@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Task lifecycle prototype</title>
+<style>
+  :root { --ink:#1d2330; --muted:#6b7385; --line:#e3e6ee; --bg:#f7f8fb; --card:#fff; --accent:#4f46e5; --accent-soft:#eef0ff; --warn:#b45309; --warn-soft:#fff6e6; --bad:#b91c1c; --bad-soft:#fdeeee; --ok:#047857; --ok-soft:#e8f7f1; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:var(--bg); }
+  header { padding:20px 28px 14px; background:var(--card); border-bottom:1px solid var(--line); }
+  header .tag { display:inline-block; font-size:11px; font-weight:700; letter-spacing:.06em; color:var(--warn); background:var(--warn-soft); padding:2px 8px; border-radius:99px; }
+  h1 { font-size:20px; margin:8px 0 4px; }
+  header p { margin:4px 0; color:var(--muted); max-width:980px; }
+  main { display:grid; grid-template-columns:minmax(340px,430px) 1fr; gap:20px; padding:20px 28px 40px; }
+  @media (max-width:900px){ main { grid-template-columns:1fr; padding:16px; } header{padding:16px;} }
+  section.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  h3 { font-size:13px; margin:12px 0 6px; }
+  button { font:inherit; font-size:13px; border:1px solid var(--line); background:#fff; color:var(--ink); padding:5px 10px; border-radius:6px; cursor:pointer; margin:0 6px 6px 0; }
+  button:hover { border-color:var(--accent); }
+  button.dim { color:#9aa1b2; border-style:dashed; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.done { background:var(--ok-soft); border-color:#b6e3d1; color:var(--ok); }
+  button:disabled { opacity:.45; cursor:default; }
+  .tabs { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px; }
+  .tabs button { margin:0; font-size:12px; }
+  .tabs button.on { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .steps { list-style:none; padding:0; margin:8px 0 0; }
+  .steps li { display:flex; gap:8px; align-items:flex-start; margin-bottom:4px; }
+  .steps li span.n { color:var(--muted); width:18px; flex:none; padding-top:6px; font-size:12px; }
+  .watch { background:var(--accent-soft); border-radius:6px; padding:8px 10px; font-size:13px; }
+  .happened { border-left:3px solid var(--accent); padding:6px 10px; background:var(--accent-soft); border-radius:0 6px 6px 0; }
+  .happened.rejected { border-color:var(--bad); background:var(--bad-soft); }
+  .happened ul { margin:4px 0 0; padding-left:18px; }
+  .bar { display:flex; flex-wrap:wrap; gap:18px; align-items:center; }
+  .bar b { font-size:18px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  tr.task { cursor:pointer; }
+  tr.task:hover td { background:#fafbff; }
+  tr.sel td { background:var(--accent-soft) !important; }
+  tr.changed td:first-child { box-shadow:inset 3px 0 0 var(--warn); }
+  .chip { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; background:#eef1f6; color:#3c4456; margin-right:4px; white-space:nowrap; }
+  .st { font-weight:600; }
+  .st-running { color:var(--accent); } .st-waiting { color:var(--bad); } .st-in-review { color:var(--warn); }
+  .st-done { color:var(--ok); } .st-cancelled { color:var(--muted); text-decoration:line-through; } .st-awaiting-children { color:#7c3aed; }
+  .muted { color:var(--muted); } .small { font-size:12px; }
+  .needs li { margin-bottom:4px; }
+  .rules li { margin-bottom:4px; }
+  .q { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <span class="tag">PROTOTYPE · THROWAWAY</span>
+  <h1>How do task, run and attention-request lifecycles fit together?</h1>
+  <p>Press buttons and watch a <b>task</b>, its <b>runs</b> and its <b>attention requests</b> move. This explores handoff (HITL → AFK), how a run's ending drives the task, how an attention request pauses a run, how child tasks roll up through a <b>task tree</b>, and whether a <b>group</b> has any state of its own. Every rule here is a proposal. The interesting moments are the ones that make you say "that shouldn't happen".</p>
+</header>
+
+<main>
+  <div>
+    <section class="card">
+      <h2>Guided walkthroughs</h2>
+      <div class="tabs" id="tabs"></div>
+      <div id="walk"></div>
+    </section>
+
+    <section class="card">
+      <h2>Free play</h2>
+      <p class="small muted">Click a task in the tree to select it. Dashed buttons are illegal for the selected task right now: press them anyway to see why.</p>
+      <div id="free"></div>
+    </section>
+
+    <section class="card">
+      <h2>Proposed rules</h2>
+      <ol class="rules small">
+        <li>A <b>task</b> is in one of: Draft, Queued (AFK) / Ready for you (HITL), Running / In conversation, Needs you, Waiting on children, In review, Done, Cancelled. There is no "failed" task state: a failed <b>run</b> raises an attention request, and the operator retries or cancels.</li>
+        <li>A <b>run</b> has one mode and is Active, Suspended, or Ended with an outcome. A task's history is its list of runs; consecutive runs resume the same Claude session.</li>
+        <li><b>Handoff</b> ends the HITL run and queues the task as AFK at a chosen autonomy level. <b>Take over</b> is the reverse: it ends (or supersedes) the AFK run and opens a HITL conversation on the same session.</li>
+        <li>An <b>attention request</b> suspends its run: the session stays open, using no tokens and no parallel slot. Answering resumes the same run. If it waits too long (or the factory restarts), the run is parked (ended); answering then queues a new run that resumes the session.</li>
+        <li>HITL runs never raise attention requests: the agent asks in the conversation. A HITL task between runs shows up as "Ready for you".</li>
+        <li>The scheduler starts queued AFK tasks while active AFK runs &lt; the cap and the usage window is open. HITL runs start only when the operator opens them. When the window runs out, active runs stop and their tasks return to the queue.</li>
+        <li>An agent in an active run can spawn child tasks (AFK, autonomy ≤ parent, same groups, depth ≤ 2), awaited or fire-and-forget. Waiting on children ends the parent's run; when every awaited child is Done or Cancelled, the parent is queued to resume with their results.</li>
+        <li>A child task finishes as Done and reports to its parent. Only a root task goes to In review (draft PR at L2, local branch at L1). Only the operator moves it to Done (merge) or back to the queue (request changes).</li>
+        <li>Cancelling a task cancels its whole subtree. A child's attention request bubbles up to its root's summary line.</li>
+        <li>A <b>group</b> is only a label set. Its "state" is a count derived from its tasks. Children inherit their parent's groups.</li>
+        <li>In a <b>workflow preset</b>, finishing a stage queues the next one. A HITL → AFK stage boundary is a handoff the preset makes. The operator can also hand off early, which skips the remaining HITL stages and goes to the next AFK stage.</li>
+      </ol>
+      <h3 class="q">Settled with the operator</h3>
+      <ul class="small">
+        <li>An attention request suspends the run, and a parked run resumes in a new run.</li>
+        <li>No Failed task state: failure lives on runs.</li>
+        <li>Children report to their parent; only the root is reviewed.</li>
+        <li>Autonomy covers AFK only (L1, L2). L0 is dropped.</li>
+        <li>Answering a suspended run resumes it at once, even over the cap.</li>
+        <li>A preset task can be handed off early.</li>
+        <li>A root can be reviewed and merged while fire-and-forget children run on.</li>
+        <li>A group is only labels.</li>
+      </ul>
+    </section>
+  </div>
+
+  <div>
+    <section class="card">
+      <div class="bar">
+        <div>Active AFK runs <b id="slots"></b></div>
+        <div>Usage window <b id="window"></b></div>
+        <div class="muted small" id="selinfo"></div>
+      </div>
+    </section>
+    <section class="card">
+      <h2>What just happened</h2>
+      <div id="happened" class="happened"><span class="muted">Nothing yet. Pick a walkthrough or use free play.</span></div>
+    </section>
+    <section class="card">
+      <h2>Task trees</h2>
+      <div id="tree"></div>
+    </section>
+    <section class="card">
+      <h2>Needs you (attention queue)</h2>
+      <div id="needs"></div>
+    </section>
+    <section class="card">
+      <h2>Groups (derived, no state of their own)</h2>
+      <div id="groups"></div>
+    </section>
+    <section class="card">
+      <h2>Runs</h2>
+      <div id="runs"></div>
+    </section>
+  </div>
+</main>
+
+<!-- ===================== The portable module: pure, no DOM. ===================== -->
+<script>
+const Lifecycle = (() => {
+  const TERMINAL = ['done', 'cancelled'];
+  const MAX_DEPTH = 2;
+
+  const isTerminal = t => TERMINAL.includes(t.state);
+  const nextId = (s, p) => p + (++s.counters[p]);
+  const say = (s, text) => s.events.push(text);
+  const liveRun = (s, t) => t.runIds.map(r => s.runs[r]).find(r => r.status !== 'ended');
+  const openRequest = (s, t) => Object.values(s.requests).find(a => a.taskId === t.id && a.status === 'open');
+  const depth = (s, t) => (t.parentId ? 1 + depth(s, s.tasks[t.parentId]) : 0);
+  const descendants = (s, t) => t.children.flatMap(c => [s.tasks[c], ...descendants(s, s.tasks[c])]);
+  const activeAfk = s => Object.values(s.runs).filter(r => r.status === 'active' && r.mode === 'AFK').length;
+  const stageOf = t => (t.stages ? t.stages[t.stageIndex] : null);
+
+  function initial() {
+    return { counters: { T: 0, R: 0, A: 0 }, tasks: {}, order: [], runs: {}, requests: {},
+      cap: 2, windowOpen: true, events: [], rejected: null };
+  }
+
+  function makeTask(s, { title, mode = 'AFK', autonomy = null, groups = [], stages = null, parentId = null }) {
+    const t = { id: nextId(s, 'T'), title, parentId, children: [], awaited: [], groups: [...groups],
+      mode: stages ? stages[0].mode : mode, autonomy: mode === 'AFK' || stages ? autonomy || 'L1' : null,
+      stages, stageIndex: 0, sessionId: null, runIds: [], state: 'draft', review: null };
+    s.tasks[t.id] = t;
+    s.order.push(t.id);
+    return t;
+  }
+
+  function startRun(s, t) {
+    const r = { id: nextId(s, 'R'), taskId: t.id, mode: t.mode, autonomy: t.mode === 'AFK' ? t.autonomy : null,
+      stage: stageOf(t)?.name ?? null, status: 'active', outcome: null, resumes: !!t.sessionId };
+    if (!t.sessionId) t.sessionId = 'S' + t.id.slice(1);
+    s.runs[r.id] = r;
+    t.runIds.push(r.id);
+    t.state = 'running';
+    say(s, `${t.id} starts ${r.mode} run ${r.id}${r.resumes ? `, resuming session ${t.sessionId}` : ` on a fresh session ${t.sessionId}`}${r.stage ? ` (stage: ${r.stage})` : ''}.`);
+    return r;
+  }
+
+  function endRun(s, r, outcome) {
+    r.status = 'ended';
+    r.outcome = outcome;
+    say(s, `Run ${r.id} ends: ${outcome}.`);
+  }
+
+  function schedule(s) {
+    if (!s.windowOpen) return;
+    for (const id of s.order) {
+      if (activeAfk(s) >= s.cap) return;
+      const t = s.tasks[id];
+      if (t.state === 'queued' && t.mode === 'AFK') {
+        say(s, `Scheduler: a slot is free, so ${t.id} starts.`);
+        startRun(s, t);
+      }
+    }
+  }
+
+  function settleParents(s) {
+    for (const t of Object.values(s.tasks)) {
+      if (t.state === 'awaiting-children' && t.awaited.every(c => isTerminal(s.tasks[c]))) {
+        t.awaited = [];
+        t.state = 'queued';
+        say(s, `Every child ${t.id} waited on has finished, so ${t.id} is queued to resume with their results.`);
+      }
+    }
+  }
+
+  // Returns why an action is illegal right now, or null.
+  function guard(s, a) {
+    const t = a.taskId ? s.tasks[a.taskId] : null;
+    if (a.taskId && !t) return `There is no task ${a.taskId}.`;
+    const req = t && openRequest(s, t);
+    switch (a.type) {
+      case 'create': return null;
+      case 'submit': return t.state === 'draft' ? null : 'Only a draft can be submitted.';
+      case 'open':
+        if (t.mode !== 'HITL') return `${t.id} is AFK. Take it over to talk to it.`;
+        if (!['draft', 'queued'].includes(t.state)) return `${t.id} isn't ready for a conversation (it is ${label(t)}).`;
+        return s.windowOpen ? null : 'The usage window is spent. The conversation can start when it resets.';
+      case 'handoff':
+        if (!(t.mode === 'HITL' && t.state === 'running')) return 'Only a task in a live HITL conversation can be handed off.';
+        return t.stages && !t.stages.slice(t.stageIndex + 1).some(st => st.mode === 'AFK') ? `${t.id}'s preset has no AFK stage left to hand off to.` : null;
+      case 'takeOver':
+        if (t.mode !== 'AFK' || !['queued', 'running', 'waiting'].includes(t.state)) return 'Only a live AFK task (queued, running or needing you) can be taken over.';
+        return s.windowOpen ? null : 'The usage window is spent, so no conversation can start.';
+      case 'raise':
+        if (t.state !== 'running') return 'Only an agent in an active run can raise an attention request.';
+        return t.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, so it raises no attention request.' : null;
+      case 'park': return t.state === 'waiting' && req?.heldRun ? null : 'Only a run suspended on an attention request can be parked.';
+      case 'answer': return t.state === 'waiting' && req ? null : `${t.id} has no open attention request.`;
+      case 'complete': return t.state === 'running' ? null : 'Only an active run can complete.';
+      case 'fail': case 'budget':
+        if (t.state !== 'running') return 'Only an active run can fail or spend its budget.';
+        return t.mode === 'AFK' ? null : 'HITL runs have no budget, and their failures show up in the conversation (not modelled here).';
+      case 'spawn':
+        if (t.state !== 'running') return 'Only an agent in an active run can spawn a child task.';
+        return depth(s, t) + 1 > MAX_DEPTH ? `Depth limit: ${t.id} is already ${depth(s, t)} level(s) deep (max ${MAX_DEPTH}).` : null;
+      case 'await':
+        if (!(t.state === 'running' && t.mode === 'AFK')) return 'Only an AFK agent in an active run can wait on its children.';
+        return t.awaited.some(c => !isTerminal(s.tasks[c])) ? null : `${t.id} has no unfinished awaited children: their results are already in hand.`;
+      case 'merge': case 'requestChanges': return t.state === 'in-review' ? null : `${t.id} is not in review.`;
+      case 'cancel': return isTerminal(t) ? `${t.id} is already ${t.state}.` : null;
+      case 'windowSpent': return s.windowOpen ? null : 'The usage window is already spent.';
+      case 'windowResets': return s.windowOpen ? 'The usage window is already open.' : null;
+      case 'setCap': return a.cap >= 1 ? null : 'The cap must be at least 1.';
+    }
+    return `Unknown action ${a.type}.`;
+  }
+
+  function apply(s, a) {
+    const t = a.taskId ? s.tasks[a.taskId] : null;
+    const run = t && liveRun(s, t);
+    const req = t && openRequest(s, t);
+    switch (a.type) {
+      case 'create': {
+        const n = makeTask(s, a);
+        if (a.submit) n.state = 'queued';
+        say(s, `Operator creates ${n.id} "${n.title}" (${n.mode}${n.autonomy ? ' ' + n.autonomy : ''}${n.stages ? ', preset' : ''}) as ${a.submit ? (n.mode === 'HITL' ? 'Ready for you' : 'Queued') : 'Draft'}.`);
+        break;
+      }
+      case 'submit':
+        t.state = 'queued';
+        say(s, `${t.id} is ${t.mode === 'HITL' ? 'Ready for you' : 'Queued'}.`);
+        break;
+      case 'open': startRun(s, t); break;
+      case 'handoff':
+        endRun(s, run, 'handed off');
+        if (t.stages) {
+          const from = t.stageIndex;
+          t.stageIndex = t.stages.findIndex((st, i) => i > from && st.mode === 'AFK');
+          say(s, `${t.id} skips to preset stage "${t.stages[t.stageIndex].name}".`);
+        }
+        t.mode = 'AFK';
+        t.autonomy = a.autonomy;
+        t.state = 'queued';
+        say(s, `${t.id} is now AFK at ${a.autonomy} and queued. Its next run resumes the same session.`);
+        break;
+      case 'takeOver':
+        if (req) { req.status = 'superseded'; say(s, `Attention request ${req.id} is superseded: the operator is taking over.`); }
+        if (run) endRun(s, run, 'taken over by the operator');
+        t.mode = 'HITL';
+        startRun(s, t);
+        break;
+      case 'raise': {
+        const r = { id: nextId(s, 'A'), taskId: t.id, runId: run.id, kind: a.kind, status: 'open', heldRun: true };
+        s.requests[r.id] = r;
+        run.status = 'suspended';
+        t.state = 'waiting';
+        say(s, `${t.id} raises attention request ${r.id} (${a.kind}). Run ${run.id} is suspended: its session stays open, using no tokens and no slot.`);
+        break;
+      }
+      case 'park':
+        endRun(s, run, 'parked (suspended too long)');
+        req.heldRun = false;
+        say(s, `${req.id} stays open. Answering it will start a new run that resumes the session.`);
+        break;
+      case 'answer':
+        req.status = 'answered';
+        if (req.heldRun) {
+          run.status = 'active';
+          t.state = 'running';
+          say(s, `Operator answers ${req.id}, and run ${run.id} carries on where it stopped.`);
+          if (t.mode === 'AFK' && activeAfk(s) > s.cap) say(s, `Note: ${activeAfk(s)} AFK runs are now active, over the cap of ${s.cap}. No new run starts until one finishes.`);
+        } else {
+          t.state = 'queued';
+          const what = { failed: 'retry', budget: 'extend the budget' }[req.kind] || 'answer';
+          say(s, `Operator chooses to ${what} on ${req.id}. ${t.id} is queued for a new run.`);
+        }
+        break;
+      case 'complete':
+        endRun(s, run, 'completed');
+        if (t.stages && t.stageIndex < t.stages.length - 1) {
+          t.stageIndex++;
+          const next = t.stages[t.stageIndex];
+          if (next.mode !== t.mode) say(s, `The preset hands ${t.id} off from ${t.mode} to ${next.mode} for stage "${next.name}".`);
+          t.mode = next.mode;
+          t.state = 'queued';
+          say(s, `${t.id} moves to stage "${next.name}" and is ${t.mode === 'HITL' ? 'Ready for you' : 'Queued'}.`);
+        } else if (t.parentId) {
+          t.state = 'done';
+          say(s, `${t.id} is Done and reports its result to ${t.parentId}.`);
+        } else if (run.mode === 'AFK') {
+          t.state = 'in-review';
+          t.review = t.autonomy === 'L2' ? 'draft PR opened' : 'commits on a local branch';
+          say(s, `${t.id} is In review (${t.review}). Only the operator can merge.`);
+        } else {
+          t.state = 'done';
+          say(s, `The operator ends the conversation as finished, so ${t.id} is Done.`);
+        }
+        break;
+      case 'fail': case 'budget': {
+        endRun(s, run, a.type === 'fail' ? 'failed' : 'budget spent');
+        const r = { id: nextId(s, 'A'), taskId: t.id, runId: run.id, kind: a.type === 'fail' ? 'failed' : 'budget', status: 'open', heldRun: false };
+        s.requests[r.id] = r;
+        t.state = 'waiting';
+        say(s, `${t.id} raises ${r.id} (${r.kind}): retry/extend, take over, or cancel?`);
+        break;
+      }
+      case 'spawn': {
+        const c = makeTask(s, { title: a.title, mode: 'AFK', autonomy: t.mode === 'AFK' ? t.autonomy : 'L1', groups: t.groups, parentId: t.id });
+        c.state = 'queued';
+        t.children.push(c.id);
+        if (a.awaited) t.awaited.push(c.id);
+        say(s, `${t.id}'s agent spawns child ${c.id} "${c.title}" (AFK ${c.autonomy}, ${a.awaited ? 'awaited' : 'fire-and-forget'}).`);
+        break;
+      }
+      case 'await':
+        endRun(s, run, 'waiting on children');
+        t.state = 'awaiting-children';
+        say(s, `${t.id} is Waiting on ${t.awaited.filter(c => !isTerminal(s.tasks[c])).join(', ')}. Its slot is freed.`);
+        break;
+      case 'merge':
+        t.state = 'done';
+        say(s, `Operator merges ${t.id} (${t.review}). Done.`);
+        break;
+      case 'requestChanges':
+        t.state = 'queued';
+        t.review = null;
+        say(s, `Operator requests changes on ${t.id}. It is queued for a new run that resumes the session with the review comments.`);
+        break;
+      case 'cancel':
+        for (const x of [t, ...descendants(s, t)]) {
+          if (isTerminal(x)) continue;
+          const xr = liveRun(s, x);
+          if (xr) endRun(s, xr, 'cancelled');
+          const xa = openRequest(s, x);
+          if (xa) xa.status = 'closed';
+          x.state = 'cancelled';
+          say(s, `${x.id} is Cancelled${x === t ? '' : ' (with its ancestor)'}.`);
+        }
+        break;
+      case 'windowSpent':
+        s.windowOpen = false;
+        say(s, 'The usage window runs out.');
+        for (const r of Object.values(s.runs)) {
+          if (r.status !== 'active') continue;
+          endRun(s, r, 'stopped: usage window spent');
+          s.tasks[r.taskId].state = 'queued';
+        }
+        say(s, 'Suspended runs are untouched: they use nothing while they wait.');
+        break;
+      case 'windowResets':
+        s.windowOpen = true;
+        say(s, 'The usage window resets.');
+        break;
+      case 'setCap':
+        s.cap = a.cap;
+        say(s, `Parallel AFK cap set to ${a.cap}.`);
+        break;
+    }
+  }
+
+  function reduce(state, action) {
+    const s = structuredClone(state);
+    s.events = [];
+    s.rejected = guard(s, action);
+    if (s.rejected) return s;
+    apply(s, action);
+    settleParents(s);
+    schedule(s);
+    return s;
+  }
+
+  // ---- Selectors ----
+  function label(t) {
+    return {
+      draft: 'Draft', queued: t.mode === 'HITL' ? 'Ready for you' : 'Queued',
+      running: t.mode === 'HITL' ? 'In conversation' : 'Running', waiting: 'Needs you',
+      'awaiting-children': 'Waiting on children', 'in-review': 'In review', done: 'Done', cancelled: 'Cancelled',
+    }[t.state];
+  }
+
+  function rollup(s, t) {
+    const ds = descendants(s, t);
+    if (!ds.length) return null;
+    const count = st => ds.filter(d => d.state === st).length;
+    return { total: ds.length, done: count('done'), running: count('running'), needsYou: count('waiting'), cancelled: count('cancelled') };
+  }
+
+  function attentionQueue(s) {
+    const items = [];
+    for (const id of s.order) {
+      const t = s.tasks[id];
+      const req = openRequest(s, t);
+      if (t.state === 'waiting') items.push({ task: t, why: `${req.id}: ${req.kind}${req.heldRun ? ' (run suspended)' : ' (run ended)'}` });
+      if (t.state === 'in-review') items.push({ task: t, why: `review: ${t.review}` });
+      if (t.state === 'queued' && t.mode === 'HITL') items.push({ task: t, why: 'your turn: open the conversation' });
+    }
+    return items;
+  }
+
+  function groups(s) {
+    const out = {};
+    for (const id of s.order) {
+      const t = s.tasks[id];
+      for (const g of t.groups) (out[g] ||= {})[label(t)] = ((out[g] ||= {})[label(t)] || 0) + 1;
+    }
+    return out;
+  }
+
+  return { initial, reduce, guard, label, rollup, attentionQueue, groups, liveRun, depth, activeAfk };
+})();
+</script>
+
+<!-- ===================== The throwaway page shell. ===================== -->
+<script>
+let state = Lifecycle.initial();
+let prev = state;
+let selected = null;
+let currentTab = null;
+let stepIndex = 0;
+
+const $ = id => document.getElementById(id);
+const esc = x => String(x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function dispatch(action) {
+  prev = state;
+  state = Lifecycle.reduce(state, action);
+  if (state.rejected) state = { ...prev, events: [], rejected: state.rejected };
+  const created = Object.keys(state.tasks).find(id => !prev.tasks[id] && action.type === 'create');
+  if (created) selected = created;
+  render();
+}
+
+// ---- Walkthroughs ----
+const SPEC = 'Spec: exports', IMP = 'Spec: importer';
+const PRESET = [{ name: 'grill-with-docs', mode: 'HITL' }, { name: 'to-spec', mode: 'HITL' }, { name: 'implement', mode: 'AFK' }, { name: 'code-review', mode: 'AFK' }];
+const WALKS = [
+  { name: 'Grill → handoff → review', desc: 'The happy path. A HITL grilling becomes AFK work, which ends in a draft PR that only the operator can merge.',
+    watch: 'Handoff ends run R1 and the AFK run R2 resumes the same session S1. The task never has two live runs.',
+    steps: [
+      ['Create HITL task "Add CSV export"', { type: 'create', title: 'Add CSV export', mode: 'HITL', groups: [SPEC] }],
+      ['Open the conversation', { type: 'open', taskId: 'T1' }],
+      ['Hand off at L2 (push + draft PR)', { type: 'handoff', taskId: 'T1', autonomy: 'L2' }],
+      ['Agent finishes the work', { type: 'complete', taskId: 'T1' }],
+      ['Operator merges', { type: 'merge', taskId: 'T1' }],
+    ] },
+  { name: 'Agent asks a question', desc: 'With a cap of one AFK run, an attention request suspends a run without holding the slot. Then a second request waits long enough to be parked.',
+    watch: 'A suspended run frees its slot, so T2 starts. Answering T1 resumes R1 in place and briefly exceeds the cap. A parked run (R2) is ended, so answering it queues a new run.',
+    steps: [
+      ['Set the parallel cap to 1', { type: 'setCap', cap: 1 }],
+      ['Create AFK L1 task "Refactor store"', { type: 'create', title: 'Refactor store', autonomy: 'L1', submit: true }],
+      ['Agent asks a question', { type: 'raise', taskId: 'T1', kind: 'question' }],
+      ['Create AFK L1 task "Fix flaky test"', { type: 'create', title: 'Fix flaky test', autonomy: 'L1', submit: true }],
+      ['Operator answers T1', { type: 'answer', taskId: 'T1' }],
+      ['T2 hits its autonomy ceiling (wants to push at L1)', { type: 'raise', taskId: 'T2', kind: 'permission' }],
+      ['Factory parks T2\'s run (waited too long)', { type: 'park', taskId: 'T2' }],
+      ['T1 finishes', { type: 'complete', taskId: 'T1' }],
+      ['Operator answers T2', { type: 'answer', taskId: 'T2' }],
+    ] },
+  { name: 'Usage window runs out', desc: 'Three AFK tasks with a cap of two, plus a live HITL conversation, then the usage window runs out.',
+    watch: 'Every active run stops and its task goes back to the queue, HITL included. Nothing restarts until the window resets, and then only up to the cap.',
+    steps: [
+      ['Create AFK "A"', { type: 'create', title: 'A', autonomy: 'L1', submit: true }],
+      ['Create AFK "B"', { type: 'create', title: 'B', autonomy: 'L1', submit: true }],
+      ['Create AFK "C" (no slot left)', { type: 'create', title: 'C', autonomy: 'L1', submit: true }],
+      ['Create HITL "Plan sprint"', { type: 'create', title: 'Plan sprint', mode: 'HITL' }],
+      ['Open the conversation', { type: 'open', taskId: 'T4' }],
+      ['Usage window runs out', { type: 'windowSpent' }],
+      ['Try to reopen the conversation (refused)', { type: 'open', taskId: 'T4' }],
+      ['Usage window resets', { type: 'windowResets' }],
+    ] },
+  { name: 'Delegation tree', desc: 'An AFK agent splits its work into child tasks, waits on two of them, and fires off a third.',
+    watch: 'Waiting on children ends the parent\'s run and frees its slot. A child\'s question bubbles to the root\'s summary line. The parent resumes only when every awaited child is finished. Children end Done; only the root goes to review. Note that "Update docs" (fire-and-forget) is still running after the root is merged.',
+    steps: [
+      ['Set the parallel cap to 3', { type: 'setCap', cap: 3 }],
+      ['Create AFK L2 "Build importer"', { type: 'create', title: 'Build importer', autonomy: 'L2', groups: [IMP], submit: true }],
+      ['Agent spawns awaited child "Parse CSV"', { type: 'spawn', taskId: 'T1', title: 'Parse CSV', awaited: true }],
+      ['Agent spawns awaited child "Map columns"', { type: 'spawn', taskId: 'T1', title: 'Map columns', awaited: true }],
+      ['Agent spawns fire-and-forget "Update docs"', { type: 'spawn', taskId: 'T1', title: 'Update docs', awaited: false }],
+      ['Parent waits on its children', { type: 'await', taskId: 'T1' }],
+      ['"Map columns" asks a question', { type: 'raise', taskId: 'T3', kind: 'question' }],
+      ['Operator answers it', { type: 'answer', taskId: 'T3' }],
+      ['"Parse CSV" finishes', { type: 'complete', taskId: 'T2' }],
+      ['"Map columns" finishes', { type: 'complete', taskId: 'T3' }],
+      ['Parent finishes', { type: 'complete', taskId: 'T1' }],
+      ['Operator merges', { type: 'merge', taskId: 'T1' }],
+    ] },
+  { name: 'Cancel a tree', desc: 'Cancelling a parent while its children (and a grandchild) are live.',
+    watch: 'Cancellation cascades down the whole subtree: live runs end, open attention requests close.',
+    steps: [
+      ['Set the parallel cap to 4', { type: 'setCap', cap: 4 }],
+      ['Create AFK L1 "Migrate auth"', { type: 'create', title: 'Migrate auth', autonomy: 'L1', submit: true }],
+      ['Spawn awaited "Port tokens"', { type: 'spawn', taskId: 'T1', title: 'Port tokens', awaited: true }],
+      ['Spawn awaited "Port sessions"', { type: 'spawn', taskId: 'T1', title: 'Port sessions', awaited: true }],
+      ['"Port tokens" spawns grandchild "Rotate keys"', { type: 'spawn', taskId: 'T2', title: 'Rotate keys', awaited: true }],
+      ['"Port sessions" asks a question', { type: 'raise', taskId: 'T3', kind: 'question' }],
+      ['Operator cancels "Migrate auth"', { type: 'cancel', taskId: 'T1' }],
+    ] },
+  { name: 'Failure and budget', desc: 'A run crashes, then a later run spends its budget.',
+    watch: 'Neither makes the task "failed". Each ends the run and raises an attention request, and the operator decides: retry or extend (a new run resumes the session), take over, or cancel.',
+    steps: [
+      ['Create AFK L1 "Upgrade deps"', { type: 'create', title: 'Upgrade deps', autonomy: 'L1', submit: true }],
+      ['Run fails', { type: 'fail', taskId: 'T1' }],
+      ['Operator retries', { type: 'answer', taskId: 'T1' }],
+      ['Run spends its budget', { type: 'budget', taskId: 'T1' }],
+      ['Operator takes over instead', { type: 'takeOver', taskId: 'T1' }],
+      ['Operator hands back at L1', { type: 'handoff', taskId: 'T1', autonomy: 'L1' }],
+      ['Agent finishes', { type: 'complete', taskId: 'T1' }],
+    ] },
+  { name: 'Workflow preset', desc: 'A task following a preset: grill-with-docs (HITL) → to-spec (HITL) → implement (AFK) → code-review (AFK).',
+    watch: 'Between the HITL stages the task waits as Ready for you. The HITL → AFK boundary is a handoff the preset performs. Every stage is a new run on the same session.',
+    steps: [
+      ['Create preset task "Exports v2" (L2)', { type: 'create', title: 'Exports v2', autonomy: 'L2', stages: PRESET, groups: [SPEC] }],
+      ['Open the conversation (grill-with-docs)', { type: 'open', taskId: 'T1' }],
+      ['Finish grill-with-docs', { type: 'complete', taskId: 'T1' }],
+      ['Open the conversation (to-spec)', { type: 'open', taskId: 'T1' }],
+      ['Finish to-spec (preset hands off)', { type: 'complete', taskId: 'T1' }],
+      ['Finish implement', { type: 'complete', taskId: 'T1' }],
+      ['Finish code-review', { type: 'complete', taskId: 'T1' }],
+    ] },
+  { name: 'Preset: skip the spec', desc: 'The operator finishes grilling, decides no spec is needed, and hands off early.',
+    watch: 'Handoff on a preset task skips the remaining HITL stage (to-spec) and goes straight to the first AFK stage (implement).',
+    steps: [
+      ['Create preset task "Small fix" (L1)', { type: 'create', title: 'Small fix', autonomy: 'L1', stages: PRESET }],
+      ['Open the conversation (grill-with-docs)', { type: 'open', taskId: 'T1' }],
+      ['Hand off early at L1', { type: 'handoff', taskId: 'T1', autonomy: 'L1' }],
+      ['Finish implement', { type: 'complete', taskId: 'T1' }],
+      ['Finish code-review', { type: 'complete', taskId: 'T1' }],
+    ] },
+  { name: 'Should be refused', desc: 'Attempts that the model should reject. Each step is expected to fail with a reason.',
+    watch: 'Read the red box after each click. If a refusal feels wrong, the rule is wrong.',
+    steps: [
+      ['Create AFK L1 "Tidy"', { type: 'create', title: 'Tidy', autonomy: 'L1', submit: true }],
+      ['Hand off an AFK task', { type: 'handoff', taskId: 'T1', autonomy: 'L2' }],
+      ['Answer with no open request', { type: 'answer', taskId: 'T1' }],
+      ['Merge before review', { type: 'merge', taskId: 'T1' }],
+      ['Open a conversation on an AFK task', { type: 'open', taskId: 'T1' }],
+      ['Wait on children it doesn\'t have', { type: 'await', taskId: 'T1' }],
+      ['Spawn child "Lvl 1"', { type: 'spawn', taskId: 'T1', title: 'Lvl 1', awaited: true }],
+      ['Child spawns "Lvl 2"', { type: 'spawn', taskId: 'T2', title: 'Lvl 2', awaited: true }],
+      ['Set the cap to 4 so "Lvl 2" runs', { type: 'setCap', cap: 4 }],
+      ['Grandchild spawns "Lvl 3" (depth limit)', { type: 'spawn', taskId: 'T3', title: 'Lvl 3', awaited: true }],
+      ['Create HITL "Chat"', { type: 'create', title: 'Chat', mode: 'HITL', submit: true }],
+      ['Open it', { type: 'open', taskId: 'T4' }],
+      ['HITL agent raises an attention request', { type: 'raise', taskId: 'T4', kind: 'question' }],
+    ] },
+];
+
+function startWalk(i) {
+  currentTab = i;
+  stepIndex = 0;
+  state = Lifecycle.initial();
+  prev = state;
+  selected = null;
+  render();
+}
+
+function renderWalk() {
+  $('tabs').innerHTML = WALKS.map((w, i) => `<button class="${i === currentTab ? 'on' : ''}" onclick="startWalk(${i})">${esc(w.name)}</button>`).join('');
+  if (currentTab === null) { $('walk').innerHTML = '<p class="muted small">Pick a scenario. Starting one resets everything.</p>'; return; }
+  const w = WALKS[currentTab];
+  $('walk').innerHTML = `<p>${esc(w.desc)}</p><div class="watch"><b>Watch for:</b> ${esc(w.watch)}</div>
+    <ol class="steps">${w.steps.map(([text], i) => `<li><span class="n">${i + 1}</span>
+      <button class="${i < stepIndex ? 'done' : i === stepIndex ? 'primary' : ''}" ${i === stepIndex ? '' : 'disabled'} onclick="walkStep()">${esc(text)}</button></li>`).join('')}</ol>
+    <button onclick="startWalk(${currentTab})">Restart scenario</button>`;
+}
+
+function walkStep() {
+  const [, action] = WALKS[currentTab].steps[stepIndex];
+  stepIndex++;
+  dispatch(action);
+}
+
+// ---- Free play ----
+let freeCounter = 0;
+function freeButtons() {
+  const t = selected && state.tasks[selected];
+  const op = [
+    ['Submit draft', { type: 'submit' }], ['Open conversation', { type: 'open' }],
+    ['Hand off at L1', { type: 'handoff', autonomy: 'L1' }], ['Hand off at L2', { type: 'handoff', autonomy: 'L2' }],
+    ['Take over', { type: 'takeOver' }], ['Answer / retry / extend', { type: 'answer' }],
+    ['Merge', { type: 'merge' }], ['Request changes', { type: 'requestChanges' }], ['Cancel (with subtree)', { type: 'cancel' }],
+  ];
+  const agent = [
+    ['Agent asks a question', { type: 'raise', kind: 'question' }], ['Agent hits autonomy ceiling', { type: 'raise', kind: 'permission' }],
+    ['Run completes', { type: 'complete' }], ['Run fails', { type: 'fail' }], ['Run spends budget', { type: 'budget' }],
+    ['Spawn awaited child', { type: 'spawn', awaited: true }], ['Spawn fire-and-forget child', { type: 'spawn', awaited: false }],
+    ['Wait on children', { type: 'await' }], ['Factory parks suspended run', { type: 'park' }],
+  ];
+  const btn = (text, a) => {
+    const full = { ...a, taskId: selected };
+    const why = Lifecycle.guard(state, full);
+    return `<button class="${why ? 'dim' : ''}" title="${esc(why || '')}" onclick='freeTask(${JSON.stringify(a)})'>${esc(text)}</button>`;
+  };
+  const world = [
+    ['New HITL task', { type: 'create', mode: 'HITL', groups: [SPEC] }], ['New AFK L1 task', { type: 'create', autonomy: 'L1', submit: true, groups: [SPEC] }],
+    ['New AFK L2 task', { type: 'create', autonomy: 'L2', submit: true, groups: [IMP] }], ['New preset task', { type: 'create', autonomy: 'L2', stages: PRESET, groups: [SPEC] }],
+  ];
+  $('free').innerHTML = `
+    <h3>Create</h3>${world.map(([x, a]) => `<button onclick='freeCreate(${JSON.stringify(a)})'>${esc(x)}</button>`).join('')}
+    <h3>Scheduler and usage window</h3>
+    <button class="${state.windowOpen ? '' : 'dim'}" onclick="dispatch({type:'windowSpent'})">Usage window runs out</button>
+    <button class="${state.windowOpen ? 'dim' : ''}" onclick="dispatch({type:'windowResets'})">Usage window resets</button>
+    <button onclick="dispatch({type:'setCap',cap:state.cap+1})">Cap +1</button>
+    <button onclick="dispatch({type:'setCap',cap:state.cap-1})">Cap −1</button>
+    ${t ? `<h3>Operator, on ${t.id} "${esc(t.title)}"</h3>${op.map(([x, a]) => btn(x, a)).join('')}
+    <h3>Agent and run events, on ${t.id}</h3>${agent.map(([x, a]) => btn(x, a)).join('')}` : '<p class="muted small">Select a task to see its actions.</p>'}
+    <p><button onclick="currentTab=null;startWalk(null);currentTab=null;render()">Reset everything</button></p>`;
+}
+function freeCreate(a) { dispatch({ ...a, title: `${a.stages ? 'Preset' : a.mode === 'HITL' ? 'Chat' : 'Job'} ${++freeCounter}` }); }
+function freeTask(a) {
+  const full = { ...a, taskId: selected };
+  if (a.type === 'spawn') full.title = `Child ${++freeCounter}`;
+  dispatch(full);
+}
+function pick(id) { selected = id; render(); }
+
+// ---- State panels ----
+function renderTree() {
+  const roots = state.order.filter(id => !state.tasks[id].parentId);
+  if (!roots.length) { $('tree').innerHTML = '<p class="muted">No tasks yet.</p>'; return; }
+  const rows = [];
+  const walk = (id, d) => {
+    const t = state.tasks[id];
+    const p = prev.tasks[id];
+    const changed = !p || p.state !== t.state || p.mode !== t.mode || p.runIds.length !== t.runIds.length;
+    const run = Lifecycle.liveRun(state, t);
+    const r = Lifecycle.rollup(state, t);
+    const stage = t.stages ? `stage ${t.stageIndex + 1}/${t.stages.length}: ${t.stages[t.stageIndex].name}` : '';
+    rows.push(`<tr class="task ${id === selected ? 'sel' : ''} ${changed ? 'changed' : ''}" onclick="pick('${id}')">
+      <td style="padding-left:${8 + d * 22}px">${d ? '└ ' : ''}<b>${id}</b> ${esc(t.title)}
+        ${r ? `<div class="small muted">subtree: ${r.done}/${r.total} done · ${r.running} running${r.needsYou ? ` · <span class="st-waiting">${r.needsYou} need${r.needsYou > 1 ? '' : 's'} you</span>` : ''}${r.cancelled ? ` · ${r.cancelled} cancelled` : ''}</div>` : ''}</td>
+      <td><span class="st st-${t.state}">${Lifecycle.label(t)}</span>${t.review && t.state === 'in-review' ? `<div class="small muted">${t.review}</div>` : ''}</td>
+      <td><span class="chip">${t.mode}</span>${t.autonomy && t.mode === 'AFK' ? `<span class="chip">${t.autonomy}</span>` : ''}</td>
+      <td class="small">${run ? `${run.id} <span class="muted">(${run.status})</span>` : '<span class="muted">—</span>'}<div class="muted">${t.runIds.length} run(s)${t.sessionId ? ' · ' + t.sessionId : ''}</div></td>
+      <td class="small">${stage}${t.groups.map(g => `<span class="chip">${esc(g)}</span>`).join('')}${t.awaited.length ? `<div class="muted">awaits ${t.awaited.join(', ')}</div>` : ''}</td></tr>`);
+    t.children.forEach(c => walk(c, d + 1));
+  };
+  roots.forEach(id => walk(id, 0));
+  $('tree').innerHTML = `<table><tr><th>Task</th><th>State</th><th>Mode</th><th>Live run</th><th>Stage · groups</th></tr>${rows.join('')}</table>
+    <p class="small muted">An amber edge marks a task that just changed.</p>`;
+}
+
+function renderRest() {
+  $('slots').textContent = `${Lifecycle.activeAfk(state)} / ${state.cap}`;
+  $('window').innerHTML = state.windowOpen ? '<span style="color:var(--ok)">open</span>' : '<span style="color:var(--bad)">spent</span>';
+  $('selinfo').textContent = selected ? `Selected: ${selected}` : 'No task selected';
+
+  const h = $('happened');
+  if (state.rejected) { h.className = 'happened rejected'; h.innerHTML = `<b>Refused.</b> ${esc(state.rejected)}`; }
+  else if (state.events.length) { h.className = 'happened'; h.innerHTML = `<ul>${state.events.map(e => `<li>${esc(e)}</li>`).join('')}</ul>`; }
+  else { h.className = 'happened'; h.innerHTML = '<span class="muted">Nothing yet.</span>'; }
+
+  const q = Lifecycle.attentionQueue(state);
+  $('needs').innerHTML = q.length ? `<ul class="needs">${q.map(i => `<li><b>${i.task.id}</b> ${esc(i.task.title)} <span class="muted">— ${esc(i.why)}</span></li>`).join('')}</ul>` : '<p class="muted">Nothing needs you.</p>';
+
+  const g = Lifecycle.groups(state);
+  $('groups').innerHTML = Object.keys(g).length ? `<table>${Object.entries(g).map(([name, c]) => `<tr><td><b>${esc(name)}</b></td><td>${Object.entries(c).map(([st, n]) => `<span class="chip">${n} ${st}</span>`).join('')}</td></tr>`).join('')}</table>` : '<p class="muted">No groups in use.</p>';
+
+  const runs = Object.values(state.runs);
+  $('runs').innerHTML = runs.length ? `<table><tr><th>Run</th><th>Task</th><th>Mode</th><th>Stage</th><th>Status</th><th>Outcome</th></tr>${runs.map(r => `<tr><td>${r.id}</td><td>${r.taskId}</td><td>${r.mode}${r.autonomy ? ' ' + r.autonomy : ''}</td><td>${r.stage || '—'}</td><td>${r.status}${r.resumes ? ' <span class="muted small">(resumed session)</span>' : ''}</td><td>${r.outcome || '—'}</td></tr>`).join('')}</table>` : '<p class="muted">No runs yet.</p>';
+}
+
+function render() { renderWalk(); freeButtons(); renderTree(); renderRest(); }
+render();
+</script>
+</body>
+</html>
