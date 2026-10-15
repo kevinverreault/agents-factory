@@ -5,7 +5,15 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Task lifecycle prototype</title>
 <style>
-  :root { --ink:#1d2330; --muted:#6b7385; --line:#e3e6ee; --bg:#f7f8fb; --card:#fff; --accent:#4f46e5; --accent-soft:#eef0ff; --warn:#b45309; --warn-soft:#fff6e6; --bad:#b91c1c; --bad-soft:#fdeeee; --ok:#047857; --ok-soft:#e8f7f1; }
+  :root { color-scheme:light; --ink:#1d2330; --muted:#6b7385; --line:#e3e6ee; --bg:#f7f8fb; --card:#fff; --btn:#fff; --hover:#fafbff; --dim:#9aa1b2;
+    --chip:#eef1f6; --chip-ink:#3c4456; --accent:#4f46e5; --on-accent:#fff; --accent-soft:#eef0ff; --warn:#b45309; --warn-soft:#fff6e6;
+    --bad:#b91c1c; --bad-soft:#fdeeee; --ok:#047857; --ok-soft:#e8f7f1; --ok-line:#b6e3d1; --violet:#7c3aed; }
+  @media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { color-scheme:dark; --ink:#e4e7ef; --muted:#959db0; --line:#2c3242; --bg:#11141b; --card:#191d27; --btn:#202533; --hover:#1f2433; --dim:#6b7385;
+    --chip:#262c3b; --chip-ink:#c5cad6; --accent:#8b8dfb; --on-accent:#11141b; --accent-soft:#252a4a; --warn:#f0a94b; --warn-soft:#3a2a12;
+    --bad:#f47a7a; --bad-soft:#3b1d22; --ok:#4fd1a1; --ok-soft:#14302a; --ok-line:#22594a; --violet:#b69cfb; } }
+  :root[data-theme="dark"] { color-scheme:dark; --ink:#e4e7ef; --muted:#959db0; --line:#2c3242; --bg:#11141b; --card:#191d27; --btn:#202533; --hover:#1f2433; --dim:#6b7385;
+    --chip:#262c3b; --chip-ink:#c5cad6; --accent:#8b8dfb; --on-accent:#11141b; --accent-soft:#252a4a; --warn:#f0a94b; --warn-soft:#3a2a12;
+    --bad:#f47a7a; --bad-soft:#3b1d22; --ok:#4fd1a1; --ok-soft:#14302a; --ok-line:#22594a; --violet:#b69cfb; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:var(--bg); }
   header { padding:20px 28px 14px; background:var(--card); border-bottom:1px solid var(--line); }
@@ -17,11 +25,11 @@
   section.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:16px; }
   h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
   h3 { font-size:13px; margin:12px 0 6px; }
-  button { font:inherit; font-size:13px; border:1px solid var(--line); background:#fff; color:var(--ink); padding:5px 10px; border-radius:6px; cursor:pointer; margin:0 6px 6px 0; }
+  button { font:inherit; font-size:13px; border:1px solid var(--line); background:var(--btn); color:var(--ink); padding:5px 10px; border-radius:6px; cursor:pointer; margin:0 6px 6px 0; }
   button:hover { border-color:var(--accent); }
-  button.dim { color:#9aa1b2; border-style:dashed; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  button.done { background:var(--ok-soft); border-color:#b6e3d1; color:var(--ok); }
+  button.dim { color:var(--dim); border-style:dashed; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+  button.done { background:var(--ok-soft); border-color:var(--ok-line); color:var(--ok); }
   button:disabled { opacity:.45; cursor:default; }
   .tabs { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px; }
   .tabs button { margin:0; font-size:12px; }
@@ -39,21 +47,23 @@
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
   th { color:var(--muted); font-weight:600; font-size:12px; }
   tr.task { cursor:pointer; }
-  tr.task:hover td { background:#fafbff; }
+  tr.task:hover td { background:var(--hover); }
   tr.sel td { background:var(--accent-soft) !important; }
   tr.changed td:first-child { box-shadow:inset 3px 0 0 var(--warn); }
-  .chip { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; background:#eef1f6; color:#3c4456; margin-right:4px; white-space:nowrap; }
+  .chip { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; background:var(--chip); color:var(--chip-ink); margin-right:4px; white-space:nowrap; }
   .st { font-weight:600; }
   .st-running { color:var(--accent); } .st-waiting { color:var(--bad); } .st-in-review { color:var(--warn); }
-  .st-done { color:var(--ok); } .st-cancelled { color:var(--muted); text-decoration:line-through; } .st-awaiting-children { color:#7c3aed; }
+  .st-done { color:var(--ok); } .st-cancelled { color:var(--muted); text-decoration:line-through; } .st-awaiting-children { color:var(--violet); }
   .muted { color:var(--muted); } .small { font-size:12px; }
   .needs li { margin-bottom:4px; }
   .rules li { margin-bottom:4px; }
   .q { color:var(--warn); }
+  .theme { float:right; margin:0; }
 </style>
 </head>
 <body>
 <header>
+  <button class="theme" id="theme" onclick="cycleTheme()"></button>
   <span class="tag">PROTOTYPE · THROWAWAY</span>
   <h1>How do task, run and attention-request lifecycles fit together?</h1>
   <p>Press buttons and watch a <b>task</b>, its <b>runs</b> and its <b>attention requests</b> move. This explores handoff (HITL → AFK), how a run's ending drives the task, how an attention request pauses a run, how child tasks roll up through a <b>task tree</b>, and whether a <b>group</b> has any state of its own. Every rule here is a proposal. The interesting moments are the ones that make you say "that shouldn't happen".</p>
@@ -690,6 +700,22 @@ function renderRest() {
 }
 
 function render() { renderWalk(); freeButtons(); renderTree(); renderRest(); }
+
+// ---- Theme: follows the OS unless the viewer picks one ----
+const THEMES = ['auto', 'light', 'dark'];
+let theme = 'auto';
+try { theme = localStorage.getItem('lifecycle-theme') || 'auto'; } catch (e) {}
+function applyTheme() {
+  if (theme === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', theme);
+  $('theme').textContent = `Theme: ${theme}`;
+}
+function cycleTheme() {
+  theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+  try { localStorage.setItem('lifecycle-theme', theme); } catch (e) {}
+  applyTheme();
+}
+applyTheme();
 render();
 </script>
 </body>
