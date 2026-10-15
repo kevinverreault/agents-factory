@@ -34,8 +34,12 @@ _Avoid_: Pipeline, recipe
 A run sequence that takes one ready ticket per iteration with fresh context, until no ticket remains, the budget is spent, or an attention request is raised.
 _Avoid_: Agent loop, autopilot
 
+**Artifact**:
+A file or GitHub issue a run produced that the factory links to its task, such as a glossary edit, an ADR or an issue.
+_Avoid_: Output, deliverable
+
 **Quick launch**:
-Starting AFK work from a single prompt after a short grilling.
+Starting AFK work from a single prompt after a short grilling of at most three questions, ending in a handoff.
 
 ### Control
 
@@ -47,7 +51,11 @@ _Avoid_: User, admin
 Whether a task is HITL (worked live with the operator) or AFK (worked by agents alone).
 
 **Handoff**:
-Moving a task from HITL to AFK so agents carry the rest of its flow. It ends the HITL run and starts an AFK run that continues the same conversation.
+Moving a task from HITL to AFK so agents carry the rest of its flow. The operator always confirms it. It ends the HITL run and starts an AFK run that continues the same conversation, or a fresh one seeded with the handoff brief.
+
+**Handoff brief**:
+The summary a HITL run writes as its last turn when handed off (goal, decisions, done-when, out of scope, links). The operator edits it, and the AFK run receives it as its first message.
+_Avoid_: Handoff summary, handover note
 
 **Takeover**:
 Moving a live AFK task back to HITL so the operator converses with it on the same conversation; the reverse of a handoff.
@@ -62,7 +70,7 @@ An AFK run's call for an operator answer, permission or decision, raised when it
 _Avoid_: Interrupt, alert, needs-human
 
 **Parked run**:
-A run ended while suspended on an attention request, so answering it starts a new run on the same conversation.
+A run ended while it waited on the operator, either suspended on an attention request or a HITL run left idle. Answering or reopening it starts a new run on the same conversation.
 
 **Attention queue**:
 Everything waiting on the operator: open attention requests, root tasks in review, and HITL tasks ready for their turn.
