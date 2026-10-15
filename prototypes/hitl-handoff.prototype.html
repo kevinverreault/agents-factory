@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HITL handoff prototype</title>
+<style>
+  :root { color-scheme:light; --ink:#1d2330; --muted:#6b7385; --line:#e3e6ee; --bg:#f7f8fb; --card:#fff; --btn:#fff; --hover:#fafbff; --dim:#9aa1b2;
+    --chip:#eef1f6; --chip-ink:#3c4456; --accent:#4f46e5; --on-accent:#fff; --accent-soft:#eef0ff; --warn:#b45309; --warn-soft:#fff6e6;
+    --bad:#b91c1c; --bad-soft:#fdeeee; --ok:#047857; --ok-soft:#e8f7f1; --ok-line:#b6e3d1; --violet:#7c3aed; }
+  @media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { color-scheme:dark; --ink:#e4e7ef; --muted:#959db0; --line:#2c3242; --bg:#11141b; --card:#191d27; --btn:#202533; --hover:#1f2433; --dim:#6b7385;
+    --chip:#262c3b; --chip-ink:#c5cad6; --accent:#8b8dfb; --on-accent:#11141b; --accent-soft:#252a4a; --warn:#f0a94b; --warn-soft:#3a2a12;
+    --bad:#f47a7a; --bad-soft:#3b1d22; --ok:#4fd1a1; --ok-soft:#14302a; --ok-line:#22594a; --violet:#b69cfb; } }
+  :root[data-theme="dark"] { color-scheme:dark; --ink:#e4e7ef; --muted:#959db0; --line:#2c3242; --bg:#11141b; --card:#191d27; --btn:#202533; --hover:#1f2433; --dim:#6b7385;
+    --chip:#262c3b; --chip-ink:#c5cad6; --accent:#8b8dfb; --on-accent:#11141b; --accent-soft:#252a4a; --warn:#f0a94b; --warn-soft:#3a2a12;
+    --bad:#f47a7a; --bad-soft:#3b1d22; --ok:#4fd1a1; --ok-soft:#14302a; --ok-line:#22594a; --violet:#b69cfb; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:var(--bg); }
+  header { padding:20px 28px 14px; background:var(--card); border-bottom:1px solid var(--line); }
+  header .tag { display:inline-block; font-size:11px; font-weight:700; letter-spacing:.06em; color:var(--warn); background:var(--warn-soft); padding:2px 8px; border-radius:99px; }
+  h1 { font-size:20px; margin:8px 0 4px; }
+  header p { margin:4px 0; color:var(--muted); max-width:1000px; }
+  main { display:grid; grid-template-columns:minmax(340px,420px) 1fr; gap:20px; padding:20px 28px 40px; }
+  @media (max-width:960px){ main { grid-template-columns:1fr; padding:16px; } header{padding:16px;} }
+  section.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  h3 { font-size:13px; margin:12px 0 6px; }
+  button { font:inherit; font-size:13px; border:1px solid var(--line); background:var(--btn); color:var(--ink); padding:5px 10px; border-radius:6px; cursor:pointer; margin:0 6px 6px 0; }
+  button:hover { border-color:var(--accent); }
+  button.dim { color:var(--dim); border-style:dashed; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+  button.done { background:var(--ok-soft); border-color:var(--ok-line); color:var(--ok); }
+  button:disabled { opacity:.45; cursor:default; }
+  .tabs { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px; }
+  .tabs button { margin:0; font-size:12px; }
+  .tabs button.on { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .steps { list-style:none; padding:0; margin:8px 0 0; }
+  .steps li { display:flex; gap:8px; align-items:flex-start; margin-bottom:4px; }
+  .steps li span.n { color:var(--muted); width:18px; flex:none; padding-top:6px; font-size:12px; }
+  .watch { background:var(--accent-soft); border-radius:6px; padding:8px 10px; font-size:13px; }
+  .happened { border-left:3px solid var(--accent); padding:6px 10px; background:var(--accent-soft); border-radius:0 6px 6px 0; }
+  .happened.rejected { border-color:var(--bad); background:var(--bad-soft); }
+  .happened ul { margin:4px 0 0; padding-left:18px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  .chip { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; background:var(--chip); color:var(--chip-ink); margin-right:4px; white-space:nowrap; }
+  .muted { color:var(--muted); } .small { font-size:12px; }
+  .rules li { margin-bottom:6px; }
+  .q { color:var(--warn); }
+  .theme { float:right; margin:0; }
+  .grp { margin-bottom:8px; } .grp .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px; }
+  dl.inh { display:grid; grid-template-columns:130px 1fr; gap:4px 12px; margin:0; font-size:13px; }
+  dl.inh dt { color:var(--muted); } dl.inh dd { margin:0; }
+  .live { color:var(--accent); font-weight:600; } .ended { color:var(--muted); }
+
+  /* ---- the mock TUI: always a dark terminal ---- */
+  .tui { --t-bg:#0d1117; --t-fg:#c9d1d9; --t-dim:#7d8590; --t-acc:#79c0ff; --t-warn:#e3b341; --t-ok:#56d364; --t-mag:#d2a8ff; --t-bad:#ff7b72; --t-line:#30363d;
+    background:var(--t-bg); color:var(--t-fg); font:13px/1.45 "Cascadia Mono",Consolas,"SF Mono",Menlo,monospace; border-radius:8px; border:1px solid var(--t-line);
+    position:relative; min-height:540px; display:flex; flex-direction:column; overflow:hidden; }
+  .tui .hd { padding:6px 10px; border-bottom:1px solid var(--t-line); display:flex; gap:10px; flex-wrap:wrap; }
+  .tui .hd .brand { color:var(--t-acc); font-weight:700; }
+  .tui .hd .r { margin-left:auto; color:var(--t-dim); }
+  .tui .bd { flex:1; display:flex; min-height:0; }
+  .tui .conv { flex:1; padding:8px 10px; overflow:hidden; }
+  .tui .rail { width:230px; border-left:1px solid var(--t-line); padding:8px 10px; color:var(--t-dim); font-size:12px; }
+  .tui .rail b { color:var(--t-fg); font-weight:600; }
+  .tui .ln { white-space:pre-wrap; margin-bottom:3px; }
+  .tui .who-agent::before { content:"◆ "; color:var(--t-acc); }
+  .tui .who-operator { color:#fff; } .tui .who-operator::before { content:"› "; color:var(--t-ok); }
+  .tui .who-system { color:var(--t-dim); font-style:italic; } .tui .who-system::before { content:"· "; }
+  .tui .who-tool { color:var(--t-mag); padding-left:14px; }
+  .tui .banner { margin:0 10px 6px; border:1px solid var(--t-warn); color:var(--t-warn); padding:4px 8px; border-radius:4px; }
+  .tui .cardq { margin:0 10px 6px; border:1px solid var(--t-acc); padding:6px 8px; border-radius:4px; }
+  .tui .cardq .opt { color:var(--t-fg); } .tui .cardq .opt b { color:var(--t-acc); }
+  .tui .input { border-top:1px solid var(--t-line); padding:6px 10px; }
+  .tui .input .pr { color:var(--t-ok); }
+  .tui .keys { padding:4px 10px 6px; color:var(--t-dim); font-size:12px; }
+  .tui .keys b { color:var(--t-fg); font-weight:600; }
+  .tui .dimtxt { color:var(--t-dim); } .tui .acc { color:var(--t-acc); } .tui .warn { color:var(--t-warn); } .tui .okc { color:var(--t-ok); } .tui .mag { color:var(--t-mag); } .tui .badc { color:var(--t-bad); }
+  .tui .list { padding:10px 12px; flex:1; }
+  .tui .list .row { display:flex; gap:12px; } .tui .list .row .st { margin-left:auto; }
+  .tui .overlay { position:absolute; inset:34px 24px 40px; background:#161b22; border:1px solid var(--t-acc); border-radius:6px; padding:10px 14px; overflow:auto; box-shadow:0 8px 30px rgba(0,0,0,.6); }
+  .tui .overlay h4 { margin:0 0 6px; color:var(--t-acc); font-size:13px; letter-spacing:.05em; }
+  .tui .opts { display:grid; grid-template-columns:110px 1fr; gap:3px 10px; margin-top:8px; border-top:1px solid var(--t-line); padding-top:8px; }
+  .tui .opts .k { color:var(--t-dim); }
+  .tui .sel { color:var(--t-acc); } .tui .unsel { color:var(--t-dim); }
+  .tui .notice { margin:0 12px 8px; color:var(--t-warn); }
+</style>
+</head>
+<body>
+<header>
+  <button class="theme" id="theme" onclick="cycleTheme()"></button>
+  <span class="tag">PROTOTYPE · THROWAWAY</span>
+  <h1>How does a HITL conversation in the TUI hand off to AFK?</h1>
+  <p>On the right is a mock of the factory's TUI (the real views are a separate ticket). Press buttons to talk to a <b>HITL</b> run, step away and come back, watch what gets <b>captured</b> from a grilling, then <b>hand off</b> and see exactly what the AFK run inherits. <b>Quick launch</b> runs the same flow from one prompt. The executor is the Agent SDK: every run is one <code>query()</code>, and a handoff ends the HITL run and starts an AFK run (ADR 0001). Everything else is a proposal to react to.</p>
+</header>
+
+<main>
+  <div>
+    <section class="card">
+      <h2>Guided walkthroughs</h2>
+      <div class="tabs" id="tabs"></div>
+      <div id="walk"></div>
+    </section>
+
+    <section class="card">
+      <h2>Free play</h2>
+      <p class="small muted">The agent is simulated: you press its buttons too. Dashed buttons are illegal right now: press them anyway to see why.</p>
+      <div id="free"></div>
+    </section>
+
+    <section class="card">
+      <h2>Proposals to react to</h2>
+      <ol class="rules small">
+        <li><b>Leaving is not ending.</b> <code>ctrl+b</code> takes you back to the task list and the HITL run stays live. If the agent is mid-turn it keeps working. When it is your turn and you are away, the task is <i>Ready for you</i> in the attention queue.</li>
+        <li><b>Idle HITL runs get parked.</b> After 30 minutes idle on your turn while you are away, or on a factory restart, the HITL run ends as <i>parked</i>. Reopening starts a new HITL run that resumes the same session. This widens "parked run" to mean any run ended while it waited on the operator.</li>
+        <li><b>Typing while the agent works queues your message.</b> Streaming input delivers it when the turn ends, and <code>esc</code> interrupts instead (as in Claude Code). Questions the agent asks with <code>AskUserQuestion</code> show as cards, never as attention requests.</li>
+        <li><b>Grilling output is captured by hooks, not by the agent's cooperation.</b> A PostToolUse hook attaches every write to <code>GLOSSARY.md</code> or <code>docs/adr/**</code>, and every issue URL a tool prints, to the task as an <b>artifact</b>. The rail shows them live: ✎ uncommitted, ✓ committed, ⊕ issue.</li>
+        <li><b>The agent may propose. Only you hand off.</b> The agent calls a factory tool <code>propose_handoff(reason)</code>, which shows a banner. <code>ctrl+h</code> (or <code>/handoff</code>) works at any moment, and if the agent is mid-turn it interrupts it. A preset's HITL → AFK boundary goes through the same sheet, pre-filled by the preset.</li>
+        <li><b>The HITL run writes its own handoff brief</b> as its last turn: goal, what was decided, done when, out of scope, and links. It has the whole context, and the prompt cache keeps that turn cheap. You review and edit the brief on the <b>handoff sheet</b>. <code>esc</code> backs out and keeps talking, and the run never ended.</li>
+        <li><b>The brief is the AFK run's first message</b> and the task's goal of record. Child tasks get the brief, never the transcript.</li>
+        <li><b>Continue as: resume (default) or fresh.</b> Resume continues the same session, with the full transcript. Fresh starts a new session seeded with only the brief and links. The sheet pre-selects Fresh once the conversation passes 60% of the context window. Takeover then lands on the fresh session, and the old one stays readable on the task.</li>
+        <li><b>Handoff commit.</b> On confirm, uncommitted HITL work (glossary, ADRs) is committed to the task branch so the AFK run starts from a known point. At L2 the commit is also pushed, because the container works on a clone.</li>
+        <li><b>An AFK run takes no chat.</b> To talk to it you take over (the reverse of a handoff) or answer its attention requests.</li>
+        <li><b>Quick launch</b> is a HITL task with a <code>quick-grill</code> skill. It asks at most 3 questions as cards in a small overlay, then must propose the handoff. <code>ctrl+e</code> expands it into the full conversation, and <code>ctrl+h</code> hands off at any question. It ends on the same handoff sheet (L1 by default).</li>
+      </ol>
+      <h3 class="q">Settled with the operator</h3>
+      <ul class="small" id="settled">
+        <li>The HITL run writes its own handoff brief as its last turn. You review and edit it on the sheet.</li>
+        <li>Resume is the default. Fresh from brief is pre-selected past 60% of the context window.</li>
+        <li>A HITL run you left is parked after 30 minutes idle on your turn, or on a restart. "Parked run" widens to cover it.</li>
+        <li>Quick launch is a card overlay with at most 3 questions, then the same sheet, L1 by default.</li>
+        <li>The other proposals stand as written (no objection): hooks capture artifacts, the agent only proposes, a handoff commit is made, and an AFK run takes no chat.</li>
+      </ul>
+    </section>
+  </div>
+
+  <div>
+    <section class="card">
+      <h2>The TUI (mock)</h2>
+      <div id="tui"></div>
+    </section>
+    <section class="card">
+      <h2>What just happened</h2>
+      <div id="happened" class="happened"><span class="muted">Nothing yet. Pick a walkthrough or use free play.</span></div>
+    </section>
+    <section class="card">
+      <h2>What the AFK run inherits</h2>
+      <div id="inherits"></div>
+    </section>
+    <section class="card">
+      <h2>Task, sessions and runs</h2>
+      <div id="runs"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+/* =====================================================================
+   Handoff: the portable, pure logic. No DOM in here.
+   reduce(state, action) -> { state, notes[] } or { state: prev, error }
+   ===================================================================== */
+const Handoff = (() => {
+  const CONTEXT_WINDOW = 200;   // k tokens
+  const FRESH_AT = 0.6;         // pre-select "fresh" above this share of the window
+  const IDLE_PARK_MIN = 30;     // a detached HITL run idle on the operator's turn is parked after this
+  const QUICK_MAX_QUESTIONS = 3;
+
+  const PRESETS = {
+    default: { name:'Matt Pocock (default)', stage:'grill-with-docs', next:{ stage:'implement', autonomy:'L2', model:'sonnet', budget:'$4 · 2 h' } },
+    quick:   { name:'Quick launch', stage:'quick-grill', next:{ stage:'implement', autonomy:'L1', model:'sonnet', budget:'$2 · 1 h' } },
+  };
+
+  function init() {
+    return { clock:0, lastActivity:0, task:null, sessions:[], sessionId:null, runs:[], attached:false, surface:null,
+      turn:null, queued:[], card:null, proposal:null, sheet:null, quick:null, transcript:[], artifacts:[], dirty:[],
+      lastHandoff:null, seq:{ run:0, session:0, issue:30, commit:0 } };
+  }
+
+  const liveRun = s => s.runs.find(r => r.status === 'active') || null;
+  const session = s => s.sessions.find(x => x.id === s.sessionId) || null;
+  const ctxShare = s => (session(s) ? session(s).ctx / CONTEXT_WINDOW : 0);
+
+  function taskState(s) {
+    const t = s.task; if (!t) return 'No task';
+    const r = liveRun(s);
+    if (t.mode === 'HITL') return r && (s.attached || s.turn === 'agent') ? 'In conversation' : 'Ready for you';
+    if (t.pending) return 'Queued';
+    return r ? 'Running' : '—';
+  }
+
+  function draftBrief(s) {
+    const pick = k => s.transcript.flatMap(e => e[k] || []);
+    return { goal: s.task.goal, decided: pick('decided'), doneWhen: pick('doneWhen'), outOfScope: pick('outOfScope'),
+      links: s.artifacts.map(a => a.ref + (a.title ? ' ' + a.title : '')), edits: [] };
+  }
+
+  function inherits(s) {
+    const src = s.sheet && s.sheet.status === 'review' ? { ...s.sheet, preview:true } : s.lastHandoff;
+    if (!src) return null;
+    const sess = s.sessions.find(x => x.id === (src.preview ? s.sessionId : src.sessionFrom));
+    return { preview: !!src.preview, continueAs: src.continueAs, autonomy: src.autonomy, model: src.model, budget: src.budget,
+      brief: src.brief, sessionFrom: src.preview ? s.sessionId : src.sessionFrom, sessionTo: src.sessionTo || null,
+      ctx: sess ? sess.ctx : 0, commit: src.commit || null, pushed: !!src.pushed, branch: s.task.branch,
+      dirty: src.preview ? s.dirty.slice() : [], artifacts: src.preview ? s.artifacts.map(a => a.ref) : src.artifacts };
+  }
+
+  function newSession(s, ctx, from) {
+    const id = 's-' + (++s.seq.session); s.sessions.push({ id, ctx, from: from || null }); s.sessionId = id; return id;
+  }
+  function startRun(s, mode, first) {
+    const r = { id:'r' + (++s.seq.run), mode, status:'active', outcome:null, session:s.sessionId, startedAt:s.clock, first };
+    s.runs.push(r); return r;
+  }
+  function endRun(r, outcome, s) { r.status = 'ended'; r.outcome = outcome; r.endedAt = s.clock; }
+
+  function reduce(prev, a) {
+    const s = structuredClone(prev);
+    const notes = [];
+    const fail = why => ({ state: prev, error: why });
+    const live = liveRun(s);
+    const hitl = live && live.mode === 'HITL' ? live : null;
+    const afk = live && live.mode === 'AFK' ? live : null;
+    const say = (who, text, extra) => s.transcript.push({ who, text, t: s.clock, ...(extra || {}) });
+    const addCtx = k => { const x = session(s); if (x) x.ctx += k; };
+    const touch = () => { s.lastActivity = s.clock; };
+    const t = s.task;
+
+    switch (a.type) {
+
+    case 'open': {
+      if (!t) return fail('There is no task yet. Use quick launch.');
+      if (t.mode === 'AFK') return fail('This task is AFK now, and an AFK run takes no chat. Take over to talk to it.');
+      if (hitl) {
+        s.attached = true; s.surface = s.quick ? 'quick' : 'conversation';
+        notes.push(`You reattach to the live run ${hitl.id}. Anything the agent said while you were away is already in the conversation.`);
+      } else if (!s.sessionId) {
+        newSession(s, 4); const r = startRun(s, 'HITL', '/' + t.stage);
+        s.attached = true; s.surface = 'conversation'; s.turn = 'agent'; touch();
+        notes.push(`New HITL run ${r.id} starts a new Claude session ${s.sessionId} with the stage skill /${t.stage}. The agent opens the grilling.`);
+      } else {
+        const r = startRun(s, 'HITL', 'resume');
+        s.attached = true; s.surface = 'conversation'; s.turn = 'operator'; touch();
+        say('system', `New run ${r.id} resumed session ${s.sessionId}`);
+        notes.push(`New HITL run ${r.id} resumes session ${s.sessionId}, so the whole conversation is back. It is your turn.`);
+      }
+      break;
+    }
+
+    case 'leave': {
+      if (!s.attached) return fail('You are not in a conversation.');
+      if (s.sheet) return fail('Finish or back out of the handoff sheet first (esc keeps talking).');
+      s.attached = false; s.surface = null;
+      if (hitl) notes.push(`${hitl.id} stays live. ` + (s.turn === 'agent'
+        ? 'The agent keeps working and its output collects in the conversation. When its turn ends, the task shows as Ready for you in the attention queue.'
+        : 'The agent is waiting on you, so the task shows as Ready for you in the attention queue now.'));
+      break;
+    }
+
+    case 'send': {
+      if (!hitl || !s.attached) return fail('You can only type into a live HITL conversation you are in.');
+      if (s.sheet) return fail('The handoff sheet is open. Press esc to keep talking first.');
+      if (s.card) {
+        say('operator', a.text, a); s.card = null; s.turn = 'agent'; addCtx(1); touch();
+        if (s.quick) s.quick.asked++;
+        notes.push('Typing your own text answers the open question card.');
+        break;
+      }
+      if (s.turn === 'agent') {
+        s.queued.push({ ...a });
+        notes.push('Queued. The agent is mid-turn, so streaming input delivers your message when the turn ends. Press esc to interrupt instead.');
+        break;
+      }
+      say('operator', a.text, a); s.turn = 'agent'; addCtx(1); touch(); s.proposal = null;
+      notes.push('Sent. The agent starts a turn.');
+      break;
+    }
+
+    case 'interrupt': {
+      if (!hitl || s.turn !== 'agent') return fail('The agent is not mid-turn, so there is nothing to interrupt.');
+      say('system', '⎋ interrupted'); s.turn = 'operator'; touch();
+      if (s.queued.length) { s.queued.forEach(q => say('operator', q.text, q)); s.queued = []; s.turn = 'agent';
+        notes.push('Interrupted. Your queued message goes in right away, and the agent starts over on it.'); }
+      else notes.push('Interrupted (SDK interrupt()). The run stays live, and it is your turn.');
+      break;
+    }
+
+    case 'agent': {
+      if (!hitl) return fail('No HITL run is live.');
+      if (s.sheet && s.sheet.status === 'drafting') return fail('The agent is writing the handoff brief. Use "Agent writes the handoff brief".');
+      if (s.turn !== 'agent') return fail('It is your turn, so the agent is waiting on you. Send a message first.');
+      say('agent', a.text, a); addCtx(a.k || 6); s.turn = 'operator'; touch();
+      notes.push('The agent ends its turn.');
+      if (s.queued.length) {
+        s.queued.forEach(q => say('operator', q.text, q)); s.queued = []; s.turn = 'agent'; addCtx(1);
+        notes.push('Your queued message is delivered now, and the agent starts a new turn on it.');
+      } else if (!s.attached) notes.push('You were away, so the task is now Ready for you in the attention queue.');
+      break;
+    }
+
+    case 'tool': {
+      if (!hitl || s.turn !== 'agent') return fail('Only an agent mid-turn in a live HITL run uses tools.');
+      if (a.tool === 'write') {
+        const kind = a.path.startsWith('docs/adr/') ? 'ADR' : a.path === 'GLOSSARY.md' ? 'glossary' : 'file';
+        say('tool', `✎ Edit ${a.path}`);
+        let art = s.artifacts.find(x => x.ref === a.path);
+        if (!art) { art = { kind, ref:a.path, committed:false }; s.artifacts.push(art); } else art.committed = false;
+        if (!s.dirty.includes(a.path)) s.dirty.push(a.path);
+        notes.push(`A PostToolUse hook saw the write and attached ${a.path} to the task as an artifact (${kind}, uncommitted). The agent did nothing special.`);
+      } else {
+        const n = ++s.seq.issue;
+        say('tool', `⊕ gh issue create → #${n} ${a.title}`);
+        s.artifacts.push({ kind:'issue', ref:'#' + n, title:a.title, committed:true });
+        notes.push(`The hook found the issue URL in the gh output and linked #${n} to the task.`);
+      }
+      addCtx(2); touch();
+      break;
+    }
+
+    case 'ask': {
+      if (!hitl || s.turn !== 'agent') return fail('Only an agent mid-turn asks questions.');
+      if (s.quick && s.quick.asked >= QUICK_MAX_QUESTIONS)
+        return fail(`A quick launch is capped at ${QUICK_MAX_QUESTIONS} questions. The agent has to propose the handoff now.`);
+      say('agent', a.text); s.card = { text:a.text, options:a.options }; s.turn = 'operator'; addCtx(2); touch();
+      notes.push('AskUserQuestion reaches the factory through canUseTool and shows as a card. In HITL it never becomes an attention request.');
+      if (!s.attached) notes.push('You were away, so the task is Ready for you.');
+      break;
+    }
+
+    case 'answer': {
+      if (!s.card) return fail('No question card is open.');
+      if (!s.attached) return fail('Open the conversation to answer.');
+      const choice = s.card.options[a.index || 0];
+      say('operator', choice, a); s.card = null; s.turn = 'agent'; addCtx(1); touch();
+      if (s.quick) { s.quick.asked++; notes.push(`Answered (${s.quick.asked} of at most ${QUICK_MAX_QUESTIONS} questions).`); }
+      else notes.push('Answered. The agent carries on.');
+      break;
+    }
+
+    case 'propose': {
+      if (!hitl || s.turn !== 'agent') return fail('Only an agent mid-turn can propose.');
+      s.proposal = { reason:a.reason };
+      say('tool', `◇ propose_handoff("${a.reason}")`); s.turn = 'operator'; addCtx(1); touch();
+      notes.push('The agent called the factory tool propose_handoff. A banner shows it, and nothing happens until you confirm.');
+      break;
+    }
+
+    case 'dismiss': {
+      if (!s.proposal) return fail('There is no proposal to dismiss.');
+      s.proposal = null; notes.push('Dismissed. Keep talking. The agent may propose again later.');
+      break;
+    }
+
+    case 'handoff': {
+      if (!t || t.mode !== 'HITL') return fail('Only a HITL task can be handed off.');
+      if (s.sheet) return fail('The handoff sheet is already open.');
+      if (!s.sessionId) return fail('There is nothing to hand off yet: no conversation has happened.');
+      if (!hitl) {
+        const r = startRun(s, 'HITL', 'resume → write brief');
+        notes.push(`No run was live, so the factory starts ${r.id} resuming ${s.sessionId}, only to write the brief.`);
+      } else if (s.card) {
+        say('system', '(card dropped: you handed off instead of answering)'); s.card = null;
+        notes.push('The open question card is dropped. Handing off answers it.');
+      } else if (s.turn === 'agent') {
+        say('system', '⎋ interrupted for handoff');
+        notes.push('The agent was mid-turn, so the handoff interrupts it first.');
+      }
+      s.queued = []; s.proposal = null; s.attached = true; if (!s.surface) s.surface = 'conversation';
+      say('system', 'Factory → agent: write the handoff brief (goal, decided, done when, out of scope, links)');
+      const next = PRESETS[t.preset].next;
+      s.sheet = { status:'drafting', continueAs: ctxShare(s) > FRESH_AT ? 'fresh' : 'resume',
+        autonomy: next.autonomy, model: next.model, budget: next.budget, stage: next.stage };
+      s.turn = 'agent'; touch();
+      notes.push('The handoff sheet opens. The HITL run writes the brief as its own last turn.');
+      if (s.sheet.continueAs === 'fresh') notes.push(`The conversation fills ${Math.round(ctxShare(s)*100)}% of the context window, so the sheet pre-selects "fresh from brief".`);
+      break;
+    }
+
+    case 'brief': {
+      if (!s.sheet || s.sheet.status !== 'drafting') return fail('No brief is being written. Hand off first.');
+      s.sheet.brief = draftBrief(s); s.sheet.status = 'review';
+      say('agent', '▤ Handoff brief written (shown on the sheet)'); addCtx(3); s.turn = 'operator'; touch();
+      notes.push('The brief is on the sheet for you to review. Nothing has been handed off yet.');
+      break;
+    }
+
+    case 'amend': {
+      if (!s.sheet || s.sheet.status !== 'review') return fail('There is no brief to edit yet.');
+      s.sheet.brief.edits.push(a.text);
+      notes.push('Your edit goes into the brief. The AFK run acts on the brief as you leave it.');
+      break;
+    }
+
+    case 'option': {
+      if (!s.sheet) return fail('The handoff sheet is not open.');
+      s.sheet[a.key] = a.value;
+      notes.push(a.key === 'continueAs'
+        ? (a.value === 'fresh' ? 'Fresh: the AFK run starts a new session seeded with only the brief and links.' : 'Resume: the AFK run continues this session, with the full transcript.')
+        : `${a.key} set to ${a.value}.`);
+      break;
+    }
+
+    case 'cancel': {
+      if (!s.sheet) return fail('The handoff sheet is not open.');
+      s.sheet = null; s.turn = 'operator';
+      notes.push('Back to the conversation. The brief stays in the transcript and the run never ended.');
+      break;
+    }
+
+    case 'confirm': {
+      if (!s.sheet) return fail('Open the handoff sheet first.');
+      if (s.sheet.status !== 'review') return fail('Wait for the agent to finish the brief. You confirm what you have read.');
+      const sh = s.sheet; let commit = null, pushed = false;
+      if (s.dirty.length) {
+        commit = (0xa1c0 + (++s.seq.commit) * 4111).toString(16);
+        s.artifacts.forEach(x => { if (s.dirty.includes(x.ref)) x.committed = true; });
+        notes.push(`Handoff commit ${commit} on ${t.branch}: ${s.dirty.join(', ')}.`);
+        if (sh.autonomy === 'L2') { pushed = true; notes.push('Pushed, because an L2 run works on a clone inside its container and only sees what is pushed.'); }
+        else notes.push('L1 works in the same worktree and would see the files anyway. The commit still gives the AFK run a known starting point.');
+        s.dirty = [];
+      }
+      endRun(hitl, 'handed off', s);
+      const from = s.sessionId; let to = from;
+      if (sh.continueAs === 'fresh') {
+        to = newSession(s, 4, from);
+        say('system', `── new session ${to}, fresh from the brief. ${from} stays readable on the task ──`);
+      }
+      s.lastHandoff = { continueAs: sh.continueAs, autonomy: sh.autonomy, model: sh.model, budget: sh.budget, brief: sh.brief,
+        sessionFrom: from, sessionTo: to, commit, pushed, artifacts: s.artifacts.map(x => x.ref) };
+      t.mode = 'AFK'; t.autonomy = sh.autonomy; t.model = sh.model; t.stage = sh.stage;
+      t.goal = sh.brief.goal;
+      t.pending = { session: to, first: 'handoff brief' };
+      s.sheet = null; s.attached = false; s.surface = null; s.quick = null; s.turn = null; s.card = null;
+      notes.push(`HITL run ${hitl.id} ended (handed off). The task is queued as AFK at ${sh.autonomy}, ${sh.model}, ${sh.budget}.`);
+      break;
+    }
+
+    case 'start': {
+      if (!t || !t.pending) return fail('Nothing is queued.');
+      s.sessionId = t.pending.session;
+      const r = startRun(s, 'AFK', t.pending.first); t.pending = null;
+      const h = s.lastHandoff;
+      notes.push(h.continueAs === 'resume'
+        ? `The scheduler starts AFK run ${r.id} with resume: ${h.sessionFrom}, so the brief is its first message on top of the full conversation.`
+        : `The scheduler starts AFK run ${r.id} on the fresh session ${h.sessionTo}, seeded with the brief and links only.`);
+      notes.push(`No permission prompts: the autonomy ceiling (${t.autonomy}) applies instead, and hitting it raises an attention request.`);
+      break;
+    }
+
+    case 'msgAfk': {
+      if (!afk) return fail('No AFK run is live.');
+      return fail('An AFK run takes no chat. Take over to talk to it, or answer its attention requests.');
+    }
+
+    case 'takeover': {
+      if (!t || t.mode !== 'AFK' || (!afk && !t.pending)) return fail('Takeover needs an AFK task that is queued or running.');
+      if (afk) endRun(afk, 'taken over', s);
+      if (t.pending) { s.sessionId = t.pending.session; t.pending = null; }
+      t.mode = 'HITL';
+      const r = startRun(s, 'HITL', 'resume (takeover)');
+      s.attached = true; s.surface = 'conversation'; s.turn = 'operator'; touch();
+      say('system', `You took over. ${r.id} resumes ${s.sessionId}, and the AFK work so far is part of this conversation.`);
+      notes.push(afk ? `${afk.id} ended (taken over). ` : 'The queued AFK start is cancelled. ');
+      notes.push(`New HITL run ${r.id} resumes session ${s.sessionId}.`);
+      break;
+    }
+
+    case 'wait': {
+      s.clock += a.min;
+      notes.push(`${a.min} minutes pass.`);
+      if (hitl && s.turn === 'operator' && !s.attached && s.clock - s.lastActivity >= IDLE_PARK_MIN) {
+        endRun(hitl, 'parked', s); s.turn = null;
+        notes.push(`${hitl.id} sat idle on your turn for ${IDLE_PARK_MIN} minutes with you away, so it is parked (ended). Session ${s.sessionId} is kept, and reopening starts a new HITL run that resumes it.`);
+      } else if (hitl && s.attached) notes.push('You are in the conversation, so the run stays live however long you think.');
+      else if (hitl && s.turn === 'agent') notes.push('The agent is still mid-turn.');
+      break;
+    }
+
+    case 'restart': {
+      notes.push('The factory process restarts.');
+      if (hitl) {
+        const lost = s.turn === 'agent';
+        endRun(hitl, 'parked', s); s.attached = false; s.surface = null; s.sheet = null; s.queued = []; s.turn = null;
+        notes.push(`${hitl.id} ended as parked. Session ${s.sessionId} is on disk, so reopening resumes it.` +
+          (lost ? ' The agent was mid-turn, so that unfinished turn is lost. Your last message is in the session, and you can say "continue".' : ''));
+      }
+      if (afk) notes.push(`The AFK run ${afk.id} is untouched here. Its fate is for "Should runs outlive the TUI?".`);
+      break;
+    }
+
+    case 'quick': {
+      if (t) return fail('This demo holds one task. Reset to try quick launch.');
+      s.task = { id:'T-40', title:a.prompt, goal:a.prompt, mode:'HITL', preset:'quick', stage:'quick-grill', autonomy:null, model:'sonnet',
+        branch:'task/T-40-' + a.prompt.toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,24).replace(/-$/,''), pending:null };
+      newSession(s, 3); const r = startRun(s, 'HITL', '/quick-grill');
+      s.quick = { asked:0, max:QUICK_MAX_QUESTIONS }; s.attached = true; s.surface = 'quick'; s.turn = 'agent'; touch();
+      say('operator', a.prompt);
+      notes.push(`Quick launch creates a HITL task and run ${r.id} with the quick-grill skill: at most ${QUICK_MAX_QUESTIONS} questions, asked as cards in a small overlay.`);
+      break;
+    }
+
+    case 'expand': {
+      if (!s.quick || s.surface !== 'quick') return fail('Only a quick launch overlay can be expanded.');
+      s.surface = 'conversation'; notes.push('Same run, full conversation view. The question cap still applies.');
+      break;
+    }
+
+    default: return fail('Unknown action ' + a.type);
+    }
+    return { state: s, notes };
+  }
+
+  return { init, reduce, taskState, inherits, liveRun, session, ctxShare, PRESETS, CONTEXT_WINDOW, QUICK_MAX_QUESTIONS };
+})();
+
+/* =====================================================================
+   Page shell: seeds, walkthroughs, rendering. Throwaway.
+   ===================================================================== */
+function baseTask() {
+  return { id:'T-12', title:'Retry failed webhook deliveries', goal:'Failed webhook deliveries are retried instead of dropped',
+    mode:'HITL', preset:'default', stage:'grill-with-docs', autonomy:null, model:'opus', branch:'task/T-12-retry-webhooks', pending:null };
+}
+const seeds = {
+  empty: () => Handoff.init(),
+  grill: () => { const s = Handoff.init(); s.task = baseTask(); return s; },
+  grillLive: () => {
+    const s = Handoff.init(); s.task = baseTask();
+    s.sessions = [{ id:'s-1', ctx:18, from:null }]; s.sessionId = 's-1'; s.seq.session = 1; s.seq.run = 1;
+    s.runs = [{ id:'r1', mode:'HITL', status:'active', outcome:null, session:'s-1', startedAt:0, first:'/grill-with-docs' }];
+    s.attached = true; s.surface = 'conversation'; s.turn = 'agent';
+    s.transcript = [
+      { who:'agent', text:'Which deliveries count as failed: 5xx and timeouts only, or 4xx too?' },
+      { who:'operator', text:'5xx and timeouts. A 4xx means the receiver rejected it, so a retry will not help.', decided:['Retry 5xx and timeouts only; never 4xx'] },
+      { who:'agent', text:'And after the last retry: drop it, or keep it somewhere you can replay from?' },
+      { who:'operator', text:'Keep it in a dead-letter table.', decided:['Exhausted deliveries go to a dead-letter table'], doneWhen:['Exhausted deliveries land in the dead-letter table'] },
+    ];
+    return s;
+  },
+  long: () => {
+    const s = Handoff.init(); s.task = baseTask(); s.task.title = 'Redesign the billing export'; s.task.goal = 'Billing exports are generated incrementally and resumable';
+    s.task.branch = 'task/T-21-billing-export'; s.task.id = 'T-21';
+    s.sessions = [{ id:'s-1', ctx:138, from:null }]; s.sessionId = 's-1'; s.seq.session = 1; s.seq.run = 3; s.clock = 600;
+    s.runs = [
+      { id:'r1', mode:'HITL', status:'ended', outcome:'parked', session:'s-1', startedAt:0, first:'/grill-with-docs' },
+      { id:'r2', mode:'HITL', status:'ended', outcome:'parked', session:'s-1', startedAt:200, first:'resume' },
+      { id:'r3', mode:'HITL', status:'ended', outcome:'parked', session:'s-1', startedAt:420, first:'resume' },
+    ];
+    s.transcript = [
+      { who:'system', text:'… 140 earlier messages over three sittings …', decided:['Exports are cut into daily chunks','A chunk is the unit of retry'], outOfScope:['Changing the CSV column layout'] },
+      { who:'agent', text:'So the cursor is the last exported invoice id, stored per chunk?' },
+      { who:'operator', text:'Yes, and a re-run skips chunks already marked complete.', decided:['Cursor = last invoice id, stored per chunk; complete chunks are skipped on re-run'], doneWhen:['Killing an export midway and re-running it produces an identical file'] },
+      { who:'agent', text:'Got it. ADR and glossary are updated, and the epic issue is open.' },
+    ];
+    s.artifacts = [ { kind:'glossary', ref:'GLOSSARY.md', committed:true }, { kind:'ADR', ref:'docs/adr/0003-chunked-billing-exports.md', committed:true },
+      { kind:'issue', ref:'#31', title:'Chunked, resumable billing exports', committed:true } ];
+    s.seq.issue = 31;
+    return s;
+  },
+  afk: () => {
+    const s = seeds.grillLive();
+    s.runs[0].status = 'ended'; s.runs[0].outcome = 'handed off';
+    s.runs.push({ id:'r2', mode:'AFK', status:'active', outcome:null, session:'s-1', startedAt:5, first:'handoff brief' }); s.seq.run = 2;
+    s.task.mode = 'AFK'; s.task.autonomy = 'L2'; s.task.model = 'sonnet'; s.task.stage = 'implement';
+    s.attached = false; s.surface = null; s.turn = null; s.sessions[0].ctx = 52; s.clock = 40;
+    s.transcript.push({ who:'agent', text:'▤ Handoff brief written (shown on the sheet)' });
+    s.transcript.push({ who:'system', text:'r1 handed off → AFK at L2' });
+    s.lastHandoff = { continueAs:'resume', autonomy:'L2', model:'sonnet', budget:'$4 · 2 h', sessionFrom:'s-1', sessionTo:'s-1', commit:'a2f17', pushed:true,
+      brief:{ goal:s.task.goal, decided:['Retry 5xx and timeouts only; never 4xx','Exhausted deliveries go to a dead-letter table'], doneWhen:['Exhausted deliveries land in the dead-letter table'], outOfScope:[], links:[], edits:[] }, artifacts:[] };
+    return s;
+  },
+};
+
+const W = (label, action) => ({ label, action });
+const walkthroughs = [
+  { name:'Grill, then hand off', seed:'grill',
+    desc:'A task on the default preset starts at its grill-with-docs stage. You grill it, the agent records decisions in the repo and opens an issue, then proposes the handoff.',
+    watch:'The right-hand rail fills with artifacts while the agent does nothing special. Uncommitted files become a handoff commit, pushed because the preset hands off at L2. Then check "What the AFK run inherits".',
+    steps:[
+      W('Open the conversation', { type:'open' }),
+      W('Agent asks its first question', { type:'agent', text:'Which deliveries count as failed: 5xx and timeouts only, or 4xx too?' }),
+      W('You answer', { type:'send', text:'5xx and timeouts. A 4xx means the receiver rejected it.', decided:['Retry 5xx and timeouts only; never 4xx'] }),
+      W('Agent sums up the retry policy', { type:'agent', text:'Then: exponential backoff from 30s, 5 attempts, then a dead-letter table you can replay from. Want me to write that down?',
+        decided:['Exponential backoff from 30s, 5 attempts','Exhausted deliveries go to a dead-letter table'], doneWhen:['A 503 is retried 5 times with backoff','Exhausted deliveries land in the dead-letter table'], outOfScope:['Replay UI for the dead-letter table'] }),
+      W('You: "Yes, write it down"', { type:'send', text:'Yes, write it down.' }),
+      W('Agent edits GLOSSARY.md', { type:'tool', tool:'write', path:'GLOSSARY.md' }),
+      W('Agent writes an ADR', { type:'tool', tool:'write', path:'docs/adr/0002-dead-letter-table-for-webhooks.md' }),
+      W('Agent opens the tracking issue', { type:'tool', tool:'issue', title:'Retry failed webhook deliveries with backoff' }),
+      W('Agent proposes the handoff', { type:'propose', reason:'Retry policy and dead-letter storage are settled; the rest is implementation' }),
+      W('Accept: hand off (ctrl+h)', { type:'handoff' }),
+      W('Agent writes the brief', { type:'brief' }),
+      W('Confirm the handoff (⏎)', { type:'confirm' }),
+      W('Scheduler starts the AFK run', { type:'start' }),
+    ] },
+  { name:'Hand off early, mid-turn', seed:'grillLive',
+    desc:'You are mid-grilling and the agent is thinking. You type anyway, hand off while it works, back out, add one more rule, and hand off for real at L1.',
+    watch:'A message typed mid-turn is queued, not lost. The handoff interrupts the agent. Backing out (esc) keeps the same run, and the second brief picks up the new rule plus your edit.',
+    steps:[
+      W('Type while the agent is mid-turn', { type:'send', text:'Also: cap the total retry time at 24h.', decided:['Total retry time is capped at 24h'] }),
+      W('Agent ends its turn', { type:'agent', text:'Noted on the dead-letter table.' }),
+      W('Hand off now (ctrl+h), mid-turn', { type:'handoff' }),
+      W('Agent writes the brief', { type:'brief' }),
+      W('Change your mind: keep talking (esc)', { type:'cancel' }),
+      W('Add one more rule', { type:'send', text:'Retries must be idempotent. Reuse the delivery id.', decided:['Retries are idempotent, keyed by delivery id'] }),
+      W('Agent agrees', { type:'agent', text:'Makes sense: the receiver can dedupe on the delivery id header.', doneWhen:['A retried delivery carries the same delivery id'] }),
+      W('Hand off again', { type:'handoff' }),
+      W('Agent writes the brief', { type:'brief' }),
+      W('Edit the brief', { type:'amend', text:'Do not touch the webhook signing code.' }),
+      W('Pick L1 (local commits only)', { type:'option', key:'autonomy', value:'L1' }),
+      W('Confirm (⏎)', { type:'confirm' }),
+    ] },
+  { name:'Walk away and come back', seed:'grillLive',
+    desc:'You leave a conversation while the agent works, it finishes without you, you forget it for half an hour, and later the factory restarts mid-turn.',
+    watch:'The runs table: the same session s-1 stays throughout while runs come and go. The task flips between In conversation and Ready for you.',
+    steps:[
+      W('Leave mid-turn (ctrl+b)', { type:'leave' }),
+      W('Agent ends its turn while you are away', { type:'agent', text:'Should the retry schedule be configurable per endpoint?' }),
+      W('Wait 30 minutes', { type:'wait', min:30 }),
+      W('Reopen the conversation', { type:'open' }),
+      W('You answer', { type:'send', text:'No, one global schedule for v1.', decided:['One global retry schedule'] }),
+      W('The factory restarts mid-turn', { type:'restart' }),
+      W('Reopen the conversation', { type:'open' }),
+    ] },
+  { name:'Quick launch', seed:'empty',
+    desc:'One prompt, a few question cards, the same handoff sheet. You never open the full conversation. The agent tries to ask past the cap.',
+    watch:'The overlay over the task list, the question counter, the rejected 4th question, and the L1 default for quick launch.',
+    steps:[
+      W('Quick launch: "Add a --dry-run flag to sync"', { type:'quick', prompt:'Add a --dry-run flag to the sync command' }),
+      W('Agent asks question 1', { type:'ask', text:'What should --dry-run show?', options:['Each planned change','Just a count','Both, with --verbose for detail'] }),
+      W('Pick option 1', { type:'answer', index:0, decided:['--dry-run prints each planned change'] }),
+      W('Agent asks question 2', { type:'ask', text:'Exit code when changes would be made?', options:['Always 0','1 if changes are pending (like terraform plan -detailed-exitcode)'] }),
+      W('Pick option 2', { type:'answer', index:1, decided:['Exit code 1 when changes are pending'], doneWhen:['sync --dry-run makes no writes and exits 1 when changes are pending'] }),
+      W('Agent asks question 3', { type:'ask', text:'Should --dry-run also skip the remote lock?', options:['Yes, it is read-only','No, take the lock to get a consistent view'] }),
+      W('Pick option 1', { type:'answer', index:0, decided:['--dry-run takes no remote lock'] }),
+      W('Agent tries a 4th question', { type:'ask', text:'JSON output too?', options:['Yes','No'] }),
+      W('Agent proposes the handoff', { type:'propose', reason:'Behaviour of --dry-run is specified' }),
+      W('Accept (ctrl+h)', { type:'handoff' }),
+      W('Agent writes the brief', { type:'brief' }),
+      W('Confirm (⏎)', { type:'confirm' }),
+      W('Scheduler starts the AFK run', { type:'start' }),
+    ] },
+  { name:'Long conversation: fresh', seed:'long',
+    desc:'A grilling spread over three sittings has filled 69% of the context window. No run is live. You hand off from the task list.',
+    watch:'The sheet pre-selects "fresh from brief". The AFK run gets a new session, and your takeover lands in that fresh session, not the long one.',
+    steps:[
+      W('Hand off from the task list (ctrl+h)', { type:'handoff' }),
+      W('Agent writes the brief', { type:'brief' }),
+      W('Confirm (⏎)', { type:'confirm' }),
+      W('Scheduler starts the AFK run', { type:'start' }),
+      W('Take over', { type:'takeover' }),
+    ] },
+  { name:"Things that shouldn't work", seed:'afk',
+    desc:'An AFK run is working at L2. You try to chat with it, then take over properly, correct it, and hand back.',
+    watch:'Chat with an AFK run is refused. Takeover resumes the same session, and handing back produces a new brief.',
+    steps:[
+      W('Message the AFK run', { type:'msgAfk' }),
+      W('Open its conversation', { type:'open' }),
+      W('Take over', { type:'takeover' }),
+      W('Correct it', { type:'send', text:'Use the existing backoff helper in lib/retry.ts, not a new one.', decided:['Reuse lib/retry.ts backoff helper'] }),
+      W('Agent acknowledges', { type:'agent', text:'Switching to lib/retry.ts. Nothing else changes.' }),
+      W('Hand off again (ctrl+h)', { type:'handoff' }),
+      W('Agent writes the brief', { type:'brief' }),
+      W('Confirm (⏎)', { type:'confirm' }),
+    ] },
+];
+
+/* ---- free play payloads ---- */
+let fpN = 0;
+const cyc = arr => arr[(fpN++) % arr.length];
+const free = [
+  { lbl:'You (in the TUI)', items:[
+    ['Open conversation ⏎', () => ({ type:'open' })],
+    ['Leave (ctrl+b)', () => ({ type:'leave' })],
+    ['Send a message', () => ({ type:'send', text: cyc(['Go on.','What about rate limits on the receiver?','Keep it simple for v1.']) })],
+    ['Interrupt (esc)', () => ({ type:'interrupt' })],
+    ['Answer card (first option)', () => ({ type:'answer', index:0 })],
+    ['Hand off (ctrl+h)', () => ({ type:'handoff' })],
+    ['Dismiss proposal', () => ({ type:'dismiss' })],
+  ]},
+  { lbl:'Agent (simulated)', items:[
+    ['Ends its turn', () => ({ type:'agent', text: cyc(['Understood. Next question: who owns the dead-letter table?','That settles retries. Anything else before I write it down?','Fine. Moving on to error reporting.']) })],
+    ['Asks a question card', () => ({ type:'ask', text:'Which backoff?', options:['Exponential','Fixed 60s','Linear'] })],
+    ['Edits GLOSSARY.md', () => ({ type:'tool', tool:'write', path:'GLOSSARY.md' })],
+    ['Writes an ADR', () => ({ type:'tool', tool:'write', path:'docs/adr/0002-dead-letter-table-for-webhooks.md' })],
+    ['Opens an issue', () => ({ type:'tool', tool:'issue', title:'Follow-up from grilling' })],
+    ['Proposes handoff', () => ({ type:'propose', reason:'The open questions are settled' })],
+    ['Writes the handoff brief', () => ({ type:'brief' })],
+  ]},
+  { lbl:'Handoff sheet', items:[
+    ['Edit brief', () => ({ type:'amend', text:'Keep the public API unchanged.' })],
+    ['Continue as: resume', () => ({ type:'option', key:'continueAs', value:'resume' })],
+    ['Continue as: fresh', () => ({ type:'option', key:'continueAs', value:'fresh' })],
+    ['L1', () => ({ type:'option', key:'autonomy', value:'L1' })],
+    ['L2', () => ({ type:'option', key:'autonomy', value:'L2' })],
+    ['Confirm ⏎', () => ({ type:'confirm' })],
+    ['Keep talking (esc)', () => ({ type:'cancel' })],
+  ]},
+  { lbl:'AFK, time and restarts', items:[
+    ['Scheduler starts AFK run', () => ({ type:'start' })],
+    ['Message the AFK run', () => ({ type:'msgAfk' })],
+    ['Take over', () => ({ type:'takeover' })],
+    ['Wait 30 min', () => ({ type:'wait', min:30 })],
+    ['Factory restarts', () => ({ type:'restart' })],
+  ]},
+  { lbl:'Quick launch', items:[
+    ['Quick launch', () => ({ type:'quick', prompt:'Add a --dry-run flag to the sync command' })],
+    ['Expand (ctrl+e)', () => ({ type:'expand' })],
+  ]},
+];
+
+/* ---- state ---- */
+let S = seeds.grill(), tab = 0, stepIdx = 0, happened = null;
+function act(a, label) {
+  const r = Handoff.reduce(S, a);
+  if (r.error) happened = { label, error: r.error };
+  else { S = r.state; happened = { label, notes: r.notes }; }
+  render();
+}
+function startWalk(i) { tab = i; stepIdx = 0; S = seeds[walkthroughs[i].seed](); happened = null; render(); }
+function doStep(i) { const st = walkthroughs[tab].steps[i]; act(st.action, st.label); stepIdx = i + 1; render(); }
+function resetFree() { S = seeds.grill(); happened = null; stepIdx = 0; render(); }
+
+/* ---- rendering ---- */
+const esc = x => String(x ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+
+function renderWalk() {
+  document.getElementById('tabs').innerHTML = walkthroughs.map((w,i) =>
+    `<button class="${i===tab?'on':''}" onclick="startWalk(${i})">${esc(w.name)}</button>`).join('');
+  const w = walkthroughs[tab];
+  document.getElementById('walk').innerHTML = `<p class="small">${esc(w.desc)}</p><div class="watch"><b>Watch for:</b> ${esc(w.watch)}</div>
+    <ol class="steps">${w.steps.map((st,i)=>`<li><span class="n">${i+1}</span><button class="${i<stepIdx?'done':i===stepIdx?'primary':''}" ${i!==stepIdx?'disabled':''} onclick="doStep(${i})">${esc(st.label)}</button></li>`).join('')}</ol>
+    <button onclick="startWalk(${tab})">Restart walkthrough</button>`;
+}
+
+function renderFree() {
+  const saved = fpN;
+  document.getElementById('free').innerHTML = free.map((g,gi) => `<div class="grp"><div class="lbl">${esc(g.lbl)}</div>${
+    g.items.map(([label, mk], ii) => { const a = mk(); const ok = !Handoff.reduce(S, a).error;
+      return `<button class="${ok?'':'dim'}" onclick="freeAct(${gi},${ii})">${esc(label)}</button>`; }).join('')}</div>`).join('') +
+    `<button onclick="resetFree()">Reset to a fresh grilling task</button>`;
+  fpN = saved;
+}
+function freeAct(gi, ii) { const [label, mk] = free[gi].items[ii]; act(mk(), label); }
+
+function tuiLine(e) {
+  return `<div class="ln who-${e.who}">${esc(e.text)}</div>`;
+}
+function renderTui() {
+  const s = S, t = s.task, live = Handoff.liveRun(s), sess = Handoff.session(s);
+  const st = Handoff.taskState(s);
+  const right = t ? `${live ? `<span class="okc">${live.id} ${live.mode}</span>` : '<span>no live run</span>'} · ${sess ? `${sess.id} · ctx ${sess.ctx}k/${Handoff.CONTEXT_WINDOW}k` : 'no session'}` : '';
+  let head = `<div class="hd"><span class="brand">agents-factory</span>${t ? `<span>› ${esc(t.title)}</span><span class="${t.mode==='HITL'?'acc':'mag'}">[${t.mode}${t.autonomy?' '+t.autonomy:''} · ${esc(t.stage)}]</span>` : ''}<span class="r">${right}</span></div>`;
+  let body = '', keys = '';
+
+  const inConv = s.attached && t && s.surface === 'conversation';
+  if (inConv) {
+    const lines = s.transcript.slice(-14).map(tuiLine).join('');
+    const rail = `<div class="rail"><div><b>Captured</b></div>${s.artifacts.length ? s.artifacts.map(a =>
+      `<div>${a.kind==='issue' ? '<span class="acc">⊕</span>' : a.committed ? '<span class="okc">✓</span>' : '<span class="warn">✎</span>'} ${esc(a.ref)}${a.title?'<br><span class="dimtxt">&nbsp;&nbsp;'+esc(a.title)+'</span>':''}</div>`).join('') : '<div>nothing yet</div>'}
+      <div style="margin-top:10px"><b>Task</b></div><div>${esc(st)}</div><div>branch ${esc(t.branch)}</div>
+      ${s.quick ? `<div style="margin-top:10px"><b>Quick launch</b></div><div>${s.quick.asked}/${s.quick.max} questions</div>` : ''}</div>`;
+    body = `<div class="bd"><div class="conv">${lines || '<span class="dimtxt">…</span>'}</div>${rail}</div>`;
+    if (s.proposal) body += `<div class="banner">◇ Agent proposes handoff: ${esc(s.proposal.reason)} · <b>ctrl+h</b> review · <b>esc</b> dismiss</div>`;
+    if (s.card) body += `<div class="cardq">${esc(s.card.text)}<br>${s.card.options.map((o,i)=>`<span class="opt"><b>${i+1}</b> ${esc(o)}</span>`).join('&nbsp;&nbsp; ')}<br><span class="dimtxt">or type your own answer</span></div>`;
+    const typing = s.turn === 'agent' ? `<span class="dimtxt">agent is working… ${s.queued.length ? `<span class="warn">queued: “${esc(s.queued.map(q => q.text).join(' / '))}”</span>` : 'type to queue a message'}</span>` : (live ? '<span class="dimtxt">your turn</span>' : '<span class="dimtxt">run ended</span>');
+    body += `<div class="input"><span class="pr">›</span> ${typing}</div>`;
+    keys = `<b>⏎</b> send · <b>esc</b> interrupt · <b>ctrl+h</b> hand off · <b>ctrl+b</b> back to tasks (run stays live)`;
+  } else {
+    const rows = t ? `<div class="row"><span>${t.mode==='HITL'?'<span class="acc">●</span>':'<span class="mag">●</span>'} ${esc(t.id)} ${esc(t.title)}</span><span class="st ${st==='Ready for you'?'warn':st==='Running'?'okc':''}">${esc(st)}</span></div>` : '<div class="dimtxt">No tasks. Press n for quick launch.</div>';
+    const queue = t && st === 'Ready for you' ? `<div class="warn">→ ${esc(t.title)}: Ready for you</div>` : '<div class="dimtxt">empty</div>';
+    body = `<div class="list"><div class="dimtxt">TASKS</div>${rows}<div class="dimtxt" style="margin-top:14px">ATTENTION QUEUE</div>${queue}
+      ${t && t.mode==='AFK' && live ? `<div class="dimtxt" style="margin-top:14px">RUN ${live.id} (read-only output)</div><div class="mag">… implementing: ${esc(t.goal)}</div>` : ''}</div>`;
+    keys = t && t.mode === 'AFK' ? `<b>⏎</b> run detail (read-only) · <b>t</b> take over · <b>n</b> quick launch` : `<b>⏎</b> open conversation · <b>ctrl+h</b> hand off · <b>n</b> quick launch`;
+  }
+
+  let overlay = '';
+  if (s.attached && s.surface === 'quick' && !s.sheet) {
+    const last = s.transcript.filter(e => e.who==='operator').slice(-1)[0];
+    overlay = `<div class="overlay"><h4>QUICK LAUNCH · ${esc(t.title)}</h4><div class="dimtxt">question ${Math.min(s.quick.asked + (s.card?1:0), s.quick.max)} of at most ${s.quick.max}</div><br>
+      ${s.card ? `<div>${esc(s.card.text)}</div>${s.card.options.map((o,i)=>`<div><b class="acc">${i+1}</b> ${esc(o)}</div>`).join('')}<div class="dimtxt">or type your own answer</div>`
+        : s.proposal ? `<div class="warn">◇ Ready to hand off: ${esc(s.proposal.reason)}</div><div class="dimtxt">⏎ review handoff · esc keep going</div>`
+        : s.turn === 'agent' ? `<div class="dimtxt">agent is thinking… (last: “${esc(last ? last.text : '')}”)</div>` : `<div class="dimtxt">your turn</div>`}
+      <br><div class="dimtxt"><b>1-3</b> answer · <b>ctrl+h</b> hand off now · <b>ctrl+e</b> full conversation · <b>ctrl+b</b> back (run stays live)</div></div>`;
+  }
+  if (s.sheet) {
+    const sh = s.sheet, share = Handoff.ctxShare(s), b = sh.brief;
+    const list = (h, xs) => xs && xs.length ? `<div><span class="dimtxt">${h}</span>${xs.map(x=>`<div>&nbsp;• ${esc(x)}</div>`).join('')}</div>` : '';
+    const opt = (cur, v, txt) => `<span class="${cur===v?'sel':'unsel'}">${cur===v?'●':'○'} ${txt}</span>`;
+    overlay = `<div class="overlay"><h4>HAND OFF TO AFK · next stage: ${esc(sh.stage)}</h4>
+      ${sh.status === 'drafting' ? `<div class="dimtxt">The agent is writing the handoff brief… (the HITL run's last turn)</div>` :
+        `<div><span class="dimtxt">Goal</span> ${esc(b.goal)}</div>${list('Decided', b.decided)}${list('Done when', b.doneWhen)}${list('Out of scope', b.outOfScope)}${list('Links', b.links)}${list('Your edits', b.edits)}`}
+      <div class="opts">
+        <span class="k">Continue as</span><span>${opt(sh.continueAs,'resume',`Resume conversation (${Handoff.session(s).ctx}k)`)} &nbsp; ${opt(sh.continueAs,'fresh','Fresh from brief')}${share > 0.6 ? `<br><span class="warn">conversation fills ${Math.round(share*100)}% of the window: fresh recommended</span>` : ''}</span>
+        <span class="k">Autonomy</span><span>${opt(sh.autonomy,'L1','L1 local commits')} &nbsp; ${opt(sh.autonomy,'L2','L2 push + draft PR, in a container')}</span>
+        <span class="k">Model · budget</span><span>${esc(sh.model)} · ${esc(sh.budget)}</span>
+        <span class="k">On confirm</span><span>${s.dirty.length ? `handoff commit of ${esc(s.dirty.join(', '))} to ${esc(t.branch)}${sh.autonomy==='L2'?', pushed':''}` : '<span class="dimtxt">nothing uncommitted</span>'}</span>
+      </div><br><div class="dimtxt"><b>⏎</b> hand off · <b>e</b> edit brief · <b>tab</b> change option · <b>esc</b> keep talking</div></div>`;
+  }
+  const notice = !s.attached && t && t.mode==='HITL' && live && s.turn==='operator' ? `<div class="notice">● ${esc(t.id)} is waiting on you</div>` : '';
+  document.getElementById('tui').innerHTML = `<div class="tui">${head}${body}${notice}<div class="keys">${keys}</div>${overlay}</div>`;
+}
+
+function renderHappened() {
+  const el = document.getElementById('happened');
+  if (!happened) { el.className = 'happened'; el.innerHTML = '<span class="muted">Nothing yet. Pick a walkthrough or use free play.</span>'; return; }
+  if (happened.error) { el.className = 'happened rejected'; el.innerHTML = `<b>Refused: ${esc(happened.label)}</b><ul><li>${esc(happened.error)}</li></ul>`; return; }
+  el.className = 'happened'; el.innerHTML = `<b>${esc(happened.label)}</b><ul>${happened.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`;
+}
+
+function renderInherits() {
+  const i = Handoff.inherits(S), el = document.getElementById('inherits');
+  if (!i) { el.innerHTML = '<p class="muted small">Nothing yet. This fills in when the handoff sheet shows a brief (as a preview), and stays after you confirm.</p>'; return; }
+  const b = i.brief;
+  el.innerHTML = `${i.preview ? '<p class="small q">Preview: the sheet is open, and nothing has been handed off yet.</p>' : ''}
+    <dl class="inh">
+      <dt>Conversation</dt><dd>${i.continueAs === 'resume'
+        ? `The full transcript, through <code>resume: ${esc(i.sessionFrom)}</code> (${i.ctx}k tokens)`
+        : `None. A new session${i.sessionTo && i.sessionTo!==i.sessionFrom ? ' '+esc(i.sessionTo) : ''} is seeded with the brief and links. ${esc(i.sessionFrom)} stays readable on the task.`}</dd>
+      <dt>First message</dt><dd>The handoff brief: ${b.decided.length} decisions, ${b.doneWhen.length} done-when, ${b.outOfScope.length} out of scope${b.edits.length ? `, ${b.edits.length} edit(s) by you` : ''}</dd>
+      <dt>Code</dt><dd>${esc(i.branch)}${i.commit ? ` at handoff commit ${esc(i.commit)}${i.pushed ? ' (pushed)' : ''}` : i.dirty.length ? ` plus a handoff commit of ${esc(i.dirty.join(', '))}${i.autonomy==='L2'?' (pushed)':''}` : ', as is'}</dd>
+      <dt>Artifacts</dt><dd>${i.artifacts.length ? i.artifacts.map(x=>`<span class="chip">${esc(x)}</span>`).join('') : '<span class="muted">none</span>'}</dd>
+      <dt>Limits</dt><dd>${esc(i.autonomy)} · ${esc(i.model)} · ${esc(i.budget)} · no permission prompts (hitting the autonomy ceiling raises an attention request)</dd>
+      <dt>Child tasks</dt><dd>Get the brief, never the transcript</dd>
+    </dl>`;
+}
+
+function renderRuns() {
+  const s = S, t = s.task;
+  if (!t) { document.getElementById('runs').innerHTML = '<p class="muted small">No task.</p>'; return; }
+  document.getElementById('runs').innerHTML = `
+    <p class="small"><b>${esc(t.id)}</b> ${esc(t.title)} · <span class="chip">${t.mode}</span><span class="chip">${esc(Handoff.taskState(s))}</span>
+      <span class="chip">preset: ${esc(Handoff.PRESETS[t.preset].name)}</span><span class="chip">stage: ${esc(t.stage)}</span>${t.autonomy?`<span class="chip">${t.autonomy}</span>`:''}
+      <span class="chip">clock ${s.clock} min</span>${s.attached?'<span class="chip">you are attached</span>':''}</p>
+    <table><tr><th>Run</th><th>Mode</th><th>Session</th><th>Started with</th><th>Status</th></tr>
+    ${s.runs.map(r=>`<tr><td>${r.id}</td><td>${r.mode}</td><td>${r.session}</td><td>${esc(r.first)}</td><td class="${r.status==='active'?'live':'ended'}">${r.status==='active'?'live'+(r.mode==='HITL'?(s.turn==='agent'?' · agent working':' · your turn'):''):'ended: '+esc(r.outcome)}</td></tr>`).join('')}
+    ${t.pending ? `<tr><td colspan="5" class="small q">Queued: an AFK run will start on ${esc(t.pending.session)} with the handoff brief</td></tr>` : ''}
+    </table>
+    <p class="small muted" style="margin-top:8px">Sessions: ${s.sessions.map(x=>`${x.id} (${x.ctx}k${x.from?', fresh from '+x.from:''})`).join(' · ') || 'none'}</p>`;
+}
+
+function render() { renderWalk(); renderFree(); renderTui(); renderHappened(); renderInherits(); renderRuns(); }
+
+/* theme toggle */
+const THEMES = ['dark','light','auto'];
+function applyTheme(m) { if (m==='auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', m);
+  document.getElementById('theme').textContent = 'Theme: ' + m; }
+function cycleTheme() { let m = 'dark'; try { m = localStorage.getItem('proto-theme') || 'dark'; } catch(e){}
+  m = THEMES[(THEMES.indexOf(m)+1)%3]; try { localStorage.setItem('proto-theme', m); } catch(e){} applyTheme(m); }
+try { applyTheme(localStorage.getItem('proto-theme') || 'dark'); } catch(e) { applyTheme('dark'); }
+
+startWalk(0);
+</script>
+</body>
+</html>
