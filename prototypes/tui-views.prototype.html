@@ -1,0 +1,733 @@
+<!doctype html>
+<!--
+  PROTOTYPE · THROWAWAY. Answers "What views and navigation does the TUI have?" (wayfinder ticket #17).
+  Three structurally different TUI layouts over the same mock factory, switchable via ?variant=A|B|C
+  and the floating bar (shift+←/→ anywhere, or ←/→ when the terminal isn't focused).
+  A = full-screen views with tabs and a drill-down stack. B = attention queue first, mail-client triage. C = three-pane cockpit.
+  No persistence: state lives in memory and the live ticker fakes the daemon.
+-->
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TUI views prototype</title>
+<style>
+  :root { color-scheme:light; --ink:#1d2330; --muted:#6b7385; --line:#e3e6ee; --bg:#f7f8fb; --card:#fff; --btn:#fff; --accent:#4f46e5; --accent-soft:#eef0ff; --warn:#b45309; --warn-soft:#fff6e6; --chip:#eef1f6; }
+  @media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { color-scheme:dark; --ink:#e4e7ef; --muted:#959db0; --line:#2c3242; --bg:#11141b; --card:#191d27; --btn:#202533; --accent:#8b8dfb; --accent-soft:#252a4a; --warn:#f0a94b; --warn-soft:#3a2a12; --chip:#262c3b; } }
+  :root[data-theme="dark"] { color-scheme:dark; --ink:#e4e7ef; --muted:#959db0; --line:#2c3242; --bg:#11141b; --card:#191d27; --btn:#202533; --accent:#8b8dfb; --accent-soft:#252a4a; --warn:#f0a94b; --warn-soft:#3a2a12; --chip:#262c3b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:var(--bg); padding-bottom:80px; }
+  header { padding:18px 28px 12px; background:var(--card); border-bottom:1px solid var(--line); }
+  header .tag { display:inline-block; font-size:11px; font-weight:700; letter-spacing:.06em; color:var(--warn); background:var(--warn-soft); padding:2px 8px; border-radius:99px; }
+  h1 { font-size:20px; margin:8px 0 4px; }
+  header p { margin:4px 0; color:var(--muted); max-width:1100px; }
+  header label { font-size:13px; color:var(--muted); margin-right:14px; }
+  main { padding:16px 28px; }
+  @media (max-width:900px){ main, header { padding-left:16px; padding-right:16px; } }
+  .panels { display:grid; grid-template-columns:1fr 1fr 1.3fr; gap:16px; margin-top:16px; }
+  @media (max-width:1100px){ .panels { grid-template-columns:1fr; } }
+  section.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 16px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
+  pre.state { margin:0; font:12px/1.45 "Cascadia Mono",Consolas,monospace; white-space:pre-wrap; }
+  table.keys { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.keys td { padding:3px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  table.keys td:first-child { font-family:"Cascadia Mono",Consolas,monospace; white-space:nowrap; color:var(--accent); }
+  ol.react { margin:0; padding-left:18px; font-size:13px; } ol.react li { margin-bottom:6px; }
+  .muted { color:var(--muted); } code { background:var(--chip); padding:0 4px; border-radius:4px; font-size:12px; }
+
+  /* ---- the mock TUI: always a dark terminal ---- */
+  .tui { --t-bg:#0d1117; --t-fg:#c9d1d9; --t-dim:#7d8590; --t-acc:#79c0ff; --t-warn:#e3b341; --t-ok:#56d364; --t-mag:#d2a8ff; --t-bad:#ff7b72; --t-line:#30363d; --t-sel:#1f6feb44;
+    background:var(--t-bg); color:var(--t-fg); font:13px/1.5 "Cascadia Mono",Consolas,"SF Mono",Menlo,monospace; border-radius:8px; border:1px solid var(--t-line);
+    position:relative; height:620px; display:flex; flex-direction:column; overflow:hidden; outline:none; }
+  .tui:focus { border-color:#58a6ff; box-shadow:0 0 0 2px #58a6ff33; }
+  .tui .focushint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:#0d1117cc; color:var(--t-acc); pointer-events:none; font-size:14px; }
+  .tui:focus .focushint { display:none; }
+  .tui .hd { padding:5px 10px; border-bottom:1px solid var(--t-line); display:flex; gap:14px; white-space:nowrap; }
+  .tui .hd .brand { color:var(--t-acc); font-weight:700; }
+  .tui .hd .r { margin-left:auto; color:var(--t-dim); }
+  .tui .tab { color:var(--t-dim); } .tui .tab.on { color:#0d1117; background:var(--t-acc); padding:0 6px; }
+  .tui .crumb { padding:3px 10px; color:var(--t-dim); border-bottom:1px solid var(--t-line); }
+  .tui .bd { flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; padding:6px 10px; }
+  .tui .ft { border-top:1px solid var(--t-line); padding:4px 10px; color:var(--t-dim); font-size:12px; white-space:nowrap; overflow:hidden; }
+  .tui .ft b { color:var(--t-fg); font-weight:600; }
+  .tui .status { border-top:1px solid var(--t-line); padding:3px 10px; background:#161b22; white-space:nowrap; overflow:hidden; }
+  .tui .r { display:flex; white-space:pre; padding:0 4px 0 2ch; position:relative; }
+  .tui .r.sel { background:var(--t-sel); } .tui .r.sel::before { content:"›"; color:var(--t-acc); position:absolute; left:2px; }
+  .tui .r.fin { color:var(--t-dim); } .tui .r.cx .w-title { text-decoration:line-through; }
+  .tui .w-tree { min-width:9ch; color:var(--t-dim); } .tui .w-title { flex:1; overflow:hidden; text-overflow:ellipsis; }
+  .tui .w-mode { width:8ch; color:var(--t-dim); } .tui .w-state { width:21ch; } .tui .w-grp { width:9ch; color:var(--t-dim); text-align:right; }
+  .tui .w-kind { width:12ch; } .tui .w-id { width:5ch; color:var(--t-dim); } .tui .w-age { width:8ch; color:var(--t-dim); text-align:right; } .tui .w-txt { flex:1; overflow:hidden; text-overflow:ellipsis; color:var(--t-dim); }
+  .tui .w-c { width:10ch; } .tui .w-c2 { width:24ch; color:var(--t-dim); }
+  .tui .dim { color:var(--t-dim); } .tui .acc { color:var(--t-acc); } .tui .warn { color:var(--t-warn); } .tui .ok { color:var(--t-ok); } .tui .mag { color:var(--t-mag); } .tui .bad { color:var(--t-bad); } .tui .fg { color:#fff; }
+  .tui .sec { color:var(--t-dim); text-transform:uppercase; letter-spacing:.06em; font-size:11.5px; margin:8px 0 2px; }
+  .tui .sec:first-child { margin-top:0; }
+  .tui .reqbox { border:1px solid var(--t-warn); border-radius:4px; padding:4px 8px; margin:6px 0; }
+  .tui .reqbox.bad { border-color:var(--t-bad); } .tui .reqbox.mag { border-color:var(--t-mag); } .tui .reqbox.acc { border-color:var(--t-acc); }
+  .tui .opt b { color:var(--t-acc); }
+  .tui .out { color:var(--t-dim); white-space:pre; overflow:hidden; } .tui .out .l { overflow:hidden; text-overflow:ellipsis; }
+  .tui .split { display:flex; flex-direction:column; flex:1; min-height:0; }
+  .tui .split .top { flex:none; } .tui .split .sep { color:var(--t-acc); margin:4px 0; white-space:nowrap; overflow:hidden; }
+  .tui .split .bottom { flex:1; min-height:0; overflow:hidden; }
+  .tui .cols { flex:1; display:flex; min-height:0; gap:0; margin:-6px -10px; }
+  .tui .col { border-right:1px solid var(--t-line); padding:6px 8px; overflow:hidden; min-height:0; display:flex; flex-direction:column; }
+  .tui .col:last-child { border-right:0; }
+  .tui .col.focus { box-shadow:inset 0 2px 0 var(--t-acc); background:#0f141b; }
+  .tui .col .ttl { color:var(--t-dim); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; margin-bottom:4px; }
+  .tui .col.focus .ttl { color:var(--t-acc); }
+  .tui .gauge { white-space:nowrap; }
+  .tui .big { display:grid; grid-template-columns:22ch 1fr; gap:2px 12px; }
+  .tui .overlay { position:absolute; left:50%; top:60px; transform:translateX(-50%); width:min(640px,90%); max-height:80%; overflow:auto; background:#161b22; border:1px solid var(--t-acc); border-radius:6px; padding:10px 14px; box-shadow:0 8px 30px rgba(0,0,0,.6); }
+  .tui .overlay.wide { width:min(900px,94%); top:40px; }
+  .tui .overlay h4 { margin:0 0 6px; color:var(--t-acc); font-size:13px; letter-spacing:.05em; }
+  .tui .field { display:grid; grid-template-columns:12ch 1fr; gap:2px 10px; }
+  .tui .field .on { color:var(--t-acc); }
+  .tui .caret { background:var(--t-fg); color:var(--t-bg); }
+  .tui .toast { position:absolute; right:14px; bottom:44px; max-width:60%; background:#1c2128; border:1px solid var(--t-ok); color:var(--t-fg); padding:6px 10px; border-radius:4px; white-space:normal; }
+  .tui .conv { flex:1; display:flex; min-height:0; }
+  .tui .conv .tr { flex:1; overflow:hidden; display:flex; flex-direction:column; justify-content:flex-end; }
+  .tui .conv .rail { width:30ch; border-left:1px solid var(--t-line); padding-left:10px; margin-left:10px; color:var(--t-dim); }
+  .tui .m-agent::before { content:"◆ "; color:var(--t-acc); } .tui .m-op { color:#fff; } .tui .m-op::before { content:"› "; color:var(--t-ok); }
+  .tui .m-sys { color:var(--t-dim); font-style:italic; } .tui .m-sys::before { content:"· "; }
+  .tui .m-tool { color:var(--t-mag); padding-left:2ch; }
+  .tui .ln { white-space:pre-wrap; margin-bottom:3px; }
+  .tui .inbox-empty { margin:40px auto; text-align:center; color:var(--t-dim); }
+
+  /* ---- the prototype's own variant switcher, deliberately not TUI-styled ---- */
+  #switcher { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:10; display:flex; align-items:center; gap:4px; background:#fde047; color:#111; border-radius:99px; padding:4px; box-shadow:0 6px 24px rgba(0,0,0,.35); font:600 13px system-ui,sans-serif; }
+  #switcher button { border:0; background:#111; color:#fde047; width:30px; height:30px; border-radius:99px; cursor:pointer; font-size:15px; }
+  #switcher span { padding:0 12px; min-width:250px; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <span class="tag">PROTOTYPE · THROWAWAY</span>
+  <h1>What views and navigation does the TUI have?</h1>
+  <p>Three <b>structurally different</b> TUIs over the same live mock factory: tasks keep running, the scheduler starts queued work, and attention requests arrive while you look. <b>Click the terminal to focus it, then drive it with the keyboard only</b> (Ink has no mouse). Flip variants with the yellow bar or <code>shift+←/→</code>. The conversation and handoff screens are stubs here; <a href="https://github.com/kevinverreault/agents-factory/issues/11">the handoff prototype</a> settled them. Steal bits across variants: "B's home with C's gauges" is a fine answer.</p>
+  <p><label><input type="checkbox" id="pause"> pause live updates</label><label><button id="reset">reset mock data</button></label></p>
+</header>
+<main>
+  <div class="tui" id="tui" tabindex="0"></div>
+  <div class="panels">
+    <section class="card"><h2>State (what the TUI holds right now)</h2><pre class="state" id="state"></pre></section>
+    <section class="card"><h2>Keys in this variant</h2><table class="keys" id="keys"></table></section>
+    <section class="card"><h2>What to react to</h2>
+      <ol class="react">
+        <li><b>Home screen.</b> Where does the TUI open? On the task tree (A), the attention queue (B), or everything at once (C)?</li>
+        <li><b>Answering.</b> A dedicated answer sheet (A, C), or inline in the inbox preview with digit keys and auto-advance to the next item (B)?</li>
+        <li><b>Queue order.</b> Attention requests oldest first, then <i>your turn</i>, then <i>in review</i>. Right order? Should a failure jump the line?</li>
+        <li><b>Usage and slots.</b> Header summary (A), always-on status bar (B), gauge strip with sparkline (C)? Does a full Usage view earn a slot in the nav, or is it an overlay (C's <code>m</code>)?</li>
+        <li><b>Groups.</b> A picker overlay (A), <code>l</code> cycling a limit (B), or a sidebar with live counts (C)?</li>
+        <li><b>Runs.</b> Does a global Runs view (A's tab 3) matter, or are runs only ever seen inside a task?</li>
+        <li><b>Live output.</b> A tail inside the task detail (A, B) or a pane that follows the selection (C)? With no PTY in v1, the factory renders SDK messages, so a pane is feasible.</li>
+        <li><b>Conversation.</b> Full screen in all three: <code>enter</code> or <code>c</code> to open, <code>ctrl+b</code> back to exactly where you were. Same for take-over?</li>
+        <li><b>Finished tasks.</b> Done/Cancelled stay in the tree dimmed. Hide them by default?</li>
+      </ol>
+    </section>
+  </div>
+</main>
+<div id="switcher"><button id="prev" title="previous variant (shift+←)">‹</button><span id="vlabel"></span><button id="next" title="next variant (shift+→)">›</button></div>
+
+<script>
+// ========================= mock factory =========================
+const GROUPS = ['auth', 'billing', 'chores', 'factory'];
+const CAP = 3;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function seed() {
+  return [
+    { id: 1, title: 'OAuth device-flow login', parent: null, mode: 'AFK', lvl: 'L2', state: 'Waiting on children', groups: ['auth'], model: 'opus',
+      runs: [['HITL', 'opus', 'handed off', '212k', '48m'], ['AFK', 'opus', 'waiting on children', '96k', '14m']], art: ['⊕ issue #31 Device-code endpoint', '⊕ issue #32 Token refresh job', '⊕ issue #33 Login docs', '✓ docs/adr/0003-device-flow.md'],
+      out: ['delegate: spawned #2 Device-code endpoint (awaited)', 'delegate: spawned #3 Token refresh job (awaited)', 'delegate: spawned #4 Login docs (fire-and-forget)', '⧗ waiting on 2 awaited children — run ended, slot freed'] },
+    { id: 2, title: 'Device-code endpoint', parent: 1, await: true, mode: 'AFK', lvl: 'L2', state: 'Running', groups: ['auth'], model: 'sonnet',
+      runs: [['AFK', 'sonnet', 'active', '118k', '12m']], out: ['Read the brief from #1', 'Read src/auth/index.ts', 'Edit src/auth/device.ts (+42 −3)'] },
+    { id: 3, title: 'Token refresh job', parent: 1, await: true, mode: 'AFK', lvl: 'L1', state: 'Needs you', groups: ['auth'], model: 'sonnet',
+      req: { kind: 'question', text: 'Store refresh tokens in the OS keychain or in SQLite?', options: ['OS keychain', 'SQLite, encrypted', 'Take over'], age: '4m', ageMin: 4 },
+      runs: [['AFK', 'sonnet', 'suspended', '64k', '9m']], out: ['Read src/auth/tokens.ts', 'Grep "refresh_token" — 7 hits', 'AskUserQuestion → attention request (run suspended, no slot)'] },
+    { id: 4, title: 'Login docs', parent: 1, await: false, mode: 'AFK', lvl: 'L1', state: 'Queued', groups: ['auth'], model: 'haiku', runs: [], out: [] },
+    { id: 5, title: 'Grill: billing exports', parent: null, mode: 'HITL', state: 'Ready for you', groups: ['billing'], model: 'opus', waitAge: '15m', waitMin: 15,
+      runs: [['HITL', 'opus', 'live · your turn', '74k', '31m']], art: ['✎ GLOSSARY.md (uncommitted)', '✎ docs/adr/0004-export-format.md (uncommitted)'], out: [] },
+    { id: 6, title: 'Invoice CSV export', parent: null, mode: 'AFK', lvl: 'L2', state: 'In review', groups: ['billing'], model: 'sonnet', reviewAge: '35m', reviewMin: 35,
+      pr: 'PR #42 (draft) · +312 −40 · CI ✓', runs: [['AFK', 'sonnet', 'completed', '220k', '31m'], ['AFK', 'sonnet', 'completed (review changes)', '40k', '6m']], art: ['⊕ PR #42 Invoice CSV export'],
+      out: ['git push origin task/6-invoice-csv', 'gh pr create --draft → #42', '✓ run completed — task in review'] },
+    { id: 7, title: 'Ralph: billing tickets', parent: null, mode: 'AFK', lvl: 'L1', state: 'Running', groups: ['billing'], model: 'sonnet', ralph: 'iteration 3 of ≤10 · 4 tickets left',
+      runs: [['AFK', 'sonnet', 'completed (iter 1)', '58k', '7m'], ['AFK', 'sonnet', 'completed (iter 2)', '61k', '8m'], ['AFK', 'sonnet', 'active (iter 3)', '22k', '3m']],
+      out: ['iter 3: picked ticket #27 Currency rounding', 'Read src/billing/money.ts'] },
+    { id: 8, title: 'Bump dependencies', parent: null, mode: 'AFK', lvl: 'L1', state: 'Needs you', groups: ['chores'], model: 'haiku',
+      req: { kind: 'failure', text: 'Run failed: 3 tests red after the vitest 4 upgrade', options: ['Retry', 'Take over', 'Cancel task'], age: '22m', ageMin: 22 },
+      runs: [['AFK', 'haiku', 'failed', '30k', '5m']], out: ['pnpm up --latest', 'Bash pnpm test — 3 failed, 211 passed', '✕ run failed → attention request'] },
+    { id: 9, title: 'Fix flaky e2e', parent: null, mode: 'AFK', lvl: 'L1', state: 'Needs you', groups: ['chores'], model: 'sonnet',
+      req: { kind: 'permission', text: 'Wants to push fix/flaky-e2e (L1 ceiling: local commits only). Run parked after waiting.', options: ['Allow once', 'Raise to L2', 'Deny'], age: '1h 10m', ageMin: 70 },
+      runs: [['AFK', 'sonnet', 'parked', '140k', '22m']], out: ['git commit -m "Wait for network idle"', 'git push → blocked by autonomy ceiling', '⏸ suspended → parked after timeout'] },
+    { id: 10, title: 'Rename config keys', parent: null, mode: 'AFK', lvl: 'L1', state: 'Done', groups: ['chores'], model: 'haiku', runs: [['AFK', 'haiku', 'completed', '18k', '4m']], out: [] },
+    { id: 11, title: 'Explore metrics export', parent: null, mode: 'HITL', state: 'In conversation', busy: true, groups: ['factory'], model: 'opus',
+      runs: [['HITL', 'opus', 'active · agent working', '80k', '25m']], art: ['✎ GLOSSARY.md (uncommitted)'], out: [] },
+    { id: 12, title: 'Cache usage snapshot', parent: null, mode: 'AFK', lvl: 'L1', state: 'Queued', groups: ['factory'], model: 'sonnet', runs: [], out: [] },
+    { id: 14, title: 'Migrate settings schema', parent: null, mode: 'AFK', lvl: 'L2', state: 'Needs you', groups: ['factory'], model: 'sonnet',
+      req: { kind: 'budget', text: 'Budget spent: 400k tokens / 40 min, migration half done', options: ['Extend +50%', 'Take over', 'Cancel task'], age: '8m', ageMin: 8 },
+      runs: [['AFK', 'sonnet', 'budget spent', '400k', '40m']], out: ['Edit src/settings/v2.ts', '⛔ budget spent → attention request'] },
+    { id: 13, title: 'Spike: OpenTUI panes', parent: null, mode: 'AFK', lvl: 'L1', state: 'Cancelled', groups: ['factory'], model: 'sonnet', runs: [['AFK', 'sonnet', 'cancelled', '12k', '2m']], out: [] },
+  ];
+}
+const SCRIPTS = {
+  2: ['Bash pnpm vitest auth/device — 6 passed', 'Thinking: poll interval must honour slow_down', 'Edit src/auth/poll.ts (+18)', 'Bash pnpm vitest — 48 passed', 'git commit -m "Device-code endpoint"', 'report_to_parent(#1): endpoint + poller done', '✓ run completed — reported to parent #1'],
+  7: ['Edit src/billing/money.ts (+9 −4)', 'Bash pnpm test billing — 31 passed', 'git commit -m "Round half-even"', 'close ticket #27', 'iter 4: picked ticket #28 VAT lines', 'Read src/billing/vat.ts', 'Edit src/billing/vat.ts (+22)', 'Bash pnpm test billing — 1 failed', 'Edit src/billing/vat.ts (+2 −1)', 'Bash pnpm test billing — 32 passed', 'git commit -m "VAT lines on invoices"', 'close ticket #28', 'iter 5: picked ticket #29 Credit notes'],
+};
+const GENERIC = ['Read the brief', 'Grep for call sites', 'Edit 2 files', 'Bash pnpm test — passed', 'git commit', 'Read related tests', 'Edit 1 file', 'Bash pnpm test — passed'];
+const CONV = {
+  11: [['op', 'Should metrics ever leave the TUI?'], ['agent', 'Two options: keep them in SQLite and render views, or export OTel to a local Grafana.'], ['tool', 'Read docs/research/usage-telemetry.md'], ['agent', 'Drafting a comparison of the two…']],
+  5: [['agent', 'Q4: should exports include voided invoices?'], ['sys', 'your turn']],
+};
+let TASKS, usage, tick, S;
+function resetAll() {
+  TASKS = seed(); usage = { win: 62, week: 31, reset: '1h 48m' }; tick = 0;
+  const prev = S ? S.variant : null;
+  S = { variant: prev || 'A', filter: null, collapsed: new Set([]), conv: null, convBuf: '', overlay: null, toast: null, last: '',
+    A: { screen: 'tasks', stack: [], cur: { tasks: 0, attn: 0, runs: 0 }, task: null },
+    B: { screen: 'inbox', cur: 0, tcur: 0 },
+    C: { focus: 'tree', lcur: 0, tcur: 0, rscroll: 0, zoom: false } };
+}
+const byId = id => TASKS.find(t => t.id === id);
+const kids = id => TASKS.filter(t => t.parent === id);
+const fin = t => t.state === 'Done' || t.state === 'Cancelled';
+const running = () => TASKS.filter(t => t.state === 'Running').length;
+const nextId = () => Math.max(...TASKS.map(t => t.id)) + 1;
+
+function visibleTasks() {
+  const out = [];
+  const walk = (t, d) => { out.push({ t, d }); if (!S.collapsed.has(t.id)) kids(t.id).forEach(c => walk(c, d + 1)); };
+  TASKS.filter(t => t.parent === null && (!S.filter || t.groups.includes(S.filter))).forEach(t => walk(t, 0));
+  return out;
+}
+// Attention queue: open requests oldest first, then HITL tasks ready for you, then root tasks in review.
+function attention(filtered) {
+  const ok = t => !filtered || !S.filter || t.groups.includes(S.filter);
+  const req = TASKS.filter(t => t.req && t.state === 'Needs you' && ok(t)).sort((a, b) => b.req.ageMin - a.req.ageMin)
+    .map(t => ({ kind: t.req.kind, t, age: t.req.age, text: t.req.text, options: t.req.options }));
+  const ready = TASKS.filter(t => t.state === 'Ready for you' && ok(t))
+    .map(t => ({ kind: 'your turn', t, age: t.waitAge || 'now', text: 'Your turn in the conversation', options: ['Open conversation'] }));
+  const review = TASKS.filter(t => t.state === 'In review' && ok(t))
+    .map(t => ({ kind: 'review', t, age: t.reviewAge || 'now', text: t.pr || 'Ready for review', options: ['Open PR in browser', 'Request changes', 'Merged on GitHub (stub)'] }));
+  return [...req, ...ready, ...review];
+}
+const KIND_CLS = { question: 'acc', permission: 'warn', failure: 'bad', budget: 'warn', 'your turn': 'acc', review: 'mag' };
+const STATE_CLS = { 'Running': 'ok', 'Needs you': 'warn', 'In review': 'mag', 'Ready for you': 'acc', 'In conversation': 'acc', 'Queued': 'dim', 'Waiting on children': 'dim', 'Done': 'dim', 'Cancelled': 'dim', 'Draft': 'dim' };
+const GLYPH = { 'Running': '●', 'Needs you': '!', 'In review': '◎', 'Ready for you': '◆', 'In conversation': '◇', 'Queued': '⋯', 'Waiting on children': '⧗', 'Done': '✓', 'Cancelled': '✕', 'Draft': '○' };
+const stateText = t => t.state + (t.state === 'In conversation' && t.busy ? ' ·agent' : '');
+
+// ---------- actions (stubbed against the in-memory mock) ----------
+function toast(msg) { S.toast = msg; clearTimeout(toast.h); toast.h = setTimeout(() => { S.toast = null; render(); }, 3800); }
+function doAction(item, i) {
+  const t = item.t, o = item.options[i];
+  if (!o) return;
+  if (item.kind === 'your turn') return openConv(t);
+  if (item.kind === 'review') {
+    if (i === 0) return toast(`Opens ${t.pr.split(' ·')[0]} in the browser. The operator merges on GitHub.`);
+    if (i === 1) { t.state = 'Queued'; t.out.push('· changes requested — new run will resume the session with review comments'); return toast(`#${t.id} changes requested → Queued`); }
+    t.state = 'Done'; return toast(`#${t.id} merged → Done`);
+  }
+  if (o === 'Take over') return takeover(t);
+  if (o === 'Cancel task') { cancelTask(t); return toast(`#${t.id} cancelled (with its subtree)`); }
+  const k = t.req.kind;
+  if (k === 'question') { t.state = 'Running'; t.out.push(`· operator answered "${o}" — suspended run resumes at once`); }
+  else if (k === 'permission') { if (o === 'Raise to L2') t.lvl = 'L2'; t.state = 'Queued'; t.out.push(`· operator: ${o} — run was parked, a new run resumes the session`); }
+  else { t.state = 'Queued'; t.out.push(`· operator: ${o} — new run queued, resumes the session`); }
+  t.req = null;
+  toast(`#${t.id} ${o} → ${t.state}`);
+}
+function takeover(t) {
+  if (t.mode === 'HITL') return openConv(t);
+  if (!['Queued', 'Running', 'Needs you'].includes(t.state)) return toast(`Can't take over a task that is ${t.state}.`);
+  t.mode = 'HITL'; t.lvl = null; t.req = null; t.state = 'In conversation'; t.busy = false;
+  t.runs.push(['HITL', t.model, 'active · takeover', '0k', '0m']);
+  CONV[t.id] = [['sys', `Took over #${t.id}. Same session; the AFK run ended.`], ['agent', `I was at: ${t.out[t.out.length - 1] || 'the start'}. What do you want to change?`]];
+  S.conv = t.id; S.convBuf = '';
+}
+function cancelTask(t) { if (!fin(t)) { t.state = 'Cancelled'; t.req = null; } kids(t.id).forEach(cancelTask); }
+function openConv(t) {
+  if (!t) return;
+  if (t.mode !== 'HITL') return toast('An AFK run takes no chat. Take over (c / T) to talk to it.');
+  if (fin(t)) return toast(`#${t.id} is ${t.state}.`);
+  if (t.state === 'Ready for you') t.state = 'In conversation';
+  S.conv = t.id; S.convBuf = '';
+}
+function leaveConv() {
+  const t = byId(S.conv);
+  if (t && t.state === 'In conversation' && !t.busy) t.state = 'Ready for you';
+  S.conv = null;
+}
+function handoff() {
+  const t = byId(S.conv);
+  t.mode = 'AFK'; t.lvl = 'L1'; t.state = 'Queued'; t.busy = false; S.conv = null;
+  toast(`Handoff sheet would open here (see the handoff prototype). Confirmed: #${t.id} queued as AFK L1.`);
+}
+function quickLaunch(prompt) {
+  const t = { id: nextId(), title: 'Quick: ' + prompt, parent: null, mode: 'HITL', state: 'In conversation', groups: S.filter ? [S.filter] : ['factory'], model: 'opus', runs: [['HITL', 'opus', 'active · quick-grill', '0k', '0m']], out: [] };
+  TASKS.push(t);
+  CONV[t.id] = [['op', prompt], ['agent', 'Q1 of ≤3: what does done look like? (quick-grill card overlay in the real TUI)']];
+  S.conv = t.id; S.convBuf = '';
+}
+function newTask(o) {
+  const t = { id: nextId(), title: o.buf || 'Untitled task', parent: null, mode: o.mode, lvl: o.mode === 'AFK' ? o.lvl : null, groups: [o.group], model: 'sonnet', runs: [], out: [],
+    state: o.mode === 'AFK' ? 'Queued' : 'Ready for you' };
+  TASKS.push(t);
+  toast(`#${t.id} created → ${t.state}${o.preset !== 'none' ? ' · preset ' + o.preset : ''}`);
+}
+
+// ---------- the fake daemon ----------
+function onTick() {
+  if (document.getElementById('pause').checked) return;
+  tick++;
+  TASKS.forEach(t => {
+    if (t.state !== 'Running') return;
+    const sc = SCRIPTS[t.id] || GENERIC; t.si = t.si || 0;
+    if (t.id === 2 && t.si >= sc.length) return;
+    t.out.push(sc[t.si % sc.length]); t.si++;
+    if (t.id === 2 && t.si >= sc.length) { t.state = 'Done'; checkParent(t); }
+  });
+  const t11 = byId(11);
+  if (t11.busy && S.conv !== 11 && tick >= 5) { t11.busy = false; t11.state = 'Ready for you'; t11.waitAge = 'now'; CONV[11].push(['agent', 'Comparison is ready: SQLite views win for v1. Want me to record an ADR?'], ['sys', 'your turn']); }
+  if (tick % 3 === 0) usage.win = Math.min(99, +(usage.win + 0.4).toFixed(1));
+  if (tick % 6 === 0) schedule();
+  if (tick === 14 && byId(12).state === 'Running') { const t = byId(12); t.state = 'Needs you'; t.req = { kind: 'question', text: 'Cache the usage snapshot per credential profile or globally?', options: ['Per profile', 'Globally', 'Take over'], age: 'now', ageMin: 0 }; t.out.push('AskUserQuestion → attention request (run suspended, no slot)'); }
+  render();
+}
+function schedule() {
+  if (running() >= CAP || usage.win >= 95) return;
+  const q = TASKS.find(t => t.state === 'Queued' && t.mode === 'AFK');
+  if (!q) return;
+  q.state = 'Running'; q.runs.push(['AFK', q.model, 'active', '0k', '0m']); q.out.push('▶ scheduler started a run (slot free, window open)');
+}
+function checkParent(t) {
+  const p = byId(t.parent);
+  if (p && p.state === 'Waiting on children' && kids(p.id).filter(c => c.await).every(fin)) { p.state = 'Queued'; p.out.push('· all awaited children done — parent queued to resume'); }
+}
+
+// ========================= shared rendering =========================
+const bar = (pct, w) => { const n = Math.round(pct / 100 * w); return '█'.repeat(n) + '░'.repeat(w - n); };
+const pctCls = p => p >= 85 ? 'bad' : p >= 65 ? 'warn' : 'ok';
+const slots = () => { const r = running(); return '●'.repeat(Math.min(r, CAP)) + '○'.repeat(Math.max(0, CAP - r)) + (r > CAP ? ' +' + (r - CAP) : ''); };
+function headerSummary() {
+  return `window <span class="${pctCls(usage.win)}">${bar(usage.win, 8)} ${Math.round(usage.win)}%</span> ↻${usage.reset} · week ${usage.week}% · slots <span class="ok">${slots()}</span>`;
+}
+function taskRow(t, d, sel) {
+  const tw = kids(t.id).length ? (S.collapsed.has(t.id) ? '▸' : '▾') : ' ';
+  return `<div class="r ${sel ? 'sel' : ''} ${fin(t) ? 'fin' : ''} ${t.state === 'Cancelled' ? 'cx' : ''}"><span class="w-tree">${'  '.repeat(d)}${tw} <span class="${STATE_CLS[t.state]}">${GLYPH[t.state]}</span></span><span class="w-id">#${t.id}</span><span class="w-title">${esc(t.title)}</span><span class="w-mode">${t.mode}${t.lvl ? ' ' + t.lvl : ''}</span><span class="w-state ${STATE_CLS[t.state]}">${stateText(t)}</span><span class="w-grp">${t.groups.join(',')}</span></div>`;
+}
+function attnRow(it, sel) {
+  return `<div class="r ${sel ? 'sel' : ''}"><span class="w-kind ${KIND_CLS[it.kind]}">${it.kind}</span><span class="w-id">#${it.t.id}</span><span class="w-c2 fg">${esc(it.t.title)}</span><span class="w-txt">${esc(it.text)}</span><span class="w-age">${it.age}</span></div>`;
+}
+function reqBox(t, hint) {
+  const items = attention(false).filter(i => i.t === t);
+  if (!items.length) return '';
+  const it = items[0];
+  return `<div class="reqbox ${KIND_CLS[it.kind]}"><span class="${KIND_CLS[it.kind]}">${it.kind}</span> · ${esc(it.text)} <span class="dim">· ${it.age}</span><br>${it.options.map((o, i) => `<span class="opt"><b>[${i + 1}]</b> ${esc(o)}</span>`).join('   ')}${hint ? `   <span class="dim">${hint}</span>` : ''}</div>`;
+}
+function taskDetail(t, o = {}) {
+  if (!t) return '<div class="dim">Nothing selected.</div>';
+  const p = t.parent ? byId(t.parent) : null, ch = kids(t.id);
+  const lines = o.lines || 10;
+  const out = t.out.slice(Math.max(0, t.out.length - lines - (o.scroll || 0)), t.out.length - (o.scroll || 0));
+  return `<div><span class="fg">#${t.id} ${esc(t.title)}</span></div>
+  <div class="dim">${t.mode}${t.lvl ? ' ' + t.lvl : ''} · ${t.model || ''} · <span class="${STATE_CLS[t.state]}">${stateText(t)}</span> · ${t.groups.join(', ')}${p ? ` · parent #${p.id} ${esc(p.title)}${t.await ? ' (awaited)' : ' (fire-and-forget)'}` : ''}${ch.length ? ` · ${ch.length} children` : ''}${t.ralph ? ' · Ralph ' + t.ralph : ''}</div>
+  ${reqBox(t, o.hint)}
+  ${o.compact ? '' : `<div class="sec">Runs</div>${t.runs.length ? t.runs.map((r, i) => `<div class="r"><span class="w-id">${i + 1}</span><span class="w-mode">${r[0]}</span><span class="w-mode">${r[1]}</span><span class="w-c2" style="color:inherit">${r[2]}</span><span class="w-mode">${r[3]}</span><span class="w-mode">${r[4]}</span></div>`).join('') : '<div class="dim">no runs yet</div>'}`}
+  ${t.art && !o.compact ? `<div class="sec">Artifacts</div>${t.art.map(a => `<div class="dim">${esc(a)}</div>`).join('')}` : ''}
+  ${t.mode === 'AFK' || t.out.length ? `<div class="sec">${t.state === 'Running' ? '<span class="ok">● live</span> output' : 'Last output'}${o.scroll ? ` <span class="warn">(scrolled ↑${o.scroll})</span>` : ''}</div><div class="out">${out.length ? out.map(l => `<div class="l">${esc(l)}</div>`).join('') : '<span class="dim">—</span>'}</div>` : `<div class="sec">Conversation</div><div class="dim">${t.state === 'In conversation' && t.busy ? 'agent is working… ' : ''}enter / c opens it full screen</div>`}`;
+}
+function usageFull() {
+  const models = [['opus', 410], ['sonnet', 760], ['haiku', 42]], groups = [['auth', 390], ['billing', 520], ['chores', 170], ['factory', 132]];
+  const mx = 800;
+  const lines = (rows) => rows.map(([k, v]) => `<div class="gauge"><span style="display:inline-block;width:10ch">${k}</span><span class="acc">${bar(v / mx * 100, 30)}</span> ${v}k</div>`).join('');
+  const top = TASKS.filter(t => t.runs.length).map(t => [t, t.runs.reduce((s, r) => s + parseInt(r[3]), 0)]).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  return `<div class="big">
+    <span>5h usage window</span><span class="gauge ${pctCls(usage.win)}">${bar(usage.win, 40)} ${Math.round(usage.win)}% · resets in ${usage.reset} <span class="dim">(last rate_limit_event snapshot)</span></span>
+    <span>Weekly window</span><span class="gauge ok">${bar(usage.week, 40)} ${usage.week}%</span>
+    <span>API overflow pool</span><span class="gauge dim">${bar(0, 40)} $0.00 of $20</span>
+    <span>Parallel slots</span><span class="gauge ok">${slots()} ${running()}/${CAP} running · ${TASKS.filter(t => t.state === 'Queued').length} queued</span>
+    <span>Tokens / hour, 12h</span><span class="acc">▁▂▂▃▅▇▆▄▃▅▆▇</span></div>
+    <div class="sec">Tokens today by model</div>${lines(models)}
+    <div class="sec">Tokens today by group</div>${lines(groups)}
+    <div class="sec">Top tasks</div>${top.map(([t, v]) => `<div class="r"><span class="w-id">#${t.id}</span><span class="w-c2" style="color:inherit;width:34ch">${esc(t.title)}</span><span>${v}k</span></div>`).join('')}`;
+}
+function convScreen() {
+  const t = byId(S.conv), msgs = CONV[t.id] || [['agent', 'Resuming the session. Where were we?']];
+  const cls = { op: 'm-op', agent: 'm-agent', sys: 'm-sys', tool: 'm-tool' };
+  return `<div class="hd"><span class="brand">◇ #${t.id} ${esc(t.title)}</span><span class="dim">HITL · ${t.model} · ctx 34%${t.busy ? ' · <span class="ok">agent working…</span>' : ''}</span><span class="r">full screen · ctrl+b returns to where you were</span></div>
+  <div class="bd"><div class="conv"><div class="tr">${msgs.slice(-14).map(([w, m]) => `<div class="ln ${cls[w]}">${esc(m)}</div>`).join('')}</div>
+  <div class="rail"><div class="sec">Artifacts</div>${(t.art || ['none yet']).map(a => `<div>${esc(a)}</div>`).join('')}<div class="sec">Task</div><div>${t.groups.join(', ')}</div><div>${t.runs.length} runs</div></div></div></div>
+  <div class="status"><span class="ok">›</span> ${esc(S.convBuf)}<span class="caret"> </span></div>
+  <div class="ft"><b>enter</b> send · <b>esc</b> interrupt · <b>ctrl+b</b> leave (run stays live) · <b>ctrl+h</b> hand off</div>`;
+}
+function overlay() {
+  const o = S.overlay; if (!o) return '';
+  const input = b => `${esc(b)}<span class="caret"> </span>`;
+  if (o.type === 'quick') return `<div class="overlay"><h4>QUICK LAUNCH</h4><div>One prompt, then at most 3 grilling questions, then the handoff sheet (L1).</div><div class="status" style="margin:8px -14px -10px"><span class="ok">›</span> ${input(o.buf)}</div><div class="dim" style="margin-top:14px">enter start · esc cancel</div></div>`;
+  if (o.type === 'new') {
+    const f = (i, k, v) => `<span class="${o.field === i ? 'on' : 'dim'}">${o.field === i ? '›' : ' '} ${k}</span><span>${v}</span>`;
+    return `<div class="overlay"><h4>NEW TASK</h4><div class="field">${f(0, 'goal', input(o.buf))}${f(1, 'mode', `◂ ${o.mode} ▸`)}${f(2, 'preset', `◂ ${o.preset} ▸`)}${f(3, 'autonomy', o.mode === 'AFK' ? `◂ ${o.lvl} ▸` : '<span class="dim">— (HITL)</span>')}${f(4, 'group', `◂ ${o.group} ▸`)}</div><div class="dim" style="margin-top:8px">tab / ↑↓ field · ←→ change · enter create · esc cancel</div></div>`;
+  }
+  if (o.type === 'answer') {
+    const it = attention(false).find(i => i.t.id === o.taskId);
+    if (!it) { S.overlay = null; return ''; }
+    return `<div class="overlay"><h4>ANSWER · #${it.t.id} ${esc(it.t.title)}</h4><div class="${KIND_CLS[it.kind]}">${it.kind} · ${it.age}</div><div style="margin:4px 0 8px">${esc(it.text)}</div>${it.options.map((op, i) => `<div class="r ${o.cur === i ? 'sel' : ''}"><b class="acc">${i + 1}</b>&nbsp; ${esc(op)}</div>`).join('')}<div class="sec">Context</div><div class="out">${it.t.out.slice(-4).map(l => `<div class="l">${esc(l)}</div>`).join('')}</div><div class="dim" style="margin-top:8px">↑↓ / 1–${it.options.length} choose · enter confirm · esc back</div></div>`;
+  }
+  if (o.type === 'group') {
+    const opts = ['all', ...GROUPS];
+    return `<div class="overlay"><h4>FILTER BY GROUP</h4>${opts.map((g, i) => `<div class="r ${o.cur === i ? 'sel' : ''}">${g}${(S.filter || 'all') === g ? ' <span class="ok">✓</span>' : ''}<span class="dim">&nbsp; ${g === 'all' ? TASKS.length : TASKS.filter(t => t.groups.includes(g)).length} tasks</span></div>`).join('')}<div class="dim" style="margin-top:8px">↑↓ · enter apply · esc</div></div>`;
+  }
+  if (o.type === 'cmd') return `<div class="overlay"><h4>COMMAND</h4><div>:${input(o.buf)}</div><div class="dim" style="margin-top:8px">tasks · attn · runs · usage · group &lt;name|all&gt; · task &lt;id&gt; · new · quick</div></div>`;
+  if (o.type === 'metrics') return `<div class="overlay wide"><h4>USAGE &amp; METRICS</h4>${usageFull()}<div class="dim" style="margin-top:8px">m / esc close</div></div>`;
+  if (o.type === 'help') return `<div class="overlay wide"><h4>KEYS · variant ${S.variant}</h4><table style="width:100%">${KEYS[S.variant].map(([k, d]) => `<tr><td class="acc" style="white-space:nowrap;padding-right:14px">${esc(k)}</td><td>${esc(d)}</td></tr>`).join('')}</table><div class="dim" style="margin-top:8px">? / esc close</div></div>`;
+  return '';
+}
+function overlayKey(k) {
+  const o = S.overlay;
+  if (k === 'esc') { S.overlay = null; return; }
+  if (['quick', 'cmd'].includes(o.type) || (o.type === 'new' && o.field === 0 && k.length === 1)) {
+    if (k.length === 1) { o.buf += k; return; }
+    if (k === 'space') { o.buf += ' '; return; }
+    if (k === 'backspace') { o.buf = o.buf.slice(0, -1); return; }
+  }
+  if (o.type === 'quick' && k === 'enter') { if (o.buf.trim()) { S.overlay = null; quickLaunch(o.buf.trim()); } return; }
+  if (o.type === 'cmd' && k === 'enter') { S.overlay = null; runCmd(o.buf.trim()); return; }
+  if (o.type === 'new') {
+    if (k === 'space' && o.field === 0) { o.buf += ' '; return; }
+    if (k === 'backspace' && o.field === 0) { o.buf = o.buf.slice(0, -1); return; }
+    if (k === 'tab' || k === 'down') { o.field = (o.field + 1) % 5; return; }
+    if (k === 'shift+tab' || k === 'up') { o.field = (o.field + 4) % 5; return; }
+    const cyc = (arr, v, d) => arr[(arr.indexOf(v) + d + arr.length) % arr.length];
+    if (k === 'left' || k === 'right') {
+      const d = k === 'left' ? -1 : 1;
+      if (o.field === 1) o.mode = cyc(['AFK', 'HITL'], o.mode, d);
+      if (o.field === 2) o.preset = cyc(['none', 'default (grill → … → pr)', 'ralph'], o.preset, d);
+      if (o.field === 3 && o.mode === 'AFK') o.lvl = cyc(['L1', 'L2'], o.lvl, d);
+      if (o.field === 4) o.group = cyc(GROUPS, o.group, d);
+      return;
+    }
+    if (k === 'enter') { S.overlay = null; newTask(o); }
+    return;
+  }
+  if (o.type === 'answer') {
+    const it = attention(false).find(i => i.t.id === o.taskId); if (!it) { S.overlay = null; return; }
+    if (k === 'up' || k === 'k') o.cur = Math.max(0, o.cur - 1);
+    if (k === 'down' || k === 'j') o.cur = Math.min(it.options.length - 1, o.cur + 1);
+    if (/^[1-9]$/.test(k) && +k <= it.options.length) o.cur = +k - 1;
+    if (k === 'enter' || /^[1-9]$/.test(k)) { S.overlay = null; doAction(it, o.cur); }
+    return;
+  }
+  if (o.type === 'group') {
+    if (k === 'up' || k === 'k') o.cur = Math.max(0, o.cur - 1);
+    if (k === 'down' || k === 'j') o.cur = Math.min(GROUPS.length, o.cur + 1);
+    if (k === 'enter') { S.filter = o.cur === 0 ? null : GROUPS[o.cur - 1]; S.overlay = null; }
+    return;
+  }
+  if ((o.type === 'help' && k === '?') || (o.type === 'metrics' && k === 'm')) S.overlay = null;
+}
+function convKey(k) {
+  const t = byId(S.conv);
+  if (k === 'ctrl+b') return leaveConv();
+  if (k === 'ctrl+h') return handoff();
+  if (k === 'esc') { if (t.busy) { t.busy = false; (CONV[t.id] ||= []).push(['sys', 'interrupted']); } return; }
+  if (k === 'backspace') { S.convBuf = S.convBuf.slice(0, -1); return; }
+  if (k === 'space') { S.convBuf += ' '; return; }
+  if (k === 'enter') {
+    if (!S.convBuf.trim()) return;
+    const msgs = (CONV[t.id] ||= []); msgs.push(['op', S.convBuf]); S.convBuf = ''; t.busy = true;
+    setTimeout(() => { t.busy = false; msgs.push(['agent', 'Noted. (canned reply — the handoff prototype covers the conversation itself)']); render(); }, 900);
+    return;
+  }
+  if (k.length === 1) S.convBuf += k;
+}
+const openNew = () => { S.overlay = { type: 'new', buf: '', mode: 'AFK', preset: 'none', lvl: 'L1', group: S.filter || GROUPS[0], field: 0 }; };
+const answerOrTake = (t, take) => {
+  if (!t) return;
+  if (take) return takeover(t);
+  if (attention(false).some(i => i.t === t)) S.overlay = { type: 'answer', taskId: t.id, cur: 0 };
+  else toast(`#${t.id} has nothing waiting on you.`);
+};
+const clamp = (v, n) => Math.max(0, Math.min(n - 1, v));
+const isUp = k => k === 'up' || k === 'k', isDown = k => k === 'down' || k === 'j';
+
+// ========================= Variant A: screens + tabs + drill-down stack =========================
+const A = {
+  name: 'Screens + drill-down',
+  sel() {
+    const a = S.A;
+    if (a.screen === 'tasks') { const v = visibleTasks(); return v[clamp(a.cur.tasks, v.length)]?.t; }
+    if (a.screen === 'attn') { const v = attention(false); return v[clamp(a.cur.attn, v.length)]?.t; }
+    if (a.screen === 'runs') { const v = A.runRows(); return v[clamp(a.cur.runs, v.length)]?.[0]; }
+    if (a.screen === 'task') return byId(a.task);
+  },
+  runRows() {
+    const rows = [];
+    TASKS.forEach(t => t.runs.forEach((r, i) => rows.push([t, i + 1, r])));
+    const live = r => /active|suspended|live/.test(r[2][2]);
+    return rows.sort((x, y) => live(y) - live(x));
+  },
+  render() {
+    const a = S.A, att = attention(false);
+    const tabs = [['tasks', '1 Tasks'], ['attn', `2 Needs you (${att.length})`], ['runs', '3 Runs'], ['usage', '4 Usage']];
+    const base = a.screen === 'task' ? (a.stack[0] || 'tasks') : a.screen;
+    let hd = `<div class="hd"><span class="brand">agent-factory</span>${tabs.map(([k, l]) => `<span class="tab ${base === k ? 'on' : ''}">${k === 'attn' && att.length ? `<span class="${base === k ? '' : 'warn'}">${l}</span>` : l}</span>`).join('')}<span class="r">${headerSummary()}</span></div>`;
+    const crumbName = { tasks: 'Tasks', attn: 'Needs you', runs: 'Runs', usage: 'Usage' };
+    let crumb = `${crumbName[base]}${a.screen === 'task' ? ` › #${a.task} ${esc(byId(a.task).title)}` : ''}${(a.screen === 'tasks') ? ` <span class="dim">· group: ${S.filter || 'all'}</span>` : ''}`;
+    let bd = '', ft = '';
+    if (a.screen === 'tasks') {
+      const v = visibleTasks(); a.cur.tasks = clamp(a.cur.tasks, v.length);
+      bd = v.map((x, i) => taskRow(x.t, x.d, i === a.cur.tasks)).join('');
+      ft = '<b>↑↓</b> move · <b>←→</b> fold · <b>enter</b> open · <b>c</b> converse/take over · <b>a</b> answer · <b>g</b> group · <b>x</b> cancel · <b>n</b> quick · <b>N</b> new · <b>:</b> cmd · <b>?</b>';
+    } else if (a.screen === 'attn') {
+      a.cur.attn = clamp(a.cur.attn, att.length);
+      bd = att.length ? att.map((it, i) => attnRow(it, i === a.cur.attn)).join('') : '<div class="inbox-empty">Nothing needs you.</div>';
+      ft = '<b>↑↓</b> move · <b>enter</b> act (answer sheet / conversation / task) · <b>c</b> take over · <b>esc</b> back · <b>1–4</b> screens';
+    } else if (a.screen === 'runs') {
+      const rows = A.runRows(); a.cur.runs = clamp(a.cur.runs, rows.length);
+      bd = `<div class="r dim"><span class="w-id">task</span><span class="w-c2">title</span><span class="w-id">run</span><span class="w-mode">mode</span><span class="w-mode">model</span><span class="w-c2">status</span><span class="w-mode">tokens</span><span class="w-mode">time</span></div>` +
+        rows.map(([t, n, r], i) => `<div class="r ${i === a.cur.runs ? 'sel' : ''} ${/active|live/.test(r[2]) ? '' : 'fin'}"><span class="w-id">#${t.id}</span><span class="w-c2" style="color:inherit">${esc(t.title)}</span><span class="w-id">${n}</span><span class="w-mode">${r[0]}</span><span class="w-mode">${r[1]}</span><span class="w-c2 ${/active|live/.test(r[2]) ? 'ok' : ''}">${r[2]}</span><span class="w-mode">${r[3]}</span><span class="w-mode">${r[4]}</span></div>`).join('');
+      ft = '<b>↑↓</b> move · <b>enter</b> open task · <b>1–4</b> screens';
+    } else if (a.screen === 'usage') {
+      bd = usageFull(); ft = '<b>1–4</b> screens';
+    } else if (a.screen === 'task') {
+      const t = byId(a.task);
+      bd = taskDetail(t, { lines: 12, hint: 'a / 1–3 answer · c take over' });
+      ft = `<b>esc</b> back · <b>enter</b>/<b>c</b> ${t.mode === 'HITL' ? 'open conversation' : 'take over'} · <b>a</b> answer · <b>1–3</b> pick option · <b>x</b> cancel`;
+    }
+    return hd + `<div class="crumb">${crumb}</div><div class="bd">${bd}</div><div class="ft">${ft}</div>`;
+  },
+  key(k) {
+    const a = S.A;
+    if (/^[1-4]$/.test(k) && a.screen !== 'task') { a.screen = ['tasks', 'attn', 'runs', 'usage'][+k - 1]; a.stack = []; return; }
+    if (/^[1-4]$/.test(k) && a.screen === 'task') {
+      const t = byId(a.task), it = attention(false).find(i => i.t === t);
+      if (it && +k <= it.options.length) return doAction(it, +k - 1);
+      a.screen = ['tasks', 'attn', 'runs', 'usage'][+k - 1]; a.stack = []; return;
+    }
+    if (k === ':') { S.overlay = { type: 'cmd', buf: '' }; return; }
+    if (k === 'g') { S.overlay = { type: 'group', cur: S.filter ? GROUPS.indexOf(S.filter) + 1 : 0 }; return; }
+    if ((k === 'esc' || k === 'backspace') && a.screen === 'task') { a.screen = a.stack.pop() || 'tasks'; return; }
+    const cur = a.screen === 'tasks' || a.screen === 'attn' || a.screen === 'runs' ? a.screen : null;
+    if (cur && isUp(k)) { a.cur[cur]--; return; }
+    if (cur && isDown(k)) { a.cur[cur]++; return; }
+    const t = A.sel();
+    if (a.screen === 'tasks' && (k === 'left' || k === 'h') && t) { if (kids(t.id).length) S.collapsed.add(t.id); else if (t.parent) { const v = visibleTasks(); a.cur.tasks = v.findIndex(x => x.t.id === t.parent); } return; }
+    if (a.screen === 'tasks' && (k === 'right' || k === 'l') && t) { S.collapsed.delete(t.id); return; }
+    if (k === 'enter' && t) {
+      if (a.screen === 'attn') { const it = attention(false)[a.cur.attn]; if (it.kind === 'your turn') return openConv(t); if (it.kind === 'review') { a.stack.push('attn'); a.task = t.id; a.screen = 'task'; return; } return answerOrTake(t); }
+      if (a.screen === 'task') return t.mode === 'HITL' ? openConv(t) : takeover(t);
+      a.stack.push(a.screen); a.task = t.id; a.screen = 'task'; return;
+    }
+    if (k === 'c') return t && (t.mode === 'HITL' ? openConv(t) : takeover(t));
+    if (k === 'a') return answerOrTake(t);
+    if (k === 'x' && t && !fin(t)) { cancelTask(t); return toast(`#${t.id} cancelled (with its subtree)`); }
+  },
+  state: () => ({ screen: S.A.screen, stack: S.A.stack, cursor: S.A.cur, openTask: S.A.screen === 'task' ? S.A.task : null }),
+};
+function runCmd(c) {
+  const [w, arg] = c.split(/\s+/), a = S.A;
+  const go = s => { a.screen = s; a.stack = []; };
+  if (['tasks', 'attn', 'runs', 'usage'].includes(w)) return go(w);
+  if (w === 'group') { S.filter = !arg || arg === 'all' ? null : arg; return go('tasks'); }
+  if (w === 'task' && byId(+arg)) { a.stack = [a.screen === 'task' ? 'tasks' : a.screen]; a.task = +arg; a.screen = 'task'; return; }
+  if (w === 'new') return openNew();
+  if (w === 'quick') { S.overlay = { type: 'quick', buf: '' }; return; }
+  toast(`Unknown command: ${c}`);
+}
+
+// ========================= Variant B: attention queue first, mail-client triage =========================
+const B = {
+  name: 'Inbox-first triage',
+  items: () => attention(true),
+  sel() {
+    const b = S.B;
+    if (b.screen === 'inbox') { const v = B.items(); return v[clamp(b.cur, v.length)]; }
+    if (b.screen === 'tree') { const v = visibleTasks(); const t = v[clamp(b.tcur, v.length)]?.t; return t && { t }; }
+  },
+  render() {
+    const b = S.B, att = B.items(), all = attention(false).length;
+    const tab = (k, l) => `<span class="tab ${b.screen === k ? 'on' : ''}">${l}</span>`;
+    const hd = `<div class="hd"><span class="brand">agent-factory</span>${tab('inbox', `i Needs you (${att.length}${S.filter && all !== att.length ? '/' + all : ''})`)}${tab('tree', 't All tasks')}${tab('usage', 'u Usage')}<span class="r">limit: <span class="${S.filter ? 'warn' : ''}">${S.filter || 'all'}</span></span></div>`;
+    let bd = '', ft = '';
+    if (b.screen === 'inbox') {
+      b.cur = clamp(b.cur, att.length);
+      if (!att.length) bd = `<div class="inbox-empty"><div class="ok" style="font-size:16px">Nothing needs you.</div><div>${running()} running · ${TASKS.filter(t => t.state === 'Queued').length} queued · ${TASKS.filter(t => t.state === 'Waiting on children').length} waiting on children</div><div style="margin-top:8px">c quick launch · t all tasks</div></div>`;
+      else {
+        const it = att[b.cur], win = att.slice(Math.max(0, b.cur - 6), Math.max(0, b.cur - 6) + 8);
+        bd = `<div class="split"><div class="top">${win.map(x => attnRow(x, x === it)).join('')}</div><div class="sep">── ${b.cur + 1}/${att.length} ── #${it.t.id} ${esc(it.t.title)} ${'─'.repeat(80)}</div><div class="bottom">${taskDetail(it.t, { lines: 7, compact: true, hint: 'press the digit — no confirm, next item slides in' })}</div></div>`;
+      }
+      ft = '<b>j/k</b> move · <b>1–3</b> act on item · <b>enter</b> open · <b>T</b> take over · <b>l</b> limit group · <b>c</b> quick launch · <b>C</b> new · <b>t</b>/<b>u</b> views · <b>?</b>';
+    } else if (b.screen === 'tree') {
+      const v = visibleTasks(); b.tcur = clamp(b.tcur, v.length); const t = v[b.tcur]?.t;
+      const start = Math.max(0, b.tcur - 9);
+      bd = `<div class="split"><div class="top">${v.slice(start, start + 11).map((x, i) => taskRow(x.t, x.d, start + i === b.tcur)).join('')}</div><div class="sep">── #${t.id} ${esc(t.title)} ${'─'.repeat(80)}</div><div class="bottom">${taskDetail(t, { lines: 5, compact: true, hint: 'i to answer from the inbox' })}</div></div>`;
+      ft = '<b>j/k</b> move · <b>←→</b> fold · <b>enter</b> converse · <b>T</b> take over · <b>x</b> cancel · <b>l</b> limit · <b>i</b> inbox · <b>u</b> usage';
+    } else { bd = usageFull(); ft = '<b>i</b> inbox · <b>t</b> all tasks'; }
+    const st = `<div class="status"><span class="ok">● ${running()}/${CAP} running</span> · ⋯ ${TASKS.filter(t => t.state === 'Queued').length} queued · ⧗ ${TASKS.filter(t => t.state === 'Waiting on children').length} waiting │ window <span class="${pctCls(usage.win)}">${Math.round(usage.win)}%</span> ↻${usage.reset} │ week ${usage.week}% │ today 1.2M tok${all ? ` │ <span class="warn">${all} need you</span>` : ''}</div>`;
+    return hd + `<div class="bd">${bd}</div>${st}<div class="ft">${ft}</div>`;
+  },
+  key(k) {
+    const b = S.B;
+    if (k === 'i') { b.screen = 'inbox'; return; }
+    if (k === 't') { b.screen = 'tree'; return; }
+    if (k === 'u') { b.screen = 'usage'; return; }
+    if (k === 'l') { const o = [null, ...GROUPS]; S.filter = o[(o.indexOf(S.filter) + 1) % o.length]; return; }
+    if (k === 'c') { S.overlay = { type: 'quick', buf: '' }; return; }
+    if (k === 'C') return openNew();
+    if (b.screen === 'inbox') {
+      if (isUp(k)) b.cur--; if (isDown(k)) b.cur++;
+      const it = B.sel(); if (!it) return;
+      if (/^[1-9]$/.test(k)) return doAction(it, +k - 1);
+      if (k === 'enter') { if (it.kind === 'your turn') return openConv(it.t); if (it.kind === 'review') return doAction(it, 0); return toast('Press 1–3 to answer, or T to take over.'); }
+      if (k === 'T') return takeover(it.t);
+    }
+    if (b.screen === 'tree') {
+      if (isUp(k)) b.tcur--; if (isDown(k)) b.tcur++;
+      const t = B.sel()?.t; if (!t) return;
+      if (k === 'left') { if (kids(t.id).length) S.collapsed.add(t.id); return; }
+      if (k === 'right') { S.collapsed.delete(t.id); return; }
+      if (k === 'enter') return openConv(t);
+      if (k === 'T') return takeover(t);
+      if (k === 'x' && !fin(t)) { cancelTask(t); toast(`#${t.id} cancelled (with its subtree)`); }
+    }
+  },
+  state: () => ({ screen: S.B.screen, inboxCursor: S.B.cur, treeCursor: S.B.tcur, limit: S.filter || 'all' }),
+};
+
+// ========================= Variant C: three-pane cockpit =========================
+const C = {
+  name: 'Three-pane cockpit',
+  leftItems() {
+    const att = attention(false);
+    return [...att.map(it => ({ type: 'attn', it })), { type: 'group', g: null }, ...GROUPS.map(g => ({ type: 'group', g }))];
+  },
+  focusTask() {
+    const c = S.C;
+    if (c.focus === 'left') { const li = C.leftItems()[clamp(c.lcur, C.leftItems().length)]; if (li?.type === 'attn') return li.it.t; }
+    const v = visibleTasks(); return v[clamp(c.tcur, v.length)]?.t;
+  },
+  render() {
+    const c = S.C, att = attention(false), left = C.leftItems(); c.lcur = clamp(c.lcur, left.length);
+    const hd = `<div class="hd"><span class="brand">agent-factory</span><span class="dim">tab switches pane · f zooms detail · m metrics</span><span class="r">${att.length ? `<span class="warn">! ${att.length} need you</span>` : '<span class="ok">nothing needs you</span>'}</span></div>`;
+    let li = '<div class="ttl">Needs you</div>';
+    left.forEach((x, i) => {
+      if (x.type === 'group' && x.g === null) li += '<div class="ttl" style="margin-top:10px">Groups</div>';
+      const sel = c.focus === 'left' && i === c.lcur;
+      if (x.type === 'attn') li += `<div class="r ${sel ? 'sel' : ''}"><span class="${KIND_CLS[x.it.kind]}" style="width:11ch;display:inline-block">${x.it.kind}</span><span class="dim">#${x.it.t.id}</span></div>`;
+      else {
+        const ts = TASKS.filter(t => !x.g || t.groups.includes(x.g)), n = ts.filter(t => attention(false).some(a => a.t === t)).length, r = ts.filter(t => t.state === 'Running').length;
+        li += `<div class="r ${sel ? 'sel' : ''}"><span style="width:9ch;display:inline-block" class="${(S.filter || null) === x.g ? 'acc' : ''}">${(S.filter || null) === x.g ? '▪' : ' '}${x.g || 'all'}</span><span class="dim">${String(ts.length).padStart(2)}</span>${r ? ` <span class="ok">●${r}</span>` : ''}${n ? ` <span class="warn">!${n}</span>` : ''}</div>`;
+      }
+    });
+    if (!att.length) li = li.replace('<div class="ttl">Needs you</div>', '<div class="ttl">Needs you</div><div class="dim">— none —</div>');
+    const v = visibleTasks(); c.tcur = clamp(c.tcur, v.length);
+    const mid = `<div class="ttl">Tasks · ${S.filter || 'all'}</div>${v.map((x, i) => taskRow(x.t, x.d, i === c.tcur && c.focus !== 'left')).join('')}`;
+    const ft_ = C.focusTask();
+    const right = `<div class="ttl">Detail${c.focus === 'left' ? ' · preview' : ''}</div>${taskDetail(ft_, { lines: c.zoom ? 22 : 9, scroll: c.focus === 'right' ? c.rscroll : 0, compact: !c.zoom, hint: 'a answer · c take over' })}`;
+    const cols = c.zoom
+      ? `<div class="cols"><div class="col focus" style="flex:1">${right.replace('Detail', 'Detail · zoomed (f / esc)')}</div></div>`
+      : `<div class="cols"><div class="col ${c.focus === 'left' ? 'focus' : ''}" style="width:24ch;flex:none">${li}</div><div class="col ${c.focus === 'tree' ? 'focus' : ''}" style="flex:1.25">${mid.replace(/<span class="w-grp">.*?<\/span>/g, '').replace(/class="w-mode"/g, 'class="w-mode" style="width:7ch"')}</div><div class="col ${c.focus === 'right' ? 'focus' : ''}" style="flex:1">${right}</div></div>`;
+    const strip = `<div class="status">window <span class="${pctCls(usage.win)}">${bar(usage.win, 14)} ${Math.round(usage.win)}%</span> ↻${usage.reset} │ week <span class="ok">${bar(usage.week, 6)}</span> ${usage.week}% │ slots <span class="ok">${slots()}</span> ${running()}/${CAP} │ tok/h <span class="acc">▁▂▃▅▇▆▄▃▅▆▇</span> │ opus 410k · sonnet 760k · haiku 42k</div>`;
+    const ft = `<b>tab</b> pane · <b>↑↓</b> move${c.focus === 'right' ? '/scroll' : ''} · <b>enter</b> ${c.focus === 'left' ? 'jump / filter' : c.focus === 'tree' ? 'converse or detail' : '—'} · <b>←→</b> fold · <b>a</b> answer · <b>c</b> converse/take over · <b>f</b> zoom · <b>m</b> metrics · <b>x</b> cancel · <b>n</b>/<b>N</b> launch · <b>?</b>`;
+    return hd + `<div class="bd">${cols}</div>${strip}<div class="ft">${ft}</div>`;
+  },
+  key(k) {
+    const c = S.C, panes = ['left', 'tree', 'right'];
+    if (k === 'tab' || k === 'shift+tab') { if (c.zoom) c.zoom = false; c.focus = panes[(panes.indexOf(c.focus) + (k === 'tab' ? 1 : 2)) % 3]; c.rscroll = 0; return; }
+    if (k === 'm') { S.overlay = { type: 'metrics' }; return; }
+    if (k === 'f') { c.zoom = !c.zoom; if (c.zoom) c.focus = 'right'; return; }
+    if (k === 'esc' && c.zoom) { c.zoom = false; return; }
+    const t = C.focusTask();
+    if (k === 'a') return answerOrTake(t);
+    if (k === 'c') return t && (t.mode === 'HITL' ? openConv(t) : takeover(t));
+    if (k === 'x' && t && !fin(t)) { cancelTask(t); return toast(`#${t.id} cancelled (with its subtree)`); }
+    if (c.focus === 'left') {
+      if (isUp(k)) c.lcur--; if (isDown(k)) c.lcur++;
+      if (k === 'enter') {
+        const li = C.leftItems()[c.lcur];
+        if (li.type === 'group') { S.filter = li.g; c.tcur = 0; return; }
+        const id = li.it.t.id;
+        if (S.filter && !li.it.t.groups.includes(S.filter)) S.filter = null;
+        for (let p = byId(li.it.t.parent); p; p = byId(p.parent)) S.collapsed.delete(p.id);
+        c.tcur = visibleTasks().findIndex(x => x.t.id === id); c.focus = 'tree';
+      }
+      return;
+    }
+    if (c.focus === 'tree') {
+      if (isUp(k)) c.tcur--; if (isDown(k)) c.tcur++;
+      if (!t) return;
+      if (k === 'left' || k === 'h') { if (kids(t.id).length) S.collapsed.add(t.id); return; }
+      if (k === 'right' || k === 'l') { S.collapsed.delete(t.id); return; }
+      if (k === 'enter') { if (t.mode === 'HITL' && !fin(t)) return openConv(t); c.focus = 'right'; c.rscroll = 0; }
+      return;
+    }
+    if (c.focus === 'right' && t) {
+      if (isUp(k)) c.rscroll = Math.min(Math.max(0, t.out.length - 3), c.rscroll + 1);
+      if (isDown(k)) c.rscroll = Math.max(0, c.rscroll - 1);
+      if (/^[1-9]$/.test(k)) { const it = attention(false).find(i => i.t === t); if (it) doAction(it, +k - 1); }
+    }
+  },
+  state: () => ({ focus: S.C.focus, leftCursor: S.C.lcur, treeCursor: S.C.tcur, detailScroll: S.C.rscroll, zoom: S.C.zoom, detailShows: C.focusTask()?.id ?? null }),
+};
+
+const VARIANTS = { A, B, C };
+const KEYS = {
+  A: [['1 2 3 4', 'Tasks · Needs you · Runs · Usage (top-level screens, reset the stack)'], ['↑↓ / j k', 'move'], ['enter', 'drill in: task detail; on a request, the answer sheet; on your-turn, the conversation'], ['esc / backspace', 'pop back out of task detail'], ['← → / h l', 'fold / unfold a task tree'], ['c', 'converse (HITL) or take over (AFK), full screen'], ['a', 'answer sheet for the selected task'], ['1–3 (in task detail)', 'pick a request option directly'], ['g', 'group filter picker'], [':', 'command line (:usage, :group billing, :task 9, …)'], ['x', 'cancel task and subtree'], ['n / N', 'quick launch / new task'], ['ctrl+b (in conversation)', 'leave, run stays live, back to the same screen'], ['?', 'help']],
+  B: [['i t u', 'Needs you (home) · All tasks · Usage'], ['j k / ↑↓', 'move; the preview follows'], ['1 2 3', 'act on the inbox item at once; the next one slides under the cursor'], ['enter', 'your-turn → conversation · review → open PR'], ['T', 'take over the selected task'], ['l', 'cycle the group limit (applies to inbox and tree)'], ['← →', 'fold (tree)'], ['x', 'cancel (tree)'], ['c / C', 'quick launch (compose) / new task'], ['ctrl+b (in conversation)', 'leave, back to the inbox'], ['?', 'help']],
+  C: [['tab / shift+tab', 'cycle focus: needs-you & groups · tasks · detail'], ['↑↓ / j k', 'move (detail pane: scroll output)'], ['enter (left)', 'jump to that task in the tree, or apply the group filter'], ['enter (tasks)', 'HITL → conversation; AFK → focus the detail'], ['← → / h l', 'fold'], ['a / 1–3', 'answer sheet / pick an option when the detail is focused'], ['c', 'converse or take over'], ['f', 'zoom the detail pane full width'], ['m', 'metrics overlay'], ['x', 'cancel task and subtree'], ['n / N', 'quick launch / new task'], ['ctrl+b (in conversation)', 'leave, back to the same pane'], ['?', 'help']],
+};
+
+// ========================= wiring =========================
+const tui = document.getElementById('tui');
+function keyName(e) {
+  const map = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Enter: 'enter', Escape: 'esc', Tab: 'tab', Backspace: 'backspace', ' ': 'space' };
+  let k = map[e.key] || (e.key.length === 1 ? e.key : null);
+  if (!k) return null;
+  if (e.ctrlKey && k.length === 1) k = 'ctrl+' + k.toLowerCase();
+  if (e.shiftKey && ['tab', 'left', 'right'].includes(k)) k = 'shift+' + k;
+  return k;
+}
+tui.addEventListener('keydown', e => {
+  const k = keyName(e); if (!k) return;
+  if (k === 'shift+left' || k === 'shift+right') return;
+  e.preventDefault(); S.last = k;
+  if (S.overlay) overlayKey(k);
+  else if (S.conv) convKey(k);
+  else if (k === '?') S.overlay = { type: 'help' };
+  else if (k === 'n' && S.variant !== 'B') S.overlay = { type: 'quick', buf: '' };
+  else if (k === 'N' && S.variant !== 'B') openNew();
+  else VARIANTS[S.variant].key(k);
+  render();
+});
+document.addEventListener('keydown', e => {
+  const typing = /INPUT|TEXTAREA/.test(document.activeElement.tagName);
+  if (typing) return;
+  const inTui = document.activeElement === tui;
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && (e.shiftKey || !inTui)) { e.preventDefault(); cycle(e.key === 'ArrowLeft' ? -1 : 1); }
+});
+function cycle(d) {
+  const vs = ['A', 'B', 'C'];
+  S.variant = vs[(vs.indexOf(S.variant) + d + 3) % 3]; S.overlay = null;
+  const u = new URL(location.href); u.searchParams.set('variant', S.variant); history.replaceState(null, '', u);
+  render(); tui.focus();
+}
+document.getElementById('prev').onclick = () => cycle(-1);
+document.getElementById('next').onclick = () => cycle(1);
+document.getElementById('reset').onclick = () => { resetAll(); render(); tui.focus(); };
+
+function render() {
+  const v = VARIANTS[S.variant];
+  tui.innerHTML = (S.conv ? convScreen() : v.render()) + overlay() + (S.toast ? `<div class="toast">${esc(S.toast)}</div>` : '') + '<div class="focushint">click here to focus the terminal, then use the keyboard</div>';
+  document.getElementById('vlabel').textContent = `${S.variant} (${v.name})`;
+  const st = { variant: S.variant, view: S.conv ? `conversation #${S.conv} (ctrl+b returns)` : v.state(), overlay: S.overlay ? S.overlay.type : null, groupFilter: S.filter || 'all', attentionQueue: attention(false).map(i => `${i.kind} #${i.t.id}`), running: `${running()}/${CAP}`, queued: TASKS.filter(t => t.state === 'Queued').map(t => '#' + t.id), lastKey: S.last };
+  document.getElementById('state').textContent = JSON.stringify(st, null, 2).replace(/"([a-zA-Z]+)":/g, '$1:');
+  document.getElementById('keys').innerHTML = KEYS[S.variant].map(([k, d]) => `<tr><td>${esc(k)}</td><td>${esc(d)}</td></tr>`).join('') + '<tr><td>shift+← →</td><td>switch prototype variant (not a TUI key)</td></tr>';
+}
+
+resetAll();
+const qv = new URLSearchParams(location.search).get('variant');
+if (VARIANTS[qv]) S.variant = qv;
+render();
+tui.focus();
+setInterval(onTick, 1600);
+</script>
+</body>
+</html>
