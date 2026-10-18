@@ -69,6 +69,10 @@ _Avoid_: Reverse handoff, hijack
 The ceiling on what an AFK task may do unattended: L1 local commits only, L2 push and open a draft PR. HITL tasks have none.
 _Avoid_: Permission level, trust level
 
+**Factory identity**:
+The GitHub identity the factory acts under for AFK work, distinct from the operator's own. HITL work stays under the operator's identity.
+_Avoid_: Bot account, service account
+
 **Attention request**:
 An AFK run's call for an operator answer, permission or decision, raised when it needs one, fails, or spends its budget.
 _Avoid_: Interrupt, alert, needs-human
