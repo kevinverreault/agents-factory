@@ -33,5 +33,5 @@ Runs outlive the TUI. A per-user background daemon owns every **run**, the sched
 
 ## Consequences
 
-- If the daemon dies, Windows kills the `claude` CLI child through libuv's kill-on-close job object. The CLI's own children (bash, MCP servers) can break away and be left orphaned. This belongs to the run-recovery work, along with what a daemon *crash* does, as opposed to a graceful stop.
+- If the daemon dies, Windows kills the `claude` CLI child through libuv's kill-on-close job object. That job sets `SILENT_BREAKAWAY_OK`, though, so the CLI's own children (bash, MCP servers) are never part of it. The CLI is Bun, which spawns through libuv too, so its direct children probably die with it, but their children (bash → tool, npx → node) break away silently and are left orphaned. MCP servers are orphaned even after a *normal* session end ([SDK #219](https://github.com/anthropics/claude-agent-sdk-typescript/issues/219)). ADR 0003 covers how orphans are swept and what a daemon *crash* does, as opposed to a graceful stop.
 - The walking skeleton (ADR 0001) should also check that a detached daemon survives closing the Windows Terminal window that spawned it. That comes from reading libuv's source and hasn't been tested.
