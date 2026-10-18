@@ -27,8 +27,12 @@ One agent session working on a task in a single mode; a task accumulates many ru
 _Avoid_: Execution, attempt, job
 
 **Workflow preset**:
-A named sequence of stages, each naming the skill, mode and model tier to use, that a task can follow.
+A named sequence of stages a task follows, frozen onto the task when it launches.
 _Avoid_: Pipeline, recipe
+
+**Stage**:
+One step of a workflow preset: an agent run of one skill, a Ralph loop, or a factory action, with its own mode, model tier, autonomy ceiling and budget.
+_Avoid_: Step, phase
 
 **Ralph loop**:
 A run sequence that takes one ready ticket per iteration with fresh context, until no ticket remains, the budget is spent, or an attention request is raised.
