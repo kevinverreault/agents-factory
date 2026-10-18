@@ -34,6 +34,10 @@ _Avoid_: Pipeline, recipe
 One step of a workflow preset: an agent run of one skill, a Ralph loop, or a factory action, with its own mode, model tier, autonomy ceiling and budget.
 _Avoid_: Step, phase
 
+**Skill set**:
+The pinned collection of skills a task's stages invoke: an upstream skill library at one fixed revision plus the factory's own skills. A task freezes its skill set when it launches, and only an explicit upgrade moves the pin for later tasks.
+_Avoid_: Bundle, plugin, skill pack
+
 **Ralph loop**:
 A run sequence that takes one ready ticket per iteration with fresh context, until no ticket remains, the budget is spent, or an attention request is raised.
 _Avoid_: Agent loop, autopilot
