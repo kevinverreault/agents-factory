@@ -39,8 +39,12 @@ The pinned collection of skills a task's stages invoke: an upstream skill librar
 _Avoid_: Bundle, plugin, skill pack
 
 **Ralph loop**:
-A run sequence that takes one ready ticket per iteration with fresh context, until no ticket remains, the budget is spent, or an attention request is raised.
+A run sequence that takes one ready ticket per iteration with fresh context, until every ticket is done, the loop stalls, its budget is spent, or the operator ends it early.
 _Avoid_: Agent loop, autopilot
+
+**Ticket**:
+A GitHub issue a Ralph loop works through, one per iteration, such as a vertical slice of a spec. It is an artifact the task reads, never a task itself.
+_Avoid_: Work item, slice
 
 **Artifact**:
 A file or GitHub issue a run produced that the factory links to its task, such as a glossary edit, an ADR or an issue.
