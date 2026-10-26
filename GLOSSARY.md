@@ -74,7 +74,7 @@ Moving a live AFK task back to HITL so the operator converses with it on the sam
 _Avoid_: Reverse handoff, hijack
 
 **Autonomy level**:
-The ceiling on what an AFK task may do unattended: L1 local commits only, L2 push and open a draft PR. HITL tasks have none.
+The ceiling on what an AFK task may do unattended: at L1 the task's code stays on the operator's machine, and at L2 it runs in a sandbox and the factory may push it and open a draft PR. HITL tasks have none.
 _Avoid_: Permission level, trust level
 
 **Factory identity**:
