@@ -31,7 +31,7 @@ A named sequence of stages a task follows, frozen onto the task when it launches
 _Avoid_: Pipeline, recipe
 
 **Stage**:
-One step of a workflow preset: an agent run of one skill, a Ralph loop, or a factory action, with its own mode, model tier, autonomy ceiling and budget.
+One step of a workflow preset: an agent run of one skill, a Ralph loop, or a factory action, with its own mode, model tier and autonomy ceiling.
 _Avoid_: Step, phase
 
 **Skill set**:
@@ -39,7 +39,7 @@ The pinned collection of skills a task's stages invoke: an upstream skill librar
 _Avoid_: Bundle, plugin, skill pack
 
 **Ralph loop**:
-A run sequence that takes one ready ticket per iteration with fresh context, until every ticket is done, the loop stalls, its budget is spent, or the operator ends it early.
+A run sequence that takes one ready ticket per iteration with fresh context, until every ticket is done, the loop stalls, or the operator ends it early.
 _Avoid_: Agent loop, autopilot
 
 **Ticket**:
@@ -82,7 +82,7 @@ The GitHub identity the factory acts under for AFK work, distinct from the opera
 _Avoid_: Bot account, service account
 
 **Attention request**:
-An AFK run's call for an operator answer, permission or decision, raised when it needs one, fails, or spends its budget.
+An AFK run's call for an operator answer, permission or decision, raised when it needs one or fails.
 _Avoid_: Interrupt, alert, needs-human
 
 **Parked run**:
@@ -92,11 +92,20 @@ A run ended while it waited on the operator, either suspended on an attention re
 Everything waiting on the operator: open attention requests, root tasks in review, and HITL tasks ready for their turn.
 _Avoid_: Inbox, notifications
 
-**Budget**:
-The cap on tokens and time a task or run may consume before it must stop.
+**Slot**:
+One of the fixed number of AFK runs the factory lets be active at once. HITL runs and suspended runs hold none.
+_Avoid_: Worker, lane
 
 ### Measurement
 
 **Usage window**:
 The rolling period over which a Claude subscription meters consumption, and the share of it already spent.
 _Avoid_: Rate limit, quota
+
+**Usage snapshot**:
+The factory's latest reading of a usage window: how much is spent and when it resets. A snapshot past its reset, or too old to trust, counts as unknown.
+_Avoid_: Quota reading, rate-limit status
+
+**API-equivalent cost**:
+What a run's tokens would cost at API prices, shown beside token counts so usage compares across models. On a subscription it is notional: nothing is paid.
+_Avoid_: Price, spend

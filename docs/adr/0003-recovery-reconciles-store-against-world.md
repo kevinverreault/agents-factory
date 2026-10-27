@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (watchdog rule and `stopped` outcome superseded by ADR 0008)
 ---
 
 # Recovery reconciles the store against the world
