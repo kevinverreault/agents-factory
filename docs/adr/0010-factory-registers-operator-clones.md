@@ -29,4 +29,4 @@ A **repository** is a GitHub repository the operator registers by pointing the f
 
 - Git refuses to check out a branch in two worktrees, so the operator can't check out a live task branch in their clone. Reviewing it means opening the task's worktree, or checking the branch out once the task is Done and its worktree is removed.
 - Moving or deleting the clone suspends that repo's tasks until `factory repo move`.
-- Removing worktrees, task branches and containers after a task ends is still the cleanup ticket's decision.
+- Removing worktrees, task branches and containers after a task ends is decided in ADR 0011.

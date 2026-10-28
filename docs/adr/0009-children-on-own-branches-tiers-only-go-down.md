@@ -70,7 +70,7 @@ Agents in a run can hand work to a **child task** through the factory's MCP tool
 ## Consequences
 
 - ADR 0001's tool list is amended: no "raise an attention request" tool.
-- Every child costs a worktree, and an L2 child also costs a container, even if it writes nothing. Cleaning them up joins worktree and container lifecycle, which is still open.
+- Every child costs a worktree, and an L2 child also costs a container, even if it writes nothing. ADR 0011 decides when they are cleaned up.
 - A child branch that a fire-and-forget child committed to is left behind unmerged. The tree in the TUI shows it.
 - A merge conflict becomes a parent run failure, not a separate kind of attention request.
 - A long task can see a newer model mid-flight after `factory models update`. Every run records the exact model it used.

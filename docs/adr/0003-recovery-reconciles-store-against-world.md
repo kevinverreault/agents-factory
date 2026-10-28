@@ -41,4 +41,4 @@ When the daemon dies ungracefully (crash, kill, power loss), its next start reco
 
 - The store needs an intents table, a per-task crash counter, deadline columns and persisted usage snapshots. The **parked run** and handoff flows must be written as idempotent steps.
 - The walking skeleton (ADR 0001) gains two checks: the job-object helper with nested jobs, and that the keep-awake helper's block holds while the helper lives.
-- Removing worktrees and containers after a task is Done or Cancelled is routine cleanup, not recovery, and is still undecided.
+- Removing worktrees and containers after a task is Done or Cancelled is routine cleanup, not recovery. ADR 0011 decides it.
