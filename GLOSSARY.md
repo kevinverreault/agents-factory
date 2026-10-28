@@ -18,6 +18,20 @@ _Avoid_: Problem tree, subtask hierarchy
 The task at the top of a task tree, and the only one in it the operator reviews and merges; its descendants report their results upward instead.
 _Avoid_: Parent task (unless one level is meant), epic
 
+**Child task**:
+A task an agent delegated from another task's run. It is always AFK, works on its own branch, and reports to its parent instead of being reviewed.
+_Avoid_: Subtask, subagent
+
+**Awaited child**:
+A child task whose report its parent's run waits for before continuing; its work can join the parent's branch.
+
+**Fire-and-forget child**:
+A child task its parent doesn't wait for; its work never joins the parent's branch.
+
+**Child report**:
+What a child task hands its parent when it ends: a summary, a status, and where its work is.
+_Avoid_: Result, return value
+
 **Group**:
 A named label the operator filters tasks by, such as the tickets of one spec; it has no lifecycle of its own.
 _Avoid_: Project, epic, folder
@@ -26,6 +40,10 @@ _Avoid_: Project, epic, folder
 One agent session working on a task in a single mode; a task accumulates many runs over its life.
 _Avoid_: Execution, attempt, job
 
+**In-run subagent**:
+A helper agent working inside a single run, invisible to the factory except in that run's usage.
+_Avoid_: Child, worker
+
 **Workflow preset**:
 A named sequence of stages a task follows, frozen onto the task when it launches.
 _Avoid_: Pipeline, recipe
@@ -33,6 +51,10 @@ _Avoid_: Pipeline, recipe
 **Stage**:
 One step of a workflow preset: an agent run of one skill, a Ralph loop, or a factory action, with its own mode, model tier and autonomy ceiling.
 _Avoid_: Step, phase
+
+**Model tier**:
+The class of model a stage or run asks for, resolved to an exact model when the run starts. A delegating agent can only ask for its own tier or a lower one.
+_Avoid_: Model, size
 
 **Skill set**:
 The pinned collection of skills a task's stages invoke: an upstream skill library at one fixed revision plus the factory's own skills. A task freezes its skill set when it launches, and only an explicit upgrade moves the pin for later tasks.
