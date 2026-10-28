@@ -18,6 +18,10 @@ _Avoid_: Problem tree, subtask hierarchy
 The task at the top of a task tree, and the only one in it the operator reviews and merges; its descendants report their results upward instead.
 _Avoid_: Parent task (unless one level is meant), epic
 
+**Task branch**:
+The one branch a root task's work accumulates on, from launch to its PR.
+_Avoid_: Feature branch, work branch
+
 **Child task**:
 A task an agent delegated from another task's run. It is always AFK, works on its own branch, and reports to its parent instead of being reviewed.
 _Avoid_: Subtask, subagent
@@ -35,6 +39,10 @@ _Avoid_: Result, return value
 **Group**:
 A named label the operator filters tasks by, such as the tickets of one spec; it has no lifecycle of its own.
 _Avoid_: Project, epic, folder
+
+**Repository**:
+A GitHub repository the operator has registered with the factory through their own clone; every task tree works in exactly one.
+_Avoid_: Project, workspace, target
 
 **Run**:
 One agent session working on a task in a single mode; a task accumulates many runs over its life.
