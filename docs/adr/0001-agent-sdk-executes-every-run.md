@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (delegation tool list amended by ADR 0009)
 ---
 
 # The Claude Agent SDK executes every run, HITL included
@@ -32,7 +32,7 @@ Every **run** (a HITL conversation, an AFK stage, a Ralph loop iteration, a dele
 The operator wants option (b), the native interactive `claude` for HITL, to stay easy to pick up later. v1 keeps that door open in these ways:
 
 1. **Port, not SDK types.** The rest of the factory sees only the executor port and factory-owned run events, never SDK message types. A PTY adapter is then a second implementation of the same port.
-2. **The delegation tool's logic lives outside its transport.** The factory MCP tool handlers (spawn child task, report progress, raise an **attention request**) are plain functions over the store. `createSdkMcpServer` is one thin binding. For (b), add a second binding as a local stdio or HTTP MCP server and pass it to `claude` with `--mcp-config`.
+2. **The delegation tool's logic lives outside its transport.** The factory MCP tool handlers (spawn, list and cancel child tasks, report progress and results; ADR 0009. Questions use `AskUserQuestion`, so there is no attention-request tool) are plain functions over the store. `createSdkMcpServer` is one thin binding. For (b), add a second binding as a local stdio or HTTP MCP server and pass it to `claude` with `--mcp-config`.
 3. **Attention requests come from hooks, not screen-scraping.** For (b), the PTY session gets settings-file hooks (`Notification`, `Stop`, `PermissionRequest`) that post to the factory. This is the same event vocabulary the SDK adapter emits from `canUseTool` and in-process hooks.
 4. **Usage window behind a port.** The scheduler reads usage-window snapshots through a port. For (b), add a status-line script that relays `rate_limits.five_hour` / `seven_day` to the factory. Token metrics come from the transcript's `cost-state` record or the next SDK run, because a PTY session has no `result` message.
 5. **Handoff already resumes by session id.** A handoff is "end run, start a new run that resumes the session", so a PTY HITL run hands off the same way: end the PTY, then the SDK resumes `--resume <session-id>`. Verify the round trip between an SDK-created session and the interactive `claude` first.
