@@ -104,11 +104,15 @@ describe('issue artifacts', () => {
       [{ type: 'text', text: '{"number":42,"html_url":"https://github.com/acme/widgets/issues/42"}' }],
     );
     await hook('Bash', { command: 'gh issue view 41' }, { stdout: 'https://github.com/acme/widgets/issues/41#issuecomment-9' });
+    // Another repository's issue is no artifact of this task: its tickets live here.
+    await hook('WebFetch', { url: 'https://github.com/anthropics/claude-agent-sdk-typescript/issues/219' }, 'https://github.com/anthropics/claude-agent-sdk-typescript/issues/219');
+    await hook('Bash', { command: 'gh issue create' }, 'https://github.com/Acme/Widgets/issues/43');
 
-    const state = await tui.until((state) => artifactsOf(state).length === 2);
+    const state = await tui.until((state) => artifactsOf(state).length === 3);
     expect(artifactsOf(state)).toEqual([
       { id: 'X1', taskId: 'T1', runId: 'R1', kind: 'issue', url: 'https://github.com/acme/widgets/issues/41' },
       { id: 'X2', taskId: 'T1', runId: 'R1', kind: 'issue', url: 'https://github.com/acme/widgets/issues/42' },
+      { id: 'X3', taskId: 'T1', runId: 'R1', kind: 'issue', url: 'https://github.com/acme/widgets/issues/43' },
     ]);
   });
 
@@ -138,7 +142,20 @@ test('a task’s artifacts are in the factory-state snapshot, across a daemon re
   expect((await again.until(() => true)).artifacts).toEqual(before.artifacts);
 });
 
-test('a hook event from a session with no live run, or with no daemon to hear it, is dropped quietly', async () => {
+test('a hook event that lands after its run ended still links its artifact to the task, credited to that run', async () => {
+  const { factory, tui, hook } = await conversing();
+  factory.executor.report('R1', { type: 'runCompleted' });
+  await tui.until((state) => state.tasks.T1?.label === 'In review');
+
+  // Hooks run in the background, so the last tool call's event can trail the run.
+  await hook('Bash', { command: 'gh issue create' }, 'https://github.com/acme/widgets/issues/41\n');
+
+  expect(artifactsOf(await tui.until((state) => artifactsOf(state).length === 1))).toEqual([
+    { id: 'X1', taskId: 'T1', runId: 'R1', kind: 'issue', url: 'https://github.com/acme/widgets/issues/41' },
+  ]);
+});
+
+test('a hook event from a session no unfinished task has, a malformed one, or one with no daemon to hear it, is dropped quietly', async () => {
   const { factory, operator, tui, worktree, hook } = await conversing();
   const stray = JSON.stringify({
     session_id: 'not-a-factory-session',
@@ -151,6 +168,10 @@ test('a hook event from a session with no live run, or with no daemon to hear it
 
   await relayHook(stray, factory.paths);
   await relayHook('not json', factory.paths);
+  expect(await operator.send({ type: 'hookEvent', event: { hook_event_name: 'PostToolUse' } as never })).toEqual({
+    ok: false,
+    reason: 'A hook event needs a session id and a working directory.',
+  });
   await operator.send({ type: 'cancel', taskId: 'T1' });
   await hook('Bash', { command: 'gh issue create' }, 'https://github.com/acme/widgets/issues/41');
   await operator.send({ type: 'daemon.status' });

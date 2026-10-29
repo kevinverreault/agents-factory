@@ -37,8 +37,7 @@ export type RunView = Pick<
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
 
-// A file or issue linked to its task, in the order captured. Stage `args`
-// are filled from these.
+// A file or issue linked to its task, in the order captured.
 export type ArtifactView = Artifact;
 
 export type FactoryState = {

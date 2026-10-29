@@ -145,10 +145,17 @@ export type RunEvent =
   | { type: 'runCompleted'; runId: string }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
-  | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string }
-  // What artifact capture found after a tool call, with whether each of the
-  // task's files (old and new) is committed.
-  | { type: 'artifactsSeen'; runId: string; files: { path: string; committed: boolean }[]; issues: string[] };
+  | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string };
+
+// What artifact capture found after a tool call of the task's latest run,
+// with whether each of the task's files (old and new) is committed. Hooks
+// run in the background, so it may land after that run ended.
+export type ArtifactsSeen = {
+  type: 'artifactsSeen';
+  taskId: string;
+  files: { path: string; committed: boolean }[];
+  issues: string[];
+};
 
 // What the daemon learns about the operator's clones.
 export type RepoEvent =
@@ -167,7 +174,7 @@ export type TaskLaunched = {
   sessionId: string;
 };
 
-export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched;
+export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched | ArtifactsSeen;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
@@ -207,6 +214,10 @@ export function openRequest(state: Lifecycle, task: Task): AttentionRequest | un
 // The open request about the repository itself, if any.
 export function openRepoRequest(state: Lifecycle, repo: string): AttentionRequest | undefined {
   return Object.values(state.requests).find((request) => request.repo === repo && request.taskId === null && request.status === 'open');
+}
+
+export function artifactsOf(state: Lifecycle, task: Task): Artifact[] {
+  return Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id);
 }
 
 export function activeAfkRuns(state: Lifecycle): number {
@@ -338,8 +349,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'runStarted':
     case 'runCompleted':
     case 'runFailed':
-    case 'artifactsSeen':
       return null;
+    case 'artifactsSeen':
+      return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
     case 'attentionRaised':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
     case 'repoRegistered': {
@@ -535,16 +547,16 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'artifactsSeen': {
       // One artifact per file or issue of a task, however often it is seen.
-      const seen = (test: (artifact: Artifact) => boolean) =>
-        Object.values(state.artifacts).find((artifact) => artifact.taskId === task.id && test(artifact));
+      const existing = (test: (artifact: Artifact) => boolean) => artifactsOf(state, task).find(test);
+      const runId = task.runIds.at(-1)!;
       for (const { path, committed } of action.files) {
-        const file = seen((artifact) => artifact.kind === 'file' && artifact.path === path);
+        const file = existing((artifact) => artifact.kind === 'file' && artifact.path === path);
         if (file?.kind === 'file') file.committed = committed;
-        else addArtifact(state, { taskId: task.id, runId: run!.id, kind: 'file', path, committed });
+        else addArtifact(state, { taskId: task.id, runId, kind: 'file', path, committed });
       }
       for (const url of action.issues) {
-        if (!seen((artifact) => artifact.kind === 'issue' && artifact.url === url)) {
-          addArtifact(state, { taskId: task.id, runId: run!.id, kind: 'issue', url });
+        if (!existing((artifact) => artifact.kind === 'issue' && artifact.url === url)) {
+          addArtifact(state, { taskId: task.id, runId, kind: 'issue', url });
         }
       }
       break;

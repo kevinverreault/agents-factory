@@ -68,13 +68,14 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
 const RAIL_WIDTH = 40;
 
 // What the task produced so far, live: captured from the run's tool calls.
+// The newest come first, so a full rail cuts off the oldest.
 function ArtifactRail({ artifacts }: { artifacts: ArtifactView[] }) {
   return h(
     Box,
     { flexDirection: 'column', width: RAIL_WIDTH, flexShrink: 0, overflow: 'hidden' },
     h(Text, { bold: true }, 'Artifacts'),
     artifacts.length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
-    ...artifacts.map((artifact) =>
+    ...artifacts.toReversed().map((artifact) =>
       h(
         Box,
         { key: artifact.id, gap: 1 },

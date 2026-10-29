@@ -6,7 +6,7 @@ import type { HookEvent } from '../protocol/protocol.ts';
 
 // A file artifact's path is relative to the task's worktree, with `/`. An
 // issue's URL is `https://github.com/<owner>/<name>/issues/<number>`.
-export type Found = { kind: 'file'; path: string } | { kind: 'issue'; url: string };
+export type CapturedArtifact = { kind: 'file'; path: string } | { kind: 'issue'; url: string };
 
 // Tools that write a file, and the input field naming it.
 const WRITERS: Record<string, string> = { Write: 'file_path', Edit: 'file_path', MultiEdit: 'file_path', NotebookEdit: 'notebook_path' };
@@ -16,12 +16,13 @@ const ECHOES = new Set([...Object.keys(WRITERS), 'Read', 'Grep']);
 
 const ISSUE_URL = /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)/g;
 
-// The artifacts the tool call in `event` produced in the worktree at `worktree`.
-export function capture(event: HookEvent, worktree: string): Found[] {
-  return [...writtenFile(event, worktree), ...printedIssues(event)];
+// The artifacts the tool call in `event` produced for a task working in
+// `repo` (`owner/name`), in its worktree at `worktree`.
+export function capture(event: HookEvent, { repo, worktree }: { repo: string; worktree: string }): CapturedArtifact[] {
+  return [...writtenFile(event, worktree), ...printedIssues(event, repo)];
 }
 
-function writtenFile(event: HookEvent, worktree: string): Found[] {
+function writtenFile(event: HookEvent, worktree: string): CapturedArtifact[] {
   const field = event.tool_name && WRITERS[event.tool_name];
   const target = field && (event.tool_input as Record<string, unknown> | undefined)?.[field];
   if (typeof target !== 'string') return [];
@@ -29,11 +30,15 @@ function writtenFile(event: HookEvent, worktree: string): Found[] {
   return path && isArtifactFile(path) ? [{ kind: 'file', path }] : [];
 }
 
-// Every issue URL in the tool's output, once each, without any `#fragment`.
-function printedIssues(event: HookEvent): Found[] {
+// Every URL of an issue in `repo` in the tool's output, once each, without
+// any `#fragment`. A task's tickets live in its own repository, so other
+// repositories' issues (a linked upstream bug, say) are no artifacts.
+function printedIssues(event: HookEvent, repo: string): CapturedArtifact[] {
   if (!event.tool_name || ECHOES.has(event.tool_name)) return [];
   const output = typeof event.tool_response === 'string' ? event.tool_response : JSON.stringify(event.tool_response ?? '');
-  const urls = [...output.matchAll(ISSUE_URL)].map(([, owner, name, number]) => `https://github.com/${owner}/${name}/issues/${number}`);
+  const urls = [...output.matchAll(ISSUE_URL)]
+    .filter(([, owner, name]) => `${owner}/${name}`.toLowerCase() === repo.toLowerCase())
+    .map(([, , , number]) => `https://github.com/${repo}/issues/${number}`);
   return [...new Set(urls)].map((url) => ({ kind: 'issue', url }));
 }
 

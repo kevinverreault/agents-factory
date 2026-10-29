@@ -76,10 +76,17 @@ export const gitCli: Git = {
 
   async uncommitted(worktreePath, paths) {
     if (paths.length === 0) return [];
-    // NUL-separated, so paths come back unquoted; a rename's entry is
-    // followed by its old path, which is changed too.
+    // NUL-separated, so paths come back unquoted: `XY path`, and after a
+    // rename's or a copy's entry, its old path on its own, changed too.
     const listing = await output(worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...paths);
-    const changed = new Set(listing.split('\0').map((entry) => (/^.. /.test(entry) ? entry.slice(3) : entry)));
+    const fields = listing.split('\0');
+    const changed = new Set<string>();
+    for (let i = 0; i < fields.length; i++) {
+      const entry = fields[i]!;
+      if (entry.length < 4) continue;
+      changed.add(entry.slice(3));
+      if (entry[0] === 'R' || entry[0] === 'C') changed.add(fields[++i] ?? '');
+    }
     return paths.filter((path) => changed.has(path));
   },
 };
