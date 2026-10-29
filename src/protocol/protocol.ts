@@ -14,6 +14,9 @@ export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // absolute: the daemon's working directory is not the client's.
 export type RepoCommand =
   | { type: 'registerRepo'; path: string; baseBranch?: string; defaultPreset?: string }
+  // Re-points the repository whose clone now holds `path` (ADR 0010).
+  // Replies with its `RepositoryView`, like `registerRepo`.
+  | { type: 'moveRepo'; path: string }
   // Replies with the `CloneView` of the clone holding `path`.
   | { type: 'inspectClone'; path: string };
 

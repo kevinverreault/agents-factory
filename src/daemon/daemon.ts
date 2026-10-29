@@ -6,16 +6,18 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname } from 'node:path';
 import type { ConversationEvent, Executor } from '../executor/executor.ts';
-import type { Git } from '../git/git.ts';
+import { GitError, type Git } from '../git/git.ts';
 import {
   guard,
   initialLifecycle,
   liveRun,
   nextTaskId,
   reduce,
+  unfinishedTasks,
   type Lifecycle,
   type LifecycleAction,
   type Repository,
+  type RepoEvent,
   type TaskLaunched,
 } from '../lifecycle/lifecycle.ts';
 import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
@@ -148,6 +150,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return { ok: true };
       case 'registerRepo':
         return registerRepo(command);
+      case 'moveRepo':
+        return moveRepo(command);
       case 'launchTask':
         return launch(command);
       case 'inspectClone': {
@@ -182,6 +186,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       defaultPreset: defaultPreset ?? DEFAULT_PRESET,
     });
     return reply.ok ? { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) } : reply;
+  }
+
+  // Re-points the repository whose clone now holds `path` there, after
+  // repairing its unfinished tasks' worktrees: they still point at the clone's
+  // old path (ADR 0010). Its `repo-missing` request closes and its runs can
+  // start again.
+  function moveRepo({ path }: Extract<RepoCommand, { type: 'moveRepo' }>): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const clone = await readClone(git, path);
+      if ('refusal' in clone) return { ok: false, reason: clone.refusal };
+      const action: RepoEvent = { type: 'repoMoved', repo: clone.repo, path: clone.path };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      for (const task of unfinishedTasks(lifecycle, clone.repo)) {
+        if (!task.worktree) continue;
+        try {
+          await git.repairWorktree(clone.path, task.worktree.path);
+        } catch (error) {
+          if (!(error instanceof GitError)) throw error;
+          return { ok: false, reason: `Couldn't repair the worktree of ${task.id} at ${task.worktree.path}: ${error.message}` };
+        }
+      }
+      const refusal = await settle(action, new Set([clone.repo]));
+      return refusal ? { ok: false, reason: refusal } : { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) };
+    });
   }
 
   // Cuts the task's worktree, then opens its conversation there (ADR 0010).

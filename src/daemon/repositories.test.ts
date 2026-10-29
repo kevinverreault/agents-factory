@@ -200,6 +200,57 @@ describe('repo remove', () => {
   });
 });
 
+describe('repo move', () => {
+  const moved = resolve('/moved/widgets');
+
+  test('moving re-points the repository at its clone’s new path, in the store, and its tasks’ worktrees work again', async () => {
+    const { factory, operator, tui } = await registered();
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Grill me on the login flow' });
+    const worktree = (await tui.until((state) => state.tasks.T1?.worktree != null)).tasks.T1!.worktree!;
+    factory.git.moveClone(widgets, moved);
+    expect(await factory.git.inspectClone(worktree)).toBeNull();
+
+    expect(await operator.send({ type: 'moveRepo', path: resolve(moved, 'src') })).toEqual({
+      ok: true,
+      value: { id: 'acme/widgets', path: moved, baseBranch: 'main', defaultPreset: 'main-flow', missing: false },
+    });
+
+    expect((await tui.until((state) => state.repositories['acme/widgets']?.path === moved)).attentionQueue).toEqual([]);
+    // The worktree belongs to the clone at its new path.
+    expect(await factory.git.inspectClone(worktree)).toMatchObject({ path: moved });
+    await factory.restart();
+    const after = watch(await factory.attach());
+    expect((await after.until(() => true)).repositories['acme/widgets']).toMatchObject({ path: moved, missing: false });
+  });
+
+  test('moving is refused, with a reason, unless the path holds a clone of a registered repository', async () => {
+    const { factory, operator, tui } = await registered();
+    factory.git.addClone(resolve('/clones/gadgets'), { originUrl: 'https://github.com/acme/gadgets.git', defaultBranch: 'main' });
+
+    expect(await operator.send({ type: 'moveRepo', path: resolve('/elsewhere') })).toEqual({
+      ok: false,
+      reason: `${resolve('/elsewhere')} is not inside a git clone.`,
+    });
+    expect(await operator.send({ type: 'moveRepo', path: resolve('/clones/gadgets') })).toEqual({
+      ok: false,
+      reason: 'acme/gadgets is not registered.',
+    });
+    expect(await operator.send({ type: 'moveRepo', path: 'moved/widgets' })).toEqual({
+      ok: false,
+      reason: 'The clone path must be absolute, not moved/widgets.',
+    });
+    expect(tui.state().repositories['acme/widgets']?.path).toBe(widgets);
+  });
+
+  test('moving from inside a task’s worktree re-points the repository at the clone, not the worktree', async () => {
+    const { factory, operator, tui } = await registered();
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Grill me on the login flow' });
+    const worktree = (await tui.until((state) => state.tasks.T1?.worktree != null)).tasks.T1!.worktree!;
+
+    expect(await operator.send({ type: 'moveRepo', path: worktree })).toMatchObject({ ok: true, value: { path: widgets } });
+  });
+});
+
 describe('a missing clone', () => {
   const moved = resolve('/moved/widgets');
   const repoMissing = (requestId: string) => ({
@@ -285,6 +336,21 @@ describe('a missing clone', () => {
     await operator.send({ type: 'submit', taskId: 'T1' });
 
     expect((await tui.until((state) => state.attentionQueue.length === 1)).attentionQueue).toEqual([repoMissing('A1')]);
+  });
+
+  test('moving a missing repository closes its request, and its queued tasks start', async () => {
+    const { factory, operator, tui } = await registered();
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Fix the login bug', mode: 'AFK' });
+    factory.git.moveClone(widgets, moved);
+    await operator.send({ type: 'submit', taskId: 'T1' });
+    await tui.until((state) => state.attentionQueue.length === 1);
+
+    expect(await operator.send({ type: 'moveRepo', path: moved })).toMatchObject({ ok: true, value: { path: moved, missing: false } });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Running');
+    expect(state.repositories['acme/widgets']).toMatchObject({ path: moved, missing: false });
+    expect(state.attentionQueue).toEqual([]);
+    expect(factory.executor.started.map((run) => run.taskId)).toEqual(['T1']);
   });
 
   test('removing a missing repository closes its request', async () => {
