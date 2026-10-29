@@ -1,0 +1,31 @@
+{
+  "name": "agents-factory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:contract": "vitest run --config vitest.contract.config.ts",
+    "probe:terminal-close": "node src/daemon/fixtures/terminal-probe.ts",
+    "probe:keys": "node src/tui/key-probe.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.312",
+    "@anthropic-ai/sdk": "1.3.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "ink": "8.0.0",
+    "react": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "ink-testing-library": "4.0.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}
