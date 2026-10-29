@@ -11,13 +11,13 @@ import { fileURLToPath } from 'node:url';
 export type SkillSetLock = { upstream: string; sha: string };
 
 // A built skill set: its version is the hash of its content.
-export type SkillSetVersion = { version: string; path: string };
+export type BuiltSkillSet = { version: string; path: string };
 
 // What the daemon needs: the version a launching task freezes, where a
 // version lives, and removing the versions no unfinished task references.
 export interface SkillSets {
   // Builds the skill set the lock pins now, unless it is built already.
-  current(): Promise<SkillSetVersion>;
+  current(): Promise<BuiltSkillSet>;
   pathOf(version: string): string;
   // Removes every built version not in `keep`.
   prune(keep: Iterable<string>): Promise<void>;
@@ -163,7 +163,9 @@ export function skillSetManager({
       const kept = new Set(keep);
       if (!existsSync(root)) return;
       for (const name of readdirSync(root)) {
-        if (!VERSION.test(name) || kept.has(name)) continue;
+        // A build cut short leaves its `.building-` directory behind.
+        const stale = (VERSION.test(name) && !kept.has(name)) || name.startsWith('.building-');
+        if (!stale) continue;
         // A version a CLI still has open goes at the next prune instead.
         try {
           rmSync(join(root, name), { recursive: true, force: true });

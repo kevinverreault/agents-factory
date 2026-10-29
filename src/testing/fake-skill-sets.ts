@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import type { SkillSets, SkillSetVersion } from '../skills/skill-set.ts';
+import type { SkillSets, BuiltSkillSet } from '../skills/skill-set.ts';
 
 // Skill set versions that exist only in memory: a test moves the pin, as
 // `skills update` would, and reads which versions are still built.
@@ -18,7 +18,7 @@ export class FakeSkillSets implements SkillSets {
     this.failure = reason;
   }
 
-  async current(): Promise<SkillSetVersion> {
+  async current(): Promise<BuiltSkillSet> {
     if (this.failure) throw new Error(this.failure);
     this.built.add(this.pinned);
     return { version: this.pinned, path: this.pathOf(this.pinned) };

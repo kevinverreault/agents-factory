@@ -17,7 +17,7 @@ export async function skillsCommand(verb: 'update' | 'status', paths: FactoryPat
   console.log(`Fetching ${skills.lock().upstream}…`);
   const update = await skills.planUpdate();
   console.log(describeUpdate(update));
-  if (update.commits.length === 0) return 0;
+  if (update.from === update.to) return 0;
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
   const answer = await prompt.question(`Bump the pin to ${short(update.to)}? Only tasks launched from now on use it. [y/N] `).catch(() => '');
   prompt.close();
@@ -30,18 +30,20 @@ export async function skillsCommand(verb: 'update' | 'status', paths: FactoryPat
   return 0;
 }
 
-export function describeUpdate({ from, to, commits, changed }: SkillSetUpdate): string {
-  if (commits.length === 0) return `The pin ${short(from)} is upstream's head: nothing to update.`;
+function describeUpdate({ from, to, commits, changed }: SkillSetUpdate): string {
+  if (from === to) return `The pin ${short(from)} is upstream's head: nothing to update.`;
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
   return [
-    `Pinned at ${short(from)}. Upstream is at ${short(to)}, ${plural(commits.length, 'commit')} on:`,
+    commits.length
+      ? `Pinned at ${short(from)}. Upstream is at ${short(to)}, ${plural(commits.length, 'commit')} on:`
+      : `Pinned at ${short(from)}, which upstream's head ${short(to)} doesn't contain.`,
     ...commits.map(({ sha, subject }) => `  ${short(sha)} ${subject}`),
     changed.length ? `${plural(changed.length, 'skill')} changed:` : 'No skill changed.',
     ...changed.map(({ skill, change }) => `  ${change.padEnd(8)} ${skill}`),
   ].join('\n');
 }
 
-export function describeStatus({ lock, skills }: SkillSetStatus, personalDir: string): string {
+function describeStatus({ lock, skills }: SkillSetStatus, personalDir: string): string {
   const width = Math.max(...skills.map(({ skill }) => skill.length));
   const copies = skills.filter(({ personal }) => personal);
   return [

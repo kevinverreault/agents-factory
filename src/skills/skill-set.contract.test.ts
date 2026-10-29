@@ -1,11 +1,12 @@
-// The skill set manager against a throwaway upstream git repository on disk,
-// standing in for `mattpocock/skills` (ADR 0005).
+// Seam 3: the skill set manager against a throwaway upstream git repository
+// in a temp directory, standing in for `mattpocock/skills` (ADR 0005).
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { DEFAULT_LOCK, skillSetManager } from './skill-set.ts';
+import { describeSkillSetsContract } from './skill-sets-contract.ts';
 
 const roots: string[] = [];
 
@@ -161,8 +162,25 @@ describe('building the skill set', () => {
   });
 });
 
+describeSkillSetsContract('the skill set manager', async () => {
+  const { pin, upstream } = pinnedUpstream();
+  const { skills, lockPath } = manager(upstream, pin);
+  let rewordings = 0;
+  return {
+    skillSets: skills,
+    async movePin() {
+      const sha = upstream.commit('Reword research', {
+        'skills/engineering/research/SKILL.md': skill('research', `Research, take ${++rewordings}.`),
+      });
+      writeFileSync(lockPath, JSON.stringify({ upstream: upstream.url, sha }));
+    },
+    isBuilt: (version) => existsSync(skills.pathOf(version)),
+    async dispose() {},
+  };
+});
+
 describe('keeping versions', () => {
-  test('pruning removes every built version but the ones kept', async () => {
+  test('pruning leaves the upstream cache, so a pin already fetched builds again offline', async () => {
     const { pin, upstream } = pinnedUpstream();
     const later = upstream.commit('Reword research', { 'skills/engineering/research/SKILL.md': skill('research', 'Research harder.') });
     const { skills, again, lockPath } = manager(upstream, pin);

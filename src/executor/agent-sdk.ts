@@ -125,9 +125,9 @@ export function agentSdkExecutor(): Executor {
 }
 
 // HITL runs act as the operator (ADR 0005): every settings source loads,
-// plus the skill set plugin. Edits are accepted; anything
-// that would prompt is refused until the conversation view can ask, and so
-// are questions, which it can't show yet.
+// plus the skill set plugin. Edits are accepted; anything that would prompt
+// is refused until the conversation view can ask, and so are questions,
+// which it can't show yet.
 function hitlOptions(credential: CredentialProfile): Options {
   return {
     env: runEnv(credential),
