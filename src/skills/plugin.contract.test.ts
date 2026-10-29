@@ -1,6 +1,6 @@
 // Seam 3: a factory-built skill set loads as the local plugin `factory`, and
 // its skills dispatch and call one another (ADR 0005). Spends a little
-// subscription usage on haiku.
+// subscription usage on haiku, and fetches mattpocock/skills from GitHub.
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { describe, expect, test } from 'vitest';
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { afkRunOptions, streamedInput } from '../executor/sdk-test-support.ts';
 import { buildPlugin } from './plugin.ts';
+import { skillSetManager } from './skill-set.ts';
 
 const skills = [
   {
@@ -29,8 +30,7 @@ const skills = [
 ];
 
 // One AFK run over the plugin, in an empty project so only the plugin's skills exist.
-async function runPrompt(prompt: string) {
-  const plugin = buildPlugin(mkdtempSync(join(tmpdir(), 'factory-plugin-')), skills);
+async function runPrompt(prompt: string, plugin = buildPlugin(mkdtempSync(join(tmpdir(), 'factory-plugin-')), skills)) {
   const input = streamedInput();
   const messages: SDKMessage[] = [];
   const run = query({
@@ -81,4 +81,18 @@ describe('factory skill set as a local plugin', () => {
     expect(skillCalls[0]).toMatch(/^(factory:)?skeleton-callee$/);
     expect(result).toContain('CALLEE-OK: ping');
   });
+
+  test('the skill set built from the default pin loads every upstream skill as `/factory:<skill>`', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'factory-skill-set-'));
+    const skillSets = skillSetManager({ root: join(home, 'skills'), lockPath: join(home, 'skills.lock') });
+    const { path } = await skillSets.current();
+
+    const { init } = await runPrompt('Reply with exactly OK and nothing else.', path);
+
+    expect(init?.plugins.map((plugin) => plugin.name)).toContain('factory');
+    expect(init?.plugin_errors ?? []).toEqual([]);
+    expect(init?.slash_commands).toEqual(
+      expect.arrayContaining(['factory:implement', 'factory:research', 'factory:wayfinder', 'factory:setup-matt-pocock-skills']),
+    );
+  }, 180_000);
 });

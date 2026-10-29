@@ -11,12 +11,14 @@ import { openStore } from '../store/store.ts';
 import { FakeClock } from './fake-clock.ts';
 import { FakeExecutor } from './fake-executor.ts';
 import { FakeGit } from './fake-git.ts';
+import { FakeSkillSets } from './fake-skill-sets.ts';
 
 export type TestFactory = {
   paths: FactoryPaths;
   clock: FakeClock;
   executor: FakeExecutor;
   git: FakeGit;
+  skillSets: FakeSkillSets;
   // The daemon currently running, if any.
   daemon(): Daemon;
   // Connects a client holding the operator's token.
@@ -36,13 +38,14 @@ export async function startTestFactory(overrides: Partial<DaemonOptions> = {}): 
   const clock = new FakeClock();
   const executor = new FakeExecutor();
   const git = new FakeGit();
+  const skillSets = new FakeSkillSets();
   const connections: FactoryConnection[] = [];
   const daemons: Daemon[] = [];
 
   async function start(more: Partial<DaemonOptions> = {}): Promise<Daemon> {
     const store = openStore(paths.storePath);
     try {
-      const daemon = await startDaemon({ ...paths, store, clock, executor, git, ...overrides, ...more });
+      const daemon = await startDaemon({ ...paths, store, clock, executor, git, skillSets, ...overrides, ...more });
       daemons.push(daemon);
       return daemon;
     } catch (error) {
@@ -58,6 +61,7 @@ export async function startTestFactory(overrides: Partial<DaemonOptions> = {}): 
     clock,
     executor,
     git,
+    skillSets,
     daemon: () => daemons.at(-1)!,
     async attach() {
       const connection = await connect(paths);

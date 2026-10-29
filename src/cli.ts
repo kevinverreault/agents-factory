@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // agents-factory: with no arguments, opens the TUI (starting the daemon if
 // none is running). `daemon status` and `daemon stop` inspect and stop it;
-// `repo add` and `repo remove` register and unregister the operator's clones.
+// `repo add` and `repo remove` register and unregister the operator's clones;
+// `skills update` and `skills status` move and inspect the skill set pin.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createElement as h } from 'react';
@@ -11,6 +12,7 @@ import { factoryPaths } from './daemon/paths.ts';
 import { connect, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
 import type { RepositoryView } from './protocol/factory-state.ts';
 import type { Command, DaemonStatus } from './protocol/protocol.ts';
+import { skillsCommand } from './skills/skills-command.ts';
 import { App } from './tui/app.ts';
 
 const USAGE = [
@@ -18,6 +20,7 @@ const USAGE = [
   '       agents-factory daemon status | daemon stop',
   '       agents-factory repo add [path] [--base-branch <branch>] [--default-preset <preset>]',
   '       agents-factory repo remove <owner/name>',
+  '       agents-factory skills update | skills status',
 ].join('\n');
 
 async function main(args: string[]): Promise<number> {
@@ -67,6 +70,9 @@ async function main(args: string[]): Promise<number> {
       console.log(`Removed ${command.repo}.`);
     }
     return 0;
+  }
+  if (args[0] === 'skills' && (args[1] === 'update' || args[1] === 'status') && args.length === 2) {
+    return skillsCommand(args[1], paths);
   }
   console.error(USAGE);
   return 2;

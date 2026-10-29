@@ -10,6 +10,7 @@ import type { Git } from '../git/git.ts';
 import {
   guard,
   initialLifecycle,
+  isTerminal,
   liveRun,
   nextTaskId,
   reduce,
@@ -32,6 +33,7 @@ import {
   type Reply,
 } from '../protocol/protocol.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
+import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { cutWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
 import type { Clock } from './clock.ts';
@@ -43,6 +45,7 @@ export type DaemonOptions = {
   clock: Clock;
   executor: Executor;
   git: Git;
+  skillSets: SkillSets;
   worktreeRoot: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
@@ -69,7 +72,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   mkdirSync(dirname(options.tokenPath), { recursive: true });
   writeFileSync(options.tokenPath, token, { mode: 0o600 });
 
-  const { store, clock, executor, git } = options;
+  const { store, clock, executor, git, skillSets } = options;
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
   let published: FactoryState = toFactoryState(lifecycle);
   const startedAt = clock.now();
@@ -184,8 +187,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return reply.ok ? { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) } : reply;
   }
 
-  // Cuts the task's worktree, then opens its conversation there (ADR 0010).
-  // The Lifecycle waits meanwhile: the task id is in the branch name.
+  // Freezes the pinned skill set (ADR 0005) and cuts the task's worktree, then
+  // opens its conversation there (ADR 0010). The Lifecycle waits meanwhile:
+  // the task id is in the branch name.
   function launch({ repo, prompt }: LaunchCommand): Promise<Reply> {
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
@@ -199,6 +203,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         prompt,
         worktree: repository ? taskWorktree(options.worktreeRoot, repository, taskId, title) : { branch: '', path: '' },
         sessionId: randomUUID(),
+        // Frozen once the skill set is built.
+        skillSet: '',
       };
       // Refused before git is touched; an unregistered repository has no worktree.
       const refused = guard(lifecycle, action);
@@ -208,11 +214,24 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         await settle({ type: 'repoMissing', repo, reason: missing }, new Set());
         return { ok: false, reason: guard(lifecycle, action)! };
       }
+      try {
+        action.skillSet = (await skillSets.current()).version;
+      } catch (error) {
+        return { ok: false, reason: `The skill set couldn't be built: ${(error as Error).message}` };
+      }
       const uncut = await cutWorktree(git, repository!, action.worktree);
       if (uncut) return { ok: false, reason: uncut };
       const refusal = await settle(action, new Set([repo]));
-      return refusal ? { ok: false, reason: refusal } : { ok: true, value: { taskId } };
+      if (refusal) return { ok: false, reason: refusal };
+      await pruneSkillSets();
+      return { ok: true, value: { taskId } };
     });
+  }
+
+  // Removes the skill set versions no unfinished task references (ADR 0005).
+  async function pruneSkillSets(): Promise<void> {
+    const tasks = Object.values(lifecycle.tasks).filter((task) => !isTerminal(task));
+    await skillSets.prune(tasks.flatMap((task) => task.skillSet ?? []));
   }
 
   // Replays the run's conversation from the Claude session file, then what
@@ -274,8 +293,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return result;
   }
 
-  // Every repository's clone is checked at start (ADR 0010).
+  // Every repository's clone is checked at start (ADR 0010), and the skill
+  // set versions finished tasks left behind are removed.
   void serially(async () => {
+    await pruneSkillSets();
     for (const [{ id, missing }, reason] of await checkClones(Object.values(lifecycle.repositories))) {
       if (reason) await settle({ type: 'repoMissing', repo: id, reason }, new Set());
       else if (missing) await settle({ type: 'repoFound', repo: id }, new Set([id]));
@@ -362,6 +383,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             model: run.model,
             // The scheduler's choice (ADR 0001): L2's profile comes with the sandbox.
             credential: 'subscription-host',
+            plugin: run.skillSet ? skillSets.pathOf(run.skillSet) : null,
           },
           { report: (event) => void dispatch(event), converse: (event) => broadcast(run.id, event) },
         );

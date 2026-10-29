@@ -16,6 +16,9 @@ export type RunStart = {
   firstMessage: string | null;
   model: string;
   credential: CredentialProfile;
+  // The directory of the skill set plugin the run loads (ADR 0005), or null
+  // for a task that froze none.
+  plugin: string | null;
 };
 
 // How a run authenticates: chosen per run, and only applied by the executor

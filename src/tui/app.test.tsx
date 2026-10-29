@@ -13,7 +13,7 @@ afterEach(() => {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null, skillSet: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -201,6 +201,7 @@ describe('launching and conversing', () => {
     outcome: null,
     model: 'claude-sonnet-5-5',
     cli: { pid: 4242, createdAt: 1 },
+    skillSet: null,
     startedAt: 1,
     endedAt: null,
   };

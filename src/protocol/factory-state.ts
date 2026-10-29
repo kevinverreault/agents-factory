@@ -27,11 +27,12 @@ export type TaskView = {
   liveRunId: string | null;
   branch: string | null;
   worktree: string | null;
+  skillSet: string | null;
 };
 
 export type RunView = Pick<
   Run,
-  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'model' | 'cli' | 'startedAt' | 'endedAt'
+  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
 >;
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
@@ -61,11 +62,12 @@ export function toFactoryState(lifecycle: Lifecycle): FactoryState {
       liveRunId: liveRun(lifecycle, task)?.id ?? null,
       branch: task.worktree?.branch ?? null,
       worktree: task.worktree?.path ?? null,
+      skillSet: task.skillSet ?? null,
     };
   }
   const runs: Record<string, RunView> = {};
-  for (const { id, taskId, mode, autonomy, status, outcome, model, cli, startedAt, endedAt } of Object.values(lifecycle.runs)) {
-    runs[id] = { id, taskId, mode, autonomy, status, outcome, model, cli, startedAt, endedAt };
+  for (const { id, taskId, mode, autonomy, status, outcome, model, cli, skillSet, startedAt, endedAt } of Object.values(lifecycle.runs)) {
+    runs[id] = { id, taskId, mode, autonomy, status, outcome, model, cli, skillSet: skillSet ?? null, startedAt, endedAt };
   }
   return {
     repositories,
