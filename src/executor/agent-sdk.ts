@@ -13,7 +13,7 @@ import {
   type Query,
   type SpawnOptions,
 } from '@anthropic-ai/claude-agent-sdk';
-import type { RunEvent } from '../lifecycle/lifecycle.ts';
+import type { Answers, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import type { ConversationEvent, CredentialProfile, Executor, RunSink } from './executor.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
@@ -25,6 +25,9 @@ type LiveRun = {
   // The CLI the run spawned, once known. Reported once: every turn starts with an init.
   cli: Promise<{ pid: number; createdAt: number }> | null;
   reportedStart: boolean;
+  // The question card the turn waits on: resolved with the operator's answers,
+  // or null once the turn or the run is cut.
+  asking: { id: string; resolve(answers: Answers | null): void } | null;
   stopped: boolean;
 };
 
@@ -54,9 +57,16 @@ export function agentSdkExecutor(): Executor {
         return;
       }
       // Exists before the query does: the SDK may spawn the CLI at once.
-      const spawning: Omit<LiveRun, 'query'> = { input: streamedInput(), sink, cli: null, reportedStart: false, stopped: false };
+      const spawning: Omit<LiveRun, 'query'> = {
+        input: streamedInput(),
+        sink,
+        cli: null,
+        reportedStart: false,
+        asking: null,
+        stopped: false,
+      };
       const options: Options = {
-        ...hitlOptions(start.credential),
+        ...hitlOptions(start.credential, askTheOperator(start.runId, spawning)),
         cwd: start.cwd,
         model: start.model,
         ...(start.resumesSession ? { resume: start.sessionId } : { sessionId: start.sessionId }),
@@ -79,10 +89,21 @@ export function agentSdkExecutor(): Executor {
 
     send: say,
 
+    interrupt(runId) {
+      const run = runs.get(runId);
+      if (run && !run.stopped) void run.query.interrupt().catch(() => {});
+    },
+
+    answer(runId, questionId, answers) {
+      const { asking } = runs.get(runId) ?? {};
+      if (asking?.id === questionId) asking.resolve(answers);
+    },
+
     stop(runId) {
       const run = runs.get(runId);
       if (!run) return;
       run.stopped = true;
+      run.asking?.resolve(null);
       runs.delete(runId);
       run.input.close();
       run.query.close();
@@ -110,6 +131,9 @@ export function agentSdkExecutor(): Executor {
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
         } else if (message.type === 'assistant' && !message.parent_tool_use_id) {
           for (const event of eventsOf('assistant', message.uuid, message.message)) run.sink.converse(event);
+        } else if (message.type === 'result') {
+          // Every turn ends with a result, an interrupted one included.
+          report({ type: 'turnEnded', runId });
         }
       }
       report({ type: 'runCompleted', runId });
@@ -123,25 +147,50 @@ export function agentSdkExecutor(): Executor {
 }
 
 // HITL runs act as the operator (ADR 0005): every settings source loads.
-// The skill set plugin joins with its own slice. Edits are accepted; anything
-// that would prompt is refused until the conversation view can ask, and so
-// are questions, which it can't show yet.
-function hitlOptions(credential: CredentialProfile): Options {
+// The skill set plugin joins with its own slice. Edits are accepted, and
+// `canUseTool` decides the rest.
+function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool): Options {
   return {
     env: runEnv(credential),
     permissionMode: 'acceptEdits',
     settingSources: ['user', 'project', 'local'],
-    canUseTool: refuseInConversation,
+    canUseTool,
   };
 }
 
-const refuseInConversation: CanUseTool = async (toolName) => ({
-  behavior: 'deny',
-  message:
-    toolName === 'AskUserQuestion'
-      ? 'Ask the operator in plain text instead: the factory shows no question cards yet.'
-      : `The factory can't ask the operator for permission to use ${toolName} yet. Say what you wanted to do instead.`,
-});
+// `AskUserQuestion` becomes a question card that holds the turn until the
+// operator answers it. Anything else that would prompt is refused until the
+// conversation view can ask for permission.
+function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>): CanUseTool {
+  return async (toolName, input, { signal, toolUseID }) => {
+    if (toolName !== 'AskUserQuestion') {
+      return {
+        behavior: 'deny',
+        message: `The factory can't ask the operator for permission to use ${toolName} yet. Say what you wanted to do instead.`,
+      };
+    }
+    const answers = await new Promise<Answers | null>((resolve) => {
+      if (run.stopped || signal.aborted) return resolve(null);
+      run.asking = { id: toolUseID, resolve };
+      signal.addEventListener('abort', () => resolve(null), { once: true });
+      run.sink.report({ type: 'questionAsked', runId, question: { id: toolUseID, questions: questionsIn(input) } });
+    });
+    run.asking = null;
+    return answers
+      ? { behavior: 'allow', updatedInput: { ...input, answers } }
+      : { behavior: 'deny', message: 'The operator dismissed the question.' };
+  };
+}
+
+// The card's questions, without what the factory doesn't show (previews).
+function questionsIn(input: Record<string, unknown>): Question['questions'] {
+  return ((input.questions ?? []) as Question['questions']).map(({ question, header, options, multiSelect }) => ({
+    question,
+    header,
+    options: options.map(({ label, description }) => ({ label, description })),
+    multiSelect: Boolean(multiSelect),
+  }));
+}
 
 // The daemon's environment (keeping PATH, USERPROFILE, APPDATA), with the
 // credential profile applied: on `subscription-host` the CLI uses the
@@ -181,10 +230,16 @@ export function eventsOf(type: 'user' | 'assistant', uuid: string, message: unkn
 // What a tool call was pointed at, on one line.
 function summarise(input: unknown): string {
   const fields = (input ?? {}) as Record<string, unknown>;
+  // `AskUserQuestion` is pointed at its first question.
+  const asked = Array.isArray(fields.questions) ? (fields.questions[0] as { question?: unknown } | undefined)?.question : undefined;
+  if (typeof asked === 'string') return oneLine(asked);
   const pick = ['command', 'file_path', 'notebook_path', 'pattern', 'url', 'query', 'skill', 'description', 'path']
     .map((name) => fields[name])
     .find((value): value is string => typeof value === 'string');
-  const summary = (pick ?? Object.values(fields).find((value) => typeof value === 'string') ?? '') as string;
-  const line = summary.replace(/\s+/g, ' ').trim();
+  return oneLine((pick ?? Object.values(fields).find((value) => typeof value === 'string') ?? '') as string);
+}
+
+function oneLine(text: string): string {
+  const line = text.replace(/\s+/g, ' ').trim();
   return line.length > SUMMARY_LENGTH ? `${line.slice(0, SUMMARY_LENGTH - 1)}…` : line;
 }

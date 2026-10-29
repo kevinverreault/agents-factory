@@ -7,7 +7,7 @@ import type { ConversationEvent } from '../executor/executor.ts';
 import type { OperatorCommand } from '../lifecycle/lifecycle.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is

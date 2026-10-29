@@ -10,10 +10,11 @@ afterEach(() => {
   for (const app of apps.splice(0)) app.unmount();
 });
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+// Long enough for a passive effect after a re-render to have run.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -191,6 +192,7 @@ describe('launching and conversing', () => {
     liveRunId: 'R1',
     branch: 'factory/T1-grill-me-about-the-login-flow',
     worktree: '/worktrees/acme-widgets/T1',
+    sessionId: '5f0c2a8e-3b1d-4c6e-9a7f-2d8b4e1c0a93',
   };
   const run = {
     id: 'R1',
@@ -199,6 +201,9 @@ describe('launching and conversing', () => {
     autonomy: null,
     status: 'active' as const,
     outcome: null,
+    turn: 'agent' as const,
+    queued: [] as string[],
+    question: null,
     model: 'claude-sonnet-5-5',
     cli: { pid: 4242, createdAt: 1 },
     startedAt: 1,
@@ -291,6 +296,156 @@ describe('launching and conversing', () => {
 
     expect(connection.sent.at(-1)).toEqual({ type: 'sendMessage', taskId: 'T1', text: 'Okta, only on Safari.' });
     expect(app.lastFrame()).not.toContain('› Okta');
+  });
+
+  test('mid-turn the view shows queued messages and esc interrupts; on the operator’s turn it says it is waiting on you', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    expect(app.lastFrame()).not.toContain('waiting on you');
+
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, queued: ['Also check Safari.'] } }]);
+    await settle();
+    expect(app.lastFrame()).toMatch(/queued\s+Also check Safari\./);
+    app.stdin.write('\x1b');
+    await settle();
+    expect(connection.sent.at(-1)).toEqual({ type: 'interrupt', taskId: 'T1' });
+
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, turn: 'operator' } }]);
+    await settle();
+    expect(app.lastFrame()).toContain('waiting on you');
+    expect(app.lastFrame()).not.toContain('queued');
+    app.stdin.write('\x1b');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'interrupt')).toHaveLength(1);
+  });
+
+  const idp = {
+    question: 'Which identity provider times out?',
+    header: 'IdP',
+    options: [
+      { label: 'Okta', description: 'The workforce SSO' },
+      { label: 'Auth0', description: 'The customer login' },
+    ],
+    multiSelect: false,
+  };
+  const browsers = {
+    question: 'Which browsers fail?',
+    header: 'Browsers',
+    options: [
+      { label: 'Safari', description: 'Desktop and iOS' },
+      { label: 'Firefox', description: 'With strict tracking protection' },
+      { label: 'Chrome', description: 'Incognito only' },
+    ],
+    multiSelect: true,
+  };
+
+  test('a question card shows each question with numbered options; digits answer it, and enter confirms a multi-select', async () => {
+    const connection = new FakeConnection();
+    const asking = { ...run, question: { id: 'toolu_01', questions: [idp, browsers] } };
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: asking } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    expect(app.lastFrame()).toMatch(/IdP[\s\S]*Which identity provider times out\?[\s\S]*1\s+Okta\s+The workforce SSO[\s\S]*2\s+Auth0\s+The customer login/);
+
+    app.stdin.write('1');
+    await settle();
+    expect(app.lastFrame()).toContain('Which browsers fail?');
+    app.stdin.write('1');
+    app.stdin.write('3');
+    await settle();
+    expect(app.lastFrame()).toMatch(/1\s+\[x\] Safari[\s\S]*2\s+\[ \] Firefox[\s\S]*3\s+\[x\] Chrome/);
+    expect(connection.sent).toEqual([]);
+    app.stdin.write('\r');
+    await settle();
+
+    expect(connection.sent).toEqual([
+      {
+        type: 'answerQuestion',
+        taskId: 'T1',
+        questionId: 'toolu_01',
+        answers: { 'Which identity provider times out?': 'Okta', 'Which browsers fail?': 'Safari, Chrome' },
+      },
+    ]);
+    expect(app.lastFrame()).not.toContain('Which browsers fail?');
+  });
+
+  test('typing on a question card answers it in the operator’s own words', async () => {
+    const connection = new FakeConnection();
+    const asking = { ...run, question: { id: 'toolu_01', questions: [idp] } };
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: asking } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+
+    await type(app, 'Neither, a SAML IdP on 2 tenants');
+    app.stdin.write('\r');
+    await settle();
+
+    expect(connection.sent).toEqual([
+      { type: 'answerQuestion', taskId: 'T1', questionId: 'toolu_01', answers: { 'Which identity provider times out?': 'Neither, a SAML IdP on 2 tenants' } },
+    ]);
+  });
+
+  test('the conversation view shows the session id, to resume in the operator’s own terminal', async () => {
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } });
+    app.stdin.write('\r');
+    await settle();
+
+    expect(app.lastFrame()).toContain('claude --resume 5f0c2a8e-3b1d-4c6e-9a7f-2d8b4e1c0a93');
+  });
+
+  test('ctrl+b returns to the screen, pane and cursor the operator left, the cursor following the task it was on', async () => {
+    const connection = new FakeConnection();
+    const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
+    const failure = { kind: 'attention' as const, taskId: 'T2', repo: 'acme/widgets', requestId: 'A1', attention: 'failure' as const, holdsRun: false, reason: 'The agent hit max turns.' };
+    const ready = { kind: 'ready' as const, taskId: 'T1' };
+    const readyForYou = { ...conversing, label: 'Ready for you' };
+    const { app } = await started({ ...factoryState([readyForYou, failing], [failure, ready]), runs: { R1: run } }, { connection });
+
+    app.stdin.write('2');
+    await settle();
+    app.stdin.write('\x1b[B');
+    await settle();
+    expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me about the login flow\./);
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.conversed).toEqual(['R1']);
+    // In the conversation, T1 no longer waits on the operator.
+    connection.servePatch([
+      { op: 'set', path: ['tasks', 'T1'], value: conversing },
+      { op: 'set', path: ['attentionQueue'], value: [failure] },
+    ]);
+    await settle();
+
+    app.stdin.write('\x02');
+    await settle();
+    expect(app.lastFrame()).toMatch(/›\s+T2\s+Implement the store\s+failure/);
+    connection.servePatch([
+      { op: 'set', path: ['tasks', 'T1'], value: readyForYou },
+      { op: 'set', path: ['attentionQueue'], value: [ready, failure] },
+    ]);
+    await settle();
+
+    const frame = app.lastFrame()!;
+    expect(frame).toContain('2 Needs you (2)');
+    expect(frame).toMatch(/›\s+T1\s+Grill me about the login flow\.\s+Ready for you/);
+    expect(frame).toMatch(/ \s+T2\s+Implement the store\s+failure/);
+  });
+
+  test('enter opens a conversation from Needs you only for a task Ready for you', async () => {
+    const connection = new FakeConnection();
+    const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
+    const failure = { kind: 'attention' as const, taskId: 'T2', repo: 'acme/widgets', requestId: 'A1', attention: 'failure' as const, holdsRun: false, reason: 'The agent hit max turns.' };
+    const { app } = await started(factoryState([failing], [failure]), { connection });
+
+    app.stdin.write('2');
+    await settle();
+    app.stdin.write('\r');
+    await settle();
+
+    expect(connection.conversed).toEqual([]);
+    expect(app.lastFrame()).toContain('2 Needs you (1)');
   });
 
   test('ctrl+b leaves the conversation for the task list, and reopening it replays the conversation afresh', async () => {
