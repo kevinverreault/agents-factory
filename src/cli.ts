@@ -2,12 +2,15 @@
 // agents-factory: with no arguments, opens the TUI (starting the daemon if
 // none is running). `daemon status` and `daemon stop` inspect and stop it;
 // `repo add` and `repo remove` register and unregister the operator's clones.
+// `hook` is run by Claude Code, not the operator: it relays a run's hook
+// events to the daemon.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createElement as h } from 'react';
 import { render } from 'ink';
 import { connectOrStart } from './daemon/auto-start.ts';
 import { factoryPaths } from './daemon/paths.ts';
+import { relayHook } from './hooks/relay.ts';
 import { connect, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
 import type { RepositoryView } from './protocol/factory-state.ts';
 import type { Command, DaemonStatus } from './protocol/protocol.ts';
@@ -45,6 +48,11 @@ async function main(args: string[]): Promise<number> {
       return 1;
     }
     console.log(args[1] === 'status' ? describe(reply.value as DaemonStatus) : 'The daemon stopped.');
+    return 0;
+  }
+  if (args[0] === 'hook' && args.length === 1) {
+    // Never starts the daemon: a run's hook events matter only to the daemon running it.
+    await relayHook(await text(process.stdin), paths);
     return 0;
   }
   if (args[0] === 'repo') {
@@ -99,6 +107,13 @@ function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 
   }
   if (verb === 'remove' && operand && Object.keys(values).length === 0) return { type: 'removeRepo', repo: operand };
   return null;
+}
+
+async function text(stream: NodeJS.ReadableStream): Promise<string> {
+  let read = '';
+  stream.setEncoding('utf8');
+  for await (const chunk of stream) read += chunk;
+  return read;
 }
 
 function describe(status: DaemonStatus): string {

@@ -5,6 +5,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname } from 'node:path';
+import { capture } from '../artifacts/capture.ts';
 import type { ConversationEvent, Executor } from '../executor/executor.ts';
 import type { Git } from '../git/git.ts';
 import {
@@ -27,6 +28,7 @@ import {
   type CloneView,
   type Command,
   type DaemonStatus,
+  type HookEvent,
   type LaunchCommand,
   type RepoCommand,
   type Reply,
@@ -150,6 +152,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return registerRepo(command);
       case 'launchTask':
         return launch(command);
+      case 'hookEvent':
+        return captureArtifacts(command.event);
       case 'inspectClone': {
         const clone = await readClone(git, command.path);
         if ('refusal' in clone) return { ok: false, reason: clone.refusal };
@@ -212,6 +216,29 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (uncut) return { ok: false, reason: uncut };
       const refusal = await settle(action, new Set([repo]));
       return refusal ? { ok: false, reason: refusal } : { ok: true, value: { taskId } };
+    });
+  }
+
+  // Links what a tool call of a live run produced to its task, and rereads
+  // whether each of the task's files is committed: the agent may have just
+  // committed them.
+  function captureArtifacts(event: HookEvent): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const task = Object.values(lifecycle.tasks).find((task) => task.sessionId === event.session_id);
+      const run = task && liveRun(lifecycle, task);
+      if (!task?.worktree || run?.status !== 'active') return { ok: false, reason: `No live run has session ${event.session_id}.` };
+      const found = capture(event, task.worktree.path);
+      const issues = found.flatMap((artifact) => (artifact.kind === 'issue' ? [artifact.url] : []));
+      const paths = new Set(found.flatMap((artifact) => (artifact.kind === 'file' ? [artifact.path] : [])));
+      for (const artifact of Object.values(lifecycle.artifacts)) {
+        if (artifact.taskId === task.id && artifact.kind === 'file') paths.add(artifact.path);
+      }
+      if (paths.size === 0 && issues.length === 0) return { ok: true };
+      const uncommitted = new Set(await git.uncommitted(task.worktree.path, [...paths]));
+      const files = [...paths].map((path) => ({ path, committed: !uncommitted.has(path) }));
+      const refusal = await settle({ type: 'artifactsSeen', runId: run.id, files, issues }, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
     });
   }
 

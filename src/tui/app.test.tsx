@@ -12,6 +12,11 @@ afterEach(() => {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 
+// Waits up to a second for `check`, for what takes several renders to arrive.
+async function until(check: () => boolean) {
+  for (let waited = 0; !check() && waited < 1_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
   return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null };
 }
@@ -21,6 +26,7 @@ function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attention
     repositories: {},
     tasks: Object.fromEntries(tasks.map((t) => [t.id, t])),
     runs: {},
+    artifacts: {},
     attentionQueue,
     slots: { active: 0, cap: 2 },
   };
@@ -234,7 +240,7 @@ describe('launching and conversing', () => {
       { op: 'set', path: ['tasks', 'T1'], value: conversing },
       { op: 'set', path: ['runs', 'R1'], value: run },
     ]);
-    await settle();
+    await until(() => connection.conversed.length > 0);
     expect(connection.conversed).toEqual(['R1']);
     expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.[\s\S]*factory\/T1-grill-me-about-the-login-flow[\s\S]*claude-sonnet-5-5/);
   });
@@ -279,7 +285,7 @@ describe('launching and conversing', () => {
       { type: 'message', id: 'E3', from: 'agent', text: 'Which identity provider times out?' },
     );
     await settle();
-    expect(app.lastFrame()).toMatch(/you\s+Grill me about the login flow\.\n[\s\S]*Read\s+src\/auth\/sso\.ts\n[\s\S]*agent\s+Which identity provider times out\?/);
+    expect(app.lastFrame()).toMatch(/you\s+Grill me about the login flow\.[^\n]*\n[\s\S]*Read\s+src\/auth\/sso\.ts[^\n]*\n[\s\S]*agent\s+Which identity provider times out\?/);
 
     await type(app, 'Okta, only on Safarii');
     app.stdin.write('\x7f');
@@ -311,5 +317,32 @@ describe('launching and conversing', () => {
     await settle();
     expect(connection.conversed).toEqual(['R1', 'R1']);
     expect(app.lastFrame()).not.toContain('Which identity provider');
+  });
+
+  test('the conversation’s artifact rail lists the task’s files and issues, and updates live', async () => {
+    const connection = new FakeConnection();
+    const artifacts: FactoryState['artifacts'] = {
+      X1: { id: 'X1', taskId: 'T1', runId: 'R1', kind: 'file', path: 'GLOSSARY.md', committed: false },
+      X2: { id: 'X2', taskId: 'T2', runId: 'R2', kind: 'file', path: 'docs/adr/0009-elsewhere.md', committed: false },
+    };
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run }, artifacts }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    expect(app.lastFrame()).toContain('Artifacts');
+    expect(app.lastFrame()).toMatch(/uncommitted\s+GLOSSARY\.md/);
+    expect(app.lastFrame()).not.toContain('0009-elsewhere');
+
+    connection.servePatch([
+      { op: 'set', path: ['artifacts', 'X1'], value: { ...artifacts.X1, committed: true } },
+      { op: 'set', path: ['artifacts', 'X3'], value: { id: 'X3', taskId: 'T1', runId: 'R1', kind: 'file', path: 'docs/adr/0001-sso-cookies.md', committed: false } },
+      { op: 'set', path: ['artifacts', 'X4'], value: { id: 'X4', taskId: 'T1', runId: 'R1', kind: 'issue', url: 'https://github.com/acme/widgets/issues/41' } },
+    ]);
+    await settle();
+
+    const frame = app.lastFrame()!;
+    expect(frame).toMatch(/committed\s+GLOSSARY\.md/);
+    expect(frame).not.toMatch(/uncommitted\s+GLOSSARY\.md/);
+    expect(frame).toMatch(/uncommitted\s+docs\/adr\/0001-sso-cookies\.md/);
+    expect(frame).toMatch(/issue\s+acme\/widgets#41/);
   });
 });

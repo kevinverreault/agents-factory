@@ -17,6 +17,8 @@ type FakeClone = Clone & {
 // moves their origin on.
 export class FakeGit implements Git {
   private readonly clones = new Map<string, FakeClone>();
+  // Each worktree's paths with changes not yet committed.
+  private readonly changes = new Map<string, Set<string>>();
   private commits = 0;
 
   addClone(path: string, { originUrl = null, defaultBranch = null }: CloneSetup = {}): void {
@@ -84,6 +86,21 @@ export class FakeGit implements Git {
 
   async worktrees(clonePath: string): Promise<Worktree[]> {
     return this.cloneAt(clonePath).worktrees.map((worktree) => ({ ...worktree }));
+  }
+
+  // Something changes `path` (relative, with `/`) in the worktree, uncommitted.
+  editFile(worktreePath: string, path: string): void {
+    const changes = this.changes.get(worktreePath) ?? new Set();
+    this.changes.set(worktreePath, changes.add(path));
+  }
+
+  // Everything changed in the worktree is committed.
+  commitAll(worktreePath: string): void {
+    this.changes.delete(worktreePath);
+  }
+
+  async uncommitted(worktreePath: string, paths: string[]): Promise<string[]> {
+    return paths.filter((path) => this.changes.get(worktreePath)?.has(path));
   }
 
   private cloneAt(path: string): FakeClone {

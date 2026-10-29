@@ -26,6 +26,9 @@ export interface Git {
   // `path`. Throws a `GitError` when the branch exists or `path` is taken.
   addWorktree(clonePath: string, worktree: { path: string; branch: string; startPoint: string }): Promise<void>;
   worktrees(clonePath: string): Promise<Worktree[]>;
+  // Which of `paths` (relative to the worktree, with `/`) have changes not
+  // yet committed there, untracked files included.
+  uncommitted(worktreePath: string, paths: string[]): Promise<string[]>;
 }
 
 export class GitError extends Error {}
@@ -70,6 +73,15 @@ export const gitCli: Git = {
         return path && head && branch ? [{ path: resolve(path), branch, head }] : [];
       });
   },
+
+  async uncommitted(worktreePath, paths) {
+    if (paths.length === 0) return [];
+    // NUL-separated, so paths come back unquoted; a rename's entry is
+    // followed by its old path, which is changed too.
+    const listing = await output(worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...paths);
+    const changed = new Set(listing.split('\0').map((entry) => (/^.. /.test(entry) ? entry.slice(3) : entry)));
+    return paths.filter((path) => changed.has(path));
+  },
 };
 
 // The command's trimmed output, or null when it fails.
@@ -80,9 +92,14 @@ function git(cwd: string, ...args: string[]): Promise<string | null> {
 // The command's trimmed output. Throws a `GitError` with git's own message
 // when it fails.
 function run(cwd: string, ...args: string[]): Promise<string> {
+  return output(cwd, ...args).then((stdout) => stdout.trim());
+}
+
+// The command's output as git wrote it.
+function output(cwd: string, ...args: string[]): Promise<string> {
   return new Promise((done, fail) =>
     execFile('git', ['-C', cwd, ...args], { windowsHide: true }, (error, stdout, stderr) =>
-      error ? fail(new GitError(stderr.trim() || error.message)) : done(stdout.trim()),
+      error ? fail(new GitError(stderr.trim() || error.message)) : done(stdout),
     ),
   );
 }

@@ -3,7 +3,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { Lifecycle } from '../lifecycle/lifecycle.ts';
+import { initialLifecycle, type Lifecycle } from '../lifecycle/lifecycle.ts';
 
 export interface Store {
   // The Lifecycle as last saved, or null for a new store.
@@ -12,7 +12,13 @@ export interface Store {
   close(): void;
 }
 
-const COLLECTIONS = { repositories: 'repositories', tasks: 'tasks', runs: 'runs', requests: 'attention_requests' } as const;
+const COLLECTIONS = {
+  repositories: 'repositories',
+  tasks: 'tasks',
+  runs: 'runs',
+  requests: 'attention_requests',
+  artifacts: 'artifacts',
+} as const;
 type Collection = keyof typeof COLLECTIONS;
 
 export function openStore(path: string): Store {
@@ -25,6 +31,7 @@ export function openStore(path: string): Store {
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS attention_requests (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
   `);
 
   // What each row held when last written, so a save writes only changed rows.
@@ -33,8 +40,10 @@ export function openStore(path: string): Store {
   function load(): Lifecycle | null {
     const meta = db.prepare(`SELECT value FROM meta WHERE key = 'lifecycle'`).get() as { value: string } | undefined;
     if (!meta) return null;
-    const { counters, slotCap } = JSON.parse(meta.value) as Pick<Lifecycle, 'counters' | 'slotCap'>;
-    const lifecycle: Lifecycle = { counters, slotCap, repositories: {}, tasks: {}, runs: {}, requests: {} };
+    const saved = JSON.parse(meta.value) as Pick<Lifecycle, 'counters' | 'slotCap'>;
+    // A store saved before a counter existed starts it at 0.
+    const lifecycle: Lifecycle = { ...initialLifecycle(), slotCap: saved.slotCap };
+    Object.assign(lifecycle.counters, saved.counters);
     for (const collection of Object.keys(COLLECTIONS) as Collection[]) {
       const rows = db.prepare(`SELECT id, data FROM ${COLLECTIONS[collection]} ORDER BY seq`).all() as {
         id: string;

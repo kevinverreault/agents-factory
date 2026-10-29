@@ -10,6 +10,7 @@ import {
   type Lifecycle,
   type Mode,
   type AttentionQueueItem,
+  type Artifact,
   type Repository,
   type Run,
   type TaskState,
@@ -36,10 +37,15 @@ export type RunView = Pick<
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
 
+// A file or issue linked to its task, in the order captured. Stage `args`
+// are filled from these.
+export type ArtifactView = Artifact;
+
 export type FactoryState = {
   repositories: Record<string, RepositoryView>;
   tasks: Record<string, TaskView>;
   runs: Record<string, RunView>;
+  artifacts: Record<string, ArtifactView>;
   attentionQueue: AttentionQueueItem[];
   slots: { active: number; cap: number };
 };
@@ -71,6 +77,7 @@ export function toFactoryState(lifecycle: Lifecycle): FactoryState {
     repositories,
     tasks,
     runs,
+    artifacts: structuredClone(lifecycle.artifacts),
     attentionQueue: attentionQueue(lifecycle),
     slots: { active: activeAfkRuns(lifecycle), cap: lifecycle.slotCap },
   };

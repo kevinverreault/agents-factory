@@ -5,6 +5,7 @@
 // and nowhere else.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
   getSessionMessages,
   query,
@@ -29,6 +30,10 @@ type LiveRun = {
 };
 
 const SUMMARY_LENGTH = 200;
+
+// The `hook` CLI, which relays each PostToolUse hook event to the daemon for
+// artifact capture. Spawned directly by Claude Code, with no shell between.
+const RELAY_HOOK = { command: process.execPath, args: [fileURLToPath(new URL('../cli.ts', import.meta.url)), 'hook'] };
 
 export function agentSdkExecutor(): Executor {
   const runs = new Map<string, LiveRun>();
@@ -125,12 +130,14 @@ export function agentSdkExecutor(): Executor {
 // HITL runs act as the operator (ADR 0005): every settings source loads.
 // The skill set plugin joins with its own slice. Edits are accepted; anything
 // that would prompt is refused until the conversation view can ask, and so
-// are questions, which it can't show yet.
+// are questions, which it can't show yet. Every tool call's outcome goes to
+// artifact capture, in the background so the run never waits on it.
 function hitlOptions(credential: CredentialProfile): Options {
   return {
     env: runEnv(credential),
     permissionMode: 'acceptEdits',
     settingSources: ['user', 'project', 'local'],
+    settings: { hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
     canUseTool: refuseInConversation,
   };
 }

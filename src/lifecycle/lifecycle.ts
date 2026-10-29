@@ -107,12 +107,21 @@ export type Repository = {
   registeredAt: number;
 };
 
+// A file or GitHub issue a run produced, linked to its task. A file is the
+// glossary or an ADR in the task's worktree, by its path there (with `/`);
+// `committed` says whether the worktree has committed its latest change.
+export type Artifact = { id: string; taskId: string; runId: string } & (
+  | { kind: 'file'; path: string; committed: boolean }
+  | { kind: 'issue'; url: string }
+);
+
 export type Lifecycle = {
-  counters: { task: number; run: number; request: number };
+  counters: { task: number; run: number; request: number; artifact: number };
   repositories: Record<string, Repository>;
   tasks: Record<string, Task>;
   runs: Record<string, Run>;
   requests: Record<string, AttentionRequest>;
+  artifacts: Record<string, Artifact>;
   slotCap: number;
 };
 
@@ -136,7 +145,10 @@ export type RunEvent =
   | { type: 'runCompleted'; runId: string }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
-  | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string };
+  | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string }
+  // What artifact capture found after a tool call, with whether each of the
+  // task's files (old and new) is committed.
+  | { type: 'artifactsSeen'; runId: string; files: { path: string; committed: boolean }[]; issues: string[] };
 
 // What the daemon learns about the operator's clones.
 export type RepoEvent =
@@ -163,11 +175,12 @@ export const DEFAULT_SLOT_CAP = 2;
 
 export function initialLifecycle(): Lifecycle {
   return {
-    counters: { task: 0, run: 0, request: 0 },
+    counters: { task: 0, run: 0, request: 0, artifact: 0 },
     repositories: {},
     tasks: {},
     runs: {},
     requests: {},
+    artifacts: {},
     slotCap: DEFAULT_SLOT_CAP,
   };
 }
@@ -325,6 +338,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'runStarted':
     case 'runCompleted':
     case 'runFailed':
+    case 'artifactsSeen':
       return null;
     case 'attentionRaised':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
@@ -344,7 +358,7 @@ function cantStartRuns(state: Lifecycle, task: Task): string | null {
 }
 
 function nextId(state: Lifecycle, kind: keyof Lifecycle['counters']): string {
-  const prefix = { task: 'T', run: 'R', request: 'A' }[kind];
+  const prefix = { task: 'T', run: 'R', request: 'A', artifact: 'X' }[kind];
   return prefix + ++state.counters[kind];
 }
 
@@ -390,6 +404,13 @@ function raise(state: Lifecycle, task: Task, run: Run, kind: AttentionKind, hold
   state.requests[request.id] = request;
   task.state = 'waiting';
 }
+
+function addArtifact(state: Lifecycle, artifact: DistributiveOmit<Artifact, 'id'>): void {
+  const id = nextId(state, 'artifact');
+  state.artifacts[id] = { id, ...artifact } as Artifact;
+}
+
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
 function closeRepoRequest(state: Lifecycle, repo: string): void {
   const request = openRepoRequest(state, repo);
@@ -512,6 +533,22 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       run!.status = 'suspended';
       raise(state, task, run!, action.kind, true, action.reason ?? null, at);
       break;
+    case 'artifactsSeen': {
+      // One artifact per file or issue of a task, however often it is seen.
+      const seen = (test: (artifact: Artifact) => boolean) =>
+        Object.values(state.artifacts).find((artifact) => artifact.taskId === task.id && test(artifact));
+      for (const { path, committed } of action.files) {
+        const file = seen((artifact) => artifact.kind === 'file' && artifact.path === path);
+        if (file?.kind === 'file') file.committed = committed;
+        else addArtifact(state, { taskId: task.id, runId: run!.id, kind: 'file', path, committed });
+      }
+      for (const url of action.issues) {
+        if (!seen((artifact) => artifact.kind === 'issue' && artifact.url === url)) {
+          addArtifact(state, { taskId: task.id, runId: run!.id, kind: 'issue', url });
+        }
+      }
+      break;
+    }
     case 'removeRepo':
       closeRepoRequest(state, action.repo);
       delete state.repositories[action.repo];
