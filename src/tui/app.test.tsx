@@ -387,6 +387,22 @@ describe('launching and conversing', () => {
     ]);
   });
 
+  test('a refused answer keeps the card up with the reason', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('answerQuestion', { ok: false, reason: 'That question is no longer open.' });
+    const asking = { ...run, question: { id: 'toolu_01', questions: [idp] } };
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: asking } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+
+    app.stdin.write('2');
+    await settle();
+
+    expect(connection.sent.at(-1)).toMatchObject({ type: 'answerQuestion', answers: { 'Which identity provider times out?': 'Auth0' } });
+    expect(app.lastFrame()).toContain('That question is no longer open.');
+    expect(app.lastFrame()).toMatch(/1\s+Okta\s+The workforce SSO/);
+  });
+
   test('the conversation view shows the session id, to resume in the operator’s own terminal', async () => {
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } });
     app.stdin.write('\r');
@@ -395,10 +411,19 @@ describe('launching and conversing', () => {
     expect(app.lastFrame()).toContain('claude --resume 5f0c2a8e-3b1d-4c6e-9a7f-2d8b4e1c0a93');
   });
 
+  const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
+  const failure = {
+    kind: 'attention' as const,
+    taskId: 'T2',
+    repo: 'acme/widgets',
+    requestId: 'A1',
+    attention: 'failure' as const,
+    holdsRun: false,
+    reason: 'The agent hit max turns.',
+  };
+
   test('ctrl+b returns to the screen, pane and cursor the operator left, the cursor following the task it was on', async () => {
     const connection = new FakeConnection();
-    const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
-    const failure = { kind: 'attention' as const, taskId: 'T2', repo: 'acme/widgets', requestId: 'A1', attention: 'failure' as const, holdsRun: false, reason: 'The agent hit max turns.' };
     const ready = { kind: 'ready' as const, taskId: 'T1' };
     const readyForYou = { ...conversing, label: 'Ready for you' };
     const { app } = await started({ ...factoryState([readyForYou, failing], [failure, ready]), runs: { R1: run } }, { connection });
@@ -433,19 +458,24 @@ describe('launching and conversing', () => {
     expect(frame).toMatch(/ \s+T2\s+Implement the store\s+failure/);
   });
 
-  test('enter opens a conversation from Needs you only for a task Ready for you', async () => {
+  test('enter opens a conversation from Needs you only for a task Ready for you in a live one', async () => {
     const connection = new FakeConnection();
-    const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
-    const failure = { kind: 'attention' as const, taskId: 'T2', repo: 'acme/widgets', requestId: 'A1', attention: 'failure' as const, holdsRun: false, reason: 'The agent hit max turns.' };
-    const { app } = await started(factoryState([failing], [failure]), { connection });
+    const queued = task('T3', 'Settle the glossary', 'queued', 'Ready for you', 'HITL');
+    const { app } = await started(factoryState([failing, queued], [failure, { kind: 'ready', taskId: 'T3' }]), { connection });
 
     app.stdin.write('2');
     await settle();
     app.stdin.write('\r');
     await settle();
+    app.stdin.write('\x1b[B');
+    app.stdin.write('\x1b[B');
+    await settle();
+    expect(app.lastFrame()).toMatch(/›\s+T3\s+Settle the glossary/);
+    app.stdin.write('\r');
+    await settle();
 
     expect(connection.conversed).toEqual([]);
-    expect(app.lastFrame()).toContain('2 Needs you (1)');
+    expect(app.lastFrame()).toContain('2 Needs you (2)');
   });
 
   test('ctrl+b leaves the conversation for the task list, and reopening it replays the conversation afresh', async () => {

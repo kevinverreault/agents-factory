@@ -169,6 +169,8 @@ function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>): CanUseTool 
         message: `The factory can't ask the operator for permission to use ${toolName} yet. Say what you wanted to do instead.`,
       };
     }
+    // The conversation shows one card at a time.
+    if (run.asking) return { behavior: 'deny', message: 'Another question is still open: ask one card at a time.' };
     const answers = await new Promise<Answers | null>((resolve) => {
       if (run.stopped || signal.aborted) return resolve(null);
       run.asking = { id: toolUseID, resolve };

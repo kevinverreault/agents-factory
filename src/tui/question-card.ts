@@ -33,7 +33,7 @@ export function cardKey(question: Question, card: Card, draft: string, input: st
   if (key.return) {
     if (draft.trim()) return answer(draft.trim());
     if (asked.multiSelect && card.picked.length) {
-      return answer([...card.picked].sort().map((i) => asked.options[i]!.label).join(', '));
+      return answer([...card.picked].sort((a, b) => a - b).map((i) => asked.options[i]!.label).join(', '));
     }
     return { kind: 'card', card, clearDraft: false };
   }

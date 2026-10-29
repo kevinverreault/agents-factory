@@ -374,15 +374,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!('runId' in action && action.runId === run.id)) executor.stop(run.id);
       }
     }
+    // The conversation verbs act on the task's live run.
+    const conversing = 'taskId' in action ? lifecycle.tasks[action.taskId] : undefined;
+    const run = conversing && liveRun(lifecycle, conversing);
     // A message reaches the run on the operator's turn, or once the agent's
     // turn it was sent during ends, with whatever else waited.
     if (action.type === 'sendMessage') {
-      const run = liveRun(lifecycle, lifecycle.tasks[action.taskId]!)!;
-      if (before.runs[run.id]!.turn === 'operator') executor.send(run.id, action.text);
+      if (before.runs[run!.id]!.turn === 'operator') executor.send(run!.id, action.text);
     } else if (action.type === 'interrupt') {
-      executor.interrupt(liveRun(lifecycle, lifecycle.tasks[action.taskId]!)!.id);
+      executor.interrupt(run!.id);
     } else if (action.type === 'answerQuestion') {
-      executor.answer(liveRun(lifecycle, lifecycle.tasks[action.taskId]!)!.id, action.questionId, action.answers);
+      executor.answer(run!.id, action.questionId, action.answers);
     } else if (action.type === 'turnEnded') {
       const { queued } = before.runs[action.runId]!;
       if (queued.length) executor.send(action.runId, queued.join('\n\n'));

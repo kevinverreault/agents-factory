@@ -53,10 +53,17 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
   const queue = state?.attentionQueue ?? [];
   const rows = tab === 'tasks' ? tasks.map((task) => task.id) : queue.map(rowOf);
   const cursor = at(cursors[tab], rows);
-  const moveTo = (index: number) => setCursors({ ...cursors, [tab]: { row: rows[index] ?? null, index } });
-  // What enter opens: any task's conversation, or one Ready for you.
+  // By a step from where the cursor is now: keys typed in one burst arrive
+  // before a re-render.
+  const move = (by: number) =>
+    setCursors((cursors) => {
+      const index = Math.min(Math.max(at(cursors[tab], rows) + by, 0), Math.max(rows.length - 1, 0));
+      return { ...cursors, [tab]: { row: rows[index] ?? null, index } };
+    });
+  // What enter opens: any task's conversation, or a live one Ready for you.
   const item = queue[cursor];
-  const opens = tab === 'tasks' ? tasks[cursor]?.id : item?.kind === 'ready' ? item.taskId : undefined;
+  const ready = item?.kind === 'ready' ? state?.tasks[item.taskId] : undefined;
+  const opens = tab === 'tasks' ? tasks[cursor]?.id : ready?.liveRunId ? ready.id : undefined;
 
   // Keys need raw mode, which a piped stdin can't give.
   const { isRawModeSupported } = useStdin();
@@ -65,8 +72,8 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       if (input === '1') setTab('tasks');
       if (input === '2') setTab('needs-you');
       if (input === 'N' && state) setView({ kind: 'launch' });
-      if (key.upArrow) moveTo(Math.max(cursor - 1, 0));
-      if (key.downArrow) moveTo(Math.min(cursor + 1, rows.length - 1));
+      if (key.upArrow) move(-1);
+      if (key.downArrow) move(1);
       if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
       if (input === 'r' && unregistered) {
         void connection.send({ type: 'registerRepo', path: unregistered.path }).then((reply) => setRefusal(reply.ok ? null : reply.reason));

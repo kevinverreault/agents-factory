@@ -44,7 +44,8 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const midTurn = live && run.turn === 'agent';
   // The open card, until the operator has answered it.
   const question = live && run.question && run.question.id !== typing.current.answered ? run.question : null;
-  if (question && typing.current.cardFor !== question.id) Object.assign(typing.current, { card: newCard(), cardFor: question.id });
+  // A card answers its own question: a new question starts a new card.
+  const card = question && typing.current.cardFor === question.id ? typing.current.card : newCard();
   const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
 
   useInput((input, key) => {
@@ -54,10 +55,17 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       if (midTurn) void connection.send({ type: 'interrupt', taskId }).then(tell);
       return;
     }
+    if (question && typed.cardFor !== question.id) Object.assign(typed, { card: newCard(), cardFor: question.id });
     const onCard = question ? cardKey(question, typed.card, typed.draft, input, key) : { kind: 'ignored' as const };
     if (onCard.kind === 'answered') {
-      void connection.send({ type: 'answerQuestion', taskId, questionId: question!.id, answers: onCard.answers }).then(tell);
-      Object.assign(typed, { answered: question!.id, draft: '' });
+      const answered = question!.id;
+      void connection.send({ type: 'answerQuestion', taskId, questionId: answered, answers: onCard.answers }).then((reply) => {
+        tell(reply);
+        // A refused answer leaves the card up, so the operator sees what is still open.
+        if (!reply.ok && typed.answered === answered) Object.assign(typed, { answered: null, card: newCard() });
+        rerender();
+      });
+      Object.assign(typed, { answered, draft: '' });
     } else if (onCard.kind === 'card') {
       typed.card = onCard.card;
       if (onCard.clearDraft) typed.draft = '';
@@ -91,7 +99,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         h(Box, { key: `queued-${i}`, gap: 1, flexShrink: 0 }, h(Box, { width: 6, flexShrink: 0 }, h(Text, { dimColor: true }, 'queued')), h(Text, { dimColor: true }, text)),
       ),
     ),
-    question ? h(QuestionCard, { question, card: typing.current.card }) : null,
+    question ? h(QuestionCard, { question, card }) : null,
     live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
     refusal ? h(Text, { color: 'red' }, refusal) : null,
     h(Text, null, `› ${draft}▏`),
