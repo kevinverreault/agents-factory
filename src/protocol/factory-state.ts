@@ -10,6 +10,7 @@ import {
   type Lifecycle,
   type Mode,
   type AttentionQueueItem,
+  type Repository,
   type Run,
   type TaskState,
 } from '../lifecycle/lifecycle.ts';
@@ -17,6 +18,7 @@ import {
 export type TaskView = {
   id: string;
   title: string;
+  repo: string;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   groups: string[];
@@ -27,7 +29,10 @@ export type TaskView = {
 
 export type RunView = Pick<Run, 'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'startedAt' | 'endedAt'>;
 
+export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
+
 export type FactoryState = {
+  repositories: Record<string, RepositoryView>;
   tasks: Record<string, TaskView>;
   runs: Record<string, RunView>;
   attentionQueue: AttentionQueueItem[];
@@ -35,11 +40,14 @@ export type FactoryState = {
 };
 
 export function toFactoryState(lifecycle: Lifecycle): FactoryState {
+  const repositories: Record<string, RepositoryView> = {};
+  for (const repository of Object.values(lifecycle.repositories)) repositories[repository.id] = repositoryView(repository);
   const tasks: Record<string, TaskView> = {};
   for (const task of Object.values(lifecycle.tasks)) {
     tasks[task.id] = {
       id: task.id,
       title: task.title,
+      repo: task.repo,
       mode: task.mode,
       autonomy: task.autonomy,
       groups: task.groups,
@@ -53,11 +61,16 @@ export function toFactoryState(lifecycle: Lifecycle): FactoryState {
     runs[id] = { id, taskId, mode, autonomy, status, outcome, startedAt, endedAt };
   }
   return {
+    repositories,
     tasks,
     runs,
     attentionQueue: attentionQueue(lifecycle),
     slots: { active: activeAfkRuns(lifecycle), cap: lifecycle.slotCap },
   };
+}
+
+export function repositoryView({ id, path, baseBranch, defaultPreset, missing }: Repository): RepositoryView {
+  return { id, path, baseBranch, defaultPreset, missing };
 }
 
 // A patch sets or deletes the value at a path. The diff goes two levels deep

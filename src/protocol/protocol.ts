@@ -6,10 +6,18 @@ import type { Socket } from 'node:net';
 import type { OperatorCommand } from '../lifecycle/lifecycle.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
-export type Command = OperatorCommand | DaemonCommand;
+// Repository verbs the daemon answers by reading the clone first. `path` is
+// absolute: the daemon's working directory is not the client's.
+export type RepoCommand =
+  | { type: 'registerRepo'; path: string; baseBranch?: string; defaultPreset?: string }
+  // Replies with the `CloneView` of the clone holding `path`.
+  | { type: 'inspectClone'; path: string };
+
+export type CloneView = { repo: string; path: string };
+export type Command = OperatorCommand | DaemonCommand | RepoCommand;
 
 export type DaemonStatus = {
   pid: number;

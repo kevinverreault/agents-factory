@@ -12,7 +12,7 @@ export interface Store {
   close(): void;
 }
 
-const COLLECTIONS = { tasks: 'tasks', runs: 'runs', requests: 'attention_requests' } as const;
+const COLLECTIONS = { repositories: 'repositories', tasks: 'tasks', runs: 'runs', requests: 'attention_requests' } as const;
 type Collection = keyof typeof COLLECTIONS;
 
 export function openStore(path: string): Store {
@@ -21,6 +21,7 @@ export function openStore(path: string): Store {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS repositories (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS attention_requests (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
@@ -33,7 +34,7 @@ export function openStore(path: string): Store {
     const meta = db.prepare(`SELECT value FROM meta WHERE key = 'lifecycle'`).get() as { value: string } | undefined;
     if (!meta) return null;
     const { counters, slotCap } = JSON.parse(meta.value) as Pick<Lifecycle, 'counters' | 'slotCap'>;
-    const lifecycle: Lifecycle = { counters, slotCap, tasks: {}, runs: {}, requests: {} };
+    const lifecycle: Lifecycle = { counters, slotCap, repositories: {}, tasks: {}, runs: {}, requests: {} };
     for (const collection of Object.keys(COLLECTIONS) as Collection[]) {
       const rows = db.prepare(`SELECT id, data FROM ${COLLECTIONS[collection]} ORDER BY seq`).all() as {
         id: string;
@@ -54,13 +55,27 @@ export function openStore(path: string): Store {
         JSON.stringify({ counters: lifecycle.counters, slotCap: lifecycle.slotCap }),
       );
       for (const collection of Object.keys(COLLECTIONS) as Collection[]) {
-        const upsert = db.prepare(`INSERT OR REPLACE INTO ${COLLECTIONS[collection]} (id, seq, data) VALUES (?, ?, ?)`);
-        for (const [id, entity] of Object.entries(lifecycle[collection])) {
+        const table = COLLECTIONS[collection];
+        // A new row goes last, so a load gives entities back in the order they came.
+        const upsert = db.prepare(
+          `INSERT INTO ${table} (id, seq, data) VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ${table}), ?)
+           ON CONFLICT (id) DO UPDATE SET data = excluded.data`,
+        );
+        const remove = db.prepare(`DELETE FROM ${table} WHERE id = ?`);
+        const entities = lifecycle[collection] as Record<string, unknown>;
+        for (const [id, entity] of Object.entries(entities)) {
           const data = JSON.stringify(entity);
           const key = `${collection}/${id}`;
           if (written.get(key) === data) continue;
-          upsert.run(id, Number(id.slice(1)), data);
+          upsert.run(id, data);
           written.set(key, data);
+        }
+        for (const key of written.keys()) {
+          const id = key.slice(collection.length + 1);
+          if (key.startsWith(`${collection}/`) && !(id in entities)) {
+            remove.run(id);
+            written.delete(key);
+          }
         }
       }
       db.exec('COMMIT');

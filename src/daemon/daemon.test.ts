@@ -14,6 +14,7 @@ const factories: TestFactory[] = [];
 async function factory(): Promise<TestFactory> {
   const started = await startTestFactory();
   factories.push(started);
+  await started.registerRepo();
   return started;
 }
 
@@ -27,7 +28,7 @@ describe('connecting to the daemon', () => {
 
     const tui = await attach();
 
-    expect(tui.protocolVersion).toBe(1);
+    expect(tui.protocolVersion).toBe(2);
   });
 
   test('a client without the token is refused', async () => {
@@ -43,7 +44,7 @@ describe('connecting to the daemon', () => {
 
     await expect(startDaemon()).rejects.toBeInstanceOf(DaemonAlreadyRunning);
     // The running daemon keeps its token and its clients.
-    expect((await attach()).protocolVersion).toBe(1);
+    expect((await attach()).protocolVersion).toBe(2);
   });
 });
 
@@ -56,7 +57,7 @@ describe('the factory-state subscription', () => {
     await first.until(() => true);
     await second.until(() => true);
 
-    expect(await operator.send({ type: 'createTask', title: 'Settle the glossary', mode: 'HITL', submit: true })).toEqual({
+    expect(await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Settle the glossary', mode: 'HITL', submit: true })).toEqual({
       ok: true,
       value: { taskId: 'T1' },
     });
@@ -72,7 +73,7 @@ describe('the factory-state subscription', () => {
   test('a TUI attaching later gets the current state as its snapshot', async () => {
     const { attach } = await factory();
     const operator = await attach();
-    await operator.send({ type: 'createTask', title: 'Run the spec', mode: 'AFK', submit: false });
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Run the spec', mode: 'AFK', submit: false });
 
     const late = watch(await attach());
 
@@ -87,8 +88,8 @@ describe('daemon status and stop', () => {
     await tui.until(() => true);
     const cli = await attach();
     await cli.send({ type: 'setSlotCap', cap: 1 });
-    await cli.send({ type: 'createTask', title: 'Fix the login bug', mode: 'AFK', submit: true });
-    await cli.send({ type: 'createTask', title: 'Fix the flaky test', mode: 'AFK', submit: true });
+    await cli.send({ type: 'createTask', repo: 'acme/widgets', title: 'Fix the login bug', mode: 'AFK', submit: true });
+    await cli.send({ type: 'createTask', repo: 'acme/widgets', title: 'Fix the flaky test', mode: 'AFK', submit: true });
 
     const reply = await cli.send({ type: 'daemon.status' });
 
@@ -96,7 +97,7 @@ describe('daemon status and stop', () => {
       ok: true,
       value: {
         pid: process.pid,
-        protocolVersion: 1,
+        protocolVersion: 2,
         startedAt: Date.UTC(2026, 9, 29, 9, 0, 0),
         attachedTuis: 1,
         activeRuns: 1,
@@ -121,14 +122,14 @@ describe('daemon status and stop', () => {
 
   test('a new daemon over the same store shows the same tasks', async () => {
     const { attach, restart } = await factory();
-    await (await attach()).send({ type: 'createTask', title: 'Settle the glossary', mode: 'HITL', submit: true });
+    await (await attach()).send({ type: 'createTask', repo: 'acme/widgets', title: 'Settle the glossary', mode: 'HITL', submit: true });
 
     await restart();
 
     const operator = await attach();
     const tui = watch(operator);
     expect((await tui.until(() => true)).tasks.T1).toMatchObject({ title: 'Settle the glossary', label: 'Ready for you' });
-    expect(await operator.send({ type: 'createTask', title: 'Write the spec', mode: 'HITL' })).toEqual({
+    expect(await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Write the spec', mode: 'HITL' })).toEqual({
       ok: true,
       value: { taskId: 'T2' },
     });
@@ -170,7 +171,7 @@ describe('idle exit', () => {
 
   test('a HITL task Ready for you counts as a queued task and keeps the daemon up', async () => {
     const { clock, daemon, attach } = await factory();
-    await (await attach()).send({ type: 'createTask', title: 'Settle the glossary', mode: 'HITL', submit: true });
+    await (await attach()).send({ type: 'createTask', repo: 'acme/widgets', title: 'Settle the glossary', mode: 'HITL', submit: true });
 
     clock.advance(minutes(30));
 
@@ -180,7 +181,7 @@ describe('idle exit', () => {
   test('an active or suspended run keeps the daemon up; a task in review does not', async () => {
     const { clock, daemon, attach, executor } = await factory();
     const cli = await attach();
-    await cli.send({ type: 'createTask', title: 'Implement the store', mode: 'AFK', submit: true });
+    await cli.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
 
     clock.advance(minutes(30));
     expect(await isStopped(daemon())).toBe(false);
@@ -191,6 +192,7 @@ describe('idle exit', () => {
 
     await cli.send({ type: 'answer', taskId: 'T1' });
     executor.report('R1', { type: 'runCompleted' });
+    await cli.send({ type: 'daemon.status' });
     clock.advance(minutes(10.5));
     expect(await isStopped(daemon())).toBe(true);
   });

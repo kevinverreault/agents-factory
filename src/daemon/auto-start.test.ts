@@ -29,7 +29,7 @@ describe('starting the TUI', () => {
     });
 
     expect(starts).toBe(1);
-    expect(tui.protocolVersion).toBe(1);
+    expect(tui.protocolVersion).toBe(2);
     tui.close();
   });
 

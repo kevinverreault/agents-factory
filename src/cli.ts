@@ -1,22 +1,31 @@
 #!/usr/bin/env node
 // agents-factory: with no arguments, opens the TUI (starting the daemon if
-// none is running). `daemon status` and `daemon stop` inspect and stop it.
+// none is running). `daemon status` and `daemon stop` inspect and stop it;
+// `repo add` and `repo remove` register and unregister the operator's clones.
+import { resolve } from 'node:path';
+import { parseArgs } from 'node:util';
 import { createElement as h } from 'react';
 import { render } from 'ink';
 import { connectOrStart } from './daemon/auto-start.ts';
 import { factoryPaths } from './daemon/paths.ts';
 import { connect, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
-import type { DaemonStatus } from './protocol/protocol.ts';
+import type { RepositoryView } from './protocol/factory-state.ts';
+import type { Command, DaemonStatus } from './protocol/protocol.ts';
 import { App } from './tui/app.ts';
 
-const USAGE = 'Usage: agents-factory [daemon status | daemon stop]';
+const USAGE = [
+  'Usage: agents-factory',
+  '       agents-factory daemon status | daemon stop',
+  '       agents-factory repo add [path] [--base-branch <branch>] [--default-preset <preset>]',
+  '       agents-factory repo remove <owner/name>',
+].join('\n');
 
 async function main(args: string[]): Promise<number> {
   const paths = factoryPaths();
   if (args.length === 0) {
     const connection = await connectOrStart(paths);
     // Closing the TUI closes only this connection; the daemon keeps running.
-    await render(h(App, { connection })).waitUntilExit();
+    await render(h(App, { connection, cwd: process.cwd() })).waitUntilExit();
     connection.close();
     return 0;
   }
@@ -38,8 +47,58 @@ async function main(args: string[]): Promise<number> {
     console.log(args[1] === 'status' ? describe(reply.value as DaemonStatus) : 'The daemon stopped.');
     return 0;
   }
+  if (args[0] === 'repo') {
+    const command = repoCommand(args.slice(1));
+    if (!command) {
+      console.error(USAGE);
+      return 2;
+    }
+    const connection = await connectOrStart(paths);
+    const reply = await connection.send(command);
+    connection.close();
+    if (!reply.ok) {
+      console.error(reply.reason);
+      return 1;
+    }
+    if (command.type === 'registerRepo') {
+      const { id, path, baseBranch, defaultPreset } = reply.value as RepositoryView;
+      console.log(`Registered ${id} at ${path} (base branch ${baseBranch}, default preset ${defaultPreset}).`);
+    } else {
+      console.log(`Removed ${command.repo}.`);
+    }
+    return 0;
+  }
   console.error(USAGE);
   return 2;
+}
+
+// `repo add [path] [--base-branch b] [--default-preset p]` or
+// `repo remove <owner/name>`, or null when the arguments don't fit.
+function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 'removeRepo' }> | null {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      allowPositionals: true,
+      options: { 'base-branch': { type: 'string' }, 'default-preset': { type: 'string' } },
+    });
+  } catch {
+    return null;
+  }
+  const { positionals, values } = parsed;
+  const [verb, operand, ...rest] = positionals;
+  if (rest.length) return null;
+  if (verb === 'add') {
+    // The daemon's working directory isn't ours, so the path goes absolute.
+    return {
+      type: 'registerRepo',
+      path: resolve(operand ?? process.cwd()),
+      ...(values['base-branch'] && { baseBranch: values['base-branch'] }),
+      ...(values['default-preset'] && { defaultPreset: values['default-preset'] }),
+    };
+  }
+  if (verb === 'remove' && operand && Object.keys(values).length === 0) return { type: 'removeRepo', repo: operand };
+  return null;
 }
 
 function describe(status: DaemonStatus): string {

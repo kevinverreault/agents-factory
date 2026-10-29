@@ -9,6 +9,7 @@ const factories: TestFactory[] = [];
 async function attached(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
   const factory = await startTestFactory();
   factories.push(factory);
+  await factory.registerRepo();
   const operator = await factory.attach();
   const tui = watch(operator);
   await tui.until(() => true);
@@ -22,7 +23,7 @@ afterEach(async () => {
 describe('runs', () => {
   test('a task has at most one live run: opening a conversation that is already open is refused', async () => {
     const { factory, operator, tui } = await attached();
-    await operator.send({ type: 'createTask', title: 'Grill the plan', mode: 'HITL', submit: true });
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Grill the plan', mode: 'HITL', submit: true });
 
     expect(await operator.send({ type: 'open', taskId: 'T1' })).toEqual({ ok: true });
     expect(await operator.send({ type: 'open', taskId: 'T1' })).toEqual({
@@ -38,7 +39,7 @@ describe('runs', () => {
   test('a queued AFK task starts a run on the executor while a slot is free', async () => {
     const { factory, operator, tui } = await attached();
 
-    await operator.send({ type: 'createTask', title: 'Implement the store', mode: 'AFK', submit: true });
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
 
     const state = await tui.until((state) => state.tasks.T1?.label === 'Running');
     expect(state.slots).toEqual({ active: 1, cap: 2 });
@@ -51,20 +52,28 @@ describe('runs', () => {
 describe('tasks end only Done or Cancelled', () => {
   test('a failed run leaves its task needing you with a failure attention request, never failed', async () => {
     const { factory, operator, tui } = await attached();
-    await operator.send({ type: 'createTask', title: 'Implement the store', mode: 'AFK', submit: true });
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
 
     factory.executor.report('R1', { type: 'runFailed', reason: 'The agent hit max turns.' });
 
     const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
     expect(state.runs.R1).toMatchObject({ status: 'ended', outcome: 'failed' });
     expect(state.attentionQueue).toEqual([
-      { kind: 'attention', taskId: 'T1', requestId: 'A1', attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.' },
+      {
+        kind: 'attention',
+        taskId: 'T1',
+        repo: 'acme/widgets',
+        requestId: 'A1',
+        attention: 'failure',
+        holdsRun: false,
+        reason: 'The agent hit max turns.',
+      },
     ]);
   });
 
   test('cancelling a task ends its live run on the executor, and a cancelled task refuses every verb with a reason', async () => {
     const { factory, operator, tui } = await attached();
-    await operator.send({ type: 'createTask', title: 'Implement the store', mode: 'AFK', submit: true });
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
 
     expect(await operator.send({ type: 'cancel', taskId: 'T1' })).toEqual({ ok: true });
 
@@ -80,7 +89,7 @@ describe('tasks end only Done or Cancelled', () => {
 
   test('a completed AFK run puts its root task In review, and only the operator marks it Done', async () => {
     const { factory, operator, tui } = await attached();
-    await operator.send({ type: 'createTask', title: 'Implement the store', mode: 'AFK', submit: true });
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
 
     factory.executor.report('R1', { type: 'runCompleted' });
     await tui.until((state) => state.tasks.T1?.label === 'In review');
@@ -93,7 +102,7 @@ describe('tasks end only Done or Cancelled', () => {
 
   test('a run event for a run that already ended is not applied', async () => {
     const { factory, operator, tui } = await attached();
-    await operator.send({ type: 'createTask', title: 'Implement the store', mode: 'AFK', submit: true });
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
     await operator.send({ type: 'cancel', taskId: 'T1' });
 
     factory.executor.report('R1', { type: 'runCompleted' });
@@ -106,7 +115,7 @@ describe('tasks end only Done or Cancelled', () => {
 describe('attention requests', () => {
   test('answering a suspended run’s request resumes the same run', async () => {
     const { factory, operator, tui } = await attached();
-    await operator.send({ type: 'createTask', title: 'Implement the store', mode: 'AFK', submit: true });
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
 
     factory.executor.report('R1', { type: 'attentionRaised', kind: 'permission', reason: 'Run `npm publish`?' });
     await tui.until((state) => state.tasks.T1?.label === 'Needs you');

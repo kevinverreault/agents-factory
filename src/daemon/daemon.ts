@@ -6,9 +6,21 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname } from 'node:path';
 import type { Executor } from '../executor/executor.ts';
-import { initialLifecycle, reduce, type Lifecycle, type LifecycleAction } from '../lifecycle/lifecycle.ts';
-import { diffFactoryState, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
-import { PROTOCOL_VERSION, readMessages, send, type ClientMessage, type Command, type DaemonStatus, type Reply } from '../protocol/protocol.ts';
+import type { Git } from '../git/git.ts';
+import { initialLifecycle, reduce, type Lifecycle, type LifecycleAction, type Repository } from '../lifecycle/lifecycle.ts';
+import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
+import {
+  PROTOCOL_VERSION,
+  readMessages,
+  send,
+  type ClientMessage,
+  type CloneView,
+  type Command,
+  type DaemonStatus,
+  type RepoCommand,
+  type Reply,
+} from '../protocol/protocol.ts';
+import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
 import type { Store } from '../store/store.ts';
 import type { Clock } from './clock.ts';
 
@@ -18,6 +30,7 @@ export type DaemonOptions = {
   store: Store;
   clock: Clock;
   executor: Executor;
+  git: Git;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
 };
@@ -43,7 +56,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   mkdirSync(dirname(options.tokenPath), { recursive: true });
   writeFileSync(options.tokenPath, token, { mode: 0o600 });
 
-  const { store, clock, executor } = options;
+  const { store, clock, executor, git } = options;
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
   let published: FactoryState = toFactoryState(lifecycle);
   const startedAt = clock.now();
@@ -85,23 +98,62 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           subscribers.add(socket);
           send(socket, { type: 'snapshot', state: published });
           break;
-        case 'command':
-          send(socket, { type: 'reply', id: message.id, ...handle(message.command) });
-          if (message.command.type === 'daemon.stop') void stop();
+        case 'command': {
+          const { id, command } = message;
+          void handle(command).then(
+            (reply) => {
+              send(socket, { type: 'reply', id, ...reply });
+              if (command.type === 'daemon.stop') void stop();
+            },
+            (error: Error) => send(socket, { type: 'reply', id, ok: false, reason: error.message }),
+          );
           break;
+        }
       }
     });
   });
 
-  function handle(command: Command): Reply {
+  async function handle(command: Command): Promise<Reply> {
     switch (command.type) {
       case 'daemon.status':
-        return { ok: true, value: status() };
+        // Queued, so the status reflects every change sent before it.
+        return serially(async () => ({ ok: true, value: status() }));
       case 'daemon.stop':
         return { ok: true };
+      case 'registerRepo':
+        return registerRepo(command);
+      case 'inspectClone': {
+        const clone = await readClone(git, command.path);
+        if ('refusal' in clone) return { ok: false, reason: clone.refusal };
+        const value: CloneView = { repo: clone.repo, path: clone.path };
+        return { ok: true, value };
+      }
       default:
         return dispatch(command);
     }
+  }
+
+  // Registers the clone at `path` under its GitHub `owner/name` (ADR 0010).
+  async function registerRepo({ path, baseBranch, defaultPreset }: Extract<RepoCommand, { type: 'registerRepo' }>): Promise<Reply> {
+    const clone = await readClone(git, path);
+    if ('refusal' in clone) return { ok: false, reason: clone.refusal };
+    baseBranch ??= clone.defaultBranch ?? undefined;
+    if (!baseBranch) {
+      return {
+        ok: false,
+        reason:
+          `The clone at ${clone.path} doesn't say which branch is origin's default. ` +
+          'Name the base branch, or run `git remote set-head origin --auto` in the clone.',
+      };
+    }
+    const reply = await dispatch({
+      type: 'repoRegistered',
+      repo: clone.repo,
+      path: clone.path,
+      baseBranch,
+      defaultPreset: defaultPreset ?? DEFAULT_PRESET,
+    });
+    return reply.ok ? { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) } : reply;
   }
 
   function status(): DaemonStatus {
@@ -124,18 +176,80 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return attachedTuis + activeRuns + suspendedRuns + queuedTasks > 0;
   }
 
+  // The Lifecycle changes one action at a time: checking a clone before a run
+  // starts waits on git, and nothing may change the Lifecycle meanwhile.
+  let queue: Promise<unknown> = Promise.resolve();
+  function serially<T>(job: () => Promise<T>): Promise<T> {
+    const result = queue.then(job);
+    queue = result.catch(() => {});
+    return result;
+  }
+
+  // Every repository's clone is checked at start (ADR 0010).
+  void serially(async () => {
+    for (const [{ id, missing }, reason] of await checkClones(Object.values(lifecycle.repositories))) {
+      if (reason) await settle({ type: 'repoMissing', repo: id, reason }, new Set());
+      else if (missing) await settle({ type: 'repoFound', repo: id }, new Set([id]));
+    }
+  });
+
   // Runs an action through the Lifecycle, saves the result and tells every
   // subscriber what changed.
-  function dispatch(action: LifecycleAction): Reply {
-    const { state, refusal } = reduce(lifecycle, action, clock.now());
-    if (refusal) return { ok: false, reason: refusal };
+  function dispatch(action: LifecycleAction): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const refusal = await settle(action, new Set());
+      if (refusal) return { ok: false, reason: refusal };
+      if (action.type === 'createTask') return { ok: true, value: { taskId: `T${lifecycle.counters.task}` } };
+      return { ok: true };
+    });
+  }
+
+  // Applies the action once the clone of every run it starts is in place
+  // (ADR 0010). A missing clone first marks its repository missing, which
+  // raises one attention request for it, and the action is reduced again
+  // without that repository's runs. `inPlace` holds the repositories whose
+  // clones were already found in place, so they aren't checked twice.
+  async function settle(action: LifecycleAction, inPlace: Set<string>): Promise<string | null> {
+    for (;;) {
+      const { state, refusal } = reduce(lifecycle, action, clock.now());
+      if (refusal) return refusal;
+      const missing = await missingClones(state, inPlace);
+      if (missing.length === 0) {
+        commit(state, action);
+        return null;
+      }
+      for (const [repo, reason] of missing) await settle({ type: 'repoMissing', repo, reason }, inPlace);
+    }
+  }
+
+  // Why each repository the new runs in `next` start in has lost its clone.
+  // Each one found in place is added to `inPlace`.
+  async function missingClones(next: Lifecycle, inPlace: Set<string>): Promise<[string, string][]> {
+    const starting = Object.values(next.runs).filter((run) => !lifecycle.runs[run.id]);
+    const repositories = [...new Set(starting.map((run) => next.tasks[run.taskId]!.repo))]
+      .filter((repo) => !inPlace.has(repo))
+      .flatMap((repo) => next.repositories[repo] ?? []);
+    const missing: [string, string][] = [];
+    for (const [{ id }, reason] of await checkClones(repositories)) {
+      if (reason) missing.push([id, reason]);
+      else inPlace.add(id);
+    }
+    return missing;
+  }
+
+  // Each repository with why its clone is gone, or null where it is in place.
+  async function checkClones(repositories: Repository[]): Promise<[Repository, string | null][]> {
+    const reasons = await Promise.all(repositories.map((repository) => whyMissing(git, repository)));
+    return repositories.map((repository, i) => [repository, reasons[i] ?? null]);
+  }
+
+  function commit(state: Lifecycle, action: LifecycleAction): void {
     const before = lifecycle;
     lifecycle = state;
     store.saveLifecycle(lifecycle);
     publish();
     driveExecutor(before, action);
-    if (action.type === 'createTask') return { ok: true, value: { taskId: `T${lifecycle.counters.task}` } };
-    return { ok: true };
   }
 
   // Starts the runs the action started, and stops the live runs an operator
@@ -171,6 +285,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // reaches its client.
       for (const socket of sockets) socket.end(() => socket.destroy());
       await closed;
+      // Whatever is changing the Lifecycle finishes before the store closes.
+      await queue;
       store.close();
       resolveStopped();
     })();
