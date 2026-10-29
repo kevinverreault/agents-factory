@@ -12,11 +12,23 @@ export type Clone = {
   defaultBranch: string | null;
 };
 
+// A worktree linked to a clone (its main worktree aside).
+export type Worktree = { path: string; branch: string; head: string };
+
 export interface Git {
   // The clone holding `path` (its top level or anywhere inside it), or null
   // when `path` isn't inside a clone.
   inspectClone(path: string): Promise<Clone | null>;
+  // Brings `origin/<branch>` up to date with origin. Throws a `GitError`
+  // when origin can't be reached or has no such branch.
+  fetch(clonePath: string, branch: string): Promise<void>;
+  // Cuts `branch` from `startPoint` and checks it out in a new worktree at
+  // `path`. Throws a `GitError` when the branch exists or `path` is taken.
+  addWorktree(clonePath: string, worktree: { path: string; branch: string; startPoint: string }): Promise<void>;
+  worktrees(clonePath: string): Promise<Worktree[]>;
 }
+
+export class GitError extends Error {}
 
 export const gitCli: Git = {
   async inspectClone(path) {
@@ -29,11 +41,48 @@ export const gitCli: Git = {
       defaultBranch: head?.startsWith('origin/') ? head.slice('origin/'.length) : null,
     };
   },
+
+  async fetch(clonePath, branch) {
+    await run(clonePath, 'fetch', '--quiet', 'origin', branch);
+  },
+
+  async addWorktree(clonePath, { path, branch, startPoint }) {
+    // Deep `node_modules` trees pass Windows' path limit (ADR 0010). Without
+    // `extensions.worktreeConfig` a worktree shares its clone's config, so the
+    // setting goes there.
+    await run(clonePath, 'config', 'core.longpaths', 'true');
+    // No upstream: the task branch is never pushed to its base branch.
+    await run(clonePath, 'worktree', 'add', '--quiet', '--no-track', '-b', branch, path, startPoint);
+  },
+
+  async worktrees(clonePath) {
+    const listing = await run(clonePath, 'worktree', 'list', '--porcelain');
+    // The first entry is the clone's own working tree.
+    return listing
+      .split(/\r?\n\r?\n/)
+      .slice(1)
+      .flatMap((entry) => {
+        const fields = new Map(entry.split(/\r?\n/).map((line) => [line.split(' ', 1)[0], line.slice(line.indexOf(' ') + 1)]));
+        const path = fields.get('worktree');
+        const head = fields.get('HEAD');
+        // A detached worktree has no `branch` line.
+        const branch = fields.get('branch')?.replace(/^refs\/heads\//, '');
+        return path && head && branch ? [{ path: resolve(path), branch, head }] : [];
+      });
+  },
 };
 
 // The command's trimmed output, or null when it fails.
 function git(cwd: string, ...args: string[]): Promise<string | null> {
-  return new Promise((done) =>
-    execFile('git', ['-C', cwd, ...args], { windowsHide: true }, (error, stdout) => done(error ? null : stdout.trim())),
+  return run(cwd, ...args).catch(() => null);
+}
+
+// The command's trimmed output. Throws a `GitError` with git's own message
+// when it fails.
+function run(cwd: string, ...args: string[]): Promise<string> {
+  return new Promise((done, fail) =>
+    execFile('git', ['-C', cwd, ...args], { windowsHide: true }, (error, stdout, stderr) =>
+      error ? fail(new GitError(stderr.trim() || error.message)) : done(stdout.trim()),
+    ),
   );
 }

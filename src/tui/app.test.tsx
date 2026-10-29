@@ -13,7 +13,7 @@ afterEach(() => {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -180,5 +180,136 @@ describe('repositories', () => {
     await settle();
 
     expect(app.lastFrame()).toMatch(/acme\/widgets\s+repo-missing: The clone of acme\/widgets is no longer at/);
+  });
+});
+
+describe('launching and conversing', () => {
+  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false };
+  const gadgets = { ...widgets, id: 'acme/gadgets', path: '/clones/gadgets' };
+  const conversing: TaskView = {
+    ...task('T1', 'Grill me about the login flow.', 'running', 'In conversation', 'HITL'),
+    liveRunId: 'R1',
+    branch: 'factory/T1-grill-me-about-the-login-flow',
+    worktree: '/worktrees/acme-widgets/T1',
+  };
+  const run = {
+    id: 'R1',
+    taskId: 'T1',
+    mode: 'HITL' as const,
+    autonomy: null,
+    status: 'active' as const,
+    outcome: null,
+    model: 'claude-sonnet-5-5',
+    cli: { pid: 4242, createdAt: 1 },
+    startedAt: 1,
+    endedAt: null,
+  };
+  const repositories = { 'acme/gadgets': gadgets, 'acme/widgets': widgets };
+
+  function inWidgets() {
+    const connection = new FakeConnection();
+    connection.replyTo('inspectClone', { ok: true, value: { repo: 'acme/widgets', path: widgets.path } });
+    return connection;
+  }
+
+  async function type(app: { stdin: { write(data: string): void } }, text: string) {
+    for (const char of text) app.stdin.write(char);
+    await settle();
+  }
+
+  test('N opens the launch card on the repository holding the working directory, and enter launches the prompt into its conversation', async () => {
+    const connection = inWidgets();
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    expect(app.lastFrame()).toMatch(/Launch a task[\s\S]*Repository\s+acme\/widgets/);
+    await type(app, 'Grill me about the login flow.');
+    app.stdin.write('\r');
+    await settle();
+
+    expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Grill me about the login flow.' });
+    connection.servePatch([
+      { op: 'set', path: ['tasks', 'T1'], value: conversing },
+      { op: 'set', path: ['runs', 'R1'], value: run },
+    ]);
+    await settle();
+    expect(connection.conversed).toEqual(['R1']);
+    expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.[\s\S]*factory\/T1-grill-me-about-the-login-flow[\s\S]*claude-sonnet-5-5/);
+  });
+
+  test('on the launch card, tab picks another repository, a refusal shows its reason, and esc backs out', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('launchTask', { ok: false, reason: "Couldn't fetch main from the origin of acme/gadgets: fatal: no network" });
+    const { app } = await started({ ...factoryState([]), repositories }, { connection });
+
+    app.stdin.write('N');
+    await settle();
+    expect(app.lastFrame()).toMatch(/Repository\s+acme\/gadgets/);
+    app.stdin.write('\t');
+    await settle();
+    expect(app.lastFrame()).toMatch(/Repository\s+acme\/widgets/);
+    app.stdin.write('\t');
+    await type(app, 'Spike the cache');
+    app.stdin.write('\r');
+    await settle();
+
+    expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/gadgets', prompt: 'Spike the cache' });
+    expect(app.lastFrame()).toContain("Couldn't fetch main from the origin of acme/gadgets: fatal: no network");
+    expect(app.lastFrame()).toContain('Spike the cache');
+
+    app.stdin.write('\x1b');
+    await settle();
+    expect(app.lastFrame()).not.toContain('Launch a task');
+    expect(app.lastFrame()).toContain('No tasks yet.');
+  });
+
+  test('the conversation view renders streamed text and tool use, and enter sends the operator’s message', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.conversed).toEqual(['R1']);
+
+    connection.serveConversation(
+      'R1',
+      { type: 'message', id: 'E1', from: 'operator', text: 'Grill me about the login flow.' },
+      { type: 'toolUse', id: 'E2', tool: 'Read', summary: 'src/auth/sso.ts' },
+      { type: 'message', id: 'E3', from: 'agent', text: 'Which identity provider times out?' },
+    );
+    await settle();
+    expect(app.lastFrame()).toMatch(/you\s+Grill me about the login flow\.\n[\s\S]*Read\s+src\/auth\/sso\.ts\n[\s\S]*agent\s+Which identity provider times out\?/);
+
+    await type(app, 'Okta, only on Safarii');
+    app.stdin.write('\x7f');
+    app.stdin.write('.');
+    await settle();
+    expect(app.lastFrame()).toContain('› Okta, only on Safari.');
+    app.stdin.write('\r');
+    await settle();
+
+    expect(connection.sent.at(-1)).toEqual({ type: 'sendMessage', taskId: 'T1', text: 'Okta, only on Safari.' });
+    expect(app.lastFrame()).not.toContain('› Okta');
+  });
+
+  test('ctrl+b leaves the conversation for the task list, and reopening it replays the conversation afresh', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Which identity provider times out?' });
+    await settle();
+
+    app.stdin.write('\x02');
+    await settle();
+    expect(connection.left).toEqual(['R1']);
+    expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.\s+In conversation/);
+    expect(app.lastFrame()).not.toContain('Which identity provider');
+
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.conversed).toEqual(['R1', 'R1']);
+    expect(app.lastFrame()).not.toContain('Which identity provider');
   });
 });

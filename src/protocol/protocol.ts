@@ -3,10 +3,11 @@
 // version; the client answers with the token from the operator's app-data
 // directory, and only then may it subscribe or send commands.
 import type { Socket } from 'node:net';
+import type { ConversationEvent } from '../executor/executor.ts';
 import type { OperatorCommand } from '../lifecycle/lifecycle.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
@@ -17,7 +18,10 @@ export type RepoCommand =
   | { type: 'inspectClone'; path: string };
 
 export type CloneView = { repo: string; path: string };
-export type Command = OperatorCommand | DaemonCommand | RepoCommand;
+// Launches a HITL task from the launch card: one stage, a conversation in a
+// new worktree. Replies with `{ taskId }`.
+export type LaunchCommand = { type: 'launchTask'; repo: string; prompt: string };
+export type Command = OperatorCommand | DaemonCommand | RepoCommand | LaunchCommand;
 
 export type DaemonStatus = {
   pid: number;
@@ -34,6 +38,10 @@ export type Reply = { ok: true; value?: unknown } | { ok: false; reason: string 
 export type ClientMessage =
   | { type: 'auth'; token: string }
   | { type: 'subscribe' }
+  // The per-run conversation subscription: the history replayed from the
+  // Claude session file, then live events, until the client leaves.
+  | { type: 'converse'; runId: string }
+  | { type: 'leaveConversation'; runId: string }
   | { type: 'command'; id: number; command: Command };
 
 export type DaemonMessage =
@@ -42,6 +50,7 @@ export type DaemonMessage =
   | { type: 'refused'; reason: string }
   | { type: 'snapshot'; state: FactoryState }
   | { type: 'patch'; ops: PatchOp[] }
+  | { type: 'conversation'; runId: string; event: ConversationEvent }
   | ({ type: 'reply'; id: number } & Reply);
 
 export function send(socket: Socket, message: ClientMessage | DaemonMessage): void {

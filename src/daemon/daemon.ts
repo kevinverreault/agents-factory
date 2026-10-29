@@ -1,13 +1,23 @@
 // The daemon core (ADR 0002): one per OS user, owning the store and every run.
 // Clients reach it only through the protocol, and every command goes through
 // the Lifecycle reducer.
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname } from 'node:path';
-import type { Executor } from '../executor/executor.ts';
+import type { ConversationEvent, Executor } from '../executor/executor.ts';
 import type { Git } from '../git/git.ts';
-import { initialLifecycle, reduce, type Lifecycle, type LifecycleAction, type Repository } from '../lifecycle/lifecycle.ts';
+import {
+  guard,
+  initialLifecycle,
+  liveRun,
+  nextTaskId,
+  reduce,
+  type Lifecycle,
+  type LifecycleAction,
+  type Repository,
+  type TaskLaunched,
+} from '../lifecycle/lifecycle.ts';
 import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
 import {
   PROTOCOL_VERSION,
@@ -17,11 +27,13 @@ import {
   type CloneView,
   type Command,
   type DaemonStatus,
+  type LaunchCommand,
   type RepoCommand,
   type Reply,
 } from '../protocol/protocol.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
 import type { Store } from '../store/store.ts';
+import { cutWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
 import type { Clock } from './clock.ts';
 
 export type DaemonOptions = {
@@ -31,6 +43,7 @@ export type DaemonOptions = {
   clock: Clock;
   executor: Executor;
   git: Git;
+  worktreeRoot: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
 };
@@ -62,6 +75,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const startedAt = clock.now();
   const sockets = new Set<Socket>();
   const subscribers = new Set<Socket>();
+  // Each run's conversation subscribers, each with its replay while the
+  // history is being read (live events wait), or null once it is live.
+  const conversations = new Map<string, Map<Socket, object | null>>();
+  // What each live run streamed since this daemon started it: the CLI writes
+  // the session file a moment after it streams.
+  const streamed = new Map<string, ConversationEvent[]>();
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolve) => (resolveStopped = resolve));
   let stopping: Promise<void> | null = null;
@@ -78,6 +97,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     socket.on('close', () => {
       sockets.delete(socket);
       subscribers.delete(socket);
+      for (const watchers of conversations.values()) watchers.delete(socket);
     });
     socket.on('error', () => {});
     let authenticated = false;
@@ -97,6 +117,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         case 'subscribe':
           subscribers.add(socket);
           send(socket, { type: 'snapshot', state: published });
+          break;
+        case 'converse':
+          void converse(socket, message.runId);
+          break;
+        case 'leaveConversation':
+          conversations.get(message.runId)?.delete(socket);
           break;
         case 'command': {
           const { id, command } = message;
@@ -122,6 +148,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return { ok: true };
       case 'registerRepo':
         return registerRepo(command);
+      case 'launchTask':
+        return launch(command);
       case 'inspectClone': {
         const clone = await readClone(git, command.path);
         if ('refusal' in clone) return { ok: false, reason: clone.refusal };
@@ -154,6 +182,67 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       defaultPreset: defaultPreset ?? DEFAULT_PRESET,
     });
     return reply.ok ? { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) } : reply;
+  }
+
+  // Cuts the task's worktree, then opens its conversation there (ADR 0010).
+  // The Lifecycle waits meanwhile: the task id is in the branch name.
+  function launch({ repo, prompt }: LaunchCommand): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const taskId = nextTaskId(lifecycle);
+      const title = titleFrom(prompt);
+      const repository = lifecycle.repositories[repo];
+      const action: TaskLaunched = {
+        type: 'taskLaunched',
+        repo,
+        title,
+        prompt,
+        worktree: repository ? taskWorktree(options.worktreeRoot, repository, taskId, title) : { branch: '', path: '' },
+        sessionId: randomUUID(),
+      };
+      // Refused before git is touched; an unregistered repository has no worktree.
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      const missing = await whyMissing(git, repository!);
+      if (missing) {
+        await settle({ type: 'repoMissing', repo, reason: missing }, new Set());
+        return { ok: false, reason: guard(lifecycle, action)! };
+      }
+      const uncut = await cutWorktree(git, repository!, action.worktree);
+      if (uncut) return { ok: false, reason: uncut };
+      const refusal = await settle(action, new Set([repo]));
+      return refusal ? { ok: false, reason: refusal } : { ok: true, value: { taskId } };
+    });
+  }
+
+  // Replays the run's conversation from the Claude session file, then what
+  // the run streamed that the file doesn't hold yet, then streams it live.
+  async function converse(socket: Socket, runId: string): Promise<void> {
+    const run = lifecycle.runs[runId];
+    const task = run && lifecycle.tasks[run.taskId];
+    if (!task) return;
+    let watchers = conversations.get(runId);
+    if (!watchers) conversations.set(runId, (watchers = new Map()));
+    const replay = {};
+    watchers.set(socket, replay);
+    // Taken now, so a run that ends during the read still has it.
+    const live = streamed.get(runId) ?? [];
+    const history =
+      task.sessionId && task.worktree ? await executor.history({ sessionId: task.sessionId, cwd: task.worktree.path }) : [];
+    // The client left, or asked again, while the file was read.
+    if (watchers.get(socket) !== replay) return;
+    const replayed = new Set(history.map((event) => event.id));
+    for (const event of [...history, ...live.filter((event) => !replayed.has(event.id))]) {
+      send(socket, { type: 'conversation', runId, event });
+    }
+    watchers.set(socket, null);
+  }
+
+  function broadcast(runId: string, event: ConversationEvent): void {
+    streamed.get(runId)?.push(event);
+    for (const [socket, replay] of conversations.get(runId) ?? []) {
+      if (!replay) send(socket, { type: 'conversation', runId, event });
+    }
   }
 
   function status(): DaemonStatus {
@@ -259,13 +348,31 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const was = before.runs[run.id];
       if (!was && run.status === 'active') {
         const task = lifecycle.tasks[run.taskId]!;
+        streamed.set(run.id, []);
         executor.start(
-          { runId: run.id, taskId: task.id, mode: run.mode, autonomy: run.autonomy, sessionId: task.sessionId!, resumesSession: run.resumesSession },
-          (event) => void dispatch(event),
+          {
+            runId: run.id,
+            taskId: task.id,
+            mode: run.mode,
+            autonomy: run.autonomy,
+            sessionId: task.sessionId!,
+            resumesSession: run.resumesSession,
+            cwd: task.worktree?.path ?? null,
+            firstMessage: run.resumesSession ? null : task.goal,
+            model: run.model,
+            // The scheduler's choice (ADR 0001): L2's profile comes with the sandbox.
+            credential: 'subscription-host',
+          },
+          { report: (event) => void dispatch(event), converse: (event) => broadcast(run.id, event) },
         );
-      } else if (was && was.status !== 'ended' && run.status === 'ended' && !('runId' in action && action.runId === run.id)) {
-        executor.stop(run.id);
+      } else if (was && was.status !== 'ended' && run.status === 'ended') {
+        streamed.delete(run.id);
+        if (!('runId' in action && action.runId === run.id)) executor.stop(run.id);
       }
+    }
+    if (action.type === 'sendMessage') {
+      const run = liveRun(lifecycle, lifecycle.tasks[action.taskId]!)!;
+      executor.send(run.id, action.text);
     }
   }
 

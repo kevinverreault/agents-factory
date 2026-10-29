@@ -1,10 +1,12 @@
 // The client half of the protocol, used by the TUI and the CLI.
 import { readFile } from 'node:fs/promises';
 import { connect as connectSocket, type Socket } from 'node:net';
+import type { ConversationEvent } from '../executor/executor.ts';
 import { applyPatch, type FactoryState, type PatchOp } from './factory-state.ts';
 import { readMessages, send, type Command, type DaemonMessage, type Reply } from './protocol.ts';
 
 export type StateListener = (state: FactoryState, patch: PatchOp[] | null) => void;
+export type ConversationListener = (event: ConversationEvent) => void;
 
 // What a TUI needs from the daemon. The TUI is tested against an in-memory
 // fake of this interface (Seam 2).
@@ -14,6 +16,8 @@ export interface FactoryConnection {
   send(command: Command): Promise<Reply>;
   // Gets the snapshot, then the state after each patch (with that patch).
   subscribe(listener: StateListener): () => void;
+  // Gets the run's conversation so far, then each live event.
+  converse(runId: string, listener: ConversationListener): () => void;
   onClose(listener: () => void): void;
   close(): void;
 }
@@ -68,6 +72,7 @@ class Connection implements FactoryConnection {
   private nextId = 1;
   private readonly pending = new Map<number, (reply: Reply) => void>();
   private readonly listeners = new Set<StateListener>();
+  private readonly conversations = new Map<string, Set<ConversationListener>>();
   private state: FactoryState | null = null;
   private subscribed = false;
   private readonly socket: Socket;
@@ -99,6 +104,9 @@ class Connection implements FactoryConnection {
         this.state = applyPatch(this.state, message.ops);
         for (const listener of this.listeners) listener(this.state, message.ops);
         break;
+      case 'conversation':
+        for (const listener of this.conversations.get(message.runId) ?? []) listener(message.event);
+        break;
     }
   }
 
@@ -119,6 +127,21 @@ class Connection implements FactoryConnection {
       send(this.socket, { type: 'subscribe' });
     }
     return () => void this.listeners.delete(listener);
+  }
+
+  converse(runId: string, listener: ConversationListener): () => void {
+    let listeners = this.conversations.get(runId);
+    if (!listeners) {
+      this.conversations.set(runId, (listeners = new Set()));
+      send(this.socket, { type: 'converse', runId });
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size || this.conversations.get(runId) !== listeners) return;
+      this.conversations.delete(runId);
+      send(this.socket, { type: 'leaveConversation', runId });
+    };
   }
 
   onClose(listener: () => void): void {

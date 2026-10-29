@@ -16,6 +16,14 @@ describeGitContract('the fake git', async () => {
     async move(from, to) {
       git.moveClone(from, to);
     },
+    async cloneWithOrigin(name, branch) {
+      const path = join(root, name);
+      git.addClone(path, { originUrl: `https://github.com/acme/${name}.git`, defaultBranch: branch });
+      return path;
+    },
+    async advanceOrigin(clonePath, branch) {
+      return git.advanceOrigin(clonePath, branch);
+    },
     async dispose() {},
   };
 });

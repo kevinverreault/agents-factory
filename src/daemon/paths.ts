@@ -10,6 +10,8 @@ export type FactoryPaths = {
   pipePath: string;
   tokenPath: string;
   storePath: string;
+  // The one global root every task worktree hangs under (ADR 0010).
+  worktreeRoot: string;
 };
 
 export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths {
@@ -19,6 +21,8 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     pipePath: pipePathFor(home),
     tokenPath: join(home, 'daemon.token'),
     storePath: join(home, 'factory.sqlite'),
+    // Kept short by default: Windows path limits bite deep in worktrees.
+    worktreeRoot: env.AGENTS_FACTORY_HOME ? join(home, 'worktrees') : join(homedir(), '.agent-factory', 'worktrees'),
   };
 }
 

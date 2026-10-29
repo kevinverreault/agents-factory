@@ -1,12 +1,17 @@
 // Seam 2 harness: an in-memory protocol client that serves scripted snapshots,
-// patches and replies, and records the commands the TUI sends.
-import type { FactoryConnection, StateListener } from '../protocol/client.ts';
+// patches, conversation events and replies, and records the commands the TUI
+// sends and the conversations it opens and leaves.
+import type { ConversationEvent } from '../executor/executor.ts';
+import type { ConversationListener, FactoryConnection, StateListener } from '../protocol/client.ts';
 import { applyPatch, type FactoryState, type PatchOp } from '../protocol/factory-state.ts';
 import type { Command, Reply } from '../protocol/protocol.ts';
 
 export class FakeConnection implements FactoryConnection {
-  readonly protocolVersion = 2;
+  readonly protocolVersion = 3;
   readonly sent: Command[] = [];
+  readonly conversed: string[] = [];
+  readonly left: string[] = [];
+  private readonly conversations = new Map<string, Set<ConversationListener>>();
   private state: FactoryState | null = null;
   private readonly listeners = new Set<StateListener>();
   private readonly closeListeners = new Set<() => void>();
@@ -27,6 +32,20 @@ export class FakeConnection implements FactoryConnection {
     this.listeners.add(listener);
     if (this.state) listener(this.state, null);
     return () => void this.listeners.delete(listener);
+  }
+
+  converse(runId: string, listener: ConversationListener): () => void {
+    this.conversed.push(runId);
+    const listeners = this.conversations.get(runId) ?? new Set();
+    this.conversations.set(runId, listeners.add(listener));
+    return () => {
+      listeners.delete(listener);
+      this.left.push(runId);
+    };
+  }
+
+  serveConversation(runId: string, ...events: ConversationEvent[]): void {
+    for (const event of events) for (const listener of this.conversations.get(runId) ?? []) listener(event);
   }
 
   onClose(listener: () => void): void {

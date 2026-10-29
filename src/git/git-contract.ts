@@ -12,20 +12,26 @@ export type CloneFixture = {
   // returns its path.
   clone(name: string, setup: { originUrl?: string; defaultBranch?: string }): Promise<string>;
   move(from: string, to: string): Promise<void>;
+  // Makes a clone at `<root>/<name>` whose origin is reachable and has
+  // `branch`, and returns its path.
+  cloneWithOrigin(name: string, branch: string): Promise<string>;
+  // Adds a commit to `branch` on the clone's origin, not yet fetched, and
+  // returns its hash.
+  advanceOrigin(clonePath: string, branch: string): Promise<string>;
   dispose(): Promise<void>;
 };
 
 export function describeGitContract(name: string, makeFixture: () => Promise<CloneFixture>): void {
-  describe(`${name}: reading a clone`, () => {
-    async function withFixture(body: (fixture: CloneFixture) => Promise<void>): Promise<void> {
-      const fixture = await makeFixture();
-      try {
-        await body(fixture);
-      } finally {
-        await fixture.dispose();
-      }
+  async function withFixture(body: (fixture: CloneFixture) => Promise<void>): Promise<void> {
+    const fixture = await makeFixture();
+    try {
+      await body(fixture);
+    } finally {
+      await fixture.dispose();
     }
+  }
 
+  describe(`${name}: reading a clone`, () => {
     test('a clone is read the same from its top level and from a directory inside it', () =>
       withFixture(async ({ git, clone }) => {
         const path = await clone('widgets', { originUrl: 'https://github.com/acme/widgets.git', defaultBranch: 'trunk' });
@@ -59,6 +65,34 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
 
         expect(await git.inspectClone(before)).toBeNull();
         expect(await git.inspectClone(after)).toEqual({ path: after, originUrl: 'https://github.com/acme/widgets.git', defaultBranch: 'main' });
+      }));
+  });
+
+  describe(`${name}: task worktrees`, () => {
+    test('a task branch is cut from origin’s freshly fetched tip into a new worktree', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, advanceOrigin }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const tip = await advanceOrigin(clone, 'main');
+        const path = join(root, 'worktrees', 'acme-widgets', 'T1');
+        expect(await git.worktrees(clone)).toEqual([]);
+
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-grill-me', startPoint: 'origin/main' });
+
+        expect(await git.worktrees(clone)).toEqual([{ path, branch: 'factory/T1-grill-me', head: tip }]);
+      }));
+
+    test('fetching a branch origin doesn’t have fails, and so does cutting a branch that already exists', () =>
+      withFixture(async ({ git, root, cloneWithOrigin }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path: join(root, 'wt', 'T1'), branch: 'factory/T1-a', startPoint: 'origin/main' });
+
+        await expect(git.fetch(clone, 'nowhere')).rejects.toThrow();
+        await expect(
+          git.addWorktree(clone, { path: join(root, 'wt', 'T2'), branch: 'factory/T1-a', startPoint: 'origin/main' }),
+        ).rejects.toThrow();
+        expect((await git.worktrees(clone)).map((worktree) => worktree.branch)).toEqual(['factory/T1-a']);
       }));
   });
 }

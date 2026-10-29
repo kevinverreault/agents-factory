@@ -1,5 +1,5 @@
 // The daemon's entry point, started detached by the TUI (or by hand).
-import { noExecutor } from '../executor/executor.ts';
+import { agentSdkExecutor } from '../executor/agent-sdk.ts';
 import { gitCli } from '../git/git.ts';
 import { openStore } from '../store/store.ts';
 import { systemClock } from './clock.ts';
@@ -9,7 +9,7 @@ import { factoryPaths } from './paths.ts';
 const paths = factoryPaths();
 const store = openStore(paths.storePath);
 try {
-  const daemon = await startDaemon({ ...paths, store, clock: systemClock, executor: noExecutor, git: gitCli });
+  const daemon = await startDaemon({ ...paths, store, clock: systemClock, executor: agentSdkExecutor(), git: gitCli });
   await daemon.stopped;
 } catch (error) {
   store.close();

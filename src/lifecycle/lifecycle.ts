@@ -3,6 +3,7 @@
 // through `reduce`. Ported from the task-lifecycle prototype, amended by
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
 // Child tasks, stages and parking arrive with their own slices.
+import { DEFAULT_TIER, route, type Tier } from '../models/routing.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -38,6 +39,9 @@ export type AttentionKind =
   | 'recovery-report';
 export type AttentionStatus = 'open' | 'answered' | 'superseded' | 'closed';
 
+// A root task's task branch and the worktree it is checked out in (ADR 0010).
+export type TaskWorktree = { branch: string; path: string };
+
 export type Task = {
   id: string;
   title: string;
@@ -46,6 +50,11 @@ export type Task = {
   mode: Mode;
   autonomy: AutonomyLevel | null;
   groups: string[];
+  // What the operator launched the task with: its first run's first message.
+  goal: string | null;
+  tier: Tier;
+  // The task branch and its worktree, cut at launch.
+  worktree: TaskWorktree | null;
   sessionId: string | null;
   runIds: string[];
   state: TaskState;
@@ -61,6 +70,11 @@ export type Run = {
   outcome: RunOutcome | null;
   interruption: Interruption | null;
   resumesSession: boolean;
+  // The exact model: routed from the task's tier at start, then the one the
+  // CLI reports it runs.
+  model: string;
+  // The CLI process the daemon spawned for the run, once it is up (ADR 0003).
+  cli: { pid: number; createdAt: number } | null;
   startedAt: number;
   endedAt: number | null;
 };
@@ -107,6 +121,7 @@ export type OperatorCommand =
   | { type: 'createTask'; title: string; repo: string; mode: Mode; autonomy?: AutonomyLevel; groups?: string[]; submit?: boolean }
   | { type: 'submit'; taskId: string }
   | { type: 'open'; taskId: string }
+  | { type: 'sendMessage'; taskId: string; text: string }
   | { type: 'handoff'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'takeOver'; taskId: string }
   | { type: 'answer'; taskId: string }
@@ -119,6 +134,7 @@ export type OperatorCommand =
 // What the executor reports about a run.
 export type RunEvent =
   | { type: 'runCompleted'; runId: string }
+  | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
   | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string };
 
@@ -128,7 +144,18 @@ export type RepoEvent =
   | { type: 'repoMissing'; repo: string; reason: string }
   | { type: 'repoFound'; repo: string };
 
-export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent;
+// A task the daemon launched once its worktree was cut. The daemon names the
+// session, so the Claude session file can be found by it.
+export type TaskLaunched = {
+  type: 'taskLaunched';
+  repo: string;
+  title: string;
+  prompt: string;
+  worktree: TaskWorktree;
+  sessionId: string;
+};
+
+export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
@@ -143,6 +170,11 @@ export function initialLifecycle(): Lifecycle {
     requests: {},
     slotCap: DEFAULT_SLOT_CAP,
   };
+}
+
+// The id the next task created will get.
+export function nextTaskId(state: Lifecycle): string {
+  return `T${state.counters.task + 1}`;
 }
 
 // ---- Selectors ----
@@ -255,6 +287,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   switch (action.type) {
     case 'createTask':
       return action.title.trim() ? null : 'A task needs a title.';
+    case 'taskLaunched':
+      if (!action.prompt.trim()) return 'A task needs a prompt.';
+      return state.repositories[action.repo]!.missing ? `${action.repo} is missing, so its runs can’t start.` : null;
     case 'removeRepo': {
       const unfinished = Object.values(state.tasks).filter((task) => task.repo === action.repo && !isTerminal(task));
       return unfinished.length
@@ -267,6 +302,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (task.mode !== 'HITL') return `${task.id} is AFK. Take it over to talk to it.`;
       if (task.state !== 'draft' && task.state !== 'queued') return `${task.id} isn't ready for a conversation (it is ${label(task)}).`;
       return cantStartRuns(state, task);
+    case 'sendMessage':
+      if (!action.text.trim()) return 'A message needs text.';
+      return task.mode === 'HITL' && liveRun(state, task)?.status === 'active' ? null : `${task.id} has no live conversation.`;
     case 'handoff':
       return task.mode === 'HITL' && task.state === 'running'
         ? null
@@ -284,6 +322,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';
+    case 'runStarted':
     case 'runCompleted':
     case 'runFailed':
       return null;
@@ -318,7 +357,9 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     status: 'active',
     outcome: null,
     interruption: null,
-    resumesSession: task.sessionId !== null,
+    resumesSession: task.runIds.length > 0,
+    model: route(task.tier).model,
+    cli: null,
     startedAt: at,
     endedAt: null,
   };
@@ -376,6 +417,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         mode: action.mode,
         autonomy: action.mode === 'AFK' ? (action.autonomy ?? 'L1') : null,
         groups: [...(action.groups ?? [])],
+        goal: null,
+        tier: DEFAULT_TIER,
+        worktree: null,
         sessionId: null,
         runIds: [],
         state: action.submit ? 'queued' : 'draft',
@@ -384,11 +428,35 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       state.tasks[created.id] = created;
       break;
     }
+    case 'taskLaunched': {
+      // One HITL stage: the conversation opens at once.
+      const launched: Task = {
+        id: nextId(state, 'task'),
+        title: action.title,
+        repo: action.repo,
+        mode: 'HITL',
+        autonomy: null,
+        groups: [],
+        goal: action.prompt,
+        tier: DEFAULT_TIER,
+        worktree: { ...action.worktree },
+        sessionId: action.sessionId,
+        runIds: [],
+        state: 'queued',
+        createdAt: at,
+      };
+      state.tasks[launched.id] = launched;
+      startRun(state, launched, at);
+      break;
+    }
     case 'submit':
       task.state = 'queued';
       break;
     case 'open':
       startRun(state, task, at);
+      break;
+    case 'sendMessage':
+      // The executor delivers it; the Lifecycle doesn't change.
       break;
     case 'handoff':
       endRun(run!, 'handed off', at);
@@ -426,6 +494,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'setSlotCap':
       state.slotCap = action.cap;
+      break;
+    case 'runStarted':
+      run!.cli = { pid: action.pid, createdAt: action.createdAt };
+      run!.model = action.model;
       break;
     case 'runCompleted':
       // With no stages yet, a task's run completing is its last stage.
