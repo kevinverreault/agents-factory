@@ -7,6 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
+    "start": "node src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:contract": "vitest run --config vitest.contract.config.ts",
@@ -27,5 +28,8 @@
     "ink-testing-library": "4.0.0",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
+  },
+  "bin": {
+    "agents-factory": "src/cli.ts"
   }
 }

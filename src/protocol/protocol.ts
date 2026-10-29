@@ -1,0 +1,65 @@
+// The daemon ↔ client protocol (ADR 0002): newline-delimited JSON over a named
+// pipe (Windows) or a Unix socket. The daemon speaks first with its protocol
+// version; the client answers with the token from the operator's app-data
+// directory, and only then may it subscribe or send commands.
+import type { Socket } from 'node:net';
+import type { OperatorCommand } from '../lifecycle/lifecycle.ts';
+import type { FactoryState, PatchOp } from './factory-state.ts';
+
+export const PROTOCOL_VERSION = 1;
+
+export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
+export type Command = OperatorCommand | DaemonCommand;
+
+export type DaemonStatus = {
+  pid: number;
+  protocolVersion: number;
+  startedAt: number;
+  attachedTuis: number;
+  activeRuns: number;
+  suspendedRuns: number;
+  queuedTasks: number;
+};
+
+export type Reply = { ok: true; value?: unknown } | { ok: false; reason: string };
+
+export type ClientMessage =
+  | { type: 'auth'; token: string }
+  | { type: 'subscribe' }
+  | { type: 'command'; id: number; command: Command };
+
+export type DaemonMessage =
+  | { type: 'hello'; protocolVersion: number }
+  | { type: 'welcome' }
+  | { type: 'refused'; reason: string }
+  | { type: 'snapshot'; state: FactoryState }
+  | { type: 'patch'; ops: PatchOp[] }
+  | ({ type: 'reply'; id: number } & Reply);
+
+export function send(socket: Socket, message: ClientMessage | DaemonMessage): void {
+  if (!socket.destroyed) socket.write(JSON.stringify(message) + '\n');
+}
+
+// Calls `onMessage` with each complete line received, parsed. A line that
+// isn't JSON ends the connection.
+export function readMessages<T>(socket: Socket, onMessage: (message: T) => void): void {
+  let buffered = '';
+  socket.setEncoding('utf8');
+  socket.on('data', (chunk: string) => {
+    buffered += chunk;
+    let newline: number;
+    while ((newline = buffered.indexOf('\n')) >= 0) {
+      const line = buffered.slice(0, newline);
+      buffered = buffered.slice(newline + 1);
+      if (!line.trim()) continue;
+      let message: T;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        socket.destroy();
+        return;
+      }
+      onMessage(message);
+    }
+  });
+}

@@ -1,0 +1,97 @@
+// The factory-state subscription's view: what every attached TUI sees. A
+// subscriber gets one snapshot, then patches that turn its copy into the
+// daemon's current state.
+import {
+  activeAfkRuns,
+  attentionQueue,
+  label,
+  liveRun,
+  type AutonomyLevel,
+  type Lifecycle,
+  type Mode,
+  type AttentionQueueItem,
+  type Run,
+  type TaskState,
+} from '../lifecycle/lifecycle.ts';
+
+export type TaskView = {
+  id: string;
+  title: string;
+  mode: Mode;
+  autonomy: AutonomyLevel | null;
+  groups: string[];
+  state: TaskState;
+  label: string;
+  liveRunId: string | null;
+};
+
+export type RunView = Pick<Run, 'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'startedAt' | 'endedAt'>;
+
+export type FactoryState = {
+  tasks: Record<string, TaskView>;
+  runs: Record<string, RunView>;
+  attentionQueue: AttentionQueueItem[];
+  slots: { active: number; cap: number };
+};
+
+export function toFactoryState(lifecycle: Lifecycle): FactoryState {
+  const tasks: Record<string, TaskView> = {};
+  for (const task of Object.values(lifecycle.tasks)) {
+    tasks[task.id] = {
+      id: task.id,
+      title: task.title,
+      mode: task.mode,
+      autonomy: task.autonomy,
+      groups: task.groups,
+      state: task.state,
+      label: label(task),
+      liveRunId: liveRun(lifecycle, task)?.id ?? null,
+    };
+  }
+  const runs: Record<string, RunView> = {};
+  for (const { id, taskId, mode, autonomy, status, outcome, startedAt, endedAt } of Object.values(lifecycle.runs)) {
+    runs[id] = { id, taskId, mode, autonomy, status, outcome, startedAt, endedAt };
+  }
+  return {
+    tasks,
+    runs,
+    attentionQueue: attentionQueue(lifecycle),
+    slots: { active: activeAfkRuns(lifecycle), cap: lifecycle.slotCap },
+  };
+}
+
+// A patch sets or deletes the value at a path. The diff goes two levels deep
+// (a collection, then one entity in it); anything deeper is replaced whole.
+export type PatchOp = { op: 'set'; path: string[]; value: unknown } | { op: 'delete'; path: string[] };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+function diffAt(path: string[], before: unknown, after: unknown, depth: number, ops: PatchOp[]): void {
+  if (same(before, after)) return;
+  if (depth === 0 || !isRecord(before) || !isRecord(after)) {
+    ops.push({ op: 'set', path, value: after });
+    return;
+  }
+  for (const key of Object.keys(before)) if (!(key in after)) ops.push({ op: 'delete', path: [...path, key] });
+  for (const key of Object.keys(after)) diffAt([...path, key], before[key], after[key], depth - 1, ops);
+}
+
+export function diffFactoryState(before: FactoryState, after: FactoryState): PatchOp[] {
+  const ops: PatchOp[] = [];
+  diffAt([], before, after, 2, ops);
+  return ops;
+}
+
+export function applyPatch(state: FactoryState, ops: PatchOp[]): FactoryState {
+  const next = structuredClone(state) as unknown as Record<string, unknown>;
+  for (const op of ops) {
+    const parent = op.path.slice(0, -1).reduce((node, key) => node[key] as Record<string, unknown>, next);
+    const key = op.path.at(-1)!;
+    if (op.op === 'set') parent[key] = structuredClone(op.value);
+    else delete parent[key];
+  }
+  return next as unknown as FactoryState;
+}

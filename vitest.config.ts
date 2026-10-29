@@ -7,7 +7,5 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.{ts,tsx}'],
     exclude: ['src/**/*.contract.test.{ts,tsx}'],
-    // No production slice has default-run tests yet.
-    passWithNoTests: true,
   },
 });
