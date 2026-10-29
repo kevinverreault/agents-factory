@@ -11,7 +11,7 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | Assumption | Result | Proof |
 |---|---|---|
 | SDK streaming input, tool calls, `interrupt()` | Holds. No `claude -p` fallback needed | `src/executor/agent-sdk.contract.test.ts` |
-| Detached daemon survives its terminal window closing | Holds for a console window. **Windows Terminal: operator step pending** | `src/daemon/spawn-detached.contract.test.ts` |
+| Detached daemon survives its terminal window closing | Holds, for a console window and for Windows Terminal | `src/daemon/spawn-detached.contract.test.ts` |
 | Kill-on-close job helper with nested jobs | Holds. Keep the helper | `src/os/job-object.contract.test.ts` |
 | Keep-awake helper holds an idle-sleep block | Holds | `src/os/keep-awake.contract.test.ts` |
 | Factory plugin loads, `/factory:<skill> args`, cross-skill calls | Holds. No `.claude/skills/` fallback needed | `src/skills/plugin.contract.test.ts` |
@@ -37,13 +37,9 @@ For the autonomy gate (later tickets):
 `spawnDetached` (`src/daemon/spawn-detached.ts`) starts the daemon with `detached: true`, `windowsHide: true`, `stdio: 'ignore'` and `unref()`.
 
 - **Console window: holds.** A TUI stand-in in a classic console window auto-starts the daemon stand-in, then the window is closed with `WM_CLOSE` (what its close button sends). The TUI dies, and the daemon lives on. With `detached: false` the same test fails, because the daemon dies with the window (checked by hand once, not kept as a test).
-- **Windows Terminal: pending.** A command started from an agent session can't drive a Windows Terminal window: the session's processes don't see the desktop's windows, and commands passed to `wt.exe` never ran. The operator's check:
+- **Windows Terminal: holds.** The operator checked this by hand on 2026-10-29, because a command started from an agent session can't drive a Windows Terminal window: the session's processes don't see the desktop's windows, and commands passed to `wt.exe` never ran. They ran `npm run probe:terminal-close` in Windows Terminal 1.24 and closed that window with its close button. `npm run test:contract -- src/daemon` then passed both tests: the TUI stand-in was gone, and the daemon stand-in was still alive.
 
-  ```bash
-  npm run probe:terminal-close
-  ```
-
-  Run it in a Windows Terminal window and close that window with its close button when told. Then, in a new terminal, run `npm run test:contract -- src/daemon`. The skipped test then runs and checks that the daemon stand-in outlived the window. Record the result here.
+  To re-check, run the same two commands. The Windows Terminal test is skipped unless the probe has just been run, and it removes the probe's record and the daemon stand-in when it finishes.
 
 ## Kill-on-close job helper (ADR 0003)
 
