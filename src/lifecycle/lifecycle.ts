@@ -2,7 +2,8 @@
 // reducer with guards and selectors. Every operator command and every run event goes
 // through `reduce`. Ported from the task-lifecycle prototype, amended by
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
-// Child tasks, stages and parking arrive with their own slices.
+// Child tasks, stages and parking on a request's timeout arrive with their
+// own slices.
 import { DEFAULT_TIER, route, type Tier } from '../models/routing.ts';
 
 export type Mode = 'HITL' | 'AFK';
@@ -75,6 +76,9 @@ export type Run = {
   model: string;
   // The CLI process the daemon spawned for the run, once it is up (ADR 0003).
   cli: { pid: number; createdAt: number } | null;
+  // When the run is parked if it is still waiting on the operator then: a
+  // wall-clock deadline, persisted with the run (ADR 0003).
+  parksAt: number | null;
   startedAt: number;
   endedAt: number | null;
 };
@@ -136,6 +140,8 @@ export type RunEvent =
   | { type: 'runCompleted'; runId: string }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
+  // The agent's turn is over; in a HITL run the operator's begins.
+  | { type: 'turnEnded'; runId: string }
   | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string };
 
 // What the daemon learns about the operator's clones.
@@ -155,11 +161,16 @@ export type TaskLaunched = {
   sessionId: string;
 };
 
-export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched;
+// The daemon's clock found deadlines that have passed (ADR 0003).
+export type ClockEvent = { type: 'deadlinesDue' };
+
+export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched | ClockEvent;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
 export const DEFAULT_SLOT_CAP = 2;
+// How long a HITL run may wait on the operator's turn before it is parked.
+export const IDLE_PARK_MS = 30 * 60_000;
 
 export function initialLifecycle(): Lifecycle {
   return {
@@ -194,6 +205,11 @@ export function openRequest(state: Lifecycle, task: Task): AttentionRequest | un
 // The open request about the repository itself, if any.
 export function openRepoRequest(state: Lifecycle, repo: string): AttentionRequest | undefined {
   return Object.values(state.requests).find((request) => request.repo === repo && request.taskId === null && request.status === 'open');
+}
+
+// The live runs whose park deadline has passed at `at`.
+export function overdueRuns(state: Lifecycle, at: number): Run[] {
+  return Object.values(state.runs).filter((run) => run.status !== 'ended' && run.parksAt !== null && run.parksAt <= at);
 }
 
 export function activeAfkRuns(state: Lifecycle): number {
@@ -325,6 +341,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'runStarted':
     case 'runCompleted':
     case 'runFailed':
+    case 'turnEnded':
       return null;
     case 'attentionRaised':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
@@ -334,6 +351,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'repoMissing':
     case 'repoFound':
+    case 'deadlinesDue':
       return null;
   }
 }
@@ -360,6 +378,7 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     resumesSession: task.runIds.length > 0,
     model: route(task.tier).model,
     cli: null,
+    parksAt: null,
     startedAt: at,
     endedAt: null,
   };
@@ -372,7 +391,15 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
 function endRun(run: Run, outcome: RunOutcome, at: number): void {
   run.status = 'ended';
   run.outcome = outcome;
+  run.parksAt = null;
   run.endedAt = at;
+}
+
+// Ends a run that waited on the operator too long. Reopening the task starts
+// a new run that resumes the session.
+function park(task: Task, run: Run, at: number): void {
+  endRun(run, 'parked', at);
+  task.state = 'queued';
 }
 
 function raise(state: Lifecycle, task: Task, run: Run, kind: AttentionKind, holdsRun: boolean, reason: string | null, at: number): void {
@@ -456,7 +483,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       startRun(state, task, at);
       break;
     case 'sendMessage':
-      // The executor delivers it; the Lifecycle doesn't change.
+      // The executor delivers it. The operator is back, so the run won't park.
+      run!.parksAt = null;
       break;
     case 'handoff':
       endRun(run!, 'handed off', at);
@@ -504,6 +532,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       endRun(run!, 'completed', at);
       task.state = 'in-review';
       break;
+    case 'turnEnded':
+      if (run!.mode === 'HITL') run!.parksAt = at + IDLE_PARK_MS;
+      break;
     case 'runFailed':
       endRun(run!, 'failed', at);
       raise(state, task, run!, 'failure', false, action.reason, at);
@@ -547,6 +578,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'repoFound':
       state.repositories[action.repo]!.missing = false;
       closeRepoRequest(state, action.repo);
+      break;
+    case 'deadlinesDue':
+      for (const overdue of overdueRuns(state, at)) park(state.tasks[overdue.taskId]!, overdue, at);
       break;
   }
 }

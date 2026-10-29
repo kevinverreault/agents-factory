@@ -110,6 +110,9 @@ export function agentSdkExecutor(): Executor {
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
         } else if (message.type === 'assistant' && !message.parent_tool_use_id) {
           for (const event of eventsOf('assistant', message.uuid, message.message)) run.sink.converse(event);
+        } else if (message.type === 'result') {
+          // Every turn ends with a result; the run lives on, waiting for the operator.
+          report({ type: 'turnEnded', runId });
         }
       }
       report({ type: 'runCompleted', runId });

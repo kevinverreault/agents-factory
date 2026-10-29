@@ -31,4 +31,11 @@ export class FakeClock implements Clock {
     }
     this.time = until;
   }
+
+  // The machine sleeps for `ms`: wall time jumps, and no tick fires while
+  // asleep. Each timer resumes on wake with what was left of its interval.
+  sleep(ms: number): void {
+    this.time += ms;
+    for (const timer of this.timers) timer.due += ms;
+  }
 }

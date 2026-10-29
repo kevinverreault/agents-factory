@@ -30,11 +30,12 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
   };
   const startedAt = Date.now();
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
+  const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
 
   executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
-  await waitFor(() => agentSaid('PERIWINKLE-42'), 120_000);
+  await waitFor(() => agentSaid('PERIWINKLE-42') && turnsEnded() === 1, 120_000);
   executor.send('R1', 'Now reply with only the word PONG.');
-  await waitFor(() => agentSaid('PONG'), 120_000);
+  await waitFor(() => agentSaid('PONG') && turnsEnded() === 2, 120_000);
 
   const started = reported.find((event) => event.type === 'runStarted');
   expect(started).toMatchObject({ runId: 'R1', model: expect.stringMatching(/^claude-haiku-5-5/) });
@@ -49,8 +50,9 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     { type: 'message', from: 'operator', text: 'Now reply with only the word PONG.' },
     expect.objectContaining({ type: 'message', from: 'agent', text: expect.stringContaining('PONG') }),
   ]);
-  // A HITL run lives on between turns: only the operator ends it.
-  expect(reported.map((event) => event.type)).toEqual(['runStarted']);
+  // A HITL run lives on between turns, each ending with the operator's turn:
+  // only the operator ends it.
+  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
 
   // Live and replayed, an event has the same id, so a replay can skip what it
   // already sent. The CLI writes the session file a moment after it streams.
@@ -63,5 +65,5 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
 
   executor.stop('R1');
   await waitFor(() => !isAlive(pid), 15_000);
-  expect(reported.map((event) => event.type)).toEqual(['runStarted']);
+  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
 });
