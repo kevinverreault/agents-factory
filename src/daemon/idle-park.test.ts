@@ -94,6 +94,17 @@ describe('the HITL idle park', () => {
     const [first, resumed] = factory.executor.started;
     expect(resumed).toEqual({ ...first, runId: 'R2', resumesSession: true, firstMessage: null });
   });
+
+  test('a reopened run starts on the operator’s turn, so it parks again if the operator leaves it idle', async () => {
+    const { factory, operator, tui } = await waitingOnTheOperator();
+    factory.clock.advance(minutes(31));
+    await tui.until((state) => state.tasks.T1?.label === 'Ready for you');
+    await operator.send({ type: 'open', taskId: 'T1' });
+
+    factory.clock.advance(minutes(31));
+
+    expect((await tui.until((state) => state.runs.R2?.status === 'ended')).runs.R2).toMatchObject({ outcome: 'parked' });
+  });
 });
 
 describe('deadlines across a daemon restart', () => {

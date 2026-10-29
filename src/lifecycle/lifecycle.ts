@@ -367,6 +367,9 @@ function nextId(state: Lifecycle, kind: keyof Lifecycle['counters']): string {
 }
 
 function startRun(state: Lifecycle, task: Task, at: number): void {
+  const resumesSession = task.runIds.length > 0;
+  // A HITL run with no first message to send starts on the operator's turn.
+  const waitsOnOperator = task.mode === 'HITL' && (resumesSession || task.goal === null);
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -375,10 +378,10 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     status: 'active',
     outcome: null,
     interruption: null,
-    resumesSession: task.runIds.length > 0,
+    resumesSession,
     model: route(task.tier).model,
     cli: null,
-    parksAt: null,
+    parksAt: waitsOnOperator ? at + IDLE_PARK_MS : null,
     startedAt: at,
     endedAt: null,
   };
