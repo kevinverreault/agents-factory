@@ -107,6 +107,8 @@ describe('the HITL idle park', () => {
   });
 });
 
+// Until restart reconciliation parks every live HITL run (ADR 0002, #61),
+// the run stays live across a restart, and only its deadline parks it.
 describe('deadlines across a daemon restart', () => {
   test('a daemon restart keeps a pending deadline, which fires when it falls due', async () => {
     const { factory } = await waitingOnTheOperator();

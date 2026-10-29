@@ -76,8 +76,8 @@ export type Run = {
   model: string;
   // The CLI process the daemon spawned for the run, once it is up (ADR 0003).
   cli: { pid: number; createdAt: number } | null;
-  // When the run is parked if it is still waiting on the operator then: a
-  // wall-clock deadline, persisted with the run (ADR 0003).
+  // While the run waits on the operator, when it parks if they still haven't
+  // replied: a wall-clock deadline, persisted with the run (ADR 0003).
   parksAt: number | null;
   startedAt: number;
   endedAt: number | null;

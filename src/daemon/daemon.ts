@@ -285,9 +285,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   });
 
   // Deadlines are wall-clock times persisted in the store (ADR 0003), never
-  // in-memory timers. Overdue ones fire at start and at every tick: timers
-  // pause while the machine sleeps, so the first tick after a wake fires
-  // every deadline that passed meanwhile.
+  // in-memory timers, which a sleep may stretch. Overdue ones fire at start
+  // and at every tick, so the first tick after a wake fires every deadline
+  // that passed while the machine slept.
   function fireOverdueDeadlines(): void {
     if (overdueRuns(lifecycle, clock.now()).length) void dispatch({ type: 'deadlinesDue' });
   }
