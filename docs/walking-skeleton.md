@@ -17,7 +17,7 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | Factory plugin loads, `/factory:<skill> args`, cross-skill calls | Holds. No `.claude/skills/` fallback needed | `src/skills/plugin.contract.test.ts` |
 | `gh` re-reads a refreshed `hosts.yml` | Holds | `src/github/gh-config.contract.test.ts` |
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
-| Ink tells `ctrl+h` from Backspace | Not through `useInput` with legacy key bytes. **Terminal bytes: operator step pending** | `src/tui/keys.contract.test.tsx`, `npm run probe:keys` |
+| Ink tells `ctrl+h` from Backspace | No. Windows Terminal sends `08` for ctrl+h (and for ctrl+Backspace), `7f` for Backspace, and no kitty sequences. `/handoff` is the primary path | `src/tui/keys.contract.test.tsx`, `npm run probe:keys` |
 
 ## Agent SDK on Windows (SDK #359, #444)
 
@@ -101,16 +101,20 @@ Ink's half (Ink 8.0.0):
 - Kitty keyboard protocol sequences are parsed whenever they arrive: ctrl+h (`ESC [104;5u`) reads as `input: 'h', ctrl: true`, distinct from Backspace (`ESC [127u`). A terminal only sends them once asked, which is what `render(…, { kittyKeyboard: { mode: 'auto', flags: ['disambiguateEscapeCodes'] } })` does.
 - The raw sequence still differs below `useInput`, but Ink exposes it only through its untyped internal event emitter.
 
-Terminal half, **pending**: which bytes Windows Terminal 1.24 sends for Backspace, ctrl+h and ctrl+Backspace, and whether it answers the kitty protocol query. The operator's check:
+Terminal half, recorded by the operator on 2026-10-29 in Windows Terminal 1.24 with `npm run probe:keys` (and again with `-- --kitty`):
 
-```bash
-npm run probe:keys
-```
+| Key | Raw bytes | `useInput` |
+|---|---|---|
+| Backspace | `7f` | `backspace: true, ctrl: false` |
+| ctrl+h | `08` | `backspace: true, ctrl: false` |
+| ctrl+Backspace | `08` | `backspace: true, ctrl: false` |
 
-Press Backspace, ctrl+h and ctrl+Backspace and note the raw bytes. Then repeat with `npm run probe:keys -- --kitty`. Record the results here.
+The `--kitty` run gave the same bytes. Ink's `auto` mode didn't switch the terminal to kitty sequences, so the kitty protocol isn't available here.
 
-Decision rule for the handoff ticket:
+**Verdict for the handoff ticket: `/handoff` is the primary path, and `ctrl+h` is best effort at most.**
 
-- If the kitty protocol works in Windows Terminal, `ctrl+h` can be the primary path.
-- If not, but Backspace sends `7f` while ctrl+h sends `08`, `ctrl+h` needs a raw-sequence key hook on Ink internals. Treat `/handoff` as primary and `ctrl+h` as best effort.
-- If both send `08`, `/handoff` is the only reliable path.
+- ctrl+h can be told apart from Backspace only by its raw byte (`08` vs `7f`), through a key hook on Ink's internal event emitter.
+- ctrl+Backspace also sends `08`. So a `ctrl+h` binding would also fire on ctrl+Backspace, which many people press to delete a word. A handoff that interrupts the agent shouldn't be one slip away from a text-editing key.
+- To offer `ctrl+h` anyway, the handoff sheet already gives the safety net: opening it is never a commitment, and `esc` backs out (#23 story 56).
+
+To re-check after a Windows Terminal or Ink upgrade, run `npm run probe:keys` and `npm run probe:keys -- --kitty`, then press the same three keys.
