@@ -12,7 +12,8 @@ export type RunStart = {
   resumesSession: boolean;
   // The task's worktree, or null for a task launched without one.
   cwd: string | null;
-  // What the operator launched the task with, sent as the run's first message.
+  // The task's goal, sent as the run's first message: for a launched task,
+  // its start stage's skill invoked on the launch inputs.
   firstMessage: string | null;
   model: string;
   credential: CredentialProfile;

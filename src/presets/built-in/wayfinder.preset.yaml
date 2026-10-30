@@ -1,0 +1,25 @@
+# Foggy ideas spanning sessions: chart a map, work its tickets with the
+# operator until it clears, then carry on as main-flow from the spec, written
+# fresh from the map.
+description: Chart a map and work it with you until it clears, then spec, tickets and main-flow onward.
+extends: main-flow
+from: spec
+stages:
+  - id: chart
+    kind: run
+    skill: wayfinder
+    args: "chart {{prompt}}"
+    mode: HITL
+    model: opus
+    exit: artifact:map
+  - id: work
+    kind: loop
+    skill: wayfinder
+    args: "{{artifacts.map}}"
+    mode: HITL
+    model: opus
+    context: fresh
+    exit: map-cleared
+  - id: spec
+    args: "{{artifacts.map}}"
+    context: fresh

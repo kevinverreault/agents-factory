@@ -2,7 +2,8 @@
 // the routing table, so a model never changes under a task by surprise. The
 // factory ships these defaults; `~/.agent-factory/models.yaml` and
 // `models update` arrive with their own slice.
-export type Tier = 'opus' | 'sonnet' | 'haiku';
+export const TIERS = ['opus', 'sonnet', 'haiku'] as const;
+export type Tier = (typeof TIERS)[number];
 
 export const DEFAULT_TIER: Tier = 'sonnet';
 

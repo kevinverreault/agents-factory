@@ -24,16 +24,21 @@ export function taskWorktree(root: string, repository: Repository, taskId: strin
   };
 }
 
-// Fetches the base branch and cuts the task branch into its worktree, or says
-// why it couldn't.
-export async function cutWorktree(git: Git, repository: Repository, worktree: TaskWorktree): Promise<string | null> {
-  const { id, path: clone, baseBranch } = repository;
+// Brings `origin/<base_branch>` up to date, or says why it couldn't.
+export async function fetchBase(git: Git, { id, path, baseBranch }: Repository): Promise<string | null> {
   try {
-    await git.fetch(clone, baseBranch);
+    await git.fetch(path, baseBranch);
+    return null;
   } catch (error) {
     if (!(error instanceof GitError)) throw error;
     return `Couldn't fetch ${baseBranch} from the origin of ${id}: ${error.message}`;
   }
+}
+
+// Cuts the task branch from the fetched base branch into its worktree, or
+// says why it couldn't.
+export async function cutWorktree(git: Git, repository: Repository, worktree: TaskWorktree): Promise<string | null> {
+  const { path: clone, baseBranch } = repository;
   try {
     await git.addWorktree(clone, { ...worktree, startPoint: `origin/${baseBranch}` });
   } catch (error) {

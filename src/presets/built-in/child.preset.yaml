@@ -1,0 +1,9 @@
+# A child task an agent delegated: one AFK run on the goal it was given.
+description: One unattended run on a goal, as a delegated child task works.
+stages:
+  - id: work
+    kind: run
+    args: "{{prompt}}"
+    mode: AFK
+    model: sonnet
+    exit: run-completed

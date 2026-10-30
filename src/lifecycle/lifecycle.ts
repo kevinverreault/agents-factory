@@ -2,9 +2,11 @@
 // reducer with guards and selectors. Every operator command and every run event goes
 // through `reduce`. Ported from the task-lifecycle prototype, amended by
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
-// Child tasks, stages and parking on a request's timeout arrive with their
-// own slices.
-import { DEFAULT_TIER, route, type Tier } from '../models/routing.ts';
+// A launched task freezes its workflow preset and starts at one of its
+// stages; child tasks, advancing stages and parking on a request's timeout
+// arrive with their own slices.
+import { DEFAULT_TIER, route, TIERS, type Tier } from '../models/routing.ts';
+import type { ResolvedPreset } from '../presets/presets.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -54,6 +56,11 @@ export type AttentionStatus = 'open' | 'answered' | 'superseded' | 'closed';
 // A root task's task branch and the worktree it is checked out in (ADR 0010).
 export type TaskWorktree = { branch: string; path: string };
 
+// The workflow preset a task froze at launch, with the commit of
+// `origin/<base_branch>` its repo-scope presets were read from: editing a
+// preset file later never changes it.
+export type FrozenPreset = ResolvedPreset & { repoCommit: string };
+
 export type Task = {
   id: string;
   title: string;
@@ -62,13 +69,18 @@ export type Task = {
   mode: Mode;
   autonomy: AutonomyLevel | null;
   groups: string[];
-  // What the operator launched the task with: its first run's first message.
+  // Its first run's first message: for a launched task, its start stage's
+  // skill invoked on the launch inputs.
   goal: string | null;
   tier: Tier;
   // The task branch and its worktree, cut at launch.
   worktree: TaskWorktree | null;
   // The skill set version frozen at launch (ADR 0005): every run loads it.
   skillSet: string | null;
+  // The preset frozen at launch, and the id of the stage the task is at.
+  // Tasks created without a launch, or stored before presets, have none.
+  preset?: FrozenPreset | null;
+  stage?: string | null;
   sessionId: string | null;
   runIds: string[];
   state: TaskState;
@@ -197,13 +209,21 @@ export type RepoEvent =
   // `repo move`: the clone is at `path` now, and its task worktrees repaired.
   | { type: 'repoMoved'; repo: string; path: string };
 
-// A task the daemon launched once its worktree was cut. The daemon names the
-// session, so the Claude session file can be found by it.
+// A task the daemon launched once its preset was frozen and its worktree cut.
+// The daemon names the session, so the Claude session file can be found by it.
 export type TaskLaunched = {
   type: 'taskLaunched';
   repo: string;
   title: string;
+  // The launch inputs: those its start stage needs, at least.
   prompt: string;
+  issues: string[];
+  groups: string[];
+  tier: Tier;
+  preset: FrozenPreset;
+  // The start stage, and its first run's first message.
+  stage: string;
+  opening: string;
   worktree: TaskWorktree;
   sessionId: string;
   skillSet: string;
@@ -259,6 +279,11 @@ export function openRequest(state: Lifecycle, task: Task): AttentionRequest | un
 // The open request about the repository itself, if any.
 export function openRepoRequest(state: Lifecycle, repo: string): AttentionRequest | undefined {
   return Object.values(state.requests).find((request) => request.repo === repo && request.taskId === null && request.status === 'open');
+}
+
+// The registered repository the operator last launched a task in, if any.
+export function lastUsedRepo(state: Lifecycle): string | null {
+  return Object.values(state.tasks).findLast((task) => task.repo in state.repositories)?.repo ?? null;
 }
 
 export function artifactsOf(state: Lifecycle, task: Task): Artifact[] {
@@ -379,7 +404,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'createTask':
       return action.title.trim() ? null : 'A task needs a title.';
     case 'taskLaunched':
-      if (!action.prompt.trim()) return 'A task needs a prompt.';
+      // Which launch inputs it needs is its start stage's to say.
+      if (!TIERS.includes(action.tier)) return `${action.tier} is not a model tier (${TIERS.slice(0, -1).join(', ')} or ${TIERS.at(-1)}).`;
       return state.repositories[action.repo]!.missing ? `${action.repo} is missing, so its runs can’t start.` : null;
     case 'removeRepo': {
       const unfinished = unfinishedTasks(state, action.repo);
@@ -560,25 +586,29 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     }
     case 'taskLaunched': {
-      // One HITL stage: the conversation opens at once.
+      // The task takes its start stage's mode: a HITL stage opens its
+      // conversation at once, and an AFK one queues for a slot at L1.
+      const { mode } = action.preset.stages.find(({ id }) => id === action.stage)!;
       const launched: Task = {
         id: nextId(state, 'task'),
         title: action.title,
         repo: action.repo,
-        mode: 'HITL',
-        autonomy: null,
-        groups: [],
-        goal: action.prompt,
-        tier: DEFAULT_TIER,
+        mode,
+        autonomy: mode === 'AFK' ? 'L1' : null,
+        groups: [...new Set(action.groups.map((group) => group.trim()).filter(Boolean))],
+        goal: action.opening,
+        tier: action.tier,
         worktree: { ...action.worktree },
         skillSet: action.skillSet,
+        preset: structuredClone(action.preset),
+        stage: action.stage,
         sessionId: action.sessionId,
         runIds: [],
         state: 'queued',
         createdAt: at,
       };
       state.tasks[launched.id] = launched;
-      startRun(state, launched, at);
+      if (mode === 'HITL') startRun(state, launched, at);
       break;
     }
     case 'submit':

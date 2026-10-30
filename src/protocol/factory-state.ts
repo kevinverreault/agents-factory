@@ -5,9 +5,11 @@ import {
   activeAfkRuns,
   attentionQueue,
   label,
+  lastUsedRepo,
   liveRun,
   readyForYou,
   type AutonomyLevel,
+  type FrozenPreset,
   type Lifecycle,
   type Mode,
   type AttentionQueueItem,
@@ -32,6 +34,9 @@ export type TaskView = {
   // The Claude session the task's conversation lives in.
   sessionId: string | null;
   skillSet: string | null;
+  // The preset frozen at launch, and the stage the task is at.
+  preset: FrozenPreset | null;
+  stage: string | null;
 };
 
 export type RunView = Pick<
@@ -51,6 +56,8 @@ export type FactoryState = {
   artifacts: Record<string, ArtifactView>;
   attentionQueue: AttentionQueueItem[];
   slots: { active: number; cap: number };
+  // Where a launch card goes when the working directory is in no registered clone.
+  lastUsedRepo: string | null;
 };
 
 // `watched` holds the runs whose conversations a TUI has open.
@@ -73,6 +80,8 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       worktree: task.worktree?.path ?? null,
       sessionId: task.sessionId,
       skillSet: task.skillSet ?? null,
+      preset: structuredClone(task.preset ?? null),
+      stage: task.stage ?? null,
     };
   }
   const runs: Record<string, RunView> = {};
@@ -87,6 +96,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
     artifacts: structuredClone(lifecycle.artifacts),
     attentionQueue: attentionQueue(lifecycle, watched),
     slots: { active: activeAfkRuns(lifecycle), cap: lifecycle.slotCap },
+    lastUsedRepo: lastUsedRepo(lifecycle),
   };
 }
 

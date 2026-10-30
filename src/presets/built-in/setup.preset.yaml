@@ -1,0 +1,9 @@
+# The skill set's per-repo setup, worked through with the operator, so the
+# skills find the issue tracker and labels they expect.
+description: Set up the skill set in this repository with you.
+stages:
+  - id: setup
+    kind: run
+    skill: setup-matt-pocock-skills
+    mode: HITL
+    model: sonnet

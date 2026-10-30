@@ -35,7 +35,14 @@ export interface Git {
   // the clone moved (ADR 0010). Throws a `GitError` when `path` is no
   // worktree of the clone.
   repairWorktree(clonePath: string, path: string): Promise<void>;
+  // The files directly in `dir` (relative, with `/`) as committed at `ref`
+  // (such as `origin/main`), by their path from the top, with the commit
+  // `ref` points at. A directory the commit lacks holds none. Throws a
+  // `GitError` when `ref` names no commit.
+  readDirectory(clonePath: string, ref: string, dir: string): Promise<{ commit: string; files: DirectoryFile[] }>;
 }
+
+export type DirectoryFile = { path: string; content: string };
 
 export class GitError extends Error {}
 
@@ -100,6 +107,20 @@ export const gitCli: Git = {
 
   async repairWorktree(clonePath, path) {
     await run(clonePath, 'worktree', 'repair', path);
+  },
+
+  async readDirectory(clonePath, ref, dir) {
+    const commit = await run(clonePath, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`).catch(() => {
+      throw new GitError(`${ref} names no commit.`);
+    });
+    // `<mode> <type> <hash>\t<path>` per entry, NUL-separated and unquoted.
+    const listing = await output(clonePath, 'ls-tree', '-z', commit, '--', `${dir}/`);
+    const files: DirectoryFile[] = [];
+    for (const entry of listing.split('\0')) {
+      const [, type, hash, path] = /^\d+ (\w+) ([0-9a-f]+)\t(.*)$/s.exec(entry) ?? [];
+      if (type === 'blob') files.push({ path: path!, content: await output(clonePath, 'cat-file', 'blob', hash!) });
+    }
+    return { commit, files };
   },
 };
 

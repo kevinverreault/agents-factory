@@ -26,6 +26,8 @@ afterEach(async () => {
 const widgets = resolve('/clones/widgets');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const prompt = 'Grill me about the login flow.\nIt keeps timing out after the SSO redirect.';
+// The first message: main-flow's first stage, its skill on the prompt.
+const opening = `/factory:grill-with-docs ${prompt}`;
 
 describe('launching a HITL task', () => {
   test('launching cuts the task branch from a freshly fetched origin/<base_branch> into one worktree, and opens the conversation there', async () => {
@@ -50,8 +52,8 @@ describe('launching a HITL task', () => {
         sessionId: expect.stringMatching(UUID),
         resumesSession: false,
         cwd: worktree,
-        firstMessage: prompt,
-        model: 'claude-sonnet-5-5',
+        firstMessage: opening,
+        model: 'claude-opus-5-5',
         credential: 'subscription-host',
         plugin: factory.skillSets.pathOf('a1a1a1a1a1a1a1a1'),
       },
@@ -60,7 +62,6 @@ describe('launching a HITL task', () => {
 
   test('a launch is refused, with a reason and nothing left behind, without a registered repository, a prompt or a reachable origin', async () => {
     const { factory, operator, tui } = await attached();
-    factory.git.cutOffOrigin(widgets, 'fatal: unable to access github.com: Could not resolve host');
 
     expect(await operator.send({ type: 'launchTask', repo: 'acme/gadgets', prompt })).toEqual({
       ok: false,
@@ -68,8 +69,9 @@ describe('launching a HITL task', () => {
     });
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt: '  \n ' })).toEqual({
       ok: false,
-      reason: 'A task needs a prompt.',
+      reason: 'Starting main-flow at grill needs a prompt.',
     });
+    factory.git.cutOffOrigin(widgets, 'fatal: unable to access github.com: Could not resolve host');
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt })).toEqual({
       ok: false,
       reason: "Couldn't fetch main from the origin of acme/widgets: fatal: unable to access github.com: Could not resolve host",
@@ -112,7 +114,7 @@ describe('conversing', () => {
     factory.executor.converse('R1', { type: 'message', from: 'agent', text: 'Then it is the third-party cookie.' });
 
     expect(await conversation.until(5)).toEqual([
-      { type: 'message', from: 'operator', text: prompt },
+      { type: 'message', from: 'operator', text: opening },
       { type: 'toolUse', tool: 'Read', summary: 'src/auth/sso.ts' },
       { type: 'message', from: 'agent', text: 'Which identity provider times out?' },
       { type: 'message', from: 'operator', text: 'Okta, only on Safari.' },
@@ -151,7 +153,7 @@ describe('conversing', () => {
     const reattached = await factory.attach();
     const second = listen(reattached, 'R1');
     expect(await second.until(3)).toEqual([
-      { type: 'message', from: 'operator', text: prompt },
+      { type: 'message', from: 'operator', text: opening },
       { type: 'message', from: 'agent', text: 'Which identity provider times out?' },
       { type: 'toolUse', tool: 'Bash', summary: 'git log --oneline -5' },
     ]);
@@ -174,7 +176,7 @@ describe('conversing', () => {
     release();
 
     expect(await conversation.until(3)).toEqual([
-      { type: 'message', from: 'operator', text: prompt },
+      { type: 'message', from: 'operator', text: opening },
       { type: 'message', from: 'agent', text: 'Which identity provider times out?' },
       { type: 'message', from: 'agent', text: 'Okta?' },
     ]);
@@ -327,7 +329,7 @@ test('a TUI that subscribes before the session file catches up still gets what t
   const conversation = listen(operator, 'R1');
 
   expect(await conversation.until(3)).toEqual([
-    { type: 'message', from: 'operator', text: prompt },
+    { type: 'message', from: 'operator', text: opening },
     { type: 'message', from: 'agent', text: 'Which identity provider times out?' },
     { type: 'message', from: 'agent', text: 'Okta?' },
   ]);
@@ -338,16 +340,16 @@ describe('the run record', () => {
     const { factory, operator, tui } = await attached();
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt });
     const routed = await tui.until((state) => state.runs.R1 !== undefined);
-    expect(routed.runs.R1).toMatchObject({ model: 'claude-sonnet-5-5', cli: null });
+    expect(routed.runs.R1).toMatchObject({ model: 'claude-opus-5-5', cli: null });
 
-    factory.executor.report('R1', { type: 'runStarted', pid: 4242, createdAt: 1_761_000_000_123, model: 'claude-sonnet-5-5-20261001' });
+    factory.executor.report('R1', { type: 'runStarted', pid: 4242, createdAt: 1_761_000_000_123, model: 'claude-opus-5-5-20261001' });
 
     const started = await tui.until((state) => state.runs.R1?.cli !== null);
-    expect(started.runs.R1).toMatchObject({ model: 'claude-sonnet-5-5-20261001', cli: { pid: 4242, createdAt: 1_761_000_000_123 } });
+    expect(started.runs.R1).toMatchObject({ model: 'claude-opus-5-5-20261001', cli: { pid: 4242, createdAt: 1_761_000_000_123 } });
     await factory.restart();
     const again = watch(await factory.attach());
     expect((await again.until(() => true)).runs.R1).toMatchObject({
-      model: 'claude-sonnet-5-5-20261001',
+      model: 'claude-opus-5-5-20261001',
       cli: { pid: 4242, createdAt: 1_761_000_000_123 },
     });
   });

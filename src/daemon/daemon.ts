@@ -35,13 +35,28 @@ import {
   type DaemonStatus,
   type HookEvent,
   type LaunchCommand,
+  type PresetCommand,
+  type PresetsView,
   type RepoCommand,
   type Reply,
 } from '../protocol/protocol.ts';
+import { DEFAULT_TIER } from '../models/routing.ts';
+import {
+  builtInPresets,
+  issueRefs,
+  launchDefault,
+  planStart,
+  presetChoices,
+  presetFiles,
+  REPO_PRESETS,
+  resolvePreset,
+  userPresets,
+  type PresetFile,
+} from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
-import { cutWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
+import { cutWorktree, fetchBase, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
 import type { Clock } from './clock.ts';
 
 export type DaemonOptions = {
@@ -53,6 +68,8 @@ export type DaemonOptions = {
   git: Git;
   skillSets: SkillSets;
   worktreeRoot: string;
+  // The user scope of workflow presets.
+  presetsDir: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
 };
@@ -164,6 +181,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return moveRepo(command);
       case 'launchTask':
         return launch(command);
+      case 'listPresets':
+        return listPresets(command);
       case 'hookEvent':
         return captureArtifacts(command.event);
       case 'inspectClone': {
@@ -226,23 +245,30 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
   }
 
-  // Freezes the pinned skill set (ADR 0005) and cuts the task's worktree, then
-  // opens its conversation there (ADR 0010). The Lifecycle waits meanwhile:
-  // the task id is in the branch name.
-  function launch({ repo, prompt }: LaunchCommand): Promise<Reply> {
+  // Freshly fetches the base branch, resolves the preset there and freezes it
+  // with the pinned skill set (ADR 0005), cuts the task's worktree, and
+  // starts the task at its start stage there (ADR 0010). The Lifecycle waits
+  // meanwhile: the task id is in the branch name.
+  function launch(command: LaunchCommand): Promise<Reply> {
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const { repo, prompt = '' } = command;
       const taskId = nextTaskId(lifecycle);
-      const title = titleFrom(prompt);
       const repository = lifecycle.repositories[repo];
       const action: TaskLaunched = {
         type: 'taskLaunched',
         repo,
-        title,
+        title: '',
         prompt,
-        worktree: repository ? taskWorktree(options.worktreeRoot, repository, taskId, title) : { branch: '', path: '' },
+        issues: command.issues ?? [],
+        groups: command.groups ?? [],
+        tier: command.tier ?? DEFAULT_TIER,
+        // Frozen once resolved, with the worktree and skill set.
+        preset: null!,
+        stage: '',
+        opening: '',
+        worktree: { branch: '', path: '' },
         sessionId: randomUUID(),
-        // Frozen once the skill set is built.
         skillSet: '',
       };
       // Refused before git is touched; an unregistered repository has no worktree.
@@ -253,6 +279,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         await settle({ type: 'repoMissing', repo, reason: missing }, new Set());
         return { ok: false, reason: guard(lifecycle, action)! };
       }
+      const refs = issueRefs(action.issues, repo);
+      if ('error' in refs) return { ok: false, reason: refs.error };
+      action.issues = refs.issues;
+      const unfetched = await fetchBase(git, repository!);
+      if (unfetched) return { ok: false, reason: unfetched };
+      const presets = await presetsOf(repository!);
+      if ('error' in presets) return { ok: false, reason: presets.error };
+      const resolved = resolvePreset(presets.files, command.preset ?? launchDefault(presets.files, repo, repository!.defaultPreset).name);
+      if ('error' in resolved) return { ok: false, reason: resolved.error };
+      const start = planStart(resolved.preset, command.stage, action);
+      if ('error' in start) return { ok: false, reason: start.error };
+      action.preset = { ...resolved.preset, repoCommit: presets.commit };
+      action.stage = start.stage.id;
+      action.opening = start.opening;
+      action.tier = command.tier ?? start.stage.model ?? DEFAULT_TIER;
+      action.title = titleFrom(prompt.trim() || action.issues.join(' ') || resolved.preset.name);
+      action.worktree = taskWorktree(options.worktreeRoot, repository!, taskId, action.title);
       try {
         action.skillSet = (await skillSets.current()).version;
       } catch (error) {
@@ -265,6 +308,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pruneSkillSets();
       return { ok: true, value: { taskId } };
     });
+  }
+
+  // Every preset a launch in the repository can pick from: the built-ins, the
+  // operator's, and the repository's as `origin/<base_branch>` has them
+  // (fetched or not), with that commit.
+  async function presetsOf(repository: Repository): Promise<{ commit: string; files: PresetFile[] } | { error: string }> {
+    const ref = `origin/${repository.baseBranch}`;
+    try {
+      const { commit, files } = await git.readDirectory(repository.path, ref, REPO_PRESETS);
+      return { commit, files: [...builtInPresets(), ...userPresets(options.presetsDir), ...presetFiles('repo', files)] };
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return { error: `Couldn't read the presets of ${repository.id} at ${ref}: ${error.message}` };
+    }
+  }
+
+  // What a launch card offers in the repository, as its clone last fetched
+  // it: a launch fetches first.
+  async function listPresets({ repo }: PresetCommand): Promise<Reply> {
+    const repository = lifecycle.repositories[repo];
+    if (!repository) return { ok: false, reason: `${repo} is not registered.` };
+    const presets = await presetsOf(repository);
+    if ('error' in presets) return { ok: false, reason: presets.error };
+    const { name, warning } = launchDefault(presets.files, repo, repository.defaultPreset);
+    const value: PresetsView = { presets: presetChoices(presets.files), defaultPreset: name, warning };
+    return { ok: true, value };
   }
 
   // Removes the skill set versions no unfinished task references (ADR 0005).

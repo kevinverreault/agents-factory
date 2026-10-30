@@ -16,8 +16,8 @@ export type CloneFixture = {
   // `branch`, and returns its path.
   cloneWithOrigin(name: string, branch: string): Promise<string>;
   // Adds a commit to `branch` on the clone's origin, not yet fetched, and
-  // returns its hash.
-  advanceOrigin(clonePath: string, branch: string): Promise<string>;
+  // returns its hash. The commit writes `files` (by path, with `/`).
+  advanceOrigin(clonePath: string, branch: string, files?: Record<string, string>): Promise<string>;
   // Writes `path` (relative, with `/`) in the worktree, without committing it.
   editFile(worktreePath: string, path: string): Promise<void>;
   // Commits everything changed in the worktree.
@@ -137,6 +137,28 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
 
         expect(await git.inspectClone(path)).toEqual({ ...before, path: moved });
         expect(await git.worktrees(moved)).toEqual([worktree]);
+      }));
+
+    test('a directory is read as the fetched origin tip has it, with that commit, and an unknown ref fails', () =>
+      withFixture(async ({ git, cloneWithOrigin, advanceOrigin }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        // Read as committed: CRLF stays CRLF.
+        const preset = 'stages:\r\n  - id: a\n';
+        const tip = await advanceOrigin(clone, 'main', {
+          '.agent-factory/presets/nightly.preset.yaml': preset,
+          '.agent-factory/presets/deep/other.preset.yaml': 'stages: []\n',
+          'README.md': 'Widgets.\n',
+        });
+        // Not fetched yet: origin's old tip has no such directory.
+        expect((await git.readDirectory(clone, 'origin/main', '.agent-factory/presets')).files).toEqual([]);
+
+        await git.fetch(clone, 'main');
+
+        expect(await git.readDirectory(clone, 'origin/main', '.agent-factory/presets')).toEqual({
+          commit: tip,
+          files: [{ path: '.agent-factory/presets/nightly.preset.yaml', content: preset }],
+        });
+        await expect(git.readDirectory(clone, 'origin/nowhere', '.agent-factory/presets')).rejects.toThrow();
       }));
 
     test('repairing a path that is no worktree of the clone fails', () =>
