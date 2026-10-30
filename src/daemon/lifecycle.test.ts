@@ -31,7 +31,7 @@ describe('runs', () => {
       reason: "T1 isn't ready for a conversation (it is In conversation).",
     });
 
-    const state = await tui.until((state) => state.tasks.T1?.label === 'In conversation');
+    const state = await tui.until((state) => state.tasks.T1?.state === 'running');
     expect(Object.values(state.runs).filter((run) => run.taskId === 'T1' && run.status !== 'ended')).toHaveLength(1);
     expect(factory.executor.started.map((run) => run.runId)).toEqual(['R1']);
   });
