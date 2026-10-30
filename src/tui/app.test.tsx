@@ -388,6 +388,26 @@ describe('launching and conversing', () => {
     });
   });
 
+  test('a daemon that acks listPresets without a listing gets the card out of loading and still launches with the defaults', async () => {
+    const connection = inWidgets();
+    connection.replyTo('listPresets', { ok: true });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).not.toContain('loading…');
+      expect(frame).toContain('The daemon listed no presets: the launch takes the repository’s defaults.');
+    });
+    await type(app, 'Spike the cache');
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Spike the cache' }));
+  });
+
   test('outside any registered clone the card starts on the last used repository, and it tags groups and picks a model tier', async () => {
     const connection = new FakeConnection();
     connection.replyTo('listPresets', { ok: true, value: presetsView });

@@ -1,9 +1,15 @@
 // Seam 1: a TUI starting with no daemon running starts one, and closing the
 // TUI never stops it.
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
+import { readMessages, send } from '../protocol/protocol.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch } from '../testing/watch.ts';
 import { connectOrStart } from './auto-start.ts';
+import { pipePathFor } from './paths.ts';
 
 const factories: TestFactory[] = [];
 
@@ -56,6 +62,29 @@ describe('starting the TUI', () => {
       connectOrStart({ pipePath: factory.paths.pipePath, tokenPath: `${factory.paths.home}/missing` }, () => starts++),
     ).rejects.toThrow();
     expect(starts).toBe(0);
+  });
+
+  test('a daemon on another protocol is refused, not started again, and told how to stop it', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'af-old-daemon-'));
+    const endpoint = { pipePath: pipePathFor(home), tokenPath: join(home, 'daemon.token') };
+    await writeFile(endpoint.tokenPath, 'token');
+    // A daemon from an older build: it welcomes any client, on protocol 3.
+    const old = createServer((socket) => {
+      send(socket, { type: 'hello', protocolVersion: 3 });
+      readMessages(socket, () => send(socket, { type: 'welcome' }));
+    });
+    await new Promise<void>((resolve) => old.listen(endpoint.pipePath, resolve));
+    let starts = 0;
+
+    try {
+      await expect(connectOrStart(endpoint, () => starts++)).rejects.toThrow(
+        'The running daemon speaks protocol 3 and this agents-factory speaks 6. Stop it with `agents-factory daemon stop`, then try again.',
+      );
+      expect(starts).toBe(0);
+    } finally {
+      await new Promise((resolve) => old.close(resolve));
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   test('a daemon that never comes up is reported after the timeout', async () => {

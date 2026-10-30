@@ -1,7 +1,10 @@
 // The TUI's way in (ADR 0002): attach to the running daemon, or start one
-// detached and retry until it answers.
+// detached and retry until it answers. A daemon on another protocol, left
+// running from another build, is refused: its replies can't be trusted to
+// mean what this build reads them as.
 import { fileURLToPath } from 'node:url';
-import { connect, isNoDaemon, type Endpoint, type FactoryConnection } from '../protocol/client.ts';
+import { connect, HandshakeRefused, isNoDaemon, type Endpoint, type FactoryConnection } from '../protocol/client.ts';
+import { PROTOCOL_VERSION } from '../protocol/protocol.ts';
 import { spawnDetached } from './spawn-detached.ts';
 
 const RETRY_MS = 100;
@@ -14,8 +17,9 @@ export async function connectOrStart(
   let started = false;
   const giveUpAt = Date.now() + timeoutMs;
   for (;;) {
+    let connection: FactoryConnection;
     try {
-      return await connect(endpoint);
+      connection = await connect(endpoint);
     } catch (error) {
       if (!isNoDaemon(error)) throw error;
       if (!started) {
@@ -25,7 +29,14 @@ export async function connectOrStart(
         throw new Error(`The daemon did not start within ${timeoutMs} ms.`);
       }
       await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
+      continue;
     }
+    if (connection.protocolVersion === PROTOCOL_VERSION) return connection;
+    connection.close();
+    throw new HandshakeRefused(
+      `The running daemon speaks protocol ${connection.protocolVersion} and this agents-factory speaks ${PROTOCOL_VERSION}. ` +
+        'Stop it with `agents-factory daemon stop`, then try again.',
+    );
   }
 }
 

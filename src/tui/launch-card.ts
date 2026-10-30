@@ -56,9 +56,14 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel }: Pr
     const { repo } = draft;
     if (!repo || listings[repo]) return;
     void connection.send({ type: 'listPresets', repo }).then((reply) => {
-      // A daemon that lists nothing leaves the defaults to the launch.
-      if (reply.ok && !reply.value) return;
-      setListings((listings) => ({ ...listings, [repo]: reply.ok ? (reply.value as PresetsView) : { refusal: reply.reason } }));
+      // A daemon that acks without a listing leaves the defaults to the
+      // launch, and the card says so rather than wait for one.
+      const listing: Listing = !reply.ok
+        ? { refusal: reply.reason }
+        : reply.value
+          ? (reply.value as PresetsView)
+          : { refusal: 'The daemon listed no presets: the launch takes the repository’s defaults.' };
+      setListings((listings) => ({ ...listings, [repo]: listing }));
     });
   }, [connection, draft.repo]);
 

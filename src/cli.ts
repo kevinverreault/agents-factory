@@ -12,7 +12,7 @@ import { render } from 'ink';
 import { connectOrStart } from './daemon/auto-start.ts';
 import { factoryPaths } from './daemon/paths.ts';
 import { relayHook } from './hooks/relay.ts';
-import { connect, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
+import { connect, HandshakeRefused, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
 import type { RepositoryView } from './protocol/factory-state.ts';
 import type { Command, DaemonStatus } from './protocol/protocol.ts';
 import { skillsCommand } from './skills/skills-command.ts';
@@ -137,4 +137,8 @@ function describe(status: DaemonStatus): string {
   ].join('\n');
 }
 
-process.exitCode = await main(process.argv.slice(2));
+process.exitCode = await main(process.argv.slice(2)).catch((error: unknown) => {
+  if (!(error instanceof HandshakeRefused)) throw error;
+  console.error(error.message);
+  return 1;
+});
