@@ -1,10 +1,11 @@
 // The full-screen conversation view: a HITL run's conversation, replayed from
-// the session file and then live, with a line for the operator's next message.
+// the session file and then live, with a line for the operator's next message
+// and a side rail of the task's artifacts.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
-import type { FactoryState } from '../protocol/factory-state.ts';
+import type { ArtifactView, FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
@@ -90,14 +91,19 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     task?.sessionId
       ? h(Text, { dimColor: true, wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
       : null,
-    // The latest events stay in view; older ones scroll off the top.
     h(
       Box,
-      { flexDirection: 'column', flexGrow: 1, justifyContent: 'flex-end', overflow: 'hidden', marginY: 1 },
-      ...events.map((event) => h(Event, { key: event.id, event })),
-      ...(run?.queued ?? []).map((text, i) =>
-        h(Box, { key: `queued-${i}`, gap: 1, flexShrink: 0 }, h(Box, { width: 6, flexShrink: 0 }, h(Text, { dimColor: true }, 'queued')), h(Text, { dimColor: true }, text)),
+      { flexGrow: 1, marginY: 1, gap: 2 },
+      // The latest events stay in view; older ones scroll off the top.
+      h(
+        Box,
+        { flexDirection: 'column', flexGrow: 1, justifyContent: 'flex-end', overflow: 'hidden' },
+        ...events.map((event) => h(Event, { key: event.id, event })),
+        ...(run?.queued ?? []).map((text, i) =>
+          h(Box, { key: `queued-${i}`, gap: 1, flexShrink: 0 }, h(Box, { width: 6, flexShrink: 0 }, h(Text, { dimColor: true }, 'queued')), h(Text, { dimColor: true }, text)),
+        ),
       ),
+      h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
     ),
     question ? h(QuestionCard, { question, card }) : null,
     live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
@@ -105,6 +111,39 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     h(Text, null, `› ${draft}▏`),
     h(Text, { dimColor: true }, hint),
   );
+}
+
+const RAIL_WIDTH = 40;
+
+// What the task produced so far, live: captured from the run's tool calls.
+// The newest come first, so a full rail cuts off the oldest.
+function ArtifactRail({ artifacts }: { artifacts: ArtifactView[] }) {
+  return h(
+    Box,
+    { flexDirection: 'column', width: RAIL_WIDTH, flexShrink: 0, overflow: 'hidden' },
+    h(Text, { bold: true }, 'Artifacts'),
+    artifacts.length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
+    ...artifacts.toReversed().map((artifact) =>
+      h(
+        Box,
+        { key: artifact.id, gap: 1 },
+        h(Box, { width: 11, flexShrink: 0 }, h(Text, { dimColor: true }, artifactState(artifact))),
+        h(Text, { wrap: 'truncate-start' }, artifactName(artifact)),
+      ),
+    ),
+  );
+}
+
+function artifactState(artifact: ArtifactView): string {
+  if (artifact.kind === 'issue') return 'issue';
+  return artifact.committed ? 'committed' : 'uncommitted';
+}
+
+// A file by its path in the worktree, an issue as `owner/name#number`.
+function artifactName(artifact: ArtifactView): string {
+  if (artifact.kind === 'file') return artifact.path;
+  const [, owner, name, , number] = new URL(artifact.url).pathname.split('/');
+  return `${owner}/${name}#${number}`;
 }
 
 function Event({ event }: { event: ConversationEvent }) {

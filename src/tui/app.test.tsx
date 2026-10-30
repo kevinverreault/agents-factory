@@ -26,6 +26,7 @@ function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attention
     repositories: {},
     tasks: Object.fromEntries(tasks.map((t) => [t.id, t])),
     runs: {},
+    artifacts: {},
     attentionQueue,
     slots: { active: 0, cap: 2 },
   };
@@ -292,7 +293,7 @@ describe('launching and conversing', () => {
       { type: 'message', id: 'E3', from: 'agent', text: 'Which identity provider times out?' },
     );
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/you\s+Grill me about the login flow\.\n[\s\S]*Read\s+src\/auth\/sso\.ts\n[\s\S]*agent\s+Which identity provider times out\?/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/you\s+Grill me about the login flow\.[^\n]*\n[\s\S]*Read\s+src\/auth\/sso\.ts[^\n]*\n[\s\S]*agent\s+Which identity provider times out\?/));
 
     await type(app, 'Okta, only on Safarii');
     app.stdin.write('\x7f');
@@ -510,5 +511,34 @@ describe('launching and conversing', () => {
     await settle();
     await eventually(() => expect(connection.conversed).toEqual(['R1', 'R1']));
     expect(app.lastFrame()).not.toContain('Which identity provider');
+  });
+
+  test('the conversation’s artifact rail lists the task’s files and issues, and updates live', async () => {
+    const connection = new FakeConnection();
+    const artifacts: FactoryState['artifacts'] = {
+      X1: { id: 'X1', taskId: 'T1', runId: 'R1', kind: 'file', path: 'GLOSSARY.md', committed: false },
+      X2: { id: 'X2', taskId: 'T2', runId: 'R2', kind: 'file', path: 'docs/adr/0009-elsewhere.md', committed: false },
+    };
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run }, artifacts }, { connection });
+    app.stdin.write('\r');
+    await eventually(() => {
+      expect(app.lastFrame()).toContain('Artifacts');
+      expect(app.lastFrame()).toMatch(/uncommitted\s+GLOSSARY\.md/);
+    });
+    expect(app.lastFrame()).not.toContain('0009-elsewhere');
+
+    connection.servePatch([
+      { op: 'set', path: ['artifacts', 'X1'], value: { ...artifacts.X1, committed: true } },
+      { op: 'set', path: ['artifacts', 'X3'], value: { id: 'X3', taskId: 'T1', runId: 'R1', kind: 'file', path: 'docs/adr/0001-sso-cookies.md', committed: false } },
+      { op: 'set', path: ['artifacts', 'X4'], value: { id: 'X4', taskId: 'T1', runId: 'R1', kind: 'issue', url: 'https://github.com/acme/widgets/issues/41' } },
+    ]);
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/committed\s+GLOSSARY\.md/);
+      expect(frame).not.toMatch(/uncommitted\s+GLOSSARY\.md/);
+      expect(frame).toMatch(/uncommitted\s+docs\/adr\/0001-sso-cookies\.md/);
+      expect(frame).toMatch(/issue\s+acme\/widgets#41/);
+    });
   });
 });

@@ -24,6 +24,12 @@ describeGitContract('the fake git', async () => {
     async advanceOrigin(clonePath, branch) {
       return git.advanceOrigin(clonePath, branch);
     },
+    async editFile(worktreePath, path) {
+      git.editFile(worktreePath, path);
+    },
+    async commitAll(worktreePath) {
+      git.commitAll(worktreePath);
+    },
     async dispose() {},
   };
 });

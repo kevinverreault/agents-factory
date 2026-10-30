@@ -5,11 +5,14 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname } from 'node:path';
+import { capture } from '../artifacts/capture.ts';
 import type { ConversationEvent, Executor } from '../executor/executor.ts';
 import { GitError, type Git } from '../git/git.ts';
 import {
+  artifactsOf,
   guard,
   initialLifecycle,
+  isTerminal,
   liveRun,
   nextTaskId,
   overdueRuns,
@@ -30,6 +33,7 @@ import {
   type CloneView,
   type Command,
   type DaemonStatus,
+  type HookEvent,
   type LaunchCommand,
   type RepoCommand,
   type Reply,
@@ -158,6 +162,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return moveRepo(command);
       case 'launchTask':
         return launch(command);
+      case 'hookEvent':
+        return captureArtifacts(command.event);
       case 'inspectClone': {
         const clone = await readClone(git, command.path);
         if ('refusal' in clone) return { ok: false, reason: clone.refusal };
@@ -246,6 +252,29 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (uncut) return { ok: false, reason: uncut };
       const refusal = await settle(action, new Set([repo]));
       return refusal ? { ok: false, reason: refusal } : { ok: true, value: { taskId } };
+    });
+  }
+
+  // Links what a tool call in a task's session produced to the task, and
+  // rereads whether each of the task's files is committed: the agent may
+  // have just committed them.
+  function captureArtifacts(event: HookEvent): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      if (typeof event?.session_id !== 'string' || typeof event.cwd !== 'string') {
+        return { ok: false, reason: 'A hook event needs a session id and a working directory.' };
+      }
+      const task = Object.values(lifecycle.tasks).find((task) => task.sessionId === event.session_id && !isTerminal(task));
+      if (!task?.worktree) return { ok: false, reason: `No unfinished task has session ${event.session_id}.` };
+      const captured = capture(event, { repo: task.repo, worktree: task.worktree.path });
+      const issues = captured.flatMap((artifact) => (artifact.kind === 'issue' ? [artifact.url] : []));
+      const paths = new Set(captured.flatMap((artifact) => (artifact.kind === 'file' ? [artifact.path] : [])));
+      for (const artifact of artifactsOf(lifecycle, task)) if (artifact.kind === 'file') paths.add(artifact.path);
+      if (paths.size === 0 && issues.length === 0) return { ok: true };
+      const uncommitted = new Set(await git.uncommitted(task.worktree.path, [...paths]));
+      const files = [...paths].map((path) => ({ path, committed: !uncommitted.has(path) }));
+      const refusal = await settle({ type: 'artifactsSeen', taskId: task.id, files, issues }, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
     });
   }
 
