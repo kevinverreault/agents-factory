@@ -1,6 +1,6 @@
 // Seam 3: the real git adapter on throwaway clones in a temp directory.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { expect, test } from 'vitest';
@@ -48,12 +48,21 @@ async function fixture(): Promise<CloneFixture> {
       origins.set(path, origin);
       return path;
     },
-    async advanceOrigin(clonePath, branch) {
+    async advanceOrigin(clonePath, branch, files = {}) {
       const origin = origins.get(clonePath)!;
-      const tip = git(origin, 'rev-parse', branch);
-      const next = git(origin, 'commit-tree', `${tip}^{tree}`, '-p', tip, '-m', 'Move on');
-      git(origin, 'update-ref', `refs/heads/${branch}`, next);
-      return next;
+      // Committed from a scratch clone, so the clone itself fetches nothing yet.
+      const scratch = mkdtempSync(join(root, 'scratch-'));
+      git(root, 'clone', '--quiet', '--branch', branch, origin, scratch);
+      // Bytes as given: no line-ending conversion on the way in.
+      git(scratch, 'config', 'core.autocrlf', 'false');
+      for (const [path, content] of Object.entries(files)) {
+        mkdirSync(dirname(join(scratch, path)), { recursive: true });
+        writeFileSync(join(scratch, path), content);
+      }
+      git(scratch, 'add', '--all');
+      git(scratch, 'commit', '--quiet', '--allow-empty', '-m', 'Move on');
+      git(scratch, 'push', '--quiet', 'origin', branch);
+      return git(scratch, 'rev-parse', 'HEAD');
     },
     async editFile(worktreePath, path) {
       const file = join(worktreePath, path);

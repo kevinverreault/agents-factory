@@ -1,0 +1,49 @@
+# Running the flow yourself: grill, spec and tickets with the operator, then
+# hand off to implement, review and open a PR unattended.
+description: Grill, spec and tickets with you, then implement, review and open a PR unattended.
+stages:
+  - id: grill
+    kind: run
+    skill: grill-with-docs
+    args: "{{prompt}}"
+    mode: HITL
+    model: opus
+  - id: spec
+    kind: run
+    skill: to-spec
+    mode: HITL
+    model: opus
+    exit: artifact:spec
+  - id: tickets
+    kind: run
+    skill: to-tickets
+    args: "{{artifacts.spec}}"
+    mode: HITL
+    model: opus
+    exit: artifact:tickets
+  - id: implement
+    kind: loop
+    skill: implement
+    args: "{{artifacts.tickets}}"
+    mode: AFK
+    model: sonnet
+    context: fresh
+    exit: tickets-closed
+  - id: review
+    kind: run
+    skill: code-review
+    mode: AFK
+    model: sonnet
+    on_findings: fix-once
+    exit: run-completed
+  - id: pr-body
+    kind: run
+    skill: pr
+    mode: AFK
+    model: haiku
+    exit: artifact:pr-body
+  # At L1 it is skipped: the root goes to review with a local branch.
+  - id: open-pr
+    kind: action
+    mode: AFK
+    requires: L2

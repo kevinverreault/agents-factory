@@ -15,6 +15,8 @@ export type FactoryPaths = {
   // The skill set pin and its built versions (ADR 0005).
   skillsLock: string;
   skillsRoot: string;
+  // The operator's own workflow presets: the user scope.
+  presetsDir: string;
 };
 
 export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths {
@@ -29,6 +31,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     worktreeRoot: join(shortHome, 'worktrees'),
     skillsLock: join(shortHome, 'skills.lock'),
     skillsRoot: join(shortHome, 'skills'),
+    presetsDir: join(shortHome, 'presets'),
   };
 }
 

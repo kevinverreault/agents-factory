@@ -5,9 +5,11 @@
 import type { Socket } from 'node:net';
 import type { ConversationEvent } from '../executor/executor.ts';
 import type { OperatorCommand } from '../lifecycle/lifecycle.ts';
+import type { Tier } from '../models/routing.ts';
+import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
@@ -21,9 +23,29 @@ export type RepoCommand =
   | { type: 'inspectClone'; path: string };
 
 export type CloneView = { repo: string; path: string };
-// Launches a HITL task from the launch card: one stage, a conversation in a
-// new worktree. Replies with `{ taskId }`.
-export type LaunchCommand = { type: 'launchTask'; repo: string; prompt: string };
+// Launches a task from the launch card: the preset (by default the
+// repository's) is resolved and frozen, and the task starts at `stage` (by
+// default the first) in a new worktree. Replies with `{ taskId }`.
+export type LaunchCommand = {
+  type: 'launchTask';
+  repo: string;
+  preset?: string;
+  stage?: string;
+  prompt?: string;
+  // `#12`, `owner/name#12` or issue URLs.
+  issues?: string[];
+  groups?: string[];
+  // The operator's tier, over the start stage's.
+  tier?: Tier;
+};
+// What a launch card offers in a repository. Replies with a `PresetsView`.
+export type PresetCommand = { type: 'listPresets'; repo: string };
+export type PresetsView = {
+  presets: PresetChoice[];
+  // The preset the card starts on, and why it isn't the repository's own default.
+  defaultPreset: string;
+  warning: string | null;
+};
 // A Claude Code hook event, as the hook gets it on stdin, relayed by the
 // `hook` CLI. Only the fields artifact capture reads are typed.
 export type HookEvent = {
@@ -35,7 +57,7 @@ export type HookEvent = {
   tool_response?: unknown;
 };
 export type HookCommand = { type: 'hookEvent'; event: HookEvent };
-export type Command = OperatorCommand | DaemonCommand | RepoCommand | LaunchCommand | HookCommand;
+export type Command = OperatorCommand | DaemonCommand | RepoCommand | LaunchCommand | PresetCommand | HookCommand;
 
 export type DaemonStatus = {
   pid: number;

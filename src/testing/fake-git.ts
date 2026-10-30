@@ -1,5 +1,5 @@
 import { relative, isAbsolute } from 'node:path';
-import { GitError, type Clone, type Git, type Worktree } from '../git/git.ts';
+import { GitError, type Clone, type DirectoryFile, type Git, type Worktree } from '../git/git.ts';
 
 type CloneSetup = { originUrl?: string | null; defaultBranch?: string | null };
 
@@ -23,6 +23,8 @@ export class FakeGit implements Git {
   private readonly clones = new Map<string, FakeClone>();
   // Each worktree's paths with changes not yet committed.
   private readonly changes = new Map<string, Set<string>>();
+  // Each commit's files, by path from the top.
+  private readonly trees = new Map<string, Map<string, string>>();
   private commits = 0;
 
   addClone(path: string, { originUrl = null, defaultBranch = null }: CloneSetup = {}): void {
@@ -51,10 +53,13 @@ export class FakeGit implements Git {
     this.clones.set(to, { ...clone, path: to });
   }
 
-  // Adds a commit to `branch` on origin, which the clone hasn't fetched yet.
-  advanceOrigin(clonePath: string, branch: string): string {
-    const tip = this.commit();
-    this.cloneAt(clonePath).origin.set(branch, tip);
+  // Adds a commit to `branch` on origin, which the clone hasn't fetched yet,
+  // writing `files` (by path, with `/`).
+  advanceOrigin(clonePath: string, branch: string, files: Record<string, string> = {}): string {
+    const clone = this.cloneAt(clonePath);
+    const before = clone.origin.get(branch);
+    const tip = this.commit(new Map([...(before ? this.trees.get(before)! : []), ...Object.entries(files)]));
+    clone.origin.set(branch, tip);
     return tip;
   }
 
@@ -123,8 +128,21 @@ export class FakeGit implements Git {
     return clone;
   }
 
-  private commit(): string {
-    return `c${++this.commits}`.padEnd(40, '0');
+  async readDirectory(clonePath: string, ref: string, dir: string): Promise<{ commit: string; files: DirectoryFile[] }> {
+    const clone = this.cloneAt(clonePath);
+    // Only origin's branches are read: the factory reads presets nowhere else.
+    const commit = ref.startsWith('origin/') ? clone.fetched.get(ref.slice('origin/'.length)) : undefined;
+    if (!commit) throw new GitError(`${ref} names no commit.`);
+    const files = [...this.trees.get(commit)!]
+      .filter(([path]) => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'))
+      .map(([path, content]) => ({ path, content }));
+    return { commit, files };
+  }
+
+  private commit(files = new Map<string, string>()): string {
+    const commit = `c${++this.commits}`.padEnd(40, '0');
+    this.trees.set(commit, files);
+    return commit;
   }
 }
 

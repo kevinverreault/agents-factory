@@ -2,6 +2,7 @@
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
+import type { PresetsView } from '../protocol/protocol.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
 import { App } from './app.ts';
 
@@ -18,7 +19,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -29,6 +30,7 @@ function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attention
     artifacts: {},
     attentionQueue,
     slots: { active: 0, cap: 2 },
+    lastUsedRepo: null,
   };
 }
 
@@ -193,6 +195,11 @@ describe('repositories', () => {
   });
 });
 
+const UP = '\x1b[A';
+const DOWN = '\x1b[B';
+const RIGHT = '\x1b[C';
+const LEFT = '\x1b[D';
+
 describe('launching and conversing', () => {
   const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false };
   const gadgets = { ...widgets, id: 'acme/gadgets', path: '/clones/gadgets' };
@@ -232,6 +239,16 @@ describe('launching and conversing', () => {
     await settle();
   }
 
+  // A frame's text with the card's border and wrapping taken out.
+  const unwrapped = (frame: string) => frame.replace(/[│\s]+/g, ' ');
+
+  async function press(app: { stdin: { write(data: string): void } }, ...keys: string[]) {
+    for (const key of keys) {
+      app.stdin.write(key);
+      await settle();
+    }
+  }
+
   test('N opens the launch card on the repository holding the working directory, and enter launches the prompt into its conversation', async () => {
     const connection = inWidgets();
     connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
@@ -254,7 +271,7 @@ describe('launching and conversing', () => {
     await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.[\s\S]*factory\/T1-grill-me-about-the-login-flow[\s\S]*claude-sonnet-5-5/));
   });
 
-  test('on the launch card, tab picks another repository, a refusal shows its reason, and esc backs out', async () => {
+  test('on the launch card, ↑↓ move between fields, ←→ pick another repository, a refusal shows its reason, and esc backs out', async () => {
     const connection = new FakeConnection();
     connection.replyTo('launchTask', { ok: false, reason: "Couldn't fetch main from the origin of acme/gadgets: fatal: no network" });
     const { app } = await started({ ...factoryState([]), repositories }, { connection });
@@ -262,10 +279,9 @@ describe('launching and conversing', () => {
     app.stdin.write('N');
     await settle();
     await eventually(() => expect(app.lastFrame()).toMatch(/Repository\s+acme\/gadgets/));
-    app.stdin.write('\t');
-    await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/Repository\s+acme\/widgets/));
-    app.stdin.write('\t');
+    await press(app, UP, UP, UP, UP, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Repository\s+‹ acme\/widgets ›/));
+    await press(app, RIGHT, DOWN, DOWN, DOWN);
     await type(app, 'Spike the cache');
     app.stdin.write('\r');
     await settle();
@@ -278,6 +294,129 @@ describe('launching and conversing', () => {
     await settle();
     await eventually(() => expect(app.lastFrame()).not.toContain('Launch a task'));
     await eventually(() => expect(app.lastFrame()).toContain('No tasks yet.'));
+  });
+
+  const presetsView: PresetsView = {
+    defaultPreset: 'main-flow',
+    warning: null,
+    presets: [
+      {
+        name: 'main-flow',
+        source: 'built-in',
+        description: 'Grill, spec and tickets with you, then implement, review and open a PR unattended.',
+        startStages: [
+          { id: 'grill', mode: 'HITL', model: 'opus', needs: ['prompt'] },
+          { id: 'tickets', mode: 'HITL', model: 'opus', needs: ['issues'] },
+          { id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['issues'] },
+        ],
+      },
+      { name: 'nightly', source: 'user', error: 'Preset nightly (user, nightly.preset.yaml): stage implement: exit all-green is not an exit condition.' },
+      { name: 'quick', source: 'built-in', description: null, startStages: [{ id: 'grill', mode: 'HITL', model: 'opus', needs: ['prompt'] }] },
+      { name: 'setup', source: 'built-in', description: null, startStages: [{ id: 'setup', mode: 'HITL', model: 'sonnet', needs: [] }] },
+    ],
+  };
+
+  test('a start stage that needs no launch input launches with an empty prompt', async () => {
+    const connection = inWidgets();
+    connection.replyTo('listPresets', { ok: true, value: presetsView });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/Preset\s+main-flow/));
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'launchTask')).toEqual([]);
+    await press(app, UP, UP, LEFT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Preset\s+‹ setup \(built-in\) ›/));
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'setup', stage: 'setup', prompt: '' }));
+  });
+
+  test('the card starts on the repository’s default preset and offers only the stages it can start at; starting at implement asks for issue refs', async () => {
+    const connection = inWidgets();
+    connection.replyTo('listPresets', { ok: true, value: presetsView });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/Preset\s+main-flow \(built-in\)/);
+      expect(frame).toContain('Grill, spec and tickets with you');
+      expect(frame).toMatch(/Start stage\s+grill · HITL · opus/);
+      expect(frame).not.toContain('Issues');
+    });
+    expect(connection.sent).toContainEqual({ type: 'listPresets', repo: 'acme/widgets' });
+
+    await press(app, UP, RIGHT, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Start stage\s+‹ implement · AFK · sonnet ›/));
+    await press(app, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Start stage\s+‹ grill · HITL · opus ›/));
+    await press(app, LEFT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Issues/));
+    await press(app, DOWN, DOWN);
+    await type(app, '#12 #13');
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', prompt: '', issues: ['#12', '#13'] }),
+    );
+  });
+
+  test('a preset that doesn’t resolve shows why, and a dangling default preset warns that main-flow is picked instead', async () => {
+    const connection = inWidgets();
+    const warning = 'The default preset of acme/widgets, nightly, no longer resolves (There is no preset nightly.), so main-flow is picked instead.';
+    connection.replyTo('listPresets', { ok: true, value: { ...presetsView, warning } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(warning));
+    await press(app, UP, UP, RIGHT);
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/Preset\s+‹ nightly \(user\) ›/);
+      expect(unwrapped(frame)).toContain('exit all-green is not an exit condition.');
+      expect(frame).not.toMatch(/Start stage\s+grill/);
+    });
+  });
+
+  test('outside any registered clone the card starts on the last used repository, and it tags groups and picks a model tier', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('listPresets', { ok: true, value: presetsView });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories, lastUsedRepo: 'acme/widgets' }, { connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/Repository\s+acme\/widgets/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/Model tier\s+stage default \(opus\)/));
+    await type(app, 'Spike the cache');
+    await press(app, DOWN);
+    await type(app, 'billing, sso');
+    await press(app, DOWN, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Model tier\s+‹ opus ›/));
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({
+        type: 'launchTask',
+        repo: 'acme/widgets',
+        preset: 'main-flow',
+        stage: 'grill',
+        prompt: 'Spike the cache',
+        groups: ['billing', 'sso'],
+        tier: 'opus',
+      }),
+    );
   });
 
   test('the conversation view renders streamed text and tool use, and enter sends the operator’s message', async () => {

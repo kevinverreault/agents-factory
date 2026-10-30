@@ -21,8 +21,8 @@ describeGitContract('the fake git', async () => {
       git.addClone(path, { originUrl: `https://github.com/acme/${name}.git`, defaultBranch: branch });
       return path;
     },
-    async advanceOrigin(clonePath, branch) {
-      return git.advanceOrigin(clonePath, branch);
+    async advanceOrigin(clonePath, branch, files) {
+      return git.advanceOrigin(clonePath, branch, files);
     },
     async editFile(worktreePath, path) {
       git.editFile(worktreePath, path);

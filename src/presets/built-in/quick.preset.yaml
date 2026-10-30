@@ -1,0 +1,33 @@
+# Small jobs: at most three questions, then one implementation run, a review
+# and a PR.
+description: At most three questions, then one implementation run, a review and a PR.
+stages:
+  - id: grill
+    kind: run
+    skill: quick-grill
+    args: "{{prompt}}"
+    mode: HITL
+    model: opus
+  - id: implement
+    kind: run
+    skill: implement
+    mode: AFK
+    model: sonnet
+    exit: run-completed
+  - id: review
+    kind: run
+    skill: code-review
+    mode: AFK
+    model: sonnet
+    on_findings: fix-once
+    exit: run-completed
+  - id: pr-body
+    kind: run
+    skill: pr
+    mode: AFK
+    model: haiku
+    exit: artifact:pr-body
+  - id: open-pr
+    kind: action
+    mode: AFK
+    requires: L2

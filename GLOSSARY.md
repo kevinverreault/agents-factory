@@ -83,6 +83,10 @@ _Avoid_: Output, deliverable
 **Quick launch**:
 Starting AFK work from a single prompt after a short grilling of at most three questions, ending in a handoff.
 
+**Launch card**:
+Where the operator starts a task: they pick its repository, workflow preset and start stage, give the prompt or issue refs the start stage needs, and tag it with groups and a model tier.
+_Avoid_: New task dialog, launcher
+
 ### Control
 
 **Operator**:
