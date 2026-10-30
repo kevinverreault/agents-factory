@@ -1,10 +1,12 @@
 // The full-screen conversation view: a HITL run's conversation, replayed from
 // the session file and then live, with a line for the operator's next message.
-import { createElement as h, useEffect, useState } from 'react';
+import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
+import type { Reply } from '../protocol/protocol.ts';
+import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
 
 type Props = {
@@ -20,8 +22,16 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const runId = task?.liveRunId ?? Object.values(state.runs).findLast((run) => run.taskId === taskId)?.id ?? null;
   const run = runId ? state.runs[runId] : undefined;
   const [events, setEvents] = useState<ConversationEvent[]>([]);
-  const [draft, setDraft] = useState('');
   const [refusal, setRefusal] = useState<string | null>(null);
+  // Keys typed in one burst arrive before a re-render, so what they edit is
+  // kept here: the draft, and the card for the question it answers.
+  const typing = useRef<{ draft: string; card: Card; cardFor: string | null; answered: string | null }>({
+    draft: '',
+    card: newCard(),
+    cardFor: null,
+    answered: null,
+  });
+  const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const { stdout } = useStdout();
 
   useEffect(() => {
@@ -30,32 +40,70 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     return connection.converse(runId, (event) => setEvents((events) => [...events, event]));
   }, [connection, runId]);
 
+  const live = run?.status === 'active';
+  const midTurn = live && run.turn === 'agent';
+  // The open card, until the operator has answered it.
+  const question = live && run.question && run.question.id !== typing.current.answered ? run.question : null;
+  // A card answers its own question: a new question starts a new card.
+  const card = question && typing.current.cardFor === question.id ? typing.current.card : newCard();
+  const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
+
   useInput((input, key) => {
+    const typed = typing.current;
     if (key.ctrl && input === 'b') return onLeave();
-    if (key.return) {
-      if (!draft.trim()) return;
-      void connection.send({ type: 'sendMessage', taskId, text: draft }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
-      setDraft('');
+    if (key.escape) {
+      if (midTurn) void connection.send({ type: 'interrupt', taskId }).then(tell);
       return;
     }
-    // Keys typed in one burst arrive before a re-render.
-    setDraft((draft) => edit(draft, input, key) ?? draft);
+    if (question && typed.cardFor !== question.id) Object.assign(typed, { card: newCard(), cardFor: question.id });
+    const onCard = question ? cardKey(question, typed.card, typed.draft, input, key) : { kind: 'ignored' as const };
+    if (onCard.kind === 'answered') {
+      const answered = question!.id;
+      void connection.send({ type: 'answerQuestion', taskId, questionId: answered, answers: onCard.answers }).then((reply) => {
+        tell(reply);
+        // A refused answer leaves the card up, so the operator sees what is still open.
+        if (!reply.ok && typed.answered === answered) Object.assign(typed, { answered: null, card: newCard() });
+        rerender();
+      });
+      Object.assign(typed, { answered, draft: '' });
+    } else if (onCard.kind === 'card') {
+      typed.card = onCard.card;
+      if (onCard.clearDraft) typed.draft = '';
+    } else if (key.return) {
+      if (!typed.draft.trim()) return;
+      void connection.send({ type: 'sendMessage', taskId, text: typed.draft }).then(tell);
+      typed.draft = '';
+    } else {
+      typed.draft = edit(typed.draft, input, key) ?? typed.draft;
+    }
+    rerender();
   });
+  const { draft } = typing.current;
+  const hint = question ? 'esc interrupt · ctrl+b back' : midTurn ? 'enter queue · esc interrupt · ctrl+b back' : 'enter send · ctrl+b back';
 
   return h(
     Box,
     { flexDirection: 'column', height: (stdout as NodeJS.WriteStream).rows || undefined },
     h(Box, { gap: 2 }, h(Text, { bold: true }, taskId), h(Text, { wrap: 'truncate' }, task?.title ?? '')),
     h(Text, { dimColor: true }, [task?.branch, run?.model, task?.label].filter(Boolean).join(' · ')),
+    // The escape hatch: the same session in the operator's own terminal.
+    task?.sessionId
+      ? h(Text, { dimColor: true, wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
+      : null,
     // The latest events stay in view; older ones scroll off the top.
     h(
       Box,
       { flexDirection: 'column', flexGrow: 1, justifyContent: 'flex-end', overflow: 'hidden', marginY: 1 },
       ...events.map((event) => h(Event, { key: event.id, event })),
+      ...(run?.queued ?? []).map((text, i) =>
+        h(Box, { key: `queued-${i}`, gap: 1, flexShrink: 0 }, h(Box, { width: 6, flexShrink: 0 }, h(Text, { dimColor: true }, 'queued')), h(Text, { dimColor: true }, text)),
+      ),
     ),
+    question ? h(QuestionCard, { question, card }) : null,
+    live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
     refusal ? h(Text, { color: 'red' }, refusal) : null,
     h(Text, null, `› ${draft}▏`),
-    h(Text, { dimColor: true }, 'enter send · ctrl+b back'),
+    h(Text, { dimColor: true }, hint),
   );
 }
 

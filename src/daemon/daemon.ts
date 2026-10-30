@@ -12,6 +12,7 @@ import {
   initialLifecycle,
   liveRun,
   nextTaskId,
+  overdueRuns,
   reduce,
   unfinishedTasks,
   type Lifecycle,
@@ -51,7 +52,7 @@ export type DaemonOptions = {
 };
 
 export const IDLE_EXIT_MS = 10 * 60_000;
-// How often the daemon checks whether it is idle.
+// How often the daemon checks whether it is idle and fires overdue deadlines.
 const TICK_MS = 5_000;
 
 export interface Daemon {
@@ -90,6 +91,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Idle exit (ADR 0002): the daemon stays up while anything needs a clock.
   let idleSince: number | null = null;
   const stopTicking = clock.every(TICK_MS, () => {
+    fireOverdueDeadlines();
     if (needsAClock()) idleSince = null;
     else if ((idleSince ??= clock.now()) + (options.idleExitMs ?? IDLE_EXIT_MS) <= clock.now()) void stop();
   });
@@ -100,6 +102,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       sockets.delete(socket);
       subscribers.delete(socket);
       for (const watchers of conversations.values()) watchers.delete(socket);
+      publish();
     });
     socket.on('error', () => {});
     let authenticated = false;
@@ -125,6 +128,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           break;
         case 'leaveConversation':
           conversations.get(message.runId)?.delete(socket);
+          publish();
           break;
         case 'command': {
           const { id, command } = message;
@@ -255,6 +259,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (!watchers) conversations.set(runId, (watchers = new Map()));
     const replay = {};
     watchers.set(socket, replay);
+    // The operator is in the conversation from now: it no longer waits for them.
+    publish();
     // Taken now, so a run that ends during the read still has it.
     const live = streamed.get(runId) ?? [];
     const history =
@@ -311,6 +317,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       else if (missing) await settle({ type: 'repoFound', repo: id }, new Set([id]));
     }
   });
+
+  // Deadlines are wall-clock times persisted in the store (ADR 0003), never
+  // in-memory timers, which a sleep may stretch. Overdue ones fire at start
+  // and at every tick, so the first tick after a wake fires every deadline
+  // that passed while the machine slept.
+  function fireOverdueDeadlines(): void {
+    if (overdueRuns(lifecycle, clock.now()).length) void dispatch({ type: 'deadlinesDue' });
+  }
+  fireOverdueDeadlines();
 
   // Runs an action through the Lifecycle, saves the result and tells every
   // subscriber what changed.
@@ -400,14 +415,30 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!('runId' in action && action.runId === run.id)) executor.stop(run.id);
       }
     }
+    // The conversation verbs act on the task's live run.
+    const conversing = 'taskId' in action ? lifecycle.tasks[action.taskId] : undefined;
+    const run = conversing && liveRun(lifecycle, conversing);
+    // A message reaches the run on the operator's turn, or once the agent's
+    // turn it was sent during ends, with whatever else waited.
     if (action.type === 'sendMessage') {
-      const run = liveRun(lifecycle, lifecycle.tasks[action.taskId]!)!;
-      executor.send(run.id, action.text);
+      if (before.runs[run!.id]!.turn === 'operator') executor.send(run!.id, action.text);
+    } else if (action.type === 'interrupt') {
+      executor.interrupt(run!.id);
+    } else if (action.type === 'answerQuestion') {
+      executor.answer(run!.id, action.questionId, action.answers);
+    } else if (action.type === 'turnEnded') {
+      const { queued } = before.runs[action.runId]!;
+      if (queued.length) executor.send(action.runId, queued.join('\n\n'));
     }
   }
 
+  // The runs whose conversations some TUI has open.
+  function watched(): Set<string> {
+    return new Set([...conversations].filter(([, watchers]) => watchers.size > 0).map(([runId]) => runId));
+  }
+
   function publish(): void {
-    const next = toFactoryState(lifecycle);
+    const next = toFactoryState(lifecycle, watched());
     const ops = diffFactoryState(published, next);
     published = next;
     if (ops.length) for (const socket of subscribers) send(socket, { type: 'patch', ops });
