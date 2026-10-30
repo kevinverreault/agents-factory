@@ -56,7 +56,7 @@ describe('the presets a launch card offers', () => {
 
     expect(view.defaultPreset).toBe('main-flow');
     expect(view.warning).toBeNull();
-    expect(view.presets.map((preset) => preset.name)).toEqual(['child', 'main-flow', 'quick', 'setup', 'wayfinder']);
+    expect(view.presets.map((preset) => preset.name)).toEqual(['child', 'implement', 'main-flow', 'quick', 'setup', 'wayfinder']);
     expect(view.presets.find((preset) => preset.name === 'main-flow')).toMatchObject({
       source: 'built-in',
       startStages: [

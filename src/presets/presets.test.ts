@@ -52,6 +52,24 @@ describe('built-in presets', () => {
     });
   });
 
+  test('implement runs the implement skill on the prompt AFK, then reviews and opens a PR as quick does', () => {
+    const preset = resolved([], 'implement');
+
+    expect(preset.stages.map((stage) => stage.id)).toEqual(['implement', 'review', 'pr-body', 'open-pr']);
+    expect(preset.stages[0]).toEqual({
+      id: 'implement',
+      kind: 'run',
+      skill: 'implement',
+      args: '{{prompt}}',
+      mode: 'AFK',
+      model: 'sonnet',
+      exit: 'run-completed',
+    });
+    expect(preset.stages.at(-1)).toMatchObject({ id: 'open-pr', kind: 'action', requires: 'L2' });
+    expect(startStages(preset)).toEqual([{ id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['prompt'] }]);
+    expect(openingMessage(preset.stages[0]!, { prompt: 'Add a dark mode toggle.', issues: [] })).toBe('/factory:implement Add a dark mode toggle.');
+  });
+
   test('quick, child and setup resolve too', () => {
     expect(resolved([], 'quick').stages.map((stage) => stage.id)).toEqual(['grill', 'implement', 'review', 'pr-body', 'open-pr']);
     expect(resolved([], 'child').stages).toEqual([{ id: 'work', kind: 'run', args: '{{prompt}}', mode: 'AFK', model: 'sonnet', exit: 'run-completed' }]);

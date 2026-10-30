@@ -8,7 +8,7 @@ A preset is a YAML file named `<name>.preset.yaml`, in one of three scopes:
 
 | Scope | Where | Read |
 |---|---|---|
-| Built-in | `src/presets/built-in/` | Shipped with the factory: `main-flow`, `wayfinder`, `quick`, `child`, `setup` |
+| Built-in | `src/presets/built-in/` | Shipped with the factory: `main-flow`, `wayfinder`, `quick`, `implement`, `child`, `setup` |
 | User | `~/.agent-factory/presets/` | From disk, at every launch |
 | Repo | `.agent-factory/presets/` in the repository | Through git, as committed at `origin/<base_branch>`, freshly fetched at launch (the launch card lists what was last fetched) |
 
@@ -72,7 +72,7 @@ stages:
   - id: review
 ```
 
-A preset that `extends` another takes its stages, overrides single ones by `id` field by field, and inserts each new stage before the next one it overrides (or last, after them all). `from: <stage id>` takes the extended preset's stages from that stage onward only: `wayfinder` extends `main-flow` from `spec`. A preset extending its own name extends the one it shadows in a lower scope, so a repo can tweak the built-in `main-flow` by one stage. Other presets extending `main-flow` then extend that tweak.
+A preset that `extends` another takes its stages, overrides single ones by `id` field by field, and inserts each new stage before the next one it overrides (or last, after them all). `from: <stage id>` takes the extended preset's stages from that stage onward only: `wayfinder` extends `main-flow` from `spec`, and `implement` extends `quick` from `implement`, starting it on the prompt. A preset extending its own name extends the one it shadows in a lower scope, so a repo can tweak the built-in `main-flow` by one stage. Other presets extending `main-flow` then extend that tweak.
 
 The resolved stages are checked whole against the schema at launch. A preset that fails, names an unknown exit condition or template, or extends one that is missing or itself is refused with the reason.
 

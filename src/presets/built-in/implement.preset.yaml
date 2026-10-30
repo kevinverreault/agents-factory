@@ -1,0 +1,9 @@
+# Work you've already worked out: straight to the implement skill on the
+# prompt, then carry on as quick from there, through review to a PR. At L1
+# open-pr is skipped: the operator's Push & open draft PR makes it (ADR 0007).
+description: Implement the prompt unattended, then a review and a PR.
+extends: quick
+from: implement
+stages:
+  - id: implement
+    args: "{{prompt}}"
