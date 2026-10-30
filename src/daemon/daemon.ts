@@ -5,18 +5,23 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname } from 'node:path';
+import { capture } from '../artifacts/capture.ts';
 import type { ConversationEvent, Executor } from '../executor/executor.ts';
-import type { Git } from '../git/git.ts';
+import { GitError, type Git } from '../git/git.ts';
 import {
+  artifactsOf,
   guard,
   initialLifecycle,
   isTerminal,
   liveRun,
   nextTaskId,
+  overdueRuns,
   reduce,
+  unfinishedTasks,
   type Lifecycle,
   type LifecycleAction,
   type Repository,
+  type RepoEvent,
   type TaskLaunched,
 } from '../lifecycle/lifecycle.ts';
 import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
@@ -28,6 +33,7 @@ import {
   type CloneView,
   type Command,
   type DaemonStatus,
+  type HookEvent,
   type LaunchCommand,
   type RepoCommand,
   type Reply,
@@ -52,7 +58,7 @@ export type DaemonOptions = {
 };
 
 export const IDLE_EXIT_MS = 10 * 60_000;
-// How often the daemon checks whether it is idle.
+// How often the daemon checks whether it is idle and fires overdue deadlines.
 const TICK_MS = 5_000;
 
 export interface Daemon {
@@ -91,6 +97,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Idle exit (ADR 0002): the daemon stays up while anything needs a clock.
   let idleSince: number | null = null;
   const stopTicking = clock.every(TICK_MS, () => {
+    fireOverdueDeadlines();
     if (needsAClock()) idleSince = null;
     else if ((idleSince ??= clock.now()) + (options.idleExitMs ?? IDLE_EXIT_MS) <= clock.now()) void stop();
   });
@@ -101,6 +108,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       sockets.delete(socket);
       subscribers.delete(socket);
       for (const watchers of conversations.values()) watchers.delete(socket);
+      publish();
     });
     socket.on('error', () => {});
     let authenticated = false;
@@ -126,6 +134,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           break;
         case 'leaveConversation':
           conversations.get(message.runId)?.delete(socket);
+          publish();
           break;
         case 'command': {
           const { id, command } = message;
@@ -151,8 +160,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return { ok: true };
       case 'registerRepo':
         return registerRepo(command);
+      case 'moveRepo':
+        return moveRepo(command);
       case 'launchTask':
         return launch(command);
+      case 'hookEvent':
+        return captureArtifacts(command.event);
       case 'inspectClone': {
         const clone = await readClone(git, command.path);
         if ('refusal' in clone) return { ok: false, reason: clone.refusal };
@@ -185,6 +198,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       defaultPreset: defaultPreset ?? DEFAULT_PRESET,
     });
     return reply.ok ? { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) } : reply;
+  }
+
+  // Re-points the repository whose clone now holds `path` there, after
+  // repairing its unfinished tasks' worktrees: they still point at the clone's
+  // old path (ADR 0010). Its `repo-missing` request closes and its runs can
+  // start again.
+  function moveRepo({ path }: Extract<RepoCommand, { type: 'moveRepo' }>): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const clone = await readClone(git, path);
+      if ('refusal' in clone) return { ok: false, reason: clone.refusal };
+      const action: RepoEvent = { type: 'repoMoved', repo: clone.repo, path: clone.path };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      for (const task of unfinishedTasks(lifecycle, clone.repo)) {
+        if (!task.worktree) continue;
+        try {
+          await git.repairWorktree(clone.path, task.worktree.path);
+        } catch (error) {
+          if (!(error instanceof GitError)) throw error;
+          return { ok: false, reason: `Couldn't repair the worktree of ${task.id} at ${task.worktree.path}: ${error.message}` };
+        }
+      }
+      const refusal = await settle(action, new Set([clone.repo]));
+      return refusal ? { ok: false, reason: refusal } : { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) };
+    });
   }
 
   // Freezes the pinned skill set (ADR 0005) and cuts the task's worktree, then
@@ -234,6 +273,29 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await skillSets.prune(tasks.flatMap((task) => task.skillSet ?? []));
   }
 
+  // Links what a tool call in a task's session produced to the task, and
+  // rereads whether each of the task's files is committed: the agent may
+  // have just committed them.
+  function captureArtifacts(event: HookEvent): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      if (typeof event?.session_id !== 'string' || typeof event.cwd !== 'string') {
+        return { ok: false, reason: 'A hook event needs a session id and a working directory.' };
+      }
+      const task = Object.values(lifecycle.tasks).find((task) => task.sessionId === event.session_id && !isTerminal(task));
+      if (!task?.worktree) return { ok: false, reason: `No unfinished task has session ${event.session_id}.` };
+      const captured = capture(event, { repo: task.repo, worktree: task.worktree.path });
+      const issues = captured.flatMap((artifact) => (artifact.kind === 'issue' ? [artifact.url] : []));
+      const paths = new Set(captured.flatMap((artifact) => (artifact.kind === 'file' ? [artifact.path] : [])));
+      for (const artifact of artifactsOf(lifecycle, task)) if (artifact.kind === 'file') paths.add(artifact.path);
+      if (paths.size === 0 && issues.length === 0) return { ok: true };
+      const uncommitted = new Set(await git.uncommitted(task.worktree.path, [...paths]));
+      const files = [...paths].map((path) => ({ path, committed: !uncommitted.has(path) }));
+      const refusal = await settle({ type: 'artifactsSeen', taskId: task.id, files, issues }, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
+  }
+
   // Replays the run's conversation from the Claude session file, then what
   // the run streamed that the file doesn't hold yet, then streams it live.
   async function converse(socket: Socket, runId: string): Promise<void> {
@@ -244,6 +306,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (!watchers) conversations.set(runId, (watchers = new Map()));
     const replay = {};
     watchers.set(socket, replay);
+    // The operator is in the conversation from now: it no longer waits for them.
+    publish();
     // Taken now, so a run that ends during the read still has it.
     const live = streamed.get(runId) ?? [];
     const history =
@@ -302,6 +366,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       else if (missing) await settle({ type: 'repoFound', repo: id }, new Set([id]));
     }
   });
+
+  // Deadlines are wall-clock times persisted in the store (ADR 0003), never
+  // in-memory timers, which a sleep may stretch. Overdue ones fire at start
+  // and at every tick, so the first tick after a wake fires every deadline
+  // that passed while the machine slept.
+  function fireOverdueDeadlines(): void {
+    if (overdueRuns(lifecycle, clock.now()).length) void dispatch({ type: 'deadlinesDue' });
+  }
+  fireOverdueDeadlines();
 
   // Runs an action through the Lifecycle, saves the result and tells every
   // subscriber what changed.
@@ -392,14 +465,30 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!('runId' in action && action.runId === run.id)) executor.stop(run.id);
       }
     }
+    // The conversation verbs act on the task's live run.
+    const conversing = 'taskId' in action ? lifecycle.tasks[action.taskId] : undefined;
+    const run = conversing && liveRun(lifecycle, conversing);
+    // A message reaches the run on the operator's turn, or once the agent's
+    // turn it was sent during ends, with whatever else waited.
     if (action.type === 'sendMessage') {
-      const run = liveRun(lifecycle, lifecycle.tasks[action.taskId]!)!;
-      executor.send(run.id, action.text);
+      if (before.runs[run!.id]!.turn === 'operator') executor.send(run!.id, action.text);
+    } else if (action.type === 'interrupt') {
+      executor.interrupt(run!.id);
+    } else if (action.type === 'answerQuestion') {
+      executor.answer(run!.id, action.questionId, action.answers);
+    } else if (action.type === 'turnEnded') {
+      const { queued } = before.runs[action.runId]!;
+      if (queued.length) executor.send(action.runId, queued.join('\n\n'));
     }
   }
 
+  // The runs whose conversations some TUI has open.
+  function watched(): Set<string> {
+    return new Set([...conversations].filter(([, watchers]) => watchers.size > 0).map(([runId]) => runId));
+  }
+
   function publish(): void {
-    const next = toFactoryState(lifecycle);
+    const next = toFactoryState(lifecycle, watched());
     const ops = diffFactoryState(published, next);
     published = next;
     if (ops.length) for (const socket of subscribers) send(socket, { type: 'patch', ops });

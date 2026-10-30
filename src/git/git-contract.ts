@@ -18,6 +18,10 @@ export type CloneFixture = {
   // Adds a commit to `branch` on the clone's origin, not yet fetched, and
   // returns its hash.
   advanceOrigin(clonePath: string, branch: string): Promise<string>;
+  // Writes `path` (relative, with `/`) in the worktree, without committing it.
+  editFile(worktreePath: string, path: string): Promise<void>;
+  // Commits everything changed in the worktree.
+  commitAll(worktreePath: string): Promise<void>;
   dispose(): Promise<void>;
 };
 
@@ -93,6 +97,53 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
           git.addWorktree(clone, { path: join(root, 'wt', 'T2'), branch: 'factory/T1-a', startPoint: 'origin/main' }),
         ).rejects.toThrow();
         expect((await git.worktrees(clone)).map((worktree) => worktree.branch)).toEqual(['factory/T1-a']);
+      }));
+
+    test('a worktree tells which files have uncommitted changes, new files included, until they are committed', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        const files = ['GLOSSARY.md', 'docs/adr/0001 sso cookies.md', 'README.md'];
+        expect(await git.uncommitted(path, files)).toEqual([]);
+
+        await editFile(path, 'GLOSSARY.md');
+        await editFile(path, 'docs/adr/0001 sso cookies.md');
+        expect(await git.uncommitted(path, files)).toEqual(['GLOSSARY.md', 'docs/adr/0001 sso cookies.md']);
+
+        await commitAll(path);
+        expect(await git.uncommitted(path, files)).toEqual([]);
+
+        await editFile(path, 'GLOSSARY.md');
+        expect(await git.uncommitted(path, files)).toEqual(['GLOSSARY.md']);
+      }));
+
+    test('a task worktree stops working when its clone moves, and works again once repaired from the new path', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, move }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'worktrees', 'acme-widgets', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-grill-me', startPoint: 'origin/main' });
+        const [worktree] = await git.worktrees(clone);
+        // A worktree reads as the clone it belongs to.
+        const before = await git.inspectClone(clone);
+        expect(await git.inspectClone(path)).toEqual(before);
+        const moved = join(root, 'moved');
+
+        await move(clone, moved);
+        expect(await git.inspectClone(path)).toBeNull();
+        await git.repairWorktree(moved, path);
+
+        expect(await git.inspectClone(path)).toEqual({ ...before, path: moved });
+        expect(await git.worktrees(moved)).toEqual([worktree]);
+      }));
+
+    test('repairing a path that is no worktree of the clone fails', () =>
+      withFixture(async ({ git, root, cloneWithOrigin }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+
+        await expect(git.repairWorktree(clone, join(root, 'worktrees', 'nowhere'))).rejects.toThrow();
       }));
   });
 }

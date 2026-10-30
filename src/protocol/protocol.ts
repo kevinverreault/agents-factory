@@ -7,13 +7,16 @@ import type { ConversationEvent } from '../executor/executor.ts';
 import type { OperatorCommand } from '../lifecycle/lifecycle.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 5;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
 // absolute: the daemon's working directory is not the client's.
 export type RepoCommand =
   | { type: 'registerRepo'; path: string; baseBranch?: string; defaultPreset?: string }
+  // Re-points the repository whose clone now holds `path` (ADR 0010).
+  // Replies with its `RepositoryView`, like `registerRepo`.
+  | { type: 'moveRepo'; path: string }
   // Replies with the `CloneView` of the clone holding `path`.
   | { type: 'inspectClone'; path: string };
 
@@ -21,7 +24,18 @@ export type CloneView = { repo: string; path: string };
 // Launches a HITL task from the launch card: one stage, a conversation in a
 // new worktree. Replies with `{ taskId }`.
 export type LaunchCommand = { type: 'launchTask'; repo: string; prompt: string };
-export type Command = OperatorCommand | DaemonCommand | RepoCommand | LaunchCommand;
+// A Claude Code hook event, as the hook gets it on stdin, relayed by the
+// `hook` CLI. Only the fields artifact capture reads are typed.
+export type HookEvent = {
+  session_id: string;
+  cwd: string;
+  hook_event_name: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: unknown;
+};
+export type HookCommand = { type: 'hookEvent'; event: HookEvent };
+export type Command = OperatorCommand | DaemonCommand | RepoCommand | LaunchCommand | HookCommand;
 
 export type DaemonStatus = {
   pid: number;

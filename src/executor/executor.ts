@@ -1,7 +1,7 @@
 // The executor port: starts and stops runs, takes the operator's messages,
 // and reports run events and the conversation. The Agent SDK adapter
 // (`agent-sdk.ts`) is the real one.
-import type { AutonomyLevel, Mode, RunEvent } from '../lifecycle/lifecycle.ts';
+import type { Answers, AutonomyLevel, Mode, RunEvent } from '../lifecycle/lifecycle.ts';
 
 export type RunStart = {
   runId: string;
@@ -46,6 +46,10 @@ export interface Executor {
   start(run: RunStart, sink: RunSink): void;
   // Sends the operator's message to a live run.
   send(runId: string, text: string): void;
+  // Cuts the run's current turn short. The turn's end is reported as usual.
+  interrupt(runId: string): void;
+  // Answers the question card the run's turn waits on.
+  answer(runId: string, questionId: string, answers: Answers): void;
   stop(runId: string): void;
   // The conversation so far, read from the Claude session file.
   history(session: Session): Promise<ConversationEvent[]>;

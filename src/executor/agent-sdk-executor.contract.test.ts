@@ -1,9 +1,12 @@
 // Seam 3: the Agent SDK adapter behind the executor port, on the operator's
-// Windows machine. One HITL conversation on haiku: it spends a little usage.
+// Windows machine. HITL conversations on haiku: they spend a little usage.
+// The resume check runs the operator's own `claude` from PATH.
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { expect, test } from 'vitest';
 import type { RunEvent } from '../lifecycle/lifecycle.ts';
 import { isAlive, waitFor } from '../os/test-support.ts';
@@ -31,11 +34,14 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
   };
   const startedAt = Date.now();
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
+  const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
 
   executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
-  await waitFor(() => agentSaid('PERIWINKLE-42'), 120_000);
+  await waitFor(() => turnsEnded() === 1, 120_000);
+  expect(agentSaid('PERIWINKLE-42')).toBe(true);
   executor.send('R1', 'Now reply with only the word PONG.');
-  await waitFor(() => agentSaid('PONG'), 120_000);
+  await waitFor(() => turnsEnded() === 2, 120_000);
+  expect(agentSaid('PONG')).toBe(true);
 
   const started = reported.find((event) => event.type === 'runStarted');
   expect(started).toMatchObject({ runId: 'R1', model: expect.stringMatching(/^claude-haiku-5-5/) });
@@ -51,7 +57,7 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     expect.objectContaining({ type: 'message', from: 'agent', text: expect.stringContaining('PONG') }),
   ]);
   // A HITL run lives on between turns: only the operator ends it.
-  expect(reported.map((event) => event.type)).toEqual(['runStarted']);
+  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
 
   // Live and replayed, an event has the same id, so a replay can skip what it
   // already sent. The CLI writes the session file a moment after it streams.
@@ -64,5 +70,66 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
 
   executor.stop('R1');
   await waitFor(() => !isAlive(pid), 15_000);
-  expect(reported.map((event) => event.type)).toEqual(['runStarted']);
+  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
+});
+
+test('AskUserQuestion holds the turn until answered, an interrupt ends only the turn, and the session resumes with `claude --resume` in a terminal', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
+  const executor = agentSdkExecutor();
+  const reported: RunEvent[] = [];
+  const live: ConversationEvent[] = [];
+  const run: RunStart = {
+    runId: 'R1',
+    taskId: 'T1',
+    mode: 'HITL',
+    autonomy: null,
+    sessionId: randomUUID(),
+    resumesSession: false,
+    cwd,
+    firstMessage:
+      'Use the AskUserQuestion tool to ask me which colour I prefer, with exactly two options: Red and Blue. ' +
+      'After I answer, reply with only the colour I chose, in capitals.',
+    model: 'claude-haiku-5-5',
+    credential: 'subscription-host',
+    plugin: null,
+  };
+  const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
+  const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
+  const asked = () => reported.find((event) => event.type === 'questionAsked');
+
+  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
+  await waitFor(() => asked() !== undefined, 120_000);
+  const { question } = asked() as Extract<RunEvent, { type: 'questionAsked' }>;
+  expect(question.questions).toEqual([
+    expect.objectContaining({ options: [expect.objectContaining({ label: 'Red' }), expect.objectContaining({ label: 'Blue' })] }),
+  ]);
+  // The card holds the turn open.
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  expect(turnsEnded()).toBe(0);
+  executor.answer('R1', question.id, { [question.questions[0]!.question]: 'Blue' });
+  await waitFor(() => turnsEnded() === 1, 120_000);
+  expect(agentSaid('BLUE')).toBe(true);
+
+  executor.send('R1', 'Use the Bash tool to run `sleep 120`. After it finishes, say DONE-SLEEPING.');
+  await waitFor(() => live.some((event) => event.type === 'toolUse' && event.tool === 'Bash'), 120_000);
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  const interruptedAt = Date.now();
+  executor.interrupt('R1');
+  await waitFor(() => turnsEnded() === 2, 15_000);
+  expect(Date.now() - interruptedAt).toBeLessThan(15_000);
+  expect(agentSaid('DONE-SLEEPING')).toBe(false);
+  // The run lives on after an interrupt: only the operator ends it.
+  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'questionAsked', 'turnEnded', 'turnEnded']);
+  const { pid } = reported[0] as Extract<RunEvent, { type: 'runStarted' }>;
+  executor.stop('R1');
+  await waitFor(() => !isAlive(pid), 15_000);
+
+  // The operator's own `claude`, in the task's worktree, as the conversation view shows.
+  const { ANTHROPIC_API_KEY, ...env } = process.env;
+  const { stdout } = await promisify(execFile)(
+    'claude',
+    ['--resume', run.sessionId, '--model', 'claude-haiku-5-5', '-p', 'Which colour did I choose? Reply with only the colour, in capitals.'],
+    { cwd, env, timeout: 120_000 },
+  );
+  expect(stdout).toContain('BLUE');
 });

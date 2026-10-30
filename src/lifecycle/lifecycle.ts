@@ -2,7 +2,8 @@
 // reducer with guards and selectors. Every operator command and every run event goes
 // through `reduce`. Ported from the task-lifecycle prototype, amended by
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
-// Child tasks, stages and parking arrive with their own slices.
+// Child tasks, stages and parking on a request's timeout arrive with their
+// own slices.
 import { DEFAULT_TIER, route, type Tier } from '../models/routing.ts';
 
 export type Mode = 'HITL' | 'AFK';
@@ -28,6 +29,17 @@ export type RunOutcome =
   | 'cancelled'
   | 'interrupted';
 export type Interruption = 'graceful' | 'unclean';
+export type Turn = 'agent' | 'operator';
+
+// What the agent asked through `AskUserQuestion`, shown as a card in the
+// conversation, never as an attention request. `id` is the tool use's.
+export type Question = {
+  id: string;
+  questions: { question: string; header: string; options: { label: string; description: string }[]; multiSelect: boolean }[];
+};
+// Each question's text with its answer: an option's label (a multi-select's
+// labels joined by ", "), or the operator's own words.
+export type Answers = Record<string, string>;
 export type AttentionKind =
   | 'question'
   | 'permission'
@@ -72,6 +84,13 @@ export type Run = {
   outcome: RunOutcome | null;
   interruption: Interruption | null;
   resumesSession: boolean;
+  // Whose turn the conversation is on. A run starts on the agent's turn when
+  // it has a first message to answer.
+  turn: Turn;
+  // The operator's messages sent during the agent's turn, delivered when it ends.
+  queued: string[];
+  // The card the agent's turn waits on, if any.
+  question: Question | null;
   // The exact model: routed from the task's tier at start, then the one the
   // CLI reports it runs.
   model: string;
@@ -79,6 +98,9 @@ export type Run = {
   cli: { pid: number; createdAt: number } | null;
   // The skill set version the run loaded: its task's.
   skillSet: string | null;
+  // While the run waits on the operator, when it parks if they still haven't
+  // replied: a wall-clock deadline, persisted with the run (ADR 0003).
+  parksAt: number | null;
   startedAt: number;
   endedAt: number | null;
 };
@@ -111,12 +133,21 @@ export type Repository = {
   registeredAt: number;
 };
 
+// A file or GitHub issue a run produced, linked to its task. A file is the
+// glossary or an ADR in the task's worktree, by its path there (with `/`);
+// `committed` says whether the worktree has committed its latest change.
+export type Artifact = { id: string; taskId: string; runId: string } & (
+  | { kind: 'file'; path: string; committed: boolean }
+  | { kind: 'issue'; url: string }
+);
+
 export type Lifecycle = {
-  counters: { task: number; run: number; request: number };
+  counters: { task: number; run: number; request: number; artifact: number };
   repositories: Record<string, Repository>;
   tasks: Record<string, Task>;
   runs: Record<string, Run>;
   requests: Record<string, AttentionRequest>;
+  artifacts: Record<string, Artifact>;
   slotCap: number;
 };
 
@@ -126,6 +157,9 @@ export type OperatorCommand =
   | { type: 'submit'; taskId: string }
   | { type: 'open'; taskId: string }
   | { type: 'sendMessage'; taskId: string; text: string }
+  // Cuts the agent's turn short; the run lives on.
+  | { type: 'interrupt'; taskId: string }
+  | { type: 'answerQuestion'; taskId: string; questionId: string; answers: Answers }
   | { type: 'handoff'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'takeOver'; taskId: string }
   | { type: 'answer'; taskId: string }
@@ -140,13 +174,28 @@ export type RunEvent =
   | { type: 'runCompleted'; runId: string }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
+  // The agent finished answering: the conversation is the operator's again.
+  | { type: 'turnEnded'; runId: string }
+  | { type: 'questionAsked'; runId: string; question: Question }
   | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string };
+
+// What artifact capture found after a tool call of the task's latest run,
+// with whether each of the task's files (old and new) is committed. Hooks
+// run in the background, so it may land after that run ended.
+export type ArtifactsSeen = {
+  type: 'artifactsSeen';
+  taskId: string;
+  files: { path: string; committed: boolean }[];
+  issues: string[];
+};
 
 // What the daemon learns about the operator's clones.
 export type RepoEvent =
   | { type: 'repoRegistered'; repo: string; path: string; baseBranch: string; defaultPreset: string }
   | { type: 'repoMissing'; repo: string; reason: string }
-  | { type: 'repoFound'; repo: string };
+  | { type: 'repoFound'; repo: string }
+  // `repo move`: the clone is at `path` now, and its task worktrees repaired.
+  | { type: 'repoMoved'; repo: string; path: string };
 
 // A task the daemon launched once its worktree was cut. The daemon names the
 // session, so the Claude session file can be found by it.
@@ -160,19 +209,25 @@ export type TaskLaunched = {
   skillSet: string;
 };
 
-export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched;
+// The daemon's clock found deadlines that have passed (ADR 0003).
+export type ClockEvent = { type: 'deadlinesDue' };
+
+export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched | ClockEvent | ArtifactsSeen;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
 export const DEFAULT_SLOT_CAP = 2;
+// How long a HITL run may wait on the operator's turn before it is parked.
+export const IDLE_PARK_MS = 30 * 60_000;
 
 export function initialLifecycle(): Lifecycle {
   return {
-    counters: { task: 0, run: 0, request: 0 },
+    counters: { task: 0, run: 0, request: 0, artifact: 0 },
     repositories: {},
     tasks: {},
     runs: {},
     requests: {},
+    artifacts: {},
     slotCap: DEFAULT_SLOT_CAP,
   };
 }
@@ -188,6 +243,11 @@ export function isTerminal(task: Task): boolean {
   return task.state === 'done' || task.state === 'cancelled';
 }
 
+// The repository's tasks that are neither Done nor Cancelled.
+export function unfinishedTasks(state: Lifecycle, repo: string): Task[] {
+  return Object.values(state.tasks).filter((task) => task.repo === repo && !isTerminal(task));
+}
+
 export function liveRun(state: Lifecycle, task: Task): Run | undefined {
   return task.runIds.map((id) => state.runs[id]!).find((run) => run.status !== 'ended');
 }
@@ -201,18 +261,44 @@ export function openRepoRequest(state: Lifecycle, repo: string): AttentionReques
   return Object.values(state.requests).find((request) => request.repo === repo && request.taskId === null && request.status === 'open');
 }
 
+export function artifactsOf(state: Lifecycle, task: Task): Artifact[] {
+  return Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id);
+}
+
+// The live runs whose park deadline has passed at `at`.
+export function overdueRuns(state: Lifecycle, at: number): Run[] {
+  return Object.values(state.runs).filter((run) => run.status !== 'ended' && run.parksAt !== null && run.parksAt <= at);
+}
+
 export function activeAfkRuns(state: Lifecycle): number {
   return Object.values(state.runs).filter((run) => run.status === 'active' && run.mode === 'AFK').length;
 }
 
-export function label(task: Task): string {
+// Whether a live run waits on the operator: its turn, or a card it asked.
+export function waitsOnOperator(run: Run): boolean {
+  return run.status === 'active' && (run.turn === 'operator' || run.question !== null);
+}
+
+// A HITL task whose turn is the operator's: queued for its conversation, or
+// in one that waits on them while no TUI has it open (`watched` holds the
+// runs whose conversations are open).
+export function readyForYou(state: Lifecycle, task: Task, watched: ReadonlySet<string>): boolean {
+  if (task.mode !== 'HITL') return false;
+  if (task.state === 'queued') return true;
+  const run = task.state === 'running' ? liveRun(state, task) : undefined;
+  return !!run && waitsOnOperator(run) && !watched.has(run.id);
+}
+
+// `ready` is what `readyForYou` says of the task.
+export function label(task: Task, ready = false): string {
   switch (task.state) {
     case 'draft':
       return 'Draft';
     case 'queued':
       return task.mode === 'HITL' ? 'Ready for you' : 'Queued';
     case 'running':
-      return task.mode === 'HITL' ? 'In conversation' : 'Running';
+      if (task.mode === 'AFK') return 'Running';
+      return ready ? 'Ready for you' : 'In conversation';
     case 'waiting':
       return 'Needs you';
     case 'awaiting-children':
@@ -251,7 +337,7 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason }: AttentionRe
 
 // Everything waiting on the operator: requests about repositories first (they
 // hold back every run in them), then the rest in task order.
-export function attentionQueue(state: Lifecycle): AttentionQueueItem[] {
+export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = new Set()): AttentionQueueItem[] {
   const items: AttentionQueueItem[] = [];
   for (const repository of Object.values(state.repositories)) {
     const request = openRepoRequest(state, repository.id);
@@ -260,7 +346,7 @@ export function attentionQueue(state: Lifecycle): AttentionQueueItem[] {
   for (const task of Object.values(state.tasks)) {
     const request = openRequest(state, task);
     if (task.state === 'waiting' && request) items.push(attentionItem(request));
-    if (task.state === 'queued' && task.mode === 'HITL') items.push({ kind: 'ready', taskId: task.id });
+    if (readyForYou(state, task, watched)) items.push({ kind: 'ready', taskId: task.id });
     if (task.state === 'in-review') items.push({ kind: 'review', taskId: task.id });
   }
   return items;
@@ -296,7 +382,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!action.prompt.trim()) return 'A task needs a prompt.';
       return state.repositories[action.repo]!.missing ? `${action.repo} is missing, so its runs can’t start.` : null;
     case 'removeRepo': {
-      const unfinished = Object.values(state.tasks).filter((task) => task.repo === action.repo && !isTerminal(task));
+      const unfinished = unfinishedTasks(state, action.repo);
       return unfinished.length
         ? `${action.repo} has unfinished tasks (${unfinished.map((task) => task.id).join(', ')}). Finish or cancel them first.`
         : null;
@@ -310,6 +396,17 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'sendMessage':
       if (!action.text.trim()) return 'A message needs text.';
       return task.mode === 'HITL' && liveRun(state, task)?.status === 'active' ? null : `${task.id} has no live conversation.`;
+    case 'interrupt': {
+      const run = task.mode === 'HITL' ? liveRun(state, task) : undefined;
+      if (run?.status !== 'active') return `${task.id} has no live conversation.`;
+      return run.turn === 'agent' ? null : `${task.id}’s agent isn’t mid-turn.`;
+    }
+    case 'answerQuestion': {
+      const { question } = liveRun(state, task) ?? {};
+      if (question?.id !== action.questionId) return 'That question is no longer open.';
+      const answered = question.questions.every(({ question }) => action.answers[question]?.trim());
+      return answered ? null : 'Answer every question on the card.';
+    }
     case 'handoff':
       return task.mode === 'HITL' && task.state === 'running'
         ? null
@@ -330,7 +427,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'runStarted':
     case 'runCompleted':
     case 'runFailed':
+    case 'turnEnded':
       return null;
+    case 'artifactsSeen':
+      return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
+    case 'questionAsked':
+      return task.mode === 'HITL' ? null : 'In an AFK run a question is an attention request.';
     case 'attentionRaised':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
     case 'repoRegistered': {
@@ -339,6 +441,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'repoMissing':
     case 'repoFound':
+    case 'repoMoved':
+    case 'deadlinesDue':
       return null;
   }
 }
@@ -349,7 +453,7 @@ function cantStartRuns(state: Lifecycle, task: Task): string | null {
 }
 
 function nextId(state: Lifecycle, kind: keyof Lifecycle['counters']): string {
-  const prefix = { task: 'T', run: 'R', request: 'A' }[kind];
+  const prefix = { task: 'T', run: 'R', request: 'A', artifact: 'X' }[kind];
   return prefix + ++state.counters[kind];
 }
 
@@ -363,8 +467,12 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     outcome: null,
     interruption: null,
     resumesSession: task.runIds.length > 0,
+    turn: task.runIds.length === 0 && task.goal ? 'agent' : 'operator',
+    queued: [],
+    question: null,
     model: route(task.tier).model,
     cli: null,
+    parksAt: null,
     // Tasks stored before skill sets were frozen have none.
     skillSet: task.skillSet ?? null,
     startedAt: at,
@@ -379,7 +487,15 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
 function endRun(run: Run, outcome: RunOutcome, at: number): void {
   run.status = 'ended';
   run.outcome = outcome;
+  run.parksAt = null;
   run.endedAt = at;
+}
+
+// Ends a run that waited on the operator too long. Reopening the task starts
+// a new run that resumes the session.
+function park(task: Task, run: Run, at: number): void {
+  endRun(run, 'parked', at);
+  task.state = 'queued';
 }
 
 function raise(state: Lifecycle, task: Task, run: Run, kind: AttentionKind, holdsRun: boolean, reason: string | null, at: number): void {
@@ -397,6 +513,13 @@ function raise(state: Lifecycle, task: Task, run: Run, kind: AttentionKind, hold
   state.requests[request.id] = request;
   task.state = 'waiting';
 }
+
+function addArtifact(state: Lifecycle, artifact: DistributiveOmit<Artifact, 'id'>): void {
+  const id = nextId(state, 'artifact');
+  state.artifacts[id] = { id, ...artifact } as Artifact;
+}
+
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
 function closeRepoRequest(state: Lifecycle, repo: string): void {
   const request = openRepoRequest(state, repo);
@@ -465,7 +588,16 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       startRun(state, task, at);
       break;
     case 'sendMessage':
-      // The executor delivers it; the Lifecycle doesn't change.
+      // The executor delivers it at once on the operator's turn; mid-turn it waits.
+      if (run!.turn === 'agent') run!.queued.push(action.text);
+      else run!.turn = 'agent';
+      break;
+    case 'interrupt':
+      // The executor cuts the turn, and reports its end like any other.
+      break;
+    case 'answerQuestion':
+      // The executor hands the answers to the waiting turn.
+      run!.question = null;
       break;
     case 'handoff':
       endRun(run!, 'handed off', at);
@@ -508,6 +640,16 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       run!.cli = { pid: action.pid, createdAt: action.createdAt };
       run!.model = action.model;
       break;
+    case 'questionAsked':
+      run!.question = action.question;
+      break;
+    case 'turnEnded':
+      // A card the turn ended without is dropped. What waited is delivered
+      // now, so the agent answers it at once.
+      run!.question = null;
+      if (run!.queued.length) run!.queued = [];
+      else run!.turn = 'operator';
+      break;
     case 'runCompleted':
       // With no stages yet, a task's run completing is its last stage.
       endRun(run!, 'completed', at);
@@ -521,6 +663,22 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       run!.status = 'suspended';
       raise(state, task, run!, action.kind, true, action.reason ?? null, at);
       break;
+    case 'artifactsSeen': {
+      // One artifact per file or issue of a task, however often it is seen.
+      const existing = (test: (artifact: Artifact) => boolean) => artifactsOf(state, task).find(test);
+      const runId = task.runIds.at(-1)!;
+      for (const { path, committed } of action.files) {
+        const file = existing((artifact) => artifact.kind === 'file' && artifact.path === path);
+        if (file?.kind === 'file') file.committed = committed;
+        else addArtifact(state, { taskId: task.id, runId, kind: 'file', path, committed });
+      }
+      for (const url of action.issues) {
+        if (!existing((artifact) => artifact.kind === 'issue' && artifact.url === url)) {
+          addArtifact(state, { taskId: task.id, runId, kind: 'issue', url });
+        }
+      }
+      break;
+    }
     case 'removeRepo':
       closeRepoRequest(state, action.repo);
       delete state.repositories[action.repo];
@@ -553,9 +711,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       state.requests[request.id] = request;
       break;
     }
+    case 'repoMoved':
+      state.repositories[action.repo]!.path = action.path;
+    // falls through: the clone is in place at its new path.
     case 'repoFound':
       state.repositories[action.repo]!.missing = false;
       closeRepoRequest(state, action.repo);
+      break;
+    case 'deadlinesDue':
+      for (const overdue of overdueRuns(state, at)) park(state.tasks[overdue.taskId]!, overdue, at);
       break;
   }
 }
@@ -566,5 +730,16 @@ export function reduce(state: Lifecycle, action: LifecycleAction, at: number): R
   const next = structuredClone(state);
   apply(next, action, at);
   schedule(next, at);
+  armIdleParks(next, at);
   return { state: next, refusal: null };
+}
+
+// A HITL run's idle clock (ADR 0003): its park deadline is set when the run
+// starts waiting on the operator, and cleared once it no longer does.
+function armIdleParks(state: Lifecycle, at: number): void {
+  for (const run of Object.values(state.runs)) {
+    if (run.mode !== 'HITL') continue;
+    if (waitsOnOperator(run)) run.parksAt ??= at + IDLE_PARK_MS;
+    else run.parksAt = null;
+  }
 }

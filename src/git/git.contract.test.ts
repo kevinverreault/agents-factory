@@ -1,8 +1,8 @@
 // Seam 3: the real git adapter on throwaway clones in a temp directory.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { expect, test } from 'vitest';
 import { describeGitContract, type CloneFixture } from './git-contract.ts';
 import { gitCli } from './git.ts';
@@ -54,6 +54,15 @@ async function fixture(): Promise<CloneFixture> {
       const next = git(origin, 'commit-tree', `${tip}^{tree}`, '-p', tip, '-m', 'Move on');
       git(origin, 'update-ref', `refs/heads/${branch}`, next);
       return next;
+    },
+    async editFile(worktreePath, path) {
+      const file = join(worktreePath, path);
+      mkdirSync(dirname(file), { recursive: true });
+      appendFileSync(file, 'More.\n');
+    },
+    async commitAll(worktreePath) {
+      git(worktreePath, 'add', '--all');
+      git(worktreePath, 'commit', '--quiet', '-m', 'Commit it all');
     },
     async dispose() {
       rmSync(root, { recursive: true, force: true });
