@@ -68,6 +68,8 @@ describe('built-in presets', () => {
     expect(preset.stages.at(-1)).toMatchObject({ id: 'open-pr', kind: 'action', requires: 'L2' });
     expect(startStages(preset)).toEqual([{ id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['prompt'] }]);
     expect(openingMessage(preset.stages[0]!, { prompt: 'Add a dark mode toggle.', issues: [] })).toBe('/factory:implement Add a dark mode toggle.');
+    // An issue number pasted in the prompt reaches the skill, which fetches it.
+    expect(openingMessage(preset.stages[0]!, { prompt: '#12', issues: [] })).toBe('/factory:implement #12');
   });
 
   test('quick, child and setup resolve too', () => {
