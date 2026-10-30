@@ -170,7 +170,9 @@ export type RunEvent =
 export type RepoEvent =
   | { type: 'repoRegistered'; repo: string; path: string; baseBranch: string; defaultPreset: string }
   | { type: 'repoMissing'; repo: string; reason: string }
-  | { type: 'repoFound'; repo: string };
+  | { type: 'repoFound'; repo: string }
+  // `repo move`: the clone is at `path` now, and its task worktrees repaired.
+  | { type: 'repoMoved'; repo: string; path: string };
 
 // A task the daemon launched once its worktree was cut. The daemon names the
 // session, so the Claude session file can be found by it.
@@ -214,6 +216,11 @@ export function nextTaskId(state: Lifecycle): string {
 
 export function isTerminal(task: Task): boolean {
   return task.state === 'done' || task.state === 'cancelled';
+}
+
+// The repository's tasks that are neither Done nor Cancelled.
+export function unfinishedTasks(state: Lifecycle, repo: string): Task[] {
+  return Object.values(state.tasks).filter((task) => task.repo === repo && !isTerminal(task));
 }
 
 export function liveRun(state: Lifecycle, task: Task): Run | undefined {
@@ -346,7 +353,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!action.prompt.trim()) return 'A task needs a prompt.';
       return state.repositories[action.repo]!.missing ? `${action.repo} is missing, so its runs can’t start.` : null;
     case 'removeRepo': {
-      const unfinished = Object.values(state.tasks).filter((task) => task.repo === action.repo && !isTerminal(task));
+      const unfinished = unfinishedTasks(state, action.repo);
       return unfinished.length
         ? `${action.repo} has unfinished tasks (${unfinished.map((task) => task.id).join(', ')}). Finish or cancel them first.`
         : null;
@@ -403,6 +410,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'repoMissing':
     case 'repoFound':
+    case 'repoMoved':
     case 'deadlinesDue':
       return null;
   }
@@ -645,6 +653,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       state.requests[request.id] = request;
       break;
     }
+    case 'repoMoved':
+      state.repositories[action.repo]!.path = action.path;
+    // falls through: the clone is in place at its new path.
     case 'repoFound':
       state.repositories[action.repo]!.missing = false;
       closeRepoRequest(state, action.repo);

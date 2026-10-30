@@ -4,7 +4,8 @@ import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
 
 export type Clone = {
-  // The clone's top level, absolute.
+  // The clone's top level, absolute: its main worktree, even when the path
+  // inspected is in one of its linked worktrees.
   path: string;
   // `origin`'s URL, or null when the clone has no `origin`.
   originUrl: string | null;
@@ -16,8 +17,9 @@ export type Clone = {
 export type Worktree = { path: string; branch: string; head: string };
 
 export interface Git {
-  // The clone holding `path` (its top level or anywhere inside it), or null
-  // when `path` isn't inside a clone.
+  // The clone holding `path` (its top level, anywhere inside it or inside one
+  // of its worktrees), or null when `path` isn't inside a clone or is in a
+  // worktree that lost track of its clone.
   inspectClone(path: string): Promise<Clone | null>;
   // Brings `origin/<branch>` up to date with origin. Throws a `GitError`
   // when origin can't be reached or has no such branch.
@@ -26,17 +28,23 @@ export interface Git {
   // `path`. Throws a `GitError` when the branch exists or `path` is taken.
   addWorktree(clonePath: string, worktree: { path: string; branch: string; startPoint: string }): Promise<void>;
   worktrees(clonePath: string): Promise<Worktree[]>;
+  // Points the worktree at `path` back at its clone, now at `clonePath`, after
+  // the clone moved (ADR 0010). Throws a `GitError` when `path` is no
+  // worktree of the clone.
+  repairWorktree(clonePath: string, path: string): Promise<void>;
 }
 
 export class GitError extends Error {}
 
 export const gitCli: Git = {
   async inspectClone(path) {
-    const top = await git(path, 'rev-parse', '--show-toplevel');
-    if (top === null) return null;
+    // The listing starts with the main worktree, wherever it is run from.
+    const main = (await git(path, 'worktree', 'list', '--porcelain'))?.match(/^worktree ([^\r\n]+)/m)?.[1];
+    if (!main) return null;
+    const top = resolve(main);
     const head = await git(top, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD');
     return {
-      path: resolve(top),
+      path: top,
       originUrl: await git(top, 'remote', 'get-url', 'origin'),
       defaultBranch: head?.startsWith('origin/') ? head.slice('origin/'.length) : null,
     };
@@ -69,6 +77,10 @@ export const gitCli: Git = {
         const branch = fields.get('branch')?.replace(/^refs\/heads\//, '');
         return path && head && branch ? [{ path: resolve(path), branch, head }] : [];
       });
+  },
+
+  async repairWorktree(clonePath, path) {
+    await run(clonePath, 'worktree', 'repair', path);
   },
 };
 
