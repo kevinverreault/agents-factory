@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // agents-factory: with no arguments, opens the TUI (starting the daemon if
 // none is running). `daemon status` and `daemon stop` inspect and stop it;
-// `repo add` and `repo remove` register and unregister the operator's clones.
-// `hook` is run by Claude Code, not the operator: it relays a run's hook
-// events to the daemon.
+// `repo add`, `repo move` and `repo remove` register, re-point and unregister
+// the operator's clones. `hook` is run by Claude Code, not the operator: it
+// relays a run's hook events to the daemon.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createElement as h } from 'react';
@@ -20,6 +20,7 @@ const USAGE = [
   'Usage: agents-factory',
   '       agents-factory daemon status | daemon stop',
   '       agents-factory repo add [path] [--base-branch <branch>] [--default-preset <preset>]',
+  '       agents-factory repo move <new-path>',
   '       agents-factory repo remove <owner/name>',
 ].join('\n');
 
@@ -71,6 +72,9 @@ async function main(args: string[]): Promise<number> {
     if (command.type === 'registerRepo') {
       const { id, path, baseBranch, defaultPreset } = reply.value as RepositoryView;
       console.log(`Registered ${id} at ${path} (base branch ${baseBranch}, default preset ${defaultPreset}).`);
+    } else if (command.type === 'moveRepo') {
+      const { id, path } = reply.value as RepositoryView;
+      console.log(`Moved ${id} to ${path}.`);
     } else {
       console.log(`Removed ${command.repo}.`);
     }
@@ -80,9 +84,10 @@ async function main(args: string[]): Promise<number> {
   return 2;
 }
 
-// `repo add [path] [--base-branch b] [--default-preset p]` or
-// `repo remove <owner/name>`, or null when the arguments don't fit.
-function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 'removeRepo' }> | null {
+// `repo add [path] [--base-branch b] [--default-preset p]`,
+// `repo move <new-path>` or `repo remove <owner/name>`, or null when the
+// arguments don't fit.
+function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 'moveRepo' | 'removeRepo' }> | null {
   let parsed;
   try {
     parsed = parseArgs({
@@ -105,6 +110,7 @@ function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 
       ...(values['default-preset'] && { defaultPreset: values['default-preset'] }),
     };
   }
+  if (verb === 'move' && operand && Object.keys(values).length === 0) return { type: 'moveRepo', path: resolve(operand) };
   if (verb === 'remove' && operand && Object.keys(values).length === 0) return { type: 'removeRepo', repo: operand };
   return null;
 }

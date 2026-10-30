@@ -80,7 +80,8 @@ export async function startTestFactory(overrides: Partial<DaemonOptions> = {}): 
     async dispose() {
       for (const connection of connections) connection.close();
       for (const daemon of daemons) await daemon.stop();
-      rmSync(home, { recursive: true, force: true });
+      // Windows may hold a run's worktree a moment after its processes exit.
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     },
   };
 }

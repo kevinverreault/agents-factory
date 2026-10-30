@@ -1,5 +1,5 @@
 import type { ConversationEvent, Executor, RunSink, RunStart, Session } from '../executor/executor.ts';
-import type { RunEvent } from '../lifecycle/lifecycle.ts';
+import type { Answers, RunEvent } from '../lifecycle/lifecycle.ts';
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
@@ -11,6 +11,8 @@ export class FakeExecutor implements Executor {
   readonly started: RunStart[] = [];
   readonly stopped: string[] = [];
   readonly sent: { runId: string; text: string }[] = [];
+  readonly interrupted: string[] = [];
+  readonly answered: { runId: string; questionId: string; answers: Answers }[] = [];
   readonly historyReads: Session[] = [];
   private readonly runs = new Map<string, { sink: RunSink; sessionId: string }>();
   private readonly transcripts = new Map<string, ConversationEvent[]>();
@@ -26,6 +28,14 @@ export class FakeExecutor implements Executor {
   send(runId: string, text: string): void {
     this.sent.push({ runId, text });
     this.converse(runId, { type: 'message', from: 'operator', text });
+  }
+
+  interrupt(runId: string): void {
+    this.interrupted.push(runId);
+  }
+
+  answer(runId: string, questionId: string, answers: Answers): void {
+    this.answered.push({ runId, questionId, answers });
   }
 
   stop(runId: string): void {
