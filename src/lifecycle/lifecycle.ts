@@ -2,7 +2,8 @@
 // reducer with guards and selectors. Every operator command and every run event goes
 // through `reduce`. Ported from the task-lifecycle prototype, amended by
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
-// Child tasks, stages and parking arrive with their own slices.
+// Child tasks, stages and parking on a request's timeout arrive with their
+// own slices.
 import { DEFAULT_TIER, route, type Tier } from '../models/routing.ts';
 
 export type Mode = 'HITL' | 'AFK';
@@ -93,6 +94,9 @@ export type Run = {
   model: string;
   // The CLI process the daemon spawned for the run, once it is up (ADR 0003).
   cli: { pid: number; createdAt: number } | null;
+  // While the run waits on the operator, when it parks if they still haven't
+  // replied: a wall-clock deadline, persisted with the run (ADR 0003).
+  parksAt: number | null;
   startedAt: number;
   endedAt: number | null;
 };
@@ -179,11 +183,16 @@ export type TaskLaunched = {
   sessionId: string;
 };
 
-export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched;
+// The daemon's clock found deadlines that have passed (ADR 0003).
+export type ClockEvent = { type: 'deadlinesDue' };
+
+export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched | ClockEvent;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
 export const DEFAULT_SLOT_CAP = 2;
+// How long a HITL run may wait on the operator's turn before it is parked.
+export const IDLE_PARK_MS = 30 * 60_000;
 
 export function initialLifecycle(): Lifecycle {
   return {
@@ -218,6 +227,11 @@ export function openRequest(state: Lifecycle, task: Task): AttentionRequest | un
 // The open request about the repository itself, if any.
 export function openRepoRequest(state: Lifecycle, repo: string): AttentionRequest | undefined {
   return Object.values(state.requests).find((request) => request.repo === repo && request.taskId === null && request.status === 'open');
+}
+
+// The live runs whose park deadline has passed at `at`.
+export function overdueRuns(state: Lifecycle, at: number): Run[] {
+  return Object.values(state.runs).filter((run) => run.status !== 'ended' && run.parksAt !== null && run.parksAt <= at);
 }
 
 export function activeAfkRuns(state: Lifecycle): number {
@@ -389,6 +403,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'repoMissing':
     case 'repoFound':
+    case 'deadlinesDue':
       return null;
   }
 }
@@ -418,6 +433,7 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     question: null,
     model: route(task.tier).model,
     cli: null,
+    parksAt: null,
     startedAt: at,
     endedAt: null,
   };
@@ -430,7 +446,15 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
 function endRun(run: Run, outcome: RunOutcome, at: number): void {
   run.status = 'ended';
   run.outcome = outcome;
+  run.parksAt = null;
   run.endedAt = at;
+}
+
+// Ends a run that waited on the operator too long. Reopening the task starts
+// a new run that resumes the session.
+function park(task: Task, run: Run, at: number): void {
+  endRun(run, 'parked', at);
+  task.state = 'queued';
 }
 
 function raise(state: Lifecycle, task: Task, run: Run, kind: AttentionKind, holdsRun: boolean, reason: string | null, at: number): void {
@@ -625,6 +649,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       state.repositories[action.repo]!.missing = false;
       closeRepoRequest(state, action.repo);
       break;
+    case 'deadlinesDue':
+      for (const overdue of overdueRuns(state, at)) park(state.tasks[overdue.taskId]!, overdue, at);
+      break;
   }
 }
 
@@ -634,5 +661,16 @@ export function reduce(state: Lifecycle, action: LifecycleAction, at: number): R
   const next = structuredClone(state);
   apply(next, action, at);
   schedule(next, at);
+  armIdleParks(next, at);
   return { state: next, refusal: null };
+}
+
+// A HITL run's idle clock (ADR 0003): its park deadline is set when the run
+// starts waiting on the operator, and cleared once it no longer does.
+function armIdleParks(state: Lifecycle, at: number): void {
+  for (const run of Object.values(state.runs)) {
+    if (run.mode !== 'HITL') continue;
+    if (waitsOnOperator(run)) run.parksAt ??= at + IDLE_PARK_MS;
+    else run.parksAt = null;
+  }
 }

@@ -12,6 +12,7 @@ import {
   initialLifecycle,
   liveRun,
   nextTaskId,
+  overdueRuns,
   reduce,
   type Lifecycle,
   type LifecycleAction,
@@ -49,7 +50,7 @@ export type DaemonOptions = {
 };
 
 export const IDLE_EXIT_MS = 10 * 60_000;
-// How often the daemon checks whether it is idle.
+// How often the daemon checks whether it is idle and fires overdue deadlines.
 const TICK_MS = 5_000;
 
 export interface Daemon {
@@ -88,6 +89,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Idle exit (ADR 0002): the daemon stays up while anything needs a clock.
   let idleSince: number | null = null;
   const stopTicking = clock.every(TICK_MS, () => {
+    fireOverdueDeadlines();
     if (needsAClock()) idleSince = null;
     else if ((idleSince ??= clock.now()) + (options.idleExitMs ?? IDLE_EXIT_MS) <= clock.now()) void stop();
   });
@@ -285,6 +287,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       else if (missing) await settle({ type: 'repoFound', repo: id }, new Set([id]));
     }
   });
+
+  // Deadlines are wall-clock times persisted in the store (ADR 0003), never
+  // in-memory timers, which a sleep may stretch. Overdue ones fire at start
+  // and at every tick, so the first tick after a wake fires every deadline
+  // that passed while the machine slept.
+  function fireOverdueDeadlines(): void {
+    if (overdueRuns(lifecycle, clock.now()).length) void dispatch({ type: 'deadlinesDue' });
+  }
+  fireOverdueDeadlines();
 
   // Runs an action through the Lifecycle, saves the result and tells every
   // subscriber what changed.
