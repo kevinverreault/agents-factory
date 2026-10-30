@@ -14,6 +14,18 @@ type Tab = 'tasks' | 'needs-you';
 // What fills the screen: the tabs, the launch card over them, or one task's
 // conversation.
 type View = { kind: 'tabs' } | { kind: 'launch' } | { kind: 'conversation'; taskId: string };
+// The row a pane's cursor is on, and where it was, for when that row is gone.
+type Cursor = { row: string | null; index: number };
+
+function at({ row, index }: Cursor, rows: string[]): number {
+  const found = row === null ? -1 : rows.indexOf(row);
+  return found >= 0 ? found : Math.min(index, Math.max(rows.length - 1, 0));
+}
+
+// A Needs you row is its task's, or else its request's (about a repository).
+function rowOf(item: AttentionQueueItem): string {
+  return item.taskId ?? (item.kind === 'attention' ? item.requestId : '');
+}
 
 // `cwd` is the directory the TUI started in: started inside a clone that
 // isn't registered, the TUI offers to register it (ADR 0010).
@@ -24,7 +36,9 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
   const [clone, setClone] = useState<CloneView | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [view, setView] = useState<View>({ kind: 'tabs' });
-  const [selected, setSelected] = useState(0);
+  // Each pane's cursor. It stays on the row it was on while the rows move,
+  // so leaving a conversation comes back to exactly where the operator was.
+  const [cursors, setCursors] = useState<Record<Tab, Cursor>>({ tasks: { row: null, index: 0 }, 'needs-you': { row: null, index: 0 } });
 
   useEffect(() => connection.subscribe((next) => setState(next)), [connection]);
   useEffect(() => connection.onClose(() => setClosed(true)), [connection]);
@@ -36,7 +50,20 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
   }, [connection, cwd]);
   const unregistered = clone && state && !(clone.repo in state.repositories) ? clone : null;
   const tasks = state ? Object.values(state.tasks) : [];
-  const cursor = Math.min(selected, Math.max(tasks.length - 1, 0));
+  const queue = state?.attentionQueue ?? [];
+  const rows = tab === 'tasks' ? tasks.map((task) => task.id) : queue.map(rowOf);
+  const cursor = at(cursors[tab], rows);
+  // By a step from where the cursor is now: keys typed in one burst arrive
+  // before a re-render.
+  const move = (by: number) =>
+    setCursors((cursors) => {
+      const index = Math.min(Math.max(at(cursors[tab], rows) + by, 0), Math.max(rows.length - 1, 0));
+      return { ...cursors, [tab]: { row: rows[index] ?? null, index } };
+    });
+  // What enter opens: any task's conversation, or a live one Ready for you.
+  const item = queue[cursor];
+  const ready = item?.kind === 'ready' ? state?.tasks[item.taskId] : undefined;
+  const opens = tab === 'tasks' ? tasks[cursor]?.id : ready?.liveRunId ? ready.id : undefined;
 
   // Keys need raw mode, which a piped stdin can't give.
   const { isRawModeSupported } = useStdin();
@@ -45,9 +72,9 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       if (input === '1') setTab('tasks');
       if (input === '2') setTab('needs-you');
       if (input === 'N' && state) setView({ kind: 'launch' });
-      if (tab === 'tasks' && key.upArrow) setSelected(Math.max(cursor - 1, 0));
-      if (tab === 'tasks' && key.downArrow) setSelected(Math.min(cursor + 1, tasks.length - 1));
-      if (tab === 'tasks' && key.return && tasks[cursor]) setView({ kind: 'conversation', taskId: tasks[cursor].id });
+      if (key.upArrow) move(-1);
+      if (key.downArrow) move(1);
+      if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
       if (input === 'r' && unregistered) {
         void connection.send({ type: 'registerRepo', path: unregistered.path }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
       }
@@ -81,7 +108,7 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
       : tab === 'tasks'
         ? h(TaskList, { tasks, cursor })
-        : h(NeedsYouList, { state }),
+        : h(NeedsYouList, { state, cursor }),
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
 }
@@ -110,16 +137,16 @@ function TaskList({ tasks, cursor }: { tasks: TaskView[]; cursor: number }) {
   );
 }
 
-function NeedsYouList({ state }: { state: FactoryState }) {
+function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }) {
   if (state.attentionQueue.length === 0) return h(Text, { dimColor: true }, 'Nothing needs you.');
   return column(
-    state.attentionQueue.map((item) => {
+    state.attentionQueue.map((item, i) => {
       const key = item.kind === 'attention' ? item.requestId : `${item.kind}-${item.taskId}`;
       const { taskId } = item;
       const task = taskId === null ? undefined : state.tasks[taskId];
       // A request about a repository itself has no task: the repository takes the title's place.
       const title = task?.title ?? (item.kind === 'attention' ? item.repo : '');
-      return h(Row, { key, id: taskId ?? '', title, detail: waitingFor(item, task) });
+      return h(Row, { key, id: taskId ?? '', title, detail: waitingFor(item, task), selected: i === cursor });
     }),
   );
 }

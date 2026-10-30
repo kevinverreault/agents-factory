@@ -29,6 +29,17 @@ export type RunOutcome =
   | 'cancelled'
   | 'interrupted';
 export type Interruption = 'graceful' | 'unclean';
+export type Turn = 'agent' | 'operator';
+
+// What the agent asked through `AskUserQuestion`, shown as a card in the
+// conversation, never as an attention request. `id` is the tool use's.
+export type Question = {
+  id: string;
+  questions: { question: string; header: string; options: { label: string; description: string }[]; multiSelect: boolean }[];
+};
+// Each question's text with its answer: an option's label (a multi-select's
+// labels joined by ", "), or the operator's own words.
+export type Answers = Record<string, string>;
 export type AttentionKind =
   | 'question'
   | 'permission'
@@ -71,6 +82,13 @@ export type Run = {
   outcome: RunOutcome | null;
   interruption: Interruption | null;
   resumesSession: boolean;
+  // Whose turn the conversation is on. A run starts on the agent's turn when
+  // it has a first message to answer.
+  turn: Turn;
+  // The operator's messages sent during the agent's turn, delivered when it ends.
+  queued: string[];
+  // The card the agent's turn waits on, if any.
+  question: Question | null;
   // The exact model: routed from the task's tier at start, then the one the
   // CLI reports it runs.
   model: string;
@@ -126,6 +144,9 @@ export type OperatorCommand =
   | { type: 'submit'; taskId: string }
   | { type: 'open'; taskId: string }
   | { type: 'sendMessage'; taskId: string; text: string }
+  // Cuts the agent's turn short; the run lives on.
+  | { type: 'interrupt'; taskId: string }
+  | { type: 'answerQuestion'; taskId: string; questionId: string; answers: Answers }
   | { type: 'handoff'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'takeOver'; taskId: string }
   | { type: 'answer'; taskId: string }
@@ -140,8 +161,9 @@ export type RunEvent =
   | { type: 'runCompleted'; runId: string }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
-  // The agent's turn is over; in a HITL run the operator's begins.
+  // The agent finished answering: the conversation is the operator's again.
   | { type: 'turnEnded'; runId: string }
+  | { type: 'questionAsked'; runId: string; question: Question }
   | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string };
 
 // What the daemon learns about the operator's clones.
@@ -216,14 +238,31 @@ export function activeAfkRuns(state: Lifecycle): number {
   return Object.values(state.runs).filter((run) => run.status === 'active' && run.mode === 'AFK').length;
 }
 
-export function label(task: Task): string {
+// Whether a live run waits on the operator: its turn, or a card it asked.
+export function waitsOnOperator(run: Run): boolean {
+  return run.status === 'active' && (run.turn === 'operator' || run.question !== null);
+}
+
+// A HITL task whose turn is the operator's: queued for its conversation, or
+// in one that waits on them while no TUI has it open (`watched` holds the
+// runs whose conversations are open).
+export function readyForYou(state: Lifecycle, task: Task, watched: ReadonlySet<string>): boolean {
+  if (task.mode !== 'HITL') return false;
+  if (task.state === 'queued') return true;
+  const run = task.state === 'running' ? liveRun(state, task) : undefined;
+  return !!run && waitsOnOperator(run) && !watched.has(run.id);
+}
+
+// `ready` is what `readyForYou` says of the task.
+export function label(task: Task, ready = false): string {
   switch (task.state) {
     case 'draft':
       return 'Draft';
     case 'queued':
       return task.mode === 'HITL' ? 'Ready for you' : 'Queued';
     case 'running':
-      return task.mode === 'HITL' ? 'In conversation' : 'Running';
+      if (task.mode === 'AFK') return 'Running';
+      return ready ? 'Ready for you' : 'In conversation';
     case 'waiting':
       return 'Needs you';
     case 'awaiting-children':
@@ -262,7 +301,7 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason }: AttentionRe
 
 // Everything waiting on the operator: requests about repositories first (they
 // hold back every run in them), then the rest in task order.
-export function attentionQueue(state: Lifecycle): AttentionQueueItem[] {
+export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = new Set()): AttentionQueueItem[] {
   const items: AttentionQueueItem[] = [];
   for (const repository of Object.values(state.repositories)) {
     const request = openRepoRequest(state, repository.id);
@@ -271,7 +310,7 @@ export function attentionQueue(state: Lifecycle): AttentionQueueItem[] {
   for (const task of Object.values(state.tasks)) {
     const request = openRequest(state, task);
     if (task.state === 'waiting' && request) items.push(attentionItem(request));
-    if (task.state === 'queued' && task.mode === 'HITL') items.push({ kind: 'ready', taskId: task.id });
+    if (readyForYou(state, task, watched)) items.push({ kind: 'ready', taskId: task.id });
     if (task.state === 'in-review') items.push({ kind: 'review', taskId: task.id });
   }
   return items;
@@ -321,6 +360,17 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'sendMessage':
       if (!action.text.trim()) return 'A message needs text.';
       return task.mode === 'HITL' && liveRun(state, task)?.status === 'active' ? null : `${task.id} has no live conversation.`;
+    case 'interrupt': {
+      const run = task.mode === 'HITL' ? liveRun(state, task) : undefined;
+      if (run?.status !== 'active') return `${task.id} has no live conversation.`;
+      return run.turn === 'agent' ? null : `${task.id}’s agent isn’t mid-turn.`;
+    }
+    case 'answerQuestion': {
+      const { question } = liveRun(state, task) ?? {};
+      if (question?.id !== action.questionId) return 'That question is no longer open.';
+      const answered = question.questions.every(({ question }) => action.answers[question]?.trim());
+      return answered ? null : 'Answer every question on the card.';
+    }
     case 'handoff':
       return task.mode === 'HITL' && task.state === 'running'
         ? null
@@ -343,6 +393,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'runFailed':
     case 'turnEnded':
       return null;
+    case 'questionAsked':
+      return task.mode === 'HITL' ? null : 'In an AFK run a question is an attention request.';
     case 'attentionRaised':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
     case 'repoRegistered': {
@@ -367,9 +419,6 @@ function nextId(state: Lifecycle, kind: keyof Lifecycle['counters']): string {
 }
 
 function startRun(state: Lifecycle, task: Task, at: number): void {
-  const resumesSession = task.runIds.length > 0;
-  // A HITL run with no first message to send starts on the operator's turn.
-  const waitsOnOperator = task.mode === 'HITL' && (resumesSession || task.goal === null);
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -378,10 +427,13 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     status: 'active',
     outcome: null,
     interruption: null,
-    resumesSession,
+    resumesSession: task.runIds.length > 0,
+    turn: task.runIds.length === 0 && task.goal ? 'agent' : 'operator',
+    queued: [],
+    question: null,
     model: route(task.tier).model,
     cli: null,
-    parksAt: waitsOnOperator ? at + IDLE_PARK_MS : null,
+    parksAt: null,
     startedAt: at,
     endedAt: null,
   };
@@ -486,8 +538,16 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       startRun(state, task, at);
       break;
     case 'sendMessage':
-      // The executor delivers it. The operator is back, so the run won't park.
-      run!.parksAt = null;
+      // The executor delivers it at once on the operator's turn; mid-turn it waits.
+      if (run!.turn === 'agent') run!.queued.push(action.text);
+      else run!.turn = 'agent';
+      break;
+    case 'interrupt':
+      // The executor cuts the turn, and reports its end like any other.
+      break;
+    case 'answerQuestion':
+      // The executor hands the answers to the waiting turn.
+      run!.question = null;
       break;
     case 'handoff':
       endRun(run!, 'handed off', at);
@@ -530,13 +590,20 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       run!.cli = { pid: action.pid, createdAt: action.createdAt };
       run!.model = action.model;
       break;
+    case 'questionAsked':
+      run!.question = action.question;
+      break;
+    case 'turnEnded':
+      // A card the turn ended without is dropped. What waited is delivered
+      // now, so the agent answers it at once.
+      run!.question = null;
+      if (run!.queued.length) run!.queued = [];
+      else run!.turn = 'operator';
+      break;
     case 'runCompleted':
       // With no stages yet, a task's run completing is its last stage.
       endRun(run!, 'completed', at);
       task.state = 'in-review';
-      break;
-    case 'turnEnded':
-      if (run!.mode === 'HITL') run!.parksAt = at + IDLE_PARK_MS;
       break;
     case 'runFailed':
       endRun(run!, 'failed', at);
@@ -594,5 +661,16 @@ export function reduce(state: Lifecycle, action: LifecycleAction, at: number): R
   const next = structuredClone(state);
   apply(next, action, at);
   schedule(next, at);
+  armIdleParks(next, at);
   return { state: next, refusal: null };
+}
+
+// A HITL run's idle clock (ADR 0003): its park deadline is set when the run
+// starts waiting on the operator, and cleared once it no longer does.
+function armIdleParks(state: Lifecycle, at: number): void {
+  for (const run of Object.values(state.runs)) {
+    if (run.mode !== 'HITL') continue;
+    if (waitsOnOperator(run)) run.parksAt ??= at + IDLE_PARK_MS;
+    else run.parksAt = null;
+  }
 }

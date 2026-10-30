@@ -68,6 +68,50 @@ describe('the HITL idle park', () => {
     expect((await tui.until((state) => state.runs.R1?.status === 'ended')).runs.R1).toMatchObject({ outcome: 'parked' });
   });
 
+  test('a turn that ends with the operator’s queued messages stays the agent’s, so the idle clock doesn’t start', async () => {
+    const { factory, operator, tui } = await waitingOnTheOperator();
+    await operator.send({ type: 'sendMessage', taskId: 'T1', text: 'Okta, only on Safari.' });
+    await operator.send({ type: 'sendMessage', taskId: 'T1', text: 'And only since Tuesday.' });
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await settled(operator);
+
+    factory.clock.advance(minutes(45));
+    await settled(operator);
+    expect(tui.state().runs.R1).toMatchObject({ status: 'active', outcome: null });
+
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await settled(operator);
+    factory.clock.advance(minutes(31));
+    expect((await tui.until((state) => state.runs.R1?.status === 'ended')).runs.R1).toMatchObject({ outcome: 'parked' });
+  });
+
+  test('a question card left unanswered for 30 minutes parks the run', async () => {
+    const { factory, operator, tui } = await waitingOnTheOperator();
+    await operator.send({ type: 'sendMessage', taskId: 'T1', text: 'Okta, only on Safari.' });
+    factory.executor.report('R1', {
+      type: 'questionAsked',
+      question: {
+        id: 'Q1',
+        questions: [
+          {
+            question: 'Which browser version?',
+            header: 'Browser',
+            options: [
+              { label: 'Safari 18', description: 'Current' },
+              { label: 'Safari 17', description: 'Previous' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+    });
+    await settled(operator);
+
+    factory.clock.advance(minutes(31));
+
+    expect((await tui.until((state) => state.runs.R1?.status === 'ended')).runs.R1).toMatchObject({ outcome: 'parked' });
+  });
+
   test('a sleep longer than the deadline parks the run as soon as the machine wakes, not 30 minutes after', async () => {
     const { factory, operator, tui } = await waitingOnTheOperator();
     factory.clock.advance(minutes(10));
@@ -89,8 +133,10 @@ describe('the HITL idle park', () => {
 
     expect(await operator.send({ type: 'open', taskId: 'T1' })).toEqual({ ok: true });
 
-    const state = await tui.until((state) => state.tasks.T1?.label === 'In conversation');
-    expect(state.tasks.T1).toMatchObject({ liveRunId: 'R2' });
+    // The resumed run starts on the operator's turn, so with no conversation
+    // open the task stays Ready for you.
+    const state = await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    expect(state.runs.R2).toMatchObject({ status: 'active' });
     const [first, resumed] = factory.executor.started;
     expect(resumed).toEqual({ ...first, runId: 'R2', resumesSession: true, firstMessage: null });
   });

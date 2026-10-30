@@ -6,6 +6,7 @@ import {
   attentionQueue,
   label,
   liveRun,
+  readyForYou,
   type AutonomyLevel,
   type Lifecycle,
   type Mode,
@@ -27,11 +28,13 @@ export type TaskView = {
   liveRunId: string | null;
   branch: string | null;
   worktree: string | null;
+  // The Claude session the task's conversation lives in.
+  sessionId: string | null;
 };
 
 export type RunView = Pick<
   Run,
-  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'model' | 'cli' | 'startedAt' | 'endedAt'
+  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'model' | 'cli' | 'startedAt' | 'endedAt'
 >;
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
@@ -44,7 +47,8 @@ export type FactoryState = {
   slots: { active: number; cap: number };
 };
 
-export function toFactoryState(lifecycle: Lifecycle): FactoryState {
+// `watched` holds the runs whose conversations a TUI has open.
+export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string> = new Set()): FactoryState {
   const repositories: Record<string, RepositoryView> = {};
   for (const repository of Object.values(lifecycle.repositories)) repositories[repository.id] = repositoryView(repository);
   const tasks: Record<string, TaskView> = {};
@@ -57,21 +61,23 @@ export function toFactoryState(lifecycle: Lifecycle): FactoryState {
       autonomy: task.autonomy,
       groups: task.groups,
       state: task.state,
-      label: label(task),
+      label: label(task, readyForYou(lifecycle, task, watched)),
       liveRunId: liveRun(lifecycle, task)?.id ?? null,
       branch: task.worktree?.branch ?? null,
       worktree: task.worktree?.path ?? null,
+      sessionId: task.sessionId,
     };
   }
   const runs: Record<string, RunView> = {};
-  for (const { id, taskId, mode, autonomy, status, outcome, model, cli, startedAt, endedAt } of Object.values(lifecycle.runs)) {
-    runs[id] = { id, taskId, mode, autonomy, status, outcome, model, cli, startedAt, endedAt };
+  for (const run of Object.values(lifecycle.runs)) {
+    const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, startedAt, endedAt } = run;
+    runs[id] = { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, startedAt, endedAt };
   }
   return {
     repositories,
     tasks,
     runs,
-    attentionQueue: attentionQueue(lifecycle),
+    attentionQueue: attentionQueue(lifecycle, watched),
     slots: { active: activeAfkRuns(lifecycle), cap: lifecycle.slotCap },
   };
 }
