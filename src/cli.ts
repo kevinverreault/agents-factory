@@ -2,7 +2,8 @@
 // agents-factory: with no arguments, opens the TUI (starting the daemon if
 // none is running). `daemon status` and `daemon stop` inspect and stop it;
 // `repo add`, `repo move` and `repo remove` register, re-point and unregister
-// the operator's clones. `hook` is run by Claude Code, not the operator: it
+// the operator's clones; `skills update` and `skills status` move and inspect
+// the skill set pin. `hook` is run by Claude Code, not the operator: it
 // relays a run's hook events to the daemon.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -14,6 +15,7 @@ import { relayHook } from './hooks/relay.ts';
 import { connect, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
 import type { RepositoryView } from './protocol/factory-state.ts';
 import type { Command, DaemonStatus } from './protocol/protocol.ts';
+import { skillsCommand } from './skills/skills-command.ts';
 import { App } from './tui/app.ts';
 
 const USAGE = [
@@ -22,6 +24,7 @@ const USAGE = [
   '       agents-factory repo add [path] [--base-branch <branch>] [--default-preset <preset>]',
   '       agents-factory repo move <new-path>',
   '       agents-factory repo remove <owner/name>',
+  '       agents-factory skills update | skills status',
 ].join('\n');
 
 async function main(args: string[]): Promise<number> {
@@ -79,6 +82,9 @@ async function main(args: string[]): Promise<number> {
       console.log(`Removed ${command.repo}.`);
     }
     return 0;
+  }
+  if (args[0] === 'skills' && (args[1] === 'update' || args[1] === 'status') && args.length === 2) {
+    return skillsCommand(args[1], paths);
   }
   console.error(USAGE);
   return 2;

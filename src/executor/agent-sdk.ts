@@ -74,6 +74,8 @@ export function agentSdkExecutor(): Executor {
         ...hitlOptions(start.credential, askTheOperator(start.runId, spawning)),
         cwd: start.cwd,
         model: start.model,
+        // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
+        ...(start.plugin !== null && { plugins: [{ type: 'local', path: start.plugin }] }),
         ...(start.resumesSession ? { resume: start.sessionId } : { sessionId: start.sessionId }),
         spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) => {
           const child = spawnCli(spawnOptions);
@@ -151,10 +153,10 @@ export function agentSdkExecutor(): Executor {
   }
 }
 
-// HITL runs act as the operator (ADR 0005): every settings source loads.
-// The skill set plugin joins with its own slice. Edits are accepted, and
-// `canUseTool` decides the rest. Every tool call's outcome goes to artifact
-// capture, in the background so the run never waits on it.
+// HITL runs act as the operator (ADR 0005): every settings source loads,
+// plus the skill set plugin. Edits are accepted, and `canUseTool` decides the
+// rest. Every tool call's outcome goes to artifact capture, in the background
+// so the run never waits on it.
 function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool): Options {
   return {
     env: runEnv(credential),

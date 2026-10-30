@@ -18,7 +18,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -215,6 +215,7 @@ describe('launching and conversing', () => {
     question: null,
     model: 'claude-sonnet-5-5',
     cli: { pid: 4242, createdAt: 1 },
+    skillSet: null,
     startedAt: 1,
     endedAt: null,
   };

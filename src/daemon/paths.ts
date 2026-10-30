@@ -12,17 +12,23 @@ export type FactoryPaths = {
   storePath: string;
   // The one global root every task worktree hangs under (ADR 0010).
   worktreeRoot: string;
+  // The skill set pin and its built versions (ADR 0005).
+  skillsLock: string;
+  skillsRoot: string;
 };
 
 export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths {
   const home = env.AGENTS_FACTORY_HOME ?? defaultHome(env);
+  // Kept short by default: Windows path limits bite deep in worktrees.
+  const shortHome = env.AGENTS_FACTORY_HOME ?? join(homedir(), '.agent-factory');
   return {
     home,
     pipePath: pipePathFor(home),
     tokenPath: join(home, 'daemon.token'),
     storePath: join(home, 'factory.sqlite'),
-    // Kept short by default: Windows path limits bite deep in worktrees.
-    worktreeRoot: env.AGENTS_FACTORY_HOME ? join(home, 'worktrees') : join(homedir(), '.agent-factory', 'worktrees'),
+    worktreeRoot: join(shortHome, 'worktrees'),
+    skillsLock: join(shortHome, 'skills.lock'),
+    skillsRoot: join(shortHome, 'skills'),
   };
 }
 

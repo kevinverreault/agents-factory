@@ -53,6 +53,7 @@ describe('launching a HITL task', () => {
         firstMessage: prompt,
         model: 'claude-sonnet-5-5',
         credential: 'subscription-host',
+        plugin: factory.skillSets.pathOf('a1a1a1a1a1a1a1a1'),
       },
     ]);
   });

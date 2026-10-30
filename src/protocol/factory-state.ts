@@ -31,11 +31,12 @@ export type TaskView = {
   worktree: string | null;
   // The Claude session the task's conversation lives in.
   sessionId: string | null;
+  skillSet: string | null;
 };
 
 export type RunView = Pick<
   Run,
-  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'model' | 'cli' | 'startedAt' | 'endedAt'
+  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
 >;
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
@@ -71,12 +72,13 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       branch: task.worktree?.branch ?? null,
       worktree: task.worktree?.path ?? null,
       sessionId: task.sessionId,
+      skillSet: task.skillSet ?? null,
     };
   }
   const runs: Record<string, RunView> = {};
   for (const run of Object.values(lifecycle.runs)) {
-    const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, startedAt, endedAt } = run;
-    runs[id] = { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, startedAt, endedAt };
+    const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
+    runs[id] = { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet: skillSet ?? null, startedAt, endedAt };
   }
   return {
     repositories,

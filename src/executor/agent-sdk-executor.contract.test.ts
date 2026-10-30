@@ -30,6 +30,7 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     firstMessage: 'Use the Read tool to read secret.txt, then reply with only the word it contains.',
     model: 'claude-haiku-5-5',
     credential: 'subscription-host',
+    plugin: null,
   };
   const startedAt = Date.now();
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
@@ -90,6 +91,7 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
       'After I answer, reply with only the colour I chose, in capitals.',
     model: 'claude-haiku-5-5',
     credential: 'subscription-host',
+    plugin: null,
   };
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
   const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;

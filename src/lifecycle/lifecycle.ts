@@ -67,6 +67,8 @@ export type Task = {
   tier: Tier;
   // The task branch and its worktree, cut at launch.
   worktree: TaskWorktree | null;
+  // The skill set version frozen at launch (ADR 0005): every run loads it.
+  skillSet: string | null;
   sessionId: string | null;
   runIds: string[];
   state: TaskState;
@@ -94,6 +96,8 @@ export type Run = {
   model: string;
   // The CLI process the daemon spawned for the run, once it is up (ADR 0003).
   cli: { pid: number; createdAt: number } | null;
+  // The skill set version the run loaded: its task's.
+  skillSet: string | null;
   // While the run waits on the operator, when it parks if they still haven't
   // replied: a wall-clock deadline, persisted with the run (ADR 0003).
   parksAt: number | null;
@@ -202,6 +206,7 @@ export type TaskLaunched = {
   prompt: string;
   worktree: TaskWorktree;
   sessionId: string;
+  skillSet: string;
 };
 
 // The daemon's clock found deadlines that have passed (ADR 0003).
@@ -468,6 +473,8 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     model: route(task.tier).model,
     cli: null,
     parksAt: null,
+    // Tasks stored before skill sets were frozen have none.
+    skillSet: task.skillSet ?? null,
     startedAt: at,
     endedAt: null,
   };
@@ -543,6 +550,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         goal: null,
         tier: DEFAULT_TIER,
         worktree: null,
+        skillSet: null,
         sessionId: null,
         runIds: [],
         state: action.submit ? 'queued' : 'draft',
@@ -563,6 +571,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         goal: action.prompt,
         tier: DEFAULT_TIER,
         worktree: { ...action.worktree },
+        skillSet: action.skillSet,
         sessionId: action.sessionId,
         runIds: [],
         state: 'queued',
