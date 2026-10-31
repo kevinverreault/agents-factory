@@ -76,6 +76,7 @@ describe('the bare TUI', () => {
             attention: 'failure',
             holdsRun: false,
             reason: 'The agent hit max turns.',
+            question: null,
           },
           { kind: 'ready', taskId: 'T1' },
         ],
@@ -183,6 +184,7 @@ describe('repositories', () => {
             attention: 'repo-missing',
             holdsRun: false,
             reason: 'The clone of acme/widgets is no longer at /clones/widgets.',
+            question: null,
           },
         ],
       ),
@@ -199,6 +201,16 @@ const UP = '\x1b[A';
 const DOWN = '\x1b[B';
 const RIGHT = '\x1b[C';
 const LEFT = '\x1b[D';
+
+// A frame's text with the card's border and wrapping taken out.
+const unwrapped = (frame: string) => frame.replace(/[│\s]+/g, ' ');
+
+async function press(app: { stdin: { write(data: string): void } }, ...keys: string[]) {
+  for (const key of keys) {
+    app.stdin.write(key);
+    await settle();
+  }
+}
 
 describe('launching and conversing', () => {
   const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false };
@@ -240,16 +252,6 @@ describe('launching and conversing', () => {
   async function type(app: { stdin: { write(data: string): void } }, text: string) {
     for (const char of text) app.stdin.write(char);
     await settle();
-  }
-
-  // A frame's text with the card's border and wrapping taken out.
-  const unwrapped = (frame: string) => frame.replace(/[│\s]+/g, ' ');
-
-  async function press(app: { stdin: { write(data: string): void } }, ...keys: string[]) {
-    for (const key of keys) {
-      app.stdin.write(key);
-      await settle();
-    }
   }
 
   test('N opens the launch card on the repository holding the working directory, and enter launches the prompt into its conversation', async () => {
@@ -662,6 +664,7 @@ describe('launching and conversing', () => {
     attention: 'failure' as const,
     holdsRun: false,
     reason: 'The agent hit max turns.',
+    question: null,
   };
 
   test('ctrl+b returns to the screen, pane and cursor the operator left, the cursor following the task it was on', async () => {
@@ -881,5 +884,132 @@ describe('launching and conversing', () => {
     await settle();
     expect(app.lastFrame()).not.toContain('Advance');
     expect(app.lastFrame()).not.toContain('ctrl+n');
+  });
+});
+
+describe('answering from Needs you', () => {
+  const [CTRL_B, ESC, ENTER] = ['\x02', '\x1b', '\r'];
+  const asking = task('T1', 'Fix the login bug', 'waiting', 'Needs you');
+  const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
+  const question = {
+    id: 'toolu_01',
+    questions: [
+      {
+        question: 'Which identity provider times out?',
+        header: 'IdP',
+        options: [
+          { label: 'Okta', description: 'The workforce SSO' },
+          { label: 'Auth0', description: 'The customer login' },
+        ],
+        multiSelect: false,
+      },
+    ],
+  };
+  const asked = {
+    kind: 'attention' as const,
+    taskId: 'T1',
+    repo: 'acme/widgets',
+    requestId: 'A1',
+    attention: 'question' as const,
+    holdsRun: true,
+    reason: 'Which identity provider times out?',
+    question,
+  };
+  const failure = {
+    kind: 'attention' as const,
+    taskId: 'T2',
+    repo: 'acme/widgets',
+    requestId: 'A2',
+    attention: 'failure' as const,
+    holdsRun: false,
+    reason: 'The agent hit max turns.',
+    question: null,
+  };
+
+  test('the selected item’s answer sheet is the bottom pane, a answers it with a digit at once, and the next item slides under the cursor', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([asking, failing], [failure, asked]), { connection });
+    await press(app, '2');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toMatch(/› T2 Implement the store failure: The agent hit max turns\./);
+      expect(frame).toContain('T2 Implement the store ── failure: The agent hit max turns. 1 Retry 2 Take over a answer');
+    });
+
+    await press(app, 'a', '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
+    connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [asked] }]);
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toMatch(/› T1 Fix the login bug question: Which identity provider times out\?/);
+      expect(frame).toMatch(/IdP Which identity provider times out\? 1 Okta The workforce SSO 2 Auth0 The customer login/);
+      expect(frame).toContain('digits answer · esc back');
+    });
+    await press(app, '2');
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which identity provider times out?': 'Auth0' } }),
+    );
+    // Answering, the digits never switched screens.
+    expect(app.lastFrame()).toContain('Fix the login bug');
+  });
+
+  test('a digit can take a failed AFK task over, into its conversation; esc gives the digits back to the screens', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([asking, failing], [failure, asked]), { connection });
+    await press(app, '2', 'a', '2');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'takeOver', taskId: 'T2' }));
+    await eventually(() => expect(app.lastFrame()).toContain('ctrl+b back'));
+    // Opened on the reply, the conversation takes keys a moment after it shows.
+    await settle();
+    await press(app, CTRL_B);
+    await eventually(() => expect(app.lastFrame()).toContain('digits answer · esc back'));
+
+    await press(app, ESC);
+    await eventually(() => expect(app.lastFrame()).toContain('a answer'));
+    await press(app, '1');
+    await eventually(() => expect(app.lastFrame()).not.toContain('a answer'));
+  });
+
+  test('once nothing needs the operator, the digits switch screens again', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([failing], [failure]), { connection });
+    await press(app, '2', 'a', '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
+
+    connection.servePatch([
+      { op: 'set', path: ['tasks', 'T2'], value: { ...failing, state: 'running', label: 'Running' } },
+      { op: 'set', path: ['attentionQueue'], value: [] },
+    ]);
+    await eventually(() => expect(app.lastFrame()).toContain('Nothing needs you.'));
+    await press(app, '1');
+    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+Running/));
+  });
+
+  test('a refused answer shows its reason and can be answered again; a multi-select toggles with digits and enter confirms', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('answer', { ok: false, reason: 'T1 has no open attention request.' });
+    const multi = { ...question, questions: [{ ...question.questions[0]!, question: 'Which providers time out?', multiSelect: true }] };
+    const { app } = await started(factoryState([asking], [{ ...asked, question: multi }]), { connection });
+    await press(app, '2', 'a', '2', '1');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/\[x\] Okta .* \[x\] Auth0/));
+
+    await press(app, ENTER);
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which providers time out?': 'Okta, Auth0' } }));
+    await eventually(() => expect(app.lastFrame()).toContain('T1 has no open attention request.'));
+
+    await press(app, '2', ENTER);
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which providers time out?': 'Auth0' } }));
+  });
+
+  test('a missing repository takes no digits, and its sheet says how to fix it', async () => {
+    const connection = new FakeConnection();
+    const missing = { ...failure, taskId: null, requestId: 'A3', attention: 'repo-missing' as const, reason: 'The clone of acme/widgets is no longer at /clones/widgets.' };
+    const { app } = await started(factoryState([], [missing]), { connection });
+    await press(app, '2', 'a', '1');
+
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('── acme/widgets ── repo-missing: The clone of acme/widgets is no longer at /clones/widgets. Put the clone back'));
+    expect(connection.sent).toEqual([]);
   });
 });

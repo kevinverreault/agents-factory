@@ -4,8 +4,7 @@
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
 // A launched task freezes its workflow preset, starts at one of its stages
 // and advances across HITL boundaries on the operator's confirm; child tasks,
-// handoffs, AFK boundaries and parking on a request's timeout arrive with
-// their own slices.
+// handoffs and AFK boundaries arrive with their own slices.
 import { DEFAULT_TIER, route, TIERS, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
@@ -37,8 +36,9 @@ export type RunOutcome =
 export type Interruption = 'graceful' | 'unclean';
 export type Turn = 'agent' | 'operator';
 
-// What the agent asked through `AskUserQuestion`, shown as a card in the
-// conversation, never as an attention request. `id` is the tool use's.
+// What the agent asked through `AskUserQuestion`: in a HITL run a card in the
+// conversation, in an AFK run a `question` attention request. `id` is the
+// tool use's.
 export type Question = {
   id: string;
   questions: { question: string; header: string; options: { label: string; description: string }[]; multiSelect: boolean }[];
@@ -105,6 +105,9 @@ export type Task = {
   // Its place in the order tasks last became Queued in: first in, first out
   // goes by it. Tasks stored before it go first.
   queuePlace?: number;
+  // What its next AFK run opens on instead of carrying on, such as the
+  // answers to a question its parked run asked.
+  resumeWith?: string | null;
 };
 
 export type Run = {
@@ -157,6 +160,8 @@ export type AttentionRequest = {
   // True while the request keeps its run suspended; false once the run ended.
   holdsRun: boolean;
   reason: string | null;
+  // What a `question` request asks. Requests stored before it have none.
+  question?: Question | null;
   raisedAt: number;
 };
 
@@ -211,7 +216,8 @@ export type OperatorCommand =
   | { type: 'answerQuestion'; taskId: string; questionId: string; answers: Answers }
   | { type: 'handoff'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'takeOver'; taskId: string }
-  | { type: 'answer'; taskId: string }
+  // Answers the task's open attention request: a question's with `answers`.
+  | { type: 'answer'; taskId: string; answers?: Answers }
   | { type: 'requestChanges'; taskId: string }
   | { type: 'markDone'; taskId: string }
   | { type: 'cancel'; taskId: string }
@@ -226,7 +232,9 @@ export type RunEvent =
   // The agent finished answering: the conversation is the operator's again.
   | { type: 'turnEnded'; runId: string }
   | { type: 'questionAsked'; runId: string; question: Question }
-  | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string }
+  // An AFK run asked the operator through `AskUserQuestion`, or for permission.
+  | { type: 'attentionRaised'; runId: string; kind: 'question'; question: Question }
+  | { type: 'attentionRaised'; runId: string; kind: 'permission'; reason?: string }
   // The agent called `propose_advance`.
   | { type: 'advanceProposed'; runId: string; reason: string };
 
@@ -295,6 +303,8 @@ const AFK_RESUME = 'Carry on, unattended, from where this conversation left off.
 export const PRIORITIES: readonly Priority[] = ['normal', 'urgent'];
 // How long a HITL run may wait on the operator's turn before it is parked.
 export const IDLE_PARK_MS = 30 * 60_000;
+// How long an attention request may keep its run suspended before the run is parked.
+export const REQUEST_PARK_MS = 60 * 60_000;
 
 export function initialLifecycle(): Lifecycle {
   return {
@@ -464,11 +474,12 @@ export type AttentionQueueItem =
       attention: AttentionKind;
       holdsRun: boolean;
       reason: string | null;
+      question: Question | null;
     }
   | { kind: 'ready'; taskId: string }
   | { kind: 'review'; taskId: string };
 
-const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason }: AttentionRequest): AttentionQueueItem => ({
+const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null }: AttentionRequest): AttentionQueueItem => ({
   kind: 'attention',
   taskId,
   repo,
@@ -476,23 +487,29 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason }: AttentionRe
   attention: kind,
   holdsRun,
   reason,
+  question,
 });
 
-// Everything waiting on the operator: requests about repositories first (they
-// hold back every run in them), then the rest in task order.
+// Everything waiting on the operator, the most urgent first: failures, then
+// the other requests (those about repositories included), each oldest first,
+// then HITL tasks ready for the operator, then root tasks in review.
 export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = new Set()): AttentionQueueItem[] {
-  const items: AttentionQueueItem[] = [];
+  const requests: AttentionRequest[] = [];
+  const ready: AttentionQueueItem[] = [];
+  const reviews: AttentionQueueItem[] = [];
   for (const repository of Object.values(state.repositories)) {
     const request = openRepoRequest(state, repository.id);
-    if (request) items.push(attentionItem(request));
+    if (request) requests.push(request);
   }
   for (const task of Object.values(state.tasks)) {
     const request = openRequest(state, task);
-    if (task.state === 'waiting' && request) items.push(attentionItem(request));
-    if (readyForYou(state, task, watched)) items.push({ kind: 'ready', taskId: task.id });
-    if (task.state === 'in-review') items.push({ kind: 'review', taskId: task.id });
+    if (task.state === 'waiting' && request) requests.push(request);
+    if (readyForYou(state, task, watched)) ready.push({ kind: 'ready', taskId: task.id });
+    if (task.state === 'in-review') reviews.push({ kind: 'review', taskId: task.id });
   }
-  return items;
+  const failure = (request: AttentionRequest) => Number(request.kind === 'failure');
+  requests.sort((a, b) => failure(b) - failure(a) || a.raisedAt - b.raisedAt);
+  return [...requests.map(attentionItem), ...ready, ...reviews];
 }
 
 // ---- Reducer ----
@@ -512,7 +529,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   if ('runId' in action) {
     const run = state.runs[action.runId];
     if (!run) return `There is no run ${action.runId}.`;
-    if (run.status !== 'active') return `Run ${run.id} is not active.`;
+    // A suspended run can still fail: its CLI may exit while it waits on the operator.
+    const fails = run.status === 'suspended' && action.type === 'runFailed';
+    if (run.status !== 'active' && !fails) return `Run ${run.id} is not active.`;
   }
   if ('repo' in action && action.type !== 'repoRegistered' && !state.repositories[action.repo]) {
     return `${action.repo} is not registered.`;
@@ -567,8 +586,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state)
         ? cantStartRuns(state, task)
         : 'Only a live AFK task (queued, running or needing you) can be taken over.';
-    case 'answer':
-      return task.state === 'waiting' && openRequest(state, task) ? null : `${task.id} has no open attention request.`;
+    case 'answer': {
+      const request = task.state === 'waiting' ? openRequest(state, task) : undefined;
+      if (!request) return `${task.id} has no open attention request.`;
+      const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
+      return answered ? null : 'Answer every question on the card.';
+    }
     case 'requestChanges':
     case 'markDone':
       return task.state === 'in-review' ? null : `${task.id} is not in review.`;
@@ -630,13 +653,18 @@ function nextId(state: Lifecycle, kind: Exclude<keyof Lifecycle['counters'], 'qu
 }
 
 // A task's first run starts on its goal; later ones resume its session and
-// wait for the operator, unless they start a stage.
+// wait for the operator, unless they start a stage. A later AFK run carries
+// on, or opens on what the task saved for it.
 function startRun(
   state: Lifecycle,
   task: Task,
   at: number,
-  { opening = task.runIds.length === 0 ? task.goal : task.mode === 'AFK' ? AFK_RESUME : null, resumesSession = task.runIds.length > 0 } = {},
+  {
+    opening = task.runIds.length === 0 ? task.goal : task.mode === 'AFK' ? (task.resumeWith ?? AFK_RESUME) : null,
+    resumesSession = task.runIds.length > 0,
+  } = {},
 ): void {
+  task.resumeWith = null;
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -674,14 +702,32 @@ function endRun(run: Run, outcome: RunOutcome, at: number): void {
   run.endedAt = at;
 }
 
-// Ends a run that waited on the operator too long. Reopening the task starts
-// a new run that resumes the session.
-function park(task: Task, run: Run, at: number): void {
+// Ends a run that waited on the operator too long. Reopening the task, or
+// answering the request its run was suspended on, starts a new run that
+// resumes the session.
+function park(state: Lifecycle, task: Task, run: Run, at: number): void {
   endRun(run, 'parked', at);
-  task.state = 'queued';
+  const request = openRequest(state, task);
+  if (request?.holdsRun) request.holdsRun = false;
+  else task.state = 'queued';
 }
 
-function raise(state: Lifecycle, task: Task, run: Run, kind: AttentionKind, holdsRun: boolean, reason: string | null, at: number): void {
+// What a question's answers are, for the run that resumes after its asker parked.
+function openingWithAnswers(question: Question, answers: Answers): string {
+  const lines = question.questions.map(({ question }) => `${question} ${answers[question]!.trim()}`);
+  return `While this conversation was parked, the operator answered your question:\n\n${lines.join('\n')}\n\n${AFK_RESUME}`;
+}
+
+function raise(
+  state: Lifecycle,
+  task: Task,
+  run: Run,
+  kind: AttentionKind,
+  holdsRun: boolean,
+  reason: string | null,
+  at: number,
+  question: Question | null = null,
+): void {
   const request: AttentionRequest = {
     id: nextId(state, 'request'),
     repo: task.repo,
@@ -691,6 +737,7 @@ function raise(state: Lifecycle, task: Task, run: Run, kind: AttentionKind, hold
     status: 'open',
     holdsRun,
     reason,
+    question,
     raisedAt: at,
   };
   state.requests[request.id] = request;
@@ -828,8 +875,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (request!.holdsRun) {
         // Resumes at once, even over the slot cap.
         run!.status = 'active';
+        run!.parksAt = null;
         task.state = 'running';
       } else {
+        if (request!.question) task.resumeWith = openingWithAnswers(request!.question, action.answers!);
         task.state = 'queued';
       }
       break;
@@ -897,12 +946,21 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.state = 'in-review';
       break;
     case 'runFailed':
+      // The request a suspended run waited on can't resume it any more.
+      if (request?.holdsRun) request.status = 'superseded';
       endRun(run!, 'failed', at);
       raise(state, task, run!, 'failure', false, action.reason, at);
       break;
     case 'attentionRaised':
       run!.status = 'suspended';
-      raise(state, task, run!, action.kind, true, action.reason ?? null, at);
+      run!.parksAt = at + REQUEST_PARK_MS;
+      if (action.kind === 'question') {
+        // Named by what it asks.
+        const reason = action.question.questions.map(({ question }) => question).join(' ');
+        raise(state, task, run!, 'question', true, reason, at, action.question);
+      } else {
+        raise(state, task, run!, 'permission', true, action.reason ?? null, at);
+      }
       break;
     case 'artifactsSeen': {
       // One artifact per file or issue of a task, however often it is seen.
@@ -960,7 +1018,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       closeRepoRequest(state, action.repo);
       break;
     case 'deadlinesDue':
-      for (const overdue of overdueRuns(state, at)) park(state.tasks[overdue.taskId]!, overdue, at);
+      for (const overdue of overdueRuns(state, at)) park(state, state.tasks[overdue.taskId]!, overdue, at);
       break;
   }
 }

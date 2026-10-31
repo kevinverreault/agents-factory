@@ -206,6 +206,7 @@ describe('skipping optional stages', () => {
         attention: 'stage-blocked',
         holdsRun: false,
         reason: 'tickets can’t start: its args need {{artifacts.spec}}, and T1 has no spec.',
+        question: null,
       },
     ]);
     expect(factory.executor.started).toHaveLength(1);

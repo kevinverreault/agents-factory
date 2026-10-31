@@ -219,3 +219,32 @@ test('an AFK run that hits its max turns ends failed, saying so', async () => {
   expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runFailed']);
   expect(reported[1]).toMatchObject({ reason: 'The run hit its max turns (1) before it finished.' });
 });
+
+test('an AFK run’s AskUserQuestion becomes a question attention request that holds the run until answered', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'factory-afk-'));
+  const executor = agentSdkExecutor();
+  const reported: RunEvent[] = [];
+  const live: ConversationEvent[] = [];
+  const run = afkRun(
+    cwd,
+    'Use the AskUserQuestion tool to ask me which colour I prefer, with exactly two options: Red and Blue. ' +
+      'After I answer, reply with only the colour I chose, in capitals.',
+    10,
+  );
+  const raised = () => reported.find((event) => event.type === 'attentionRaised');
+
+  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
+  await waitFor(() => raised() !== undefined, 120_000);
+  const { question } = raised() as Extract<RunEvent, { type: 'attentionRaised'; kind: 'question' }>;
+  expect(question.questions).toEqual([
+    expect.objectContaining({ options: [expect.objectContaining({ label: 'Red' }), expect.objectContaining({ label: 'Blue' })] }),
+  ]);
+  // The request holds the run open.
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'attentionRaised']);
+
+  executor.answer('R1', question.id, { [question.questions[0]!.question]: 'Blue' });
+  await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
+  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'attentionRaised', 'runCompleted']);
+  expect(live.some((event) => event.type === 'message' && event.from === 'agent' && /blue/i.test(event.text))).toBe(true);
+});
