@@ -2,6 +2,7 @@
 // and reports run events and the conversation. The Agent SDK adapter
 // (`agent-sdk.ts`) is the real one.
 import type { Answers, AutonomyLevel, Mode, RunEvent } from '../lifecycle/lifecycle.ts';
+import type { ToolCall } from '../permissions/permissions.ts';
 
 export type RunStart = {
   runId: string;
@@ -41,7 +42,14 @@ export type RunSink = {
   // Run events change the Lifecycle.
   report(event: RunEvent): void;
   converse(event: ConversationEvent): void;
+  // An AFK run's tool call that Claude Code asked about: the factory's gate
+  // decides it (ADR 0007), and the call waits for `permit`.
+  askPermission(call: ToolCall): void;
 };
+
+// What a tool call is allowed to do: run, or be refused with a message the
+// agent reads.
+export type Verdict = { allow: true } | { allow: false; message: string };
 
 export type Session = { sessionId: string; cwd: string };
 
@@ -53,6 +61,8 @@ export interface Executor {
   interrupt(runId: string): void;
   // Answers the question card the run's turn waits on.
   answer(runId: string, questionId: string, answers: Answers): void;
+  // Decides the tool call the run asked permission for.
+  permit(runId: string, callId: string, verdict: Verdict): void;
   stop(runId: string): void;
   // The conversation so far, read from the Claude session file.
   history(session: Session): Promise<ConversationEvent[]>;

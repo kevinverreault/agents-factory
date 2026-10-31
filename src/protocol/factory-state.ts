@@ -39,6 +39,8 @@ export type TaskView = {
   // The preset frozen at launch, and the stage the task is at.
   preset: FrozenPreset | null;
   stage: string | null;
+  // The rules the operator allowed for the task.
+  allowRules: string[];
 };
 
 export type RunView = Pick<
@@ -85,6 +87,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       skillSet: task.skillSet ?? null,
       preset: structuredClone(task.preset ?? null),
       stage: task.stage ?? null,
+      allowRules: [...(task.allowRules ?? [])],
     };
   }
   const runs: Record<string, RunView> = {};

@@ -45,7 +45,7 @@ test('a HITL run’s glossary write and printed issue URL reach the daemon as ar
         'Then use the Bash tool to run exactly: echo https://github.com/acme/widgets/issues/41 ' +
         'Then reply with only the word DONE.',
     },
-    { report: (event) => reported.push(event), converse: () => {} },
+    { report: (event) => reported.push(event), converse: () => {}, askPermission: () => {} },
   );
   try {
     const state = await tui.until((state) => Object.keys(state.artifacts).length === 2, 150_000);

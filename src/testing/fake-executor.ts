@@ -1,5 +1,6 @@
-import type { ConversationEvent, Executor, RunSink, RunStart, Session } from '../executor/executor.ts';
+import type { ConversationEvent, Executor, RunSink, RunStart, Session, Verdict } from '../executor/executor.ts';
 import type { Answers, RunEvent } from '../lifecycle/lifecycle.ts';
+import type { ToolCall } from '../permissions/permissions.ts';
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
@@ -13,6 +14,7 @@ export class FakeExecutor implements Executor {
   readonly sent: { runId: string; text: string }[] = [];
   readonly interrupted: string[] = [];
   readonly answered: { runId: string; questionId: string; answers: Answers }[] = [];
+  readonly permitted: { runId: string; callId: string; verdict: Verdict }[] = [];
   readonly historyReads: Session[] = [];
   private readonly runs = new Map<string, { sink: RunSink; sessionId: string }>();
   private readonly transcripts = new Map<string, ConversationEvent[]>();
@@ -38,6 +40,10 @@ export class FakeExecutor implements Executor {
     this.answered.push({ runId, questionId, answers });
   }
 
+  permit(runId: string, callId: string, verdict: Verdict): void {
+    this.permitted.push({ runId, callId, verdict });
+  }
+
   stop(runId: string): void {
     this.stopped.push(runId);
   }
@@ -50,6 +56,19 @@ export class FakeExecutor implements Executor {
 
   report(runId: string, event: DistributiveOmit<RunEvent, 'runId'>): void {
     this.run(runId).sink.report({ ...event, runId } as RunEvent);
+  }
+
+  // Claude Code asks whether the run's agent may make a tool call. Its
+  // summary is its command, or else its file path or URL.
+  askPermission(runId: string, call: Omit<ToolCall, 'summary'> & { summary?: string }): void {
+    const { command, file_path, url } = call.input;
+    const summary = call.summary ?? String(command ?? file_path ?? url ?? '');
+    this.run(runId).sink.askPermission({ ...call, summary });
+  }
+
+  // The verdicts the run's tool calls got, by call id.
+  verdicts(runId: string): Record<string, Verdict> {
+    return Object.fromEntries(this.permitted.filter((p) => p.runId === runId).map((p) => [p.callId, p.verdict]));
   }
 
   // The agent says or does something in the run. With `inHistory: false` it
