@@ -2,12 +2,13 @@
 // Clients reach it only through the protocol, and every command goes through
 // the Lifecycle reducer.
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
-import type { ConversationEvent, Executor } from '../executor/executor.ts';
-import { GitError, type Git } from '../git/git.ts';
+import type { ConversationEvent, Executor, RunGuards, RunStart } from '../executor/executor.ts';
+import { GitError, type Git, type RunSnapshot } from '../git/git.ts';
+import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import {
   artifactsOf,
   guard,
@@ -23,6 +24,8 @@ import {
   type LifecycleAction,
   type Repository,
   type RepoEvent,
+  type Run,
+  type RunEvent,
   type TaskLaunched,
 } from '../lifecycle/lifecycle.ts';
 import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
@@ -77,6 +80,8 @@ export type DaemonOptions = {
   presetsDir: string;
   // The operator's allow rules for L1 runs (ADR 0007).
   permissionsPath: string;
+  // Where each AFK run's own git config and hooks go while it runs.
+  runsRoot: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
 };
@@ -116,6 +121,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const streamed = new Map<string, ConversationEvent[]>();
   // Each suspended run's tool calls waiting on the gate until its request is answered.
   const held = new Map<string, ToolCall[]>();
+  // Each guarded AFK run's worktree as it found it, checked once it ends (ADR 0007).
+  const guarded = new Map<string, { worktree: string; snapshot: RunSnapshot }>();
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolve) => (resolveStopped = resolve));
   let stopping: Promise<void> | null = null;
@@ -535,33 +542,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     for (const run of Object.values(lifecycle.runs)) {
       const was = before.runs[run.id];
       if (!was && run.status === 'active') {
-        const task = lifecycle.tasks[run.taskId]!;
         streamed.set(run.id, []);
-        executor.start(
-          {
-            runId: run.id,
-            taskId: task.id,
-            mode: run.mode,
-            autonomy: run.autonomy,
-            sessionId: task.sessionId!,
-            resumesSession: run.resumesSession,
-            cwd: task.worktree?.path ?? null,
-            firstMessage: run.opening,
-            model: run.model,
-            maxTurns: run.maxTurns ?? null,
-            // The scheduler's choice (ADR 0001): L2's profile comes with the sandbox.
-            credential: 'subscription-host',
-            plugin: run.skillSet ? skillSets.pathOf(run.skillSet) : null,
-          },
-          {
-            report: (event) => void dispatch(event),
-            converse: (event) => broadcast(run.id, event),
-            askPermission: (call) => gate(run.id, call),
-          },
-        );
+        void startRun(run);
       } else if (was && was.status !== 'ended' && run.status === 'ended') {
         streamed.delete(run.id);
         held.delete(run.id);
+        // A run ended by an operator verb or parked isn't checked: it never finished.
+        unguard(run.id);
         if (!('runId' in action && action.runId === run.id)) executor.stop(run.id);
       }
     }
@@ -601,6 +588,82 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const { queued } = before.runs[action.runId]!;
       if (queued.length) executor.send(action.runId, queued.join('\n\n'));
     }
+  }
+
+  // Starts the run on the executor. An AFK run in a worktree starts guarded
+  // (ADR 0007), once its worktree is snapshotted, unless it ended meanwhile.
+  async function startRun(run: Run): Promise<void> {
+    const task = lifecycle.tasks[run.taskId]!;
+    const cwd = task.worktree?.path ?? null;
+    let guards: RunGuards | null = null;
+    if (run.mode === 'AFK' && cwd) {
+      let snapshot: RunSnapshot;
+      try {
+        snapshot = await git.snapshot(cwd);
+      } catch (error) {
+        if (!(error instanceof GitError)) throw error;
+        return void dispatch({ type: 'runFailed', runId: run.id, reason: `The factory couldn't read the run's worktree at ${cwd}: ${error.message}` });
+      }
+      if (lifecycle.runs[run.id]?.status !== 'active') return;
+      const env = prepareRunGit(join(options.runsRoot, run.id), FACTORY_IDENTITY, {
+        task: task.id,
+        run: run.id,
+        model: run.model,
+      });
+      guarded.set(run.id, { worktree: cwd, snapshot });
+      guards = { start: snapshot.head, env };
+    }
+    const start: RunStart = {
+      runId: run.id,
+      taskId: task.id,
+      mode: run.mode,
+      autonomy: run.autonomy,
+      sessionId: task.sessionId!,
+      resumesSession: run.resumesSession,
+      cwd,
+      firstMessage: run.opening,
+      model: run.model,
+      maxTurns: run.maxTurns ?? null,
+      // The scheduler's choice (ADR 0001): L2's profile comes with the sandbox.
+      credential: 'subscription-host',
+      plugin: run.skillSet ? skillSets.pathOf(run.skillSet) : null,
+      guards,
+    };
+    executor.start(start, {
+      report: (event) => void checkedAfterRun(event).then(dispatch),
+      converse: (event) => broadcast(run.id, event),
+      askPermission: (call) => gate(run.id, call),
+    });
+  }
+
+  // The run event, failed when it ends a guarded run that broke the git
+  // invariants of its snapshot (ADR 0007), saying what broke.
+  async function checkedAfterRun(event: RunEvent): Promise<RunEvent> {
+    const guard = guarded.get(event.runId);
+    if (!guard || (event.type !== 'runCompleted' && event.type !== 'runFailed')) return event;
+    unguard(event.runId);
+    // The factory's own branches for other tasks, cut while the run worked.
+    const branches = Object.values(lifecycle.tasks).flatMap((task) =>
+      task.worktree && task.worktree.path !== guard.worktree ? [task.worktree.branch] : [],
+    );
+    let broken: string[];
+    try {
+      broken = await git.violations(guard.worktree, guard.snapshot, branches);
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      broken = [`The factory couldn't check the run's worktree: ${error.message}`];
+    }
+    if (broken.length === 0) return event;
+    const breach = `broke the factory’s git guards. ${broken.join(' ')}`;
+    return event.type === 'runCompleted'
+      ? { type: 'runFailed', runId: event.runId, reason: `The run ${breach}` }
+      : { ...event, reason: `${event.reason} It also ${breach}` };
+  }
+
+  // Forgets the run's snapshot, and removes its git config and hooks.
+  function unguard(runId: string): void {
+    if (!guarded.delete(runId)) return;
+    rmSync(join(options.runsRoot, runId), { recursive: true, force: true, maxRetries: 3 });
   }
 
   // The L1 gate (ADR 0007): a call the factory's allow list or the operator's

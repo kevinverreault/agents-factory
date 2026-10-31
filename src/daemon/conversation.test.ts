@@ -57,6 +57,7 @@ describe('launching a HITL task', () => {
         maxTurns: null,
         credential: 'subscription-host',
         plugin: factory.skillSets.pathOf('a1a1a1a1a1a1a1a1'),
+        guards: null,
       },
     ]);
   });
