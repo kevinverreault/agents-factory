@@ -1,6 +1,7 @@
-// The full-screen conversation view: a HITL run's conversation, replayed from
-// the session file and then live, with a line for the operator's next message,
-// a side rail of the task's artifacts, and the advance sheet over it.
+// The full-screen conversation view: a run's conversation, replayed from the
+// session file and then live, with a side rail of the task's artifacts. A HITL
+// run's has a line for the operator's next message and the advance sheet over
+// it; an AFK run never takes chat, so its view only follows it.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
@@ -44,7 +45,8 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     return connection.converse(runId, (event) => setEvents((events) => [...events, event]));
   }, [connection, runId]);
 
-  const live = run?.status === 'active';
+  const takesChat = (run?.mode ?? task?.mode) !== 'AFK';
+  const live = takesChat && run?.status === 'active';
   const midTurn = live && run.turn === 'agent';
   // The open card, until the operator has answered it.
   const question = live && run.question && run.question.id !== typing.current.answered ? run.question : null;
@@ -55,6 +57,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   useInput((input, key) => {
     const typed = typing.current;
     if (key.ctrl && input === 'b') return onLeave();
+    if (!takesChat) return;
     if (key.ctrl && input === 'n') {
       if (canAdvance(task)) setAdvancing(true);
       return;
@@ -87,7 +90,13 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     rerender();
   }, { isActive: !advancing });
   const { draft } = typing.current;
-  const keys = question ? 'esc interrupt' : midTurn ? 'enter queue · esc interrupt' : 'enter send';
+  const keys = !takesChat
+    ? 'AFK runs take no chat: take it over to talk to it'
+    : question
+      ? 'esc interrupt'
+      : midTurn
+        ? 'enter queue · esc interrupt'
+        : 'enter send';
   const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''} · ctrl+b back`;
 
   return h(
@@ -122,7 +131,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       : null,
     live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
     refusal ? h(Text, { color: 'red' }, refusal) : null,
-    h(Text, null, `› ${draft}▏`),
+    takesChat ? h(Text, null, `› ${draft}▏`) : null,
     h(Text, { dimColor: true }, hint),
   );
 }

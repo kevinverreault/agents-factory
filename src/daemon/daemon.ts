@@ -271,6 +271,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         preset: null!,
         stage: '',
         opening: '',
+        autonomy: command.autonomy ?? 'L1',
+        maxTurns: command.maxTurns ?? null,
+        priority: command.priority ?? 'normal',
         worktree: { branch: '', path: '' },
         sessionId: randomUUID(),
         skillSet: '',
@@ -527,6 +530,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             cwd: task.worktree?.path ?? null,
             firstMessage: run.opening,
             model: run.model,
+            maxTurns: run.maxTurns ?? null,
             // The scheduler's choice (ADR 0001): L2's profile comes with the sandbox.
             credential: 'subscription-host',
             plugin: run.skillSet ? skillSets.pathOf(run.skillSet) : null,

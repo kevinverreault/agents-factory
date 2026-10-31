@@ -12,11 +12,12 @@ import {
   type CanUseTool,
   type Options,
   type Query,
+  type SDKResultMessage,
   type SpawnOptions,
 } from '@anthropic-ai/claude-agent-sdk';
-import type { Answers, Question, RunEvent } from '../lifecycle/lifecycle.ts';
+import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import { processCreatedAt } from '../os/process-info.ts';
-import type { ConversationEvent, CredentialProfile, Executor, RunSink } from './executor.ts';
+import type { ConversationEvent, CredentialProfile, Executor, RunSink, RunStart } from './executor.ts';
 import { hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
 
@@ -24,6 +25,8 @@ type LiveRun = {
   input: StreamedInput;
   query: Query;
   sink: RunSink;
+  mode: Mode;
+  maxTurns: number | null;
   // The CLI the run spawned, once known. Reported once: every turn starts with an init.
   cli: Promise<{ pid: number; createdAt: number }> | null;
   reportedStart: boolean;
@@ -52,28 +55,27 @@ export function agentSdkExecutor(): Executor {
 
   return {
     start(start, sink) {
-      if (start.mode !== 'HITL' || start.cwd === null) {
-        queueMicrotask(() =>
-          sink.report({
-            type: 'runFailed',
-            runId: start.runId,
-            reason: start.cwd === null ? 'The task has no worktree to run in.' : 'AFK runs arrive with the autonomy gate.',
-          }),
-        );
+      const unstartable = whyUnstartable(start);
+      if (unstartable) {
+        queueMicrotask(() => sink.report({ type: 'runFailed', runId: start.runId, reason: unstartable }));
         return;
       }
       // Exists before the query does: the SDK may spawn the CLI at once.
       const spawning: Omit<LiveRun, 'query'> = {
         input: streamedInput(),
         sink,
+        mode: start.mode,
+        maxTurns: start.maxTurns,
         cli: null,
         reportedStart: false,
         asking: null,
         stopped: false,
       };
       const options: Options = {
-        ...hitlOptions(start.credential, askTheOperator(start.runId, spawning), hitlFactoryTools(start.runId, sink)),
-        cwd: start.cwd,
+        ...(start.mode === 'HITL'
+          ? hitlOptions(start.credential, askTheOperator(start.runId, spawning), hitlFactoryTools(start.runId, sink))
+          : l1Options(start.credential, start.maxTurns)),
+        cwd: start.cwd!,
         model: start.model,
         // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
         ...(start.plugin !== null && { plugins: [{ type: 'local', path: start.plugin }] }),
@@ -128,8 +130,12 @@ export function agentSdkExecutor(): Executor {
   // Turns the run's SDK messages into run events and conversation events,
   // until the run ends or the daemon stops it.
   async function consume(runId: string, run: LiveRun): Promise<void> {
+    // Nothing is reported once the run has ended.
+    let ended = false;
     const report = (event: RunEvent) => {
-      if (!run.stopped) run.sink.report(event);
+      if (run.stopped || ended) return;
+      ended = event.type === 'runCompleted' || event.type === 'runFailed';
+      run.sink.report(event);
     };
     try {
       for await (const message of run.query) {
@@ -139,9 +145,21 @@ export function agentSdkExecutor(): Executor {
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
         } else if (message.type === 'assistant' && !message.parent_tool_use_id) {
           for (const event of eventsOf('assistant', message.uuid, message.message)) run.sink.converse(event);
-        } else if (message.type === 'result') {
+        } else if (message.type === 'result' && run.mode === 'HITL') {
           // Every turn ends with a result, an interrupted one included.
           report({ type: 'turnEnded', runId });
+        } else if (message.type === 'result') {
+          // An AFK run is one turn on its first message, and takes no chat:
+          // its result ends it, completed once the CLI exits, or failed.
+          const failure = afkFailure(message, run.maxTurns);
+          if (!failure) {
+            run.input.close();
+            continue;
+          }
+          report({ type: 'runFailed', runId, reason: failure });
+          run.input.close();
+          run.query.close();
+          return;
         }
       }
       report({ type: 'runCompleted', runId });
@@ -169,6 +187,45 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
     settings: { hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
     canUseTool,
   };
+}
+
+// L1 AFK runs (ADR 0007) execute in the host worktree with edits accepted.
+// They load only project settings, with auto memory off, so they are the
+// same from one run to the next (ADR 0005), and `maxTurns` is their runaway
+// guard (ADR 0008). Nothing else that would prompt gets through: the
+// factory's allow list and permission requests, and AFK questions as
+// attention requests, arrive with their own slices.
+function l1Options(credential: CredentialProfile, maxTurns: number | null): Options {
+  return {
+    env: { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+    permissionMode: 'acceptEdits',
+    settingSources: ['project'],
+    settings: { hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
+    ...(maxTurns !== null && { maxTurns }),
+    canUseTool: async (toolName) => ({
+      behavior: 'deny',
+      message:
+        toolName === 'AskUserQuestion'
+          ? 'Nobody is in this unattended run to answer. Decide for yourself, and say what you assumed.'
+          : `This unattended run may not use ${toolName}. Do without it, and say what you would have done.`,
+    }),
+  };
+}
+
+// Why the executor can't start the run, or null.
+function whyUnstartable({ mode, autonomy, cwd, firstMessage }: RunStart): string | null {
+  if (cwd === null) return 'The task has no worktree to run in.';
+  if (mode === 'HITL') return null;
+  if (autonomy !== 'L1') return 'L2 runs arrive with the sandbox.';
+  // An AFK run takes no chat, so with nothing to start on it would wait forever.
+  return firstMessage === null ? 'The AFK run has no first message to work on.' : null;
+}
+
+// Why an AFK run's result fails it, or null when it completed.
+function afkFailure(result: SDKResultMessage, maxTurns: number | null): string | null {
+  if (result.subtype === 'error_max_turns') return `The run hit its max turns (${maxTurns ?? result.num_turns}) before it finished.`;
+  if (result.subtype !== 'success') return result.errors.join(' ') || `The run ended on ${result.subtype}.`;
+  return result.is_error ? result.result : null;
 }
 
 // `AskUserQuestion` becomes a question card that holds the turn until the

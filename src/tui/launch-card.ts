@@ -1,8 +1,12 @@
 // The launch card (`N`): the repository, workflow preset, start stage, launch
-// inputs, groups and model tier a task launches with. The daemon resolves and
-// freezes the preset; the card offers what it lists for the repository.
+// inputs, groups and model tier a task launches with, and for an AFK start
+// stage the handoff fields: autonomy level (L1 until the sandbox arrives),
+// max turns and priority. The
+// daemon resolves and freezes the preset; the card offers what it lists for
+// the repository.
 import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
+import { DEFAULT_MAX_TURNS, PRIORITIES, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
 import type { PresetChoice, StartStage } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -19,18 +23,21 @@ type Props = {
   onCancel(): void;
 };
 
-type Field = 'repo' | 'preset' | 'stage' | 'prompt' | 'issues' | 'groups' | 'tier';
+type Field = 'repo' | 'preset' | 'stage' | 'prompt' | 'issues' | 'groups' | 'autonomy' | 'tier' | 'maxTurns' | 'priority';
 // What the operator picked and typed. A null choice is the default: the
-// repository's preset, the preset's first start stage, the stage's tier.
+// repository's preset, the preset's first start stage, the stage's tier,
+// normal priority. Empty max turns are the stage's.
 type Draft = {
   field: Field;
   repo: string | null;
   preset: string | null;
   stage: string | null;
   tier: Tier | null;
+  priority: Priority | null;
   prompt: string;
   issues: string;
   groups: string;
+  maxTurns: string;
 };
 // What the daemon listed for a repository, or why it couldn't.
 type Listing = PresetsView | { refusal: string };
@@ -45,9 +52,11 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel }: Pr
     preset: null,
     stage: null,
     tier: null,
+    priority: null,
     prompt: '',
     issues: '',
     groups: '',
+    maxTurns: '',
   }));
   const [listings, setListings] = useState<Record<string, Listing>>({});
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -109,6 +118,8 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel }: Pr
     );
   }
   const { listing, choice, start } = card;
+  const afk = start?.mode === 'AFK';
+  const maxTurnsDefault = `stage default (${start?.maxTurns ?? DEFAULT_MAX_TURNS})`;
   return h(
     Box,
     { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
@@ -131,7 +142,18 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel }: Pr
     row('prompt', 'Prompt', draft.prompt, false),
     card.fields.includes('issues') ? row('issues', 'Issues', draft.issues, false) : null,
     row('groups', 'Groups', draft.groups, false),
+    // Never focused: L2 needs the sandbox, so there is nothing to choose yet.
+    afk ? row('autonomy', 'Autonomy', 'L1 (L2 arrives with the sandbox)') : null,
     row('tier', 'Model tier', draft.tier ?? `stage default${start ? ` (${start.model ?? DEFAULT_TIER})` : ''}`),
+    afk
+      ? row(
+          'maxTurns',
+          'Max turns',
+          draft.maxTurns || draft.field === 'maxTurns' ? draft.maxTurns : h(Text, { dimColor: true }, maxTurnsDefault),
+          false,
+        )
+      : null,
+    afk ? row('priority', 'Priority', draft.priority ?? 'normal') : null,
     listing && 'warning' in listing && listing.warning ? h(Text, { color: 'yellow' }, listing.warning) : null,
     refusal ? h(Text, { color: 'red' }, refusal) : null,
     h(Text, { dimColor: true }, 'enter launch · ↑↓ field · ←→ choose · esc back'),
@@ -157,7 +179,9 @@ function cardOf(draft: Draft, listing: Listing | undefined): Card {
   const start = starts.find((stage) => stage.id === draft.stage) ?? starts[0];
   const fields: Field[] = ['repo', 'preset', 'stage', 'prompt'];
   if (start?.needs.includes('issues')) fields.push('issues');
-  fields.push('groups', 'tier');
+  fields.push('groups');
+  fields.push('tier');
+  if (start?.mode === 'AFK') fields.push('maxTurns', 'priority');
   return { listing, choice, start, presets, starts, fields };
 }
 
@@ -179,6 +203,8 @@ function step(draft: Draft, card: Card, repositories: string[], input: string, k
         return { ...draft, stage: cycle(card.starts.map(({ id }) => id), card.start?.id ?? null, by) };
       case 'tier':
         return { ...draft, tier: cycle([null, ...TIERS], draft.tier, by) };
+      case 'priority':
+        return { ...draft, priority: cycle(PRIORITIES, draft.priority ?? 'normal', by) };
       default:
         return draft;
     }
@@ -186,6 +212,11 @@ function step(draft: Draft, card: Card, repositories: string[], input: string, k
   if (draft.field === 'prompt' || draft.field === 'issues' || draft.field === 'groups') {
     const edited = edit(draft[draft.field], input, key);
     return edited === null ? draft : { ...draft, [draft.field]: edited };
+  }
+  if (draft.field === 'maxTurns') {
+    // A whole number: other characters are dropped.
+    const edited = edit(draft.maxTurns, input.replace(/\D/g, ''), key);
+    return edited === null ? draft : { ...draft, maxTurns: edited };
   }
   return draft;
 }
@@ -205,6 +236,8 @@ function launchCommand(draft: Draft, card: Card): LaunchCommand | null {
   const needs = card.start?.needs ?? (card.choice ? [] : ['prompt']);
   if (!draft.repo || (needs.includes('prompt') && !draft.prompt.trim()) || (needs.includes('issues') && issues.length === 0)) return null;
   const groups = words(draft.groups);
+  // The handoff fields go only for an AFK start stage, and only when changed.
+  const afk = card.start?.mode === 'AFK';
   return {
     type: 'launchTask',
     repo: draft.repo,
@@ -214,6 +247,8 @@ function launchCommand(draft: Draft, card: Card): LaunchCommand | null {
     ...(issues.length > 0 && { issues }),
     ...(groups.length > 0 && { groups }),
     ...(draft.tier && { tier: draft.tier }),
+    ...(afk && draft.maxTurns && { maxTurns: Number(draft.maxTurns) }),
+    ...(afk && draft.priority && { priority: draft.priority }),
   };
 }
 

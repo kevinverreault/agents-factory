@@ -49,7 +49,7 @@ Stage fields:
 | `mode` | `HITL` or `AFK` |
 | `model` | A model tier: `opus`, `sonnet` or `haiku` |
 | `autonomy` | `L1` or `L2`, the ceiling an AFK stage may run at. HITL stages have none |
-| `max_turns` | A whole number of at least 1, the runaway guard |
+| `max_turns` | A whole number of at least 1, the runaway guard of an AFK stage's runs: hitting it ends the run `failed` with a failure attention request. Without it a run gets the global default of 300; the launch card's max turns overrides both |
 | `context` | `resume` (the default) or `fresh` |
 | `optional` | `true` when the advance sheet may skip it |
 | `exit` | `run-completed`, `artifact:<kind>`, `tickets-closed` or `map-cleared`. A HITL stage without one advances when the operator confirms |

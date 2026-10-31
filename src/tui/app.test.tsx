@@ -19,7 +19,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -223,6 +223,7 @@ describe('launching and conversing', () => {
     stage: 'grill' as string | null,
     proposal: null as { reason: string } | null,
     model: 'claude-sonnet-5-5',
+    maxTurns: null,
     cli: { pid: 4242, createdAt: 1 },
     skillSet: null,
     startedAt: 1,
@@ -371,6 +372,48 @@ describe('launching and conversing', () => {
     );
   });
 
+  test('an AFK start stage shows the handoff fields, and the card sends the max turns and priority the operator set', async () => {
+    const connection = inWidgets();
+    connection.replyTo('listPresets', { ok: true, value: presetsView });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/Start stage\s+grill · HITL · opus/));
+    expect(app.lastFrame()).not.toMatch(/Autonomy|Max turns|Priority/);
+    await press(app, UP, RIGHT, RIGHT);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/Autonomy\s+L1 \(L2 arrives with the sandbox\)/);
+      expect(frame).toMatch(/Model tier\s+stage default \(sonnet\)/);
+      expect(frame).toMatch(/Max turns\s+stage default \(300\)/);
+      expect(frame).toMatch(/Priority\s+normal/);
+    });
+    await press(app, DOWN, DOWN);
+    await type(app, '#12');
+    await press(app, DOWN, DOWN, DOWN);
+    await type(app, '4x0');
+    await eventually(() => expect(app.lastFrame()).toMatch(/Max turns\s+40▏/));
+    await press(app, DOWN, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Priority\s+‹ urgent ›/));
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({
+        type: 'launchTask',
+        repo: 'acme/widgets',
+        preset: 'main-flow',
+        stage: 'implement',
+        prompt: '',
+        issues: ['#12'],
+        maxTurns: 40,
+        priority: 'urgent',
+      }),
+    );
+  });
+
   test('a preset that doesn’t resolve shows why, and a dangling default preset warns that main-flow is picked instead', async () => {
     const connection = inWidgets();
     const warning = 'The default preset of acme/widgets, nightly, no longer resolves (There is no preset nightly.), so main-flow is picked instead.';
@@ -467,6 +510,30 @@ describe('launching and conversing', () => {
 
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'sendMessage', taskId: 'T1', text: 'Okta, only on Safari.' }));
     await eventually(() => expect(app.lastFrame()).not.toContain('› Okta'));
+  });
+
+  test('the conversation view of an AFK run follows it live but takes no chat: typing, enter and esc send nothing', async () => {
+    const connection = new FakeConnection();
+    const working: TaskView = { ...task('T1', 'Implement acme/widgets#12', 'running', 'Running'), liveRunId: 'R1' };
+    const afkRun = { ...run, mode: 'AFK' as const, autonomy: 'L1' as const, maxTurns: 300 };
+    const { app } = await started({ ...factoryState([working]), runs: { R1: afkRun } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Reading the ticket.' });
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/agent\s+Reading the ticket\./));
+
+    await type(app, 'Use the new API');
+    app.stdin.write('\r');
+    app.stdin.write('\x1b');
+    await settle();
+
+    const frame = app.lastFrame()!;
+    expect(frame).not.toContain('Use the new API');
+    expect(frame).not.toContain('›');
+    expect(frame).toContain('AFK runs take no chat: take it over to talk to it · ctrl+b back');
+    expect(connection.sent.filter((command) => command.type === 'sendMessage' || command.type === 'interrupt')).toEqual([]);
   });
 
   test('mid-turn the view shows queued messages and esc interrupts; on the operator’s turn it says it is waiting on you', async () => {

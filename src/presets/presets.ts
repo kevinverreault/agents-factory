@@ -89,8 +89,8 @@ export type LaunchInputs = { prompt: string; issues: string[] };
 export type LaunchInput = 'prompt' | 'issues';
 
 // A stage a task can start at, skipping the ones before it, and the launch
-// inputs it needs.
-export type StartStage = { id: string; mode: Stage['mode']; model: Tier | null; needs: LaunchInput[] };
+// inputs it needs. `maxTurns` is its `max_turns`, when it sets one.
+export type StartStage = { id: string; mode: Stage['mode']; model: Tier | null; maxTurns?: number; needs: LaunchInput[] };
 
 // The stages whose args the launch inputs can fill: the prompt fills
 // `{{prompt}}`, and issue refs stand for the issue artifacts (map, spec,
@@ -106,7 +106,8 @@ export function startStages(preset: ResolvedPreset): StartStage[] {
       else return [];
     }
     if (i > 0 && needs.size === 0) return [];
-    return [{ id: stage.id, mode: stage.mode, model: stage.model ?? null, needs: [...needs] }];
+    const maxTurns = stage.max_turns === undefined ? {} : { maxTurns: stage.max_turns };
+    return [{ id: stage.id, mode: stage.mode, model: stage.model ?? null, ...maxTurns, needs: [...needs] }];
   });
 }
 

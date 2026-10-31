@@ -54,6 +54,7 @@ describe('launching a HITL task', () => {
         cwd: worktree,
         firstMessage: opening,
         model: 'claude-opus-5-5',
+        maxTurns: null,
         credential: 'subscription-host',
         plugin: factory.skillSets.pathOf('a1a1a1a1a1a1a1a1'),
       },
@@ -131,7 +132,7 @@ describe('conversing', () => {
     expect(await operator.send({ type: 'sendMessage', taskId: 'T1', text: ' ' })).toEqual({ ok: false, reason: 'A message needs text.' });
     expect(await operator.send({ type: 'sendMessage', taskId: 'T2', text: 'Hello?' })).toEqual({
       ok: false,
-      reason: 'T2 has no live conversation.',
+      reason: 'T2 is AFK, so it takes no chat. Take it over to talk to it.',
     });
     await operator.send({ type: 'cancel', taskId: 'T1' });
     expect(await operator.send({ type: 'sendMessage', taskId: 'T1', text: 'Hello?' })).toEqual({
