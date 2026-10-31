@@ -17,6 +17,8 @@ export type FactoryPaths = {
   skillsRoot: string;
   // The operator's own workflow presets: the user scope.
   presetsDir: string;
+  // The operator's own allow rules for L1 runs (ADR 0007).
+  permissionsPath: string;
 };
 
 export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths {
@@ -32,6 +34,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     skillsLock: join(shortHome, 'skills.lock'),
     skillsRoot: join(shortHome, 'skills'),
     presetsDir: join(shortHome, 'presets'),
+    permissionsPath: join(shortHome, 'permissions.yaml'),
   };
 }
 

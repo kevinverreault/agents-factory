@@ -3,15 +3,18 @@
 // The resume check runs the operator's own `claude` from PATH.
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { query, type CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { expect, test } from 'vitest';
 import type { RunEvent } from '../lifecycle/lifecycle.ts';
+import type { ToolCall } from '../permissions/permissions.ts';
 import { isAlive, waitFor } from '../os/test-support.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, RunStart } from './executor.ts';
+import { afkRunOptions } from './sdk-test-support.ts';
 
 test('a HITL run streams text and tool use, takes the operator’s messages, records its CLI, and replays from the session file', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
@@ -37,7 +40,7 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
   const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
 
-  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
+  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
   await waitFor(() => turnsEnded() === 1, 120_000);
   expect(agentSaid('PERIWINKLE-42')).toBe(true);
   executor.send('R1', 'Now reply with only the word PONG.');
@@ -94,7 +97,7 @@ test('the agent proposes advancing through the factory MCP server’s propose_ad
     plugin: null,
   };
 
-  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
+  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
   await waitFor(() => reported.some((event) => event.type === 'turnEnded'), 120_000);
 
   expect(reported.find((event) => event.type === 'advanceProposed')).toEqual({
@@ -132,7 +135,7 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
   const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
   const asked = () => reported.find((event) => event.type === 'questionAsked');
 
-  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
+  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
   await waitFor(() => asked() !== undefined, 120_000);
   const { question } = asked() as Extract<RunEvent, { type: 'questionAsked' }>;
   expect(question.questions).toEqual([
@@ -194,7 +197,7 @@ test('an L1 AFK run edits in its worktree without asking, takes no chat, and com
   const live: ConversationEvent[] = [];
   const run = afkRun(cwd, 'Use the Write tool to create done.txt containing only the word FINISHED. Then reply with only OK.', 10);
 
-  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
+  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
   await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
 
   expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runCompleted']);
@@ -211,7 +214,7 @@ test('an AFK run that hits its max turns ends failed, saying so', async () => {
   const reported: RunEvent[] = [];
   const run = afkRun(cwd, 'Use the Read tool on a.txt, then on b.txt, then on c.txt, one call at a time. Then reply with their contents.', 1);
 
-  executor.start(run, { report: (event) => reported.push(event), converse: () => {} });
+  executor.start(run, { report: (event) => reported.push(event), converse: () => {}, askPermission: () => {} });
   await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
   // Nothing more is reported once the run has ended.
   await new Promise((resolve) => setTimeout(resolve, 2_000));
@@ -233,7 +236,7 @@ test('an AFK run’s AskUserQuestion becomes a question attention request that h
   );
   const raised = () => reported.find((event) => event.type === 'attentionRaised');
 
-  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
+  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
   await waitFor(() => raised() !== undefined, 120_000);
   const { question } = raised() as Extract<RunEvent, { type: 'attentionRaised'; kind: 'question' }>;
   expect(question.questions).toEqual([
@@ -247,4 +250,61 @@ test('an AFK run’s AskUserQuestion becomes a question attention request that h
   await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
   expect(reported.map((event) => event.type)).toEqual(['runStarted', 'attentionRaised', 'runCompleted']);
   expect(live.some((event) => event.type === 'message' && event.from === 'agent' && /blue/i.test(event.text))).toBe(true);
+});
+
+test('an L1 run asks the factory’s gate about calls the target repo’s own rules allow, and takes its verdicts, a denial’s message included', async () => {
+  // Claude Code applies a project's rules only in a folder the operator
+  // trusts, as they do this checkout, so the target repo is made in it.
+  mkdirSync(join(process.cwd(), '.temp'), { recursive: true });
+  const cwd = mkdtempSync(join(process.cwd(), '.temp', 'factory-afk-'));
+  writeFileSync(join(cwd, 'package.json'), JSON.stringify({ name: 'widgets', version: '1.0.0' }));
+  // `acceptEdits` takes file commands such as `cp` and `mv` in the worktree
+  // without asking; `npm pkg set` it asks about.
+  mkdirSync(join(cwd, '.claude'));
+  writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: ['Bash(npm pkg *)'] } }));
+
+  // Without the factory's options, the repo's rule lets the call through unasked.
+  const askedPlainly: string[] = [];
+  const recordAsk: CanUseTool = async (toolName) => {
+    askedPlainly.push(toolName);
+    return { behavior: 'deny', message: 'Not in this check.' };
+  };
+  for await (const message of query({
+    prompt: 'Use the Bash tool to run exactly `npm pkg set keywords[]=owl`. Then reply DONE.',
+    options: { ...afkRunOptions(cwd), canUseTool: recordAsk, maxTurns: 4 },
+  })) {
+    if (message.type === 'result') break;
+  }
+  expect(askedPlainly).toEqual([]);
+  expect(JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8')).keywords).toEqual(['owl']);
+
+  const executor = agentSdkExecutor();
+  const reported: RunEvent[] = [];
+  const live: ConversationEvent[] = [];
+  const asked: ToolCall[] = [];
+  const run = afkRun(
+    cwd,
+    'Use the Bash tool to run exactly `npm pkg set description=owls`. Then use the Bash tool to run exactly `npm pkg set version=9.9.9`. ' +
+      'If a command is refused, quote the refusal message word for word in your reply. Then reply DONE.',
+    10,
+  );
+
+  executor.start(run, {
+    report: (event) => reported.push(event),
+    converse: (event) => live.push(event),
+    askPermission: (call) => {
+      asked.push(call);
+      const describes = String(call.input.command).includes('description=');
+      executor.permit('R1', call.id, describes ? { allow: true } : { allow: false, message: 'NOTE-OWL-17: the version is the release job’s.' });
+    },
+  });
+  await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
+
+  // The repo's rules allowed both commands, and neither ran without asking.
+  expect(asked.map(({ tool, summary }) => `${tool}: ${summary}`)).toEqual(
+    expect.arrayContaining(['Bash: npm pkg set description=owls', 'Bash: npm pkg set version=9.9.9']),
+  );
+  expect(JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'))).toMatchObject({ description: 'owls', version: '1.0.0' });
+  expect(live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes('NOTE-OWL-17'))).toBe(true);
+  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runCompleted']);
 });

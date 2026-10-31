@@ -19,7 +19,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, allowRules: [] };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -77,6 +77,7 @@ describe('the bare TUI', () => {
             holdsRun: false,
             reason: 'The agent hit max turns.',
             question: null,
+            permission: null,
           },
           { kind: 'ready', taskId: 'T1' },
         ],
@@ -185,6 +186,7 @@ describe('repositories', () => {
             holdsRun: false,
             reason: 'The clone of acme/widgets is no longer at /clones/widgets.',
             question: null,
+            permission: null,
           },
         ],
       ),
@@ -232,6 +234,7 @@ describe('launching and conversing', () => {
     turn: 'agent' as const,
     queued: [] as string[],
     question: null,
+    permission: null,
     stage: 'grill' as string | null,
     proposal: null as { reason: string } | null,
     model: 'claude-sonnet-5-5',
@@ -665,6 +668,7 @@ describe('launching and conversing', () => {
     holdsRun: false,
     reason: 'The agent hit max turns.',
     question: null,
+    permission: null,
   };
 
   test('ctrl+b returns to the screen, pane and cursor the operator left, the cursor following the task it was on', async () => {
@@ -914,6 +918,7 @@ describe('answering from Needs you', () => {
     holdsRun: true,
     reason: 'Which identity provider times out?',
     question,
+    permission: null,
   };
   const failure = {
     kind: 'attention' as const,
@@ -924,6 +929,7 @@ describe('answering from Needs you', () => {
     holdsRun: false,
     reason: 'The agent hit max turns.',
     question: null,
+    permission: null,
   };
 
   test('the selected item’s answer sheet is the bottom pane, a answers it with a digit at once, and the next item slides under the cursor', async () => {
@@ -1001,6 +1007,55 @@ describe('answering from Needs you', () => {
 
     await press(app, '2', ENTER);
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which providers time out?': 'Auth0' } }));
+  });
+
+  const permission = {
+    ...failure,
+    requestId: 'A3',
+    attention: 'permission' as const,
+    holdsRun: true,
+    reason: 'Bash: npm publish',
+    permission: { id: 'toolu_1', tool: 'Bash', summary: 'npm publish', rule: 'Bash(npm publish)' },
+  };
+
+  test('a permission request is allowed once, or for the task by its rule, with a digit', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([failing], [permission]), { connection });
+    await press(app, '2');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain(
+        '── T2 Implement the store ── permission: Bash: npm publish 1 Allow once 2 Allow for this task: Bash(npm publish) 3 Deny with a note a answer',
+      ),
+    );
+
+    await press(app, 'a', '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'once' } }));
+    connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [{ ...permission, requestId: 'A4' }] }]);
+    await settle();
+    await press(app, '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'task' } }));
+  });
+
+  test('Deny takes a typed note, which enter sends and esc sets aside', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([failing], [permission]), { connection });
+    await press(app, '2', 'a', '3');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
+
+    await press(app, ESC);
+    await eventually(() => expect(app.lastFrame()).toContain('3 Deny with a note'));
+    // The digits still answer: esc left only the note.
+    await press(app, '3');
+    await eventually(() => expect(app.lastFrame()).toContain('Note for the agent:'));
+    // An empty note sends nothing.
+    await press(app, ENTER);
+    await settle();
+    expect(connection.sent).toEqual([]);
+
+    app.stdin.write('Use 2 tags');
+    await eventually(() => expect(app.lastFrame()).toContain('Note for the agent: Use 2 tags'));
+    await press(app, ENTER);
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { deny: 'Use 2 tags' } }));
   });
 
   test('a missing repository takes no digits, and its sheet says how to fix it', async () => {

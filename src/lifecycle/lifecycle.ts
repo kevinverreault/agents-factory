@@ -8,6 +8,7 @@
 import { DEFAULT_TIER, route, TIERS, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
+import { ruleFor, type ToolCall } from '../permissions/permissions.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -43,6 +44,12 @@ export type Question = {
   id: string;
   questions: { question: string; header: string; options: { label: string; description: string }[]; multiSelect: boolean }[];
 };
+// The tool call a `permission` request asks about (ADR 0007): `id` is the
+// tool use's, and `rule` what Allow for this task adds to the task's rules.
+export type Permission = { id: string; tool: string; summary: string; rule: string };
+// How the operator answers a permission request: allow the call once, allow
+// it for the rest of the task, or deny it with a note the agent reads.
+export type PermissionAnswer = { allow: 'once' | 'task' } | { deny: string };
 // Each question's text with its answer: an option's label (a multi-select's
 // labels joined by ", "), or the operator's own words.
 export type Answers = Record<string, string>;
@@ -108,6 +115,12 @@ export type Task = {
   // What its next AFK run opens on instead of carrying on, such as the
   // answers to a question its parked run asked.
   resumeWith?: string | null;
+  // The rules the operator allowed for this task (ADR 0007): its L1 runs
+  // make calls they cover without asking. Tasks stored before them have none.
+  allowRules?: string[];
+  // The rules the operator allowed once while its run was parked, which its
+  // next run takes.
+  allowOnce?: string[];
 };
 
 export type Run = {
@@ -144,6 +157,9 @@ export type Run = {
   // While the run waits on the operator, when it parks if they still haven't
   // replied: a wall-clock deadline, persisted with the run (ADR 0003).
   parksAt: number | null;
+  // The rules the operator allowed once for it: each lets one call with that
+  // rule through. Runs stored before them have none.
+  allowOnce?: string[];
   startedAt: number;
   endedAt: number | null;
 };
@@ -162,6 +178,8 @@ export type AttentionRequest = {
   reason: string | null;
   // What a `question` request asks. Requests stored before it have none.
   question?: Question | null;
+  // The call a `permission` request asks about. Requests stored before it have none.
+  permission?: Permission | null;
   raisedAt: number;
 };
 
@@ -216,8 +234,9 @@ export type OperatorCommand =
   | { type: 'answerQuestion'; taskId: string; questionId: string; answers: Answers }
   | { type: 'handoff'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'takeOver'; taskId: string }
-  // Answers the task's open attention request: a question's with `answers`.
-  | { type: 'answer'; taskId: string; answers?: Answers }
+  // Answers the task's open attention request: a question's with `answers`,
+  // a permission request's with `permission`.
+  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer }
   | { type: 'requestChanges'; taskId: string }
   | { type: 'markDone'; taskId: string }
   | { type: 'cancel'; taskId: string }
@@ -232,9 +251,12 @@ export type RunEvent =
   // The agent finished answering: the conversation is the operator's again.
   | { type: 'turnEnded'; runId: string }
   | { type: 'questionAsked'; runId: string; question: Question }
-  // An AFK run asked the operator through `AskUserQuestion`, or for permission.
+  // An AFK run asked the operator through `AskUserQuestion`.
   | { type: 'attentionRaised'; runId: string; kind: 'question'; question: Question }
-  | { type: 'attentionRaised'; runId: string; kind: 'permission'; reason?: string }
+  // An AFK run's tool call that neither the factory's allow list nor the
+  // operator's rules cover (the daemon checks those). `rulesProblem` says why
+  // the operator's permissions file granted nothing, if it couldn't be read.
+  | { type: 'permissionAsked'; runId: string; call: ToolCall; rulesProblem: string | null }
   // The agent called `propose_advance`.
   | { type: 'advanceProposed'; runId: string; reason: string };
 
@@ -475,11 +497,12 @@ export type AttentionQueueItem =
       holdsRun: boolean;
       reason: string | null;
       question: Question | null;
+      permission: Permission | null;
     }
   | { kind: 'ready'; taskId: string }
   | { kind: 'review'; taskId: string };
 
-const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null }: AttentionRequest): AttentionQueueItem => ({
+const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null }: AttentionRequest): AttentionQueueItem => ({
   kind: 'attention',
   taskId,
   repo,
@@ -488,6 +511,7 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = nu
   holdsRun,
   reason,
   question,
+  permission,
 });
 
 // Everything waiting on the operator, the most urgent first: failures, then
@@ -529,9 +553,13 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   if ('runId' in action) {
     const run = state.runs[action.runId];
     if (!run) return `There is no run ${action.runId}.`;
-    // A suspended run can still fail: its CLI may exit while it waits on the operator.
-    const fails = run.status === 'suspended' && action.type === 'runFailed';
-    if (run.status !== 'active' && !fails) return `Run ${run.id} is not active.`;
+    if (run.status === 'suspended' && action.type === 'permissionAsked') {
+      // The task's rules still decide a suspended run's other calls.
+      if (!grantFor(state.tasks[run.taskId]!, run, action.call)) return 'Another request of this run is waiting on the operator.';
+    } else if (run.status !== 'active' && !(run.status === 'suspended' && action.type === 'runFailed')) {
+      // A suspended run can still fail: its CLI may exit while it waits on the operator.
+      return `Run ${run.id} is not active.`;
+    }
   }
   if ('repo' in action && action.type !== 'repoRegistered' && !state.repositories[action.repo]) {
     return `${action.repo} is not registered.`;
@@ -589,6 +617,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'answer': {
       const request = task.state === 'waiting' ? openRequest(state, task) : undefined;
       if (!request) return `${task.id} has no open attention request.`;
+      if (request.permission && !validPermissionAnswer(action.permission)) {
+        return 'Allow it once, allow it for this task, or deny it with a note for the agent.';
+      }
       const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
       return answered ? null : 'Answer every question on the card.';
     }
@@ -620,6 +651,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return plan.to ? cantStartRuns(state, task) : null;
     }
     case 'attentionRaised':
+    case 'permissionAsked':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
     case 'repoRegistered': {
       const registered = state.repositories[action.repo];
@@ -631,6 +663,21 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'deadlinesDue':
       return null;
   }
+}
+
+// Allow once or for the task, or deny with a note that isn't blank.
+function validPermissionAnswer(answer: PermissionAnswer | undefined): boolean {
+  if (!answer) return false;
+  return 'deny' in answer ? typeof answer.deny === 'string' && answer.deny.trim() !== '' : answer.allow === 'once' || answer.allow === 'task';
+}
+
+// Which of the operator's answers lets the call through, if any: the
+// task's rules, or a rule allowed once for the run. Either is the call's own
+// rule, never a pattern.
+function grantFor(task: Task, run: Run, call: ToolCall): 'task' | 'once' | null {
+  const rule = ruleFor(call);
+  if (task.allowRules?.includes(rule)) return 'task';
+  return run.allowOnce?.includes(rule) ? 'once' : null;
 }
 
 // An AFK run is steered only through attention requests and takeover.
@@ -665,6 +712,8 @@ function startRun(
   } = {},
 ): void {
   task.resumeWith = null;
+  const allowOnce = task.allowOnce ?? [];
+  task.allowOnce = [];
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -684,6 +733,7 @@ function startRun(
     maxTurns: task.mode === 'AFK' ? (task.maxTurns ?? stageOf(task, task.stage)?.max_turns ?? DEFAULT_MAX_TURNS) : null,
     cli: null,
     parksAt: null,
+    allowOnce,
     // Tasks stored before skill sets were frozen have none.
     skillSet: task.skillSet ?? null,
     startedAt: at,
@@ -718,6 +768,26 @@ function openingWithAnswers(question: Question, answers: Answers): string {
   return `While this conversation was parked, the operator answered your question:\n\n${lines.join('\n')}\n\n${AFK_RESUME}`;
 }
 
+// The run waits on an attention request, holding no slot, until it parks.
+function suspend(run: Run, at: number): void {
+  run.status = 'suspended';
+  run.parksAt = at + REQUEST_PARK_MS;
+}
+
+// What the operator answered a permission request with, for the run that
+// resumes after its asker parked.
+function openingWithVerdict({ tool, summary }: Permission, answer: PermissionAnswer): string {
+  const verdict =
+    'deny' in answer
+      ? `denied ${tool}: ${summary}. Their note: ${answer.deny.trim()}`
+      : answer.allow === 'once'
+        ? `allowed ${tool} once: ${summary}. Make that call again now.`
+        : `allowed ${tool} for the rest of this task: ${summary}.`;
+  return `While this conversation was parked, the operator ${verdict}
+
+${AFK_RESUME}`;
+}
+
 function raise(
   state: Lifecycle,
   task: Task,
@@ -726,7 +796,7 @@ function raise(
   holdsRun: boolean,
   reason: string | null,
   at: number,
-  question: Question | null = null,
+  { question = null, permission = null }: { question?: Question | null; permission?: Permission | null } = {},
 ): void {
   const request: AttentionRequest = {
     id: nextId(state, 'request'),
@@ -738,6 +808,7 @@ function raise(
     holdsRun,
     reason,
     question,
+    permission,
     raisedAt: at,
   };
   state.requests[request.id] = request;
@@ -872,6 +943,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'answer':
       request!.status = 'answered';
+      if (request!.permission && action.permission && 'allow' in action.permission && action.permission.allow === 'task') {
+        const rules = (task.allowRules ??= []);
+        if (!rules.includes(request!.permission.rule)) rules.push(request!.permission.rule);
+      }
       if (request!.holdsRun) {
         // Resumes at once, even over the slot cap.
         run!.status = 'active';
@@ -879,6 +954,11 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         task.state = 'running';
       } else {
         if (request!.question) task.resumeWith = openingWithAnswers(request!.question, action.answers!);
+        if (request!.permission) {
+          const answer = action.permission!;
+          if ('allow' in answer && answer.allow === 'once') (task.allowOnce ??= []).push(request!.permission.rule);
+          task.resumeWith = openingWithVerdict(request!.permission, answer);
+        }
         task.state = 'queued';
       }
       break;
@@ -951,17 +1031,26 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       endRun(run!, 'failed', at);
       raise(state, task, run!, 'failure', false, action.reason, at);
       break;
-    case 'attentionRaised':
-      run!.status = 'suspended';
-      run!.parksAt = at + REQUEST_PARK_MS;
-      if (action.kind === 'question') {
-        // Named by what it asks.
-        const reason = action.question.questions.map(({ question }) => question).join(' ');
-        raise(state, task, run!, 'question', true, reason, at, action.question);
-      } else {
-        raise(state, task, run!, 'permission', true, action.reason ?? null, at);
-      }
+    case 'attentionRaised': {
+      suspend(run!, at);
+      // Named by what it asks.
+      const reason = action.question.questions.map(({ question }) => question).join(' ');
+      raise(state, task, run!, 'question', true, reason, at, { question: action.question });
       break;
+    }
+    case 'permissionAsked': {
+      // The executor lets a call the operator allowed through, using up a
+      // rule allowed once.
+      const grant = grantFor(task, run!, action.call);
+      if (grant === 'once') run!.allowOnce!.splice(run!.allowOnce!.indexOf(ruleFor(action.call)), 1);
+      if (grant) break;
+      const { id, tool, summary } = action.call;
+      suspend(run!, at);
+      const problem = action.rulesProblem && ` (${action.rulesProblem.replace(/\.$/, '')}, so its rules granted nothing.)`;
+      const permission = { id, tool, summary, rule: ruleFor(action.call) };
+      raise(state, task, run!, 'permission', true, `${tool}: ${summary}${problem ?? ''}`, at, { permission });
+      break;
+    }
     case 'artifactsSeen': {
       // One artifact per file or issue of a task, however often it is seen.
       const existing = (test: (artifact: Artifact) => boolean) => artifactsOf(state, task).find(test);
