@@ -123,6 +123,42 @@ describe('the bare TUI', () => {
   });
 });
 
+describe('re-tiering', () => {
+  test('each task shows the tier its next run starts at, and t moves the selected task to the next tier', async () => {
+    const { app, connection } = await started(
+      factoryState([task('T1', 'Settle the glossary', 'queued', 'Ready for you', 'HITL'), task('T2', 'Implement the store', 'running', 'Running')]),
+    );
+    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+Running · sonnet/));
+    expect(app.lastFrame()).toContain('t re-tier');
+
+    app.stdin.write('\x1b[B');
+    await settle();
+    // Typed in one burst: each press goes on from the last.
+    app.stdin.write('t');
+    app.stdin.write('t');
+    await eventually(() =>
+      expect(connection.sent).toEqual([
+        { type: 'retier', taskId: 'T2', tier: 'haiku' },
+        { type: 'retier', taskId: 'T2', tier: 'opus' },
+      ]),
+    );
+
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T2', 'tier'], value: 'opus' }]);
+    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+Running · opus/));
+    app.stdin.write('t');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'retier', taskId: 'T2', tier: 'sonnet' }));
+  });
+
+  test('a refused re-tier says why', async () => {
+    const { app, connection } = await started(factoryState([task('T1', 'Implement the store', 'done', 'Done')]));
+    connection.replyTo('retier', { ok: false, reason: 'T1 is already Done.' });
+
+    app.stdin.write('t');
+
+    await eventually(() => expect(app.lastFrame()).toContain('T1 is already Done.'));
+  });
+});
+
 describe('repositories', () => {
   const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false };
 
