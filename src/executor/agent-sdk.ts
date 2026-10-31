@@ -18,6 +18,7 @@ import {
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import type { ConversationEvent, CredentialProfile, Executor, RunSink, RunStart } from './executor.ts';
+import { hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
 
 type LiveRun = {
@@ -72,7 +73,7 @@ export function agentSdkExecutor(): Executor {
       };
       const options: Options = {
         ...(start.mode === 'HITL'
-          ? hitlOptions(start.credential, askTheOperator(start.runId, spawning))
+          ? hitlOptions(start.credential, askTheOperator(start.runId, spawning), hitlFactoryTools(start.runId, sink))
           : l1Options(start.credential, start.maxTurns)),
         cwd: start.cwd!,
         model: start.model,
@@ -172,13 +173,16 @@ export function agentSdkExecutor(): Executor {
 }
 
 // HITL runs act as the operator (ADR 0005): every settings source loads,
-// plus the skill set plugin. Edits are accepted, and `canUseTool` decides the
-// rest. Every tool call's outcome goes to artifact capture, in the background
-// so the run never waits on it.
-function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool): Options {
+// plus the skill set plugin and the factory MCP server. Edits and the
+// factory's tools are accepted, and `canUseTool` decides the rest. Every tool
+// call's outcome goes to artifact capture, in the background so the run never
+// waits on it.
+function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, factory: FactoryTools): Options {
   return {
     env: runEnv(credential),
     permissionMode: 'acceptEdits',
+    mcpServers: { factory: factory.server },
+    allowedTools: factory.allowed,
     settingSources: ['user', 'project', 'local'],
     settings: { hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
     canUseTool,

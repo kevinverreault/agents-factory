@@ -43,7 +43,7 @@ export type TaskView = {
 
 export type RunView = Pick<
   Run,
-  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
+  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
 > & { maxTurns: number | null };
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
@@ -89,7 +89,11 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
   }
   const runs: Record<string, RunView> = {};
   for (const run of Object.values(lifecycle.runs)) {
-    const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, maxTurns, cli, skillSet, startedAt, endedAt } = run;
+    const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
+    // Runs stored before stages, proposals and max turns have none.
+    const stage = run.stage ?? null;
+    const proposal = run.proposal ?? null;
+    const maxTurns = run.maxTurns ?? null;
     runs[id] = {
       id,
       taskId,
@@ -100,8 +104,10 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       turn,
       queued,
       question,
+      stage,
+      proposal,
       model,
-      maxTurns: maxTurns ?? null,
+      maxTurns,
       cli,
       skillSet: skillSet ?? null,
       startedAt,

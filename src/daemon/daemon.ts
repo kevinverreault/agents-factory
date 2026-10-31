@@ -75,9 +75,6 @@ export type DaemonOptions = {
 };
 
 export const IDLE_EXIT_MS = 10 * 60_000;
-// What a resumed AFK run starts on: it takes no chat, so nothing else would
-// start its turn.
-const AFK_RESUME = 'Carry on, unattended, from where this conversation left off.';
 // How often the daemon checks whether it is idle and fires overdue deadlines.
 const TICK_MS = 5_000;
 
@@ -184,6 +181,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return moveRepo(command);
       case 'launchTask':
         return launch(command);
+      case 'advanceStage':
+        // Named now, for a next stage whose context is fresh.
+        return dispatch({ type: 'stageAdvanced', taskId: command.taskId, skip: command.skip ?? [], sessionId: randomUUID() });
       case 'listPresets':
         return listPresets(command);
       case 'hookEvent':
@@ -266,6 +266,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         issues: command.issues ?? [],
         groups: command.groups ?? [],
         tier: command.tier ?? DEFAULT_TIER,
+        operatorTier: command.tier ?? null,
         // Frozen once resolved, with the worktree and skill set.
         preset: null!,
         stage: '',
@@ -527,7 +528,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             sessionId: task.sessionId!,
             resumesSession: run.resumesSession,
             cwd: task.worktree?.path ?? null,
-            firstMessage: run.resumesSession ? (run.mode === 'AFK' ? AFK_RESUME : null) : task.goal,
+            firstMessage: run.opening,
             model: run.model,
             maxTurns: run.maxTurns ?? null,
             // The scheduler's choice (ADR 0001): L2's profile comes with the sandbox.

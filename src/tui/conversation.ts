@@ -1,13 +1,15 @@
 // The full-screen conversation view: a run's conversation, replayed from the
 // session file and then live, with a side rail of the task's artifacts. A HITL
-// run's has a line for the operator's next message; an AFK run never takes
-// chat, so its view only follows it.
+// run's has a line for the operator's next message and the advance sheet over
+// it; an AFK run never takes chat, so its view only follows it.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { ArtifactView, FactoryState } from '../protocol/factory-state.ts';
+import { issueRef } from '../artifacts/capture.ts';
 import type { Reply } from '../protocol/protocol.ts';
+import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
 
@@ -25,6 +27,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const run = runId ? state.runs[runId] : undefined;
   const [events, setEvents] = useState<ConversationEvent[]>([]);
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [advancing, setAdvancing] = useState(false);
   // Keys typed in one burst arrive before a re-render, so what they edit is
   // kept here: the draft, and the card for the question it answers.
   const typing = useRef<{ draft: string; card: Card; cardFor: string | null; answered: string | null }>({
@@ -55,6 +58,10 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     const typed = typing.current;
     if (key.ctrl && input === 'b') return onLeave();
     if (!takesChat) return;
+    if (key.ctrl && input === 'n') {
+      if (canAdvance(task)) setAdvancing(true);
+      return;
+    }
     if (key.escape) {
       if (midTurn) void connection.send({ type: 'interrupt', taskId }).then(tell);
       return;
@@ -81,21 +88,22 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       typed.draft = edit(typed.draft, input, key) ?? typed.draft;
     }
     rerender();
-  });
+  }, { isActive: !advancing });
   const { draft } = typing.current;
-  const hint = !takesChat
-    ? 'AFK runs take no chat: take it over to talk to it · ctrl+b back'
+  const keys = !takesChat
+    ? 'AFK runs take no chat: take it over to talk to it'
     : question
-      ? 'esc interrupt · ctrl+b back'
+      ? 'esc interrupt'
       : midTurn
-        ? 'enter queue · esc interrupt · ctrl+b back'
-        : 'enter send · ctrl+b back';
+        ? 'enter queue · esc interrupt'
+        : 'enter send';
+  const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''} · ctrl+b back`;
 
   return h(
     Box,
     { flexDirection: 'column', height: (stdout as NodeJS.WriteStream).rows || undefined },
     h(Box, { gap: 2 }, h(Text, { bold: true }, taskId), h(Text, { wrap: 'truncate' }, task?.title ?? '')),
-    h(Text, { dimColor: true }, [task?.branch, run?.model, task?.label].filter(Boolean).join(' · ')),
+    h(Text, { dimColor: true }, [task?.branch, task?.stage, run?.model, task?.label].filter(Boolean).join(' · ')),
     // The escape hatch: the same session in the operator's own terminal.
     task?.sessionId
       ? h(Text, { dimColor: true, wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
@@ -115,6 +123,12 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
     ),
     question ? h(QuestionCard, { question, card }) : null,
+    live && run.proposal
+      ? h(Text, { color: 'yellow' }, `◇ The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
+      : null,
+    advancing && canAdvance(task)
+      ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
+      : null,
     live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
     refusal ? h(Text, { color: 'red' }, refusal) : null,
     takesChat ? h(Text, null, `› ${draft}▏`) : null,
@@ -150,9 +164,7 @@ function artifactState(artifact: ArtifactView): string {
 
 // A file by its path in the worktree, an issue as `owner/name#number`.
 function artifactName(artifact: ArtifactView): string {
-  if (artifact.kind === 'file') return artifact.path;
-  const [, owner, name, , number] = new URL(artifact.url).pathname.split('/');
-  return `${owner}/${name}#${number}`;
+  return artifact.kind === 'file' ? artifact.path : issueRef(artifact.url);
 }
 
 function Event({ event }: { event: ConversationEvent }) {

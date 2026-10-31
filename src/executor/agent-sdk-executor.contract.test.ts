@@ -74,6 +74,39 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
   expect(reported.map((event) => event.type)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
 });
 
+test('the agent proposes advancing through the factory MCP server’s propose_advance, with no permission prompt', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
+  const executor = agentSdkExecutor();
+  const reported: RunEvent[] = [];
+  const live: ConversationEvent[] = [];
+  const run: RunStart = {
+    runId: 'R1',
+    taskId: 'T1',
+    mode: 'HITL',
+    autonomy: null,
+    sessionId: randomUUID(),
+    resumesSession: false,
+    cwd,
+    firstMessage: 'Call the propose_advance tool with the reason "the colour is settled", then reply with only the word PROPOSED.',
+    model: 'claude-haiku-5-5',
+    maxTurns: null,
+    credential: 'subscription-host',
+    plugin: null,
+  };
+
+  executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event) });
+  await waitFor(() => reported.some((event) => event.type === 'turnEnded'), 120_000);
+
+  expect(reported.find((event) => event.type === 'advanceProposed')).toEqual({
+    type: 'advanceProposed',
+    runId: 'R1',
+    reason: expect.stringContaining('colour is settled'),
+  });
+  expect(live).toContainEqual(expect.objectContaining({ type: 'toolUse', tool: 'mcp__factory__propose_advance' }));
+  expect(live).toContainEqual(expect.objectContaining({ type: 'message', from: 'agent', text: expect.stringContaining('PROPOSED') }));
+  executor.stop('R1');
+});
+
 test('AskUserQuestion holds the turn until answered, an interrupt ends only the turn, and the session resumes with `claude --resume` in a terminal', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
   const executor = agentSdkExecutor();
