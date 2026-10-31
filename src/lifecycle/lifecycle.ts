@@ -6,10 +6,12 @@
 // stages; child tasks, advancing stages and parking on a request's timeout
 // arrive with their own slices.
 import { DEFAULT_TIER, route, TIERS, type Tier } from '../models/routing.ts';
-import type { ResolvedPreset } from '../presets/presets.ts';
+import type { ResolvedPreset, Stage } from '../presets/presets.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
+// The operator's priority for an AFK task: urgent ones take a free slot first.
+export type Priority = 'normal' | 'urgent';
 
 export type TaskState =
   | 'draft'
@@ -69,6 +71,11 @@ export type Task = {
   mode: Mode;
   autonomy: AutonomyLevel | null;
   groups: string[];
+  // Tasks stored before priorities are normal.
+  priority?: Priority;
+  // The operator's max turns for its AFK runs, over each stage's
+  // `max_turns`; null when they set none.
+  maxTurns?: number | null;
   // Its first run's first message: for a launched task, its start stage's
   // skill invoked on the launch inputs.
   goal: string | null;
@@ -85,6 +92,9 @@ export type Task = {
   runIds: string[];
   state: TaskState;
   createdAt: number;
+  // Its place in the order tasks last became Queued in: first in, first out
+  // goes by it. Tasks stored before it go first.
+  queuePlace?: number;
 };
 
 export type Run = {
@@ -106,6 +116,9 @@ export type Run = {
   // The exact model: routed from the task's tier at start, then the one the
   // CLI reports it runs.
   model: string;
+  // An AFK run's runaway guard (ADR 0008): hitting it fails the run. HITL
+  // runs have none, and neither do runs stored before it.
+  maxTurns?: number | null;
   // The CLI process the daemon spawned for the run, once it is up (ADR 0003).
   cli: { pid: number; createdAt: number } | null;
   // The skill set version the run loaded: its task's.
@@ -154,7 +167,7 @@ export type Artifact = { id: string; taskId: string; runId: string } & (
 );
 
 export type Lifecycle = {
-  counters: { task: number; run: number; request: number; artifact: number };
+  counters: { task: number; run: number; request: number; artifact: number; queue: number };
   repositories: Record<string, Repository>;
   tasks: Record<string, Task>;
   runs: Record<string, Run>;
@@ -165,7 +178,16 @@ export type Lifecycle = {
 
 // The operator's verbs.
 export type OperatorCommand =
-  | { type: 'createTask'; title: string; repo: string; mode: Mode; autonomy?: AutonomyLevel; groups?: string[]; submit?: boolean }
+  | {
+      type: 'createTask';
+      title: string;
+      repo: string;
+      mode: Mode;
+      autonomy?: AutonomyLevel;
+      priority?: Priority;
+      groups?: string[];
+      submit?: boolean;
+    }
   | { type: 'submit'; taskId: string }
   | { type: 'open'; taskId: string }
   | { type: 'sendMessage'; taskId: string; text: string }
@@ -224,6 +246,10 @@ export type TaskLaunched = {
   // The start stage, and its first run's first message.
   stage: string;
   opening: string;
+  // The handoff fields, which an AFK start stage's runs take.
+  autonomy: AutonomyLevel;
+  maxTurns: number | null;
+  priority: Priority;
   worktree: TaskWorktree;
   sessionId: string;
   skillSet: string;
@@ -237,12 +263,15 @@ export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunc
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
 export const DEFAULT_SLOT_CAP = 2;
+// The global default for an AFK run's max turns, under a stage's `max_turns`.
+export const DEFAULT_MAX_TURNS = 300;
+export const PRIORITIES: readonly Priority[] = ['normal', 'urgent'];
 // How long a HITL run may wait on the operator's turn before it is parked.
 export const IDLE_PARK_MS = 30 * 60_000;
 
 export function initialLifecycle(): Lifecycle {
   return {
-    counters: { task: 0, run: 0, request: 0, artifact: 0 },
+    counters: { task: 0, run: 0, request: 0, artifact: 0, queue: 0 },
     repositories: {},
     tasks: {},
     runs: {},
@@ -402,11 +431,17 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   const task = taskOf(state, action)!;
   switch (action.type) {
     case 'createTask':
-      return action.title.trim() ? null : 'A task needs a title.';
+      if (!action.title.trim()) return 'A task needs a title.';
+      return action.priority === undefined ? null : priorityRefusal(action.priority);
     case 'taskLaunched':
       // Which launch inputs it needs is its start stage's to say.
       if (!TIERS.includes(action.tier)) return `${action.tier} is not a model tier (${TIERS.slice(0, -1).join(', ')} or ${TIERS.at(-1)}).`;
-      return state.repositories[action.repo]!.missing ? `${action.repo} is missing, so its runs can’t start.` : null;
+      if (action.maxTurns !== null && !(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) {
+        return 'Max turns must be a whole number of at least 1.';
+      }
+      if (action.autonomy !== 'L1') return 'L2 runs in a sandbox, which the factory doesn’t have yet: launch at L1.';
+      if (state.repositories[action.repo]!.missing) return `${action.repo} is missing, so its runs can’t start.`;
+      return priorityRefusal(action.priority);
     case 'removeRepo': {
       const unfinished = unfinishedTasks(state, action.repo);
       return unfinished.length
@@ -420,10 +455,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (task.state !== 'draft' && task.state !== 'queued') return `${task.id} isn't ready for a conversation (it is ${label(task)}).`;
       return cantStartRuns(state, task);
     case 'sendMessage':
+      if (task.mode === 'AFK') return takesNoChat(task);
       if (!action.text.trim()) return 'A message needs text.';
-      return task.mode === 'HITL' && liveRun(state, task)?.status === 'active' ? null : `${task.id} has no live conversation.`;
+      return liveRun(state, task)?.status === 'active' ? null : `${task.id} has no live conversation.`;
     case 'interrupt': {
-      const run = task.mode === 'HITL' ? liveRun(state, task) : undefined;
+      if (task.mode === 'AFK') return takesNoChat(task);
+      const run = liveRun(state, task);
       if (run?.status !== 'active') return `${task.id} has no live conversation.`;
       return run.turn === 'agent' ? null : `${task.id}’s agent isn’t mid-turn.`;
     }
@@ -473,12 +510,21 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   }
 }
 
+// An AFK run is steered only through attention requests and takeover.
+function takesNoChat(task: Task): string {
+  return `${task.id} is AFK, so it takes no chat. Take it over to talk to it.`;
+}
+
+function priorityRefusal(priority: Priority): string | null {
+  return PRIORITIES.includes(priority) ? null : `${priority} is not a priority (${PRIORITIES.join(' or ')}).`;
+}
+
 // Why no new run can start in the task's repository, or null (ADR 0010).
 function cantStartRuns(state: Lifecycle, task: Task): string | null {
   return state.repositories[task.repo]?.missing ? `${task.repo} is missing, so its runs can’t start.` : null;
 }
 
-function nextId(state: Lifecycle, kind: keyof Lifecycle['counters']): string {
+function nextId(state: Lifecycle, kind: Exclude<keyof Lifecycle['counters'], 'queue'>): string {
   const prefix = { task: 'T', run: 'R', request: 'A', artifact: 'X' }[kind];
   return prefix + ++state.counters[kind];
 }
@@ -497,6 +543,7 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     queued: [],
     question: null,
     model: route(task.tier).model,
+    maxTurns: task.mode === 'AFK' ? (task.maxTurns ?? stageOf(task)?.max_turns ?? DEFAULT_MAX_TURNS) : null,
     cli: null,
     parksAt: null,
     // Tasks stored before skill sets were frozen have none.
@@ -508,6 +555,11 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
   state.runs[run.id] = run;
   task.runIds.push(run.id);
   task.state = 'running';
+}
+
+// The stage of its frozen preset the task is at, if it has one.
+function stageOf(task: Task): Stage | undefined {
+  return task.preset?.stages.find(({ id }) => id === task.stage);
 }
 
 function endRun(run: Run, outcome: RunOutcome, at: number): void {
@@ -552,12 +604,24 @@ function closeRepoRequest(state: Lifecycle, repo: string): void {
   if (request) request.status = 'closed';
 }
 
-// Starts queued AFK tasks, first in first out, while a slot is free.
+// The scheduler (ADR 0008): starts queued AFK tasks in turn while the
+// admission check lets them. Urgent tasks go first, then work that continues
+// something in flight (a task that has run before), then first in, first out.
 function schedule(state: Lifecycle, at: number): void {
-  for (const task of Object.values(state.tasks)) {
-    if (activeAfkRuns(state) >= state.slotCap) return;
-    if (task.state === 'queued' && task.mode === 'AFK' && !cantStartRuns(state, task)) startRun(state, task, at);
+  const urgent = (task: Task) => Number(task.priority === 'urgent');
+  const continuing = (task: Task) => Number(task.runIds.length > 0);
+  const queued = Object.values(state.tasks).filter((task) => task.state === 'queued' && task.mode === 'AFK');
+  queued.sort((a, b) => urgent(b) - urgent(a) || continuing(b) - continuing(a) || (a.queuePlace ?? 0) - (b.queuePlace ?? 0));
+  for (const task of queued) {
+    if (!admits(state)) return;
+    if (!cantStartRuns(state, task)) startRun(state, task, at);
   }
+}
+
+// The one admission check: whether another AFK run may start now. v1 checks
+// only the slot cap; a usage-window gate would join it here (ADR 0008).
+function admits(state: Lifecycle): boolean {
+  return activeAfkRuns(state) < state.slotCap;
 }
 
 function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
@@ -573,6 +637,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         mode: action.mode,
         autonomy: action.mode === 'AFK' ? (action.autonomy ?? 'L1') : null,
         groups: [...(action.groups ?? [])],
+        priority: action.priority ?? 'normal',
         goal: null,
         tier: DEFAULT_TIER,
         worktree: null,
@@ -587,14 +652,17 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     }
     case 'taskLaunched': {
       // The task takes its start stage's mode: a HITL stage opens its
-      // conversation at once, and an AFK one queues for a slot at L1.
+      // conversation at once, and an AFK one queues for a slot with its
+      // handoff fields.
       const { mode } = action.preset.stages.find(({ id }) => id === action.stage)!;
       const launched: Task = {
         id: nextId(state, 'task'),
         title: action.title,
         repo: action.repo,
         mode,
-        autonomy: mode === 'AFK' ? 'L1' : null,
+        autonomy: mode === 'AFK' ? action.autonomy : null,
+        priority: action.priority,
+        maxTurns: mode === 'AFK' ? action.maxTurns : null,
         groups: [...new Set(action.groups.map((group) => group.trim()).filter(Boolean))],
         goal: action.opening,
         tier: action.tier,
@@ -759,9 +827,17 @@ export function reduce(state: Lifecycle, action: LifecycleAction, at: number): R
   if (refusal) return { state, refusal };
   const next = structuredClone(state);
   apply(next, action, at);
+  placeInQueue(state, next);
   schedule(next, at);
   armIdleParks(next, at);
   return { state: next, refusal: null };
+}
+
+// Gives each task that has just become Queued the next place in the queue.
+function placeInQueue(before: Lifecycle, after: Lifecycle): void {
+  for (const task of Object.values(after.tasks)) {
+    if (task.state === 'queued' && before.tasks[task.id]?.state !== 'queued') task.queuePlace = ++after.counters.queue;
+  }
 }
 
 // A HITL run's idle clock (ADR 0003): its park deadline is set when the run

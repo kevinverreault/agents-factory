@@ -4,12 +4,12 @@
 // directory, and only then may it subscribe or send commands.
 import type { Socket } from 'node:net';
 import type { ConversationEvent } from '../executor/executor.ts';
-import type { OperatorCommand } from '../lifecycle/lifecycle.ts';
+import type { AutonomyLevel, OperatorCommand, Priority } from '../lifecycle/lifecycle.ts';
 import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
@@ -37,6 +37,11 @@ export type LaunchCommand = {
   groups?: string[];
   // The operator's tier, over the start stage's.
   tier?: Tier;
+  // The handoff fields an AFK start stage takes: its autonomy level (L1 by
+  // default), max turns (over the stage's `max_turns`) and priority.
+  autonomy?: AutonomyLevel;
+  maxTurns?: number;
+  priority?: Priority;
 };
 // What a launch card offers in a repository. Replies with a `PresetsView`.
 export type PresetCommand = { type: 'listPresets'; repo: string };

@@ -12,6 +12,7 @@ import {
   type FrozenPreset,
   type Lifecycle,
   type Mode,
+  type Priority,
   type AttentionQueueItem,
   type Artifact,
   type Repository,
@@ -25,6 +26,7 @@ export type TaskView = {
   repo: string;
   mode: Mode;
   autonomy: AutonomyLevel | null;
+  priority: Priority;
   groups: string[];
   state: TaskState;
   label: string;
@@ -42,7 +44,7 @@ export type TaskView = {
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
->;
+> & { maxTurns: number | null };
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
 
@@ -72,6 +74,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       repo: task.repo,
       mode: task.mode,
       autonomy: task.autonomy,
+      priority: task.priority ?? 'normal',
       groups: task.groups,
       state: task.state,
       label: label(task, readyForYou(lifecycle, task, watched)),
@@ -86,8 +89,24 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
   }
   const runs: Record<string, RunView> = {};
   for (const run of Object.values(lifecycle.runs)) {
-    const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
-    runs[id] = { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet: skillSet ?? null, startedAt, endedAt };
+    const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, maxTurns, cli, skillSet, startedAt, endedAt } = run;
+    runs[id] = {
+      id,
+      taskId,
+      mode,
+      autonomy,
+      status,
+      outcome,
+      turn,
+      queued,
+      question,
+      model,
+      maxTurns: maxTurns ?? null,
+      cli,
+      skillSet: skillSet ?? null,
+      startedAt,
+      endedAt,
+    };
   }
   return {
     repositories,

@@ -16,6 +16,8 @@ export type RunStart = {
   // its start stage's skill invoked on the launch inputs.
   firstMessage: string | null;
   model: string;
+  // An AFK run's runaway guard: hitting it fails the run. Null for HITL.
+  maxTurns: number | null;
   credential: CredentialProfile;
   // The directory of the skill set plugin the run loads (ADR 0005), or null
   // for a task that froze none.
