@@ -9,7 +9,7 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
@@ -38,6 +38,9 @@ export type LaunchCommand = {
   // The operator's tier, over the start stage's.
   tier?: Tier;
 };
+// The advance sheet's confirm: the HITL task leaves its stage for the next
+// one, skipping the optional stages named in `skip`.
+export type AdvanceCommand = { type: 'advanceStage'; taskId: string; skip?: string[] };
 // What a launch card offers in a repository. Replies with a `PresetsView`.
 export type PresetCommand = { type: 'listPresets'; repo: string };
 export type PresetsView = {
@@ -57,7 +60,7 @@ export type HookEvent = {
   tool_response?: unknown;
 };
 export type HookCommand = { type: 'hookEvent'; event: HookEvent };
-export type Command = OperatorCommand | DaemonCommand | RepoCommand | LaunchCommand | PresetCommand | HookCommand;
+export type Command = OperatorCommand | DaemonCommand | RepoCommand | LaunchCommand | AdvanceCommand | PresetCommand | HookCommand;
 
 export type DaemonStatus = {
   pid: number;

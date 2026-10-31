@@ -220,6 +220,8 @@ describe('launching and conversing', () => {
     turn: 'agent' as const,
     queued: [] as string[],
     question: null,
+    stage: 'grill' as string | null,
+    proposal: null as { reason: string } | null,
     model: 'claude-sonnet-5-5',
     cli: { pid: 4242, createdAt: 1 },
     skillSet: null,
@@ -700,5 +702,117 @@ describe('launching and conversing', () => {
       expect(frame).toMatch(/uncommitted\s+docs\/adr\/0001-sso-cookies\.md/);
       expect(frame).toMatch(/issue\s+acme\/widgets#41/);
     });
+  });
+
+  // A frozen preset of HITL stages up to the handoff to implement.
+  const hitlStage = (id: string, more: object = {}) => ({ id, kind: 'run' as const, skill: id, mode: 'HITL' as const, model: 'opus' as const, ...more });
+  const lean = {
+    name: 'lean',
+    description: null,
+    source: 'user' as const,
+    path: 'lean.preset.yaml',
+    hash: '0123456789abcdef',
+    repoCommit: 'c0ffee',
+    stages: [
+      hitlStage('grill'),
+      hitlStage('glossary', { optional: true }),
+      hitlStage('spec', { optional: true, exit: 'artifact:spec' }),
+      hitlStage('tickets'),
+      { id: 'implement', kind: 'loop' as const, skill: 'implement', mode: 'AFK' as const, model: 'sonnet' as const },
+    ],
+  };
+  const onLean = { ...conversing, preset: lean, stage: 'grill' };
+  const CTRL_N = '\x0e';
+
+  test('the agent’s proposal to advance shows as a banner with its reason, and ctrl+n opens the advance sheet on it', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toContain('ctrl+n advance'));
+    expect(app.lastFrame()).not.toContain('proposes');
+
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, proposal: { reason: 'The login flow is settled.' } } }]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('The agent proposes advancing: The login flow is settled. ctrl+n review'));
+
+    app.stdin.write(CTRL_N);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('Advance T1 from grill');
+      expect(frame).toMatch(/› glossary opus optional ← advances here spec opus optional tickets opus then implement \(AFK\): the handoff starts it/);
+    });
+  });
+
+  test('enter on the advance sheet advances the task, and the conversation carries on with the next stage’s run', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    app.stdin.write(CTRL_N);
+    await eventually(() => expect(app.lastFrame()).toContain('Advance T1 from grill'));
+
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'advanceStage', taskId: 'T1' }));
+    await eventually(() => expect(app.lastFrame()).not.toContain('Advance T1'));
+
+    connection.servePatch([
+      { op: 'set', path: ['runs', 'R1'], value: { ...run, status: 'ended', outcome: 'completed' } },
+      { op: 'set', path: ['runs', 'R2'], value: { ...run, id: 'R2', stage: 'glossary' } },
+      { op: 'set', path: ['tasks', 'T1'], value: { ...onLean, stage: 'glossary', liveRunId: 'R2' } },
+    ]);
+    await eventually(() => expect(connection.conversed).toEqual(['R1', 'R2']));
+    await eventually(() => expect(app.lastFrame()).toContain('glossary'));
+  });
+
+  test('space skips an optional stage, and only those; a refusal stays on the sheet, and esc backs out without advancing', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('advanceStage', { ok: false, reason: 'tickets can’t start: its args need {{artifacts.spec}}, and T1 has no spec.' });
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    app.stdin.write(CTRL_N);
+    await settle();
+
+    await press(app, ' ', DOWN, ' ', DOWN, ' ');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/glossary opus optional · skipped spec opus optional · skipped › tickets opus ← advances here/));
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'advanceStage', taskId: 'T1', skip: ['glossary', 'spec'] }));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('tickets can’t start'));
+    expect(app.lastFrame()).toContain('Advance T1 from grill');
+
+    // Taking a skip back makes that stage the one advanced to again.
+    await press(app, UP, ' ');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/glossary opus optional · skipped › spec opus optional ← advances here tickets opus/));
+
+    app.stdin.write('\x1b');
+    await eventually(() => expect(app.lastFrame()).not.toContain('Advance T1'));
+    expect(connection.sent.filter((command) => command.type === 'advanceStage')).toHaveLength(1);
+    expect(connection.sent.filter((command) => command.type === 'interrupt')).toEqual([]);
+  });
+
+  test('the advance sheet says when the next stage is the handoff’s, or the last stage is ending; a task without a preset has none', async () => {
+    const connection = new FakeConnection();
+    const atTickets = { ...onLean, stage: 'tickets' };
+    const { app } = await started({ ...factoryState([atTickets]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    app.stdin.write(CTRL_N);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('The next stage, implement, is AFK: hand T1 off to start it.'));
+
+    app.stdin.write('\x1b');
+    await settle();
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...onLean, preset: { ...lean, stages: lean.stages.slice(0, 1) } } }]);
+    await settle();
+    app.stdin.write(CTRL_N);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('grill is the last stage: advancing puts T1 in review.'));
+
+    app.stdin.write('\x1b');
+    await settle();
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: conversing }]);
+    await settle();
+    app.stdin.write(CTRL_N);
+    await settle();
+    expect(app.lastFrame()).not.toContain('Advance');
+    expect(app.lastFrame()).not.toContain('ctrl+n');
   });
 });

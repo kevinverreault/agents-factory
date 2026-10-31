@@ -116,8 +116,28 @@ export function startStages(preset: ResolvedPreset): StartStage[] {
 // run on all its tickets for now: ADR 0006 has the factory pick one ticket
 // per iteration, which the Ralph loop's own slice (#47) brings.
 export function openingMessage(stage: Stage, { prompt, issues }: LaunchInputs): string {
-  const args = (stage.args ?? '').replace(TEMPLATE, (_, variable: string) => (variable === 'prompt' ? prompt.trim() : issues.join(' '))).trim();
-  return stage.skill === undefined ? args : `/factory:${stage.skill}${args ? ` ${args}` : ''}`;
+  const filled = fillOpening(stage, (variable) => (variable === 'prompt' ? prompt.trim() : issues.join(' ')));
+  return 'opening' in filled ? filled.opening : '';
+}
+
+// A stage's first message, its args filled by `valueOf` (`prompt`,
+// `artifacts.spec`…), or the variables it has no value for.
+export function fillOpening(stage: Stage, valueOf: (variable: string) => string | null): { opening: string } | { missing: string[] } {
+  const missing: string[] = [];
+  const args = (stage.args ?? '')
+    .replace(TEMPLATE, (_, variable: string) => {
+      const value = valueOf(variable);
+      if (value === null) missing.push(variable);
+      return value ?? '';
+    })
+    .trim();
+  if (missing.length) return { missing };
+  return { opening: stage.skill === undefined ? args : `/factory:${stage.skill}${args ? ` ${args}` : ''}` };
+}
+
+// The artifact kinds a stage's args name, such as `spec` for `{{artifacts.spec}}`.
+export function artifactKindsIn(stage: Stage): string[] {
+  return variablesOf(stage).flatMap((variable) => (variable.startsWith('artifacts.') ? [variable.slice('artifacts.'.length)] : []));
 }
 
 // The stage a preset starts at, and its first run's first message, or why
