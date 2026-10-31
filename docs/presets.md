@@ -79,3 +79,17 @@ The resolved stages are checked whole against the schema at launch. A preset tha
 ## Starting at a stage
 
 The launch card's start stage picker offers the stages whose `args` the launch inputs can fill: the prompt fills `{{prompt}}`, and issue refs stand for the issue artifacts (`map`, `spec`, `tickets`) earlier stages would have made. The first stage is offered even when it needs no input (`setup`); a later stage that needs none isn't, since it works from what earlier stages left. A stage needing an artifact no launch input stands for (`pr-body`) is never offered. Starting `main-flow` at `implement` with issue refs makes the task AFK from its first run, at L1. Until the Ralph loop arrives, that first run gets every ref at once rather than one ticket per iteration (ADR 0006).
+
+## Artifacts of a kind
+
+`artifact:<kind>` and `{{artifacts.<kind>}}` name the task's artifacts of that kind. An issue is one of kind `spec` (or `map`, `tickets`) when it was captured during a stage whose exit is `artifact:spec`, so an issue the grill merely printed is no spec. In `args` they read as `owner/name#n`, separated by spaces. A task started past the stages that make them reads its launch issue refs instead, for the kinds its start stage's `args` name. Exits count only captured artifacts.
+
+## Moving from stage to stage
+
+**HITL → HITL.** The agent may call `propose_advance` on the factory MCP server. The proposal shows as a banner in the conversation and changes nothing else; the operator's next message sets it aside. Only the operator advances, on the advance sheet (`ctrl+n`), which lists the HITL stages up to the next AFK one and skips optional ones with `space`. Confirming:
+
+- is refused while the stage's exit doesn't hold. `run-completed` holds, since confirming ends the run completed; `artifact:<kind>` holds once the task has an artifact of that kind. The factory can't evaluate `tickets-closed` or `map-cleared` on a HITL boundary yet.
+- is refused when the next stage is AFK: the handoff starts that one.
+- otherwise ends the stage's run `completed` and starts a run of the next stage, its skill invoked on its filled `args`. It resumes the session, or starts a new one with `context: fresh`, at the tier the operator picked at launch, else the stage's model tier (the task's when the stage names none).
+- raises a `stage-blocked` attention request instead, naming what's missing, when the next stage's `args` can't be filled. The run still ends, and the task stays at the stage it was leaving, to advance from again once the request is answered.
+- past the last stage, puts the root task in review.

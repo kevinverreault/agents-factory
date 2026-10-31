@@ -181,6 +181,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return moveRepo(command);
       case 'launchTask':
         return launch(command);
+      case 'advanceStage':
+        // Named now, for a next stage whose context is fresh.
+        return dispatch({ type: 'stageAdvanced', taskId: command.taskId, skip: command.skip ?? [], sessionId: randomUUID() });
       case 'listPresets':
         return listPresets(command);
       case 'hookEvent':
@@ -263,6 +266,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         issues: command.issues ?? [],
         groups: command.groups ?? [],
         tier: command.tier ?? DEFAULT_TIER,
+        operatorTier: command.tier ?? null,
         // Frozen once resolved, with the worktree and skill set.
         preset: null!,
         stage: '',
@@ -521,7 +525,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             sessionId: task.sessionId!,
             resumesSession: run.resumesSession,
             cwd: task.worktree?.path ?? null,
-            firstMessage: run.resumesSession ? null : task.goal,
+            firstMessage: run.opening,
             model: run.model,
             // The scheduler's choice (ADR 0001): L2's profile comes with the sandbox.
             credential: 'subscription-host',

@@ -41,7 +41,7 @@ export type TaskView = {
 
 export type RunView = Pick<
   Run,
-  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
+  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
 >;
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
@@ -87,7 +87,10 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
   const runs: Record<string, RunView> = {};
   for (const run of Object.values(lifecycle.runs)) {
     const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
-    runs[id] = { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet: skillSet ?? null, startedAt, endedAt };
+    // Runs stored before stages and proposals have neither.
+    const stage = run.stage ?? null;
+    const proposal = run.proposal ?? null;
+    runs[id] = { id, taskId, mode, autonomy, status, outcome, turn, queued, question, stage, proposal, model, cli, skillSet: skillSet ?? null, startedAt, endedAt };
   }
   return {
     repositories,

@@ -30,6 +30,12 @@ function writtenFile(event: HookEvent, worktree: string): CapturedArtifact[] {
   return path && isArtifactFile(path) ? [{ kind: 'file', path }] : [];
 }
 
+// An issue URL as `owner/name#number`.
+export function issueRef(url: string): string {
+  const [, owner, name, , number] = new URL(url).pathname.split('/');
+  return `${owner}/${name}#${number}`;
+}
+
 // Every URL of an issue in `repo` in the tool's output, once each, without
 // any `#fragment`. A task's tickets live in its own repository, so other
 // repositories' issues (a linked upstream bug, say) are no artifacts.

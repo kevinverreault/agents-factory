@@ -7,7 +7,7 @@ import { applyPatch, type FactoryState, type PatchOp } from '../protocol/factory
 import type { Command, Reply } from '../protocol/protocol.ts';
 
 export class FakeConnection implements FactoryConnection {
-  readonly protocolVersion = 6;
+  readonly protocolVersion = 7;
   readonly sent: Command[] = [];
   readonly conversed: string[] = [];
   readonly left: string[] = [];

@@ -2,11 +2,13 @@
 // reducer with guards and selectors. Every operator command and every run event goes
 // through `reduce`. Ported from the task-lifecycle prototype, amended by
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
-// A launched task freezes its workflow preset and starts at one of its
-// stages; child tasks, advancing stages and parking on a request's timeout
-// arrive with their own slices.
+// A launched task freezes its workflow preset, starts at one of its stages
+// and advances across HITL boundaries on the operator's confirm; child tasks,
+// handoffs, AFK boundaries and parking on a request's timeout arrive with
+// their own slices.
 import { DEFAULT_TIER, route, TIERS, type Tier } from '../models/routing.ts';
-import type { ResolvedPreset } from '../presets/presets.ts';
+import { issueRef } from '../artifacts/capture.ts';
+import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -53,6 +55,10 @@ export type AttentionKind =
   | 'recovery-report';
 export type AttentionStatus = 'open' | 'answered' | 'superseded' | 'closed';
 
+// The agent's proposal to advance the task to its next stage (`propose_advance`),
+// shown until the operator confirms it or keeps talking instead.
+export type Proposal = { reason: string };
+
 // A root task's task branch and the worktree it is checked out in (ADR 0010).
 export type TaskWorktree = { branch: string; path: string };
 
@@ -81,6 +87,10 @@ export type Task = {
   // Tasks created without a launch, or stored before presets, have none.
   preset?: FrozenPreset | null;
   stage?: string | null;
+  // What it launched with: for later stages' args, the prompt and the issue
+  // refs with the artifact kinds they stand for (those its start stage's args
+  // name), and the tier the operator picked over every stage's, if any.
+  inputs?: LaunchInputs & { issueKinds: string[]; tier: Tier | null };
   sessionId: string | null;
   runIds: string[];
   state: TaskState;
@@ -103,6 +113,11 @@ export type Run = {
   queued: string[];
   // The card the agent's turn waits on, if any.
   question: Question | null;
+  // The stage of its task's preset the run works on, if the task has one.
+  stage: string | null;
+  // The message the run starts with, or null to wait for the operator's.
+  opening: string | null;
+  proposal: Proposal | null;
   // The exact model: routed from the task's tier at start, then the one the
   // CLI reports it runs.
   model: string;
@@ -189,7 +204,9 @@ export type RunEvent =
   // The agent finished answering: the conversation is the operator's again.
   | { type: 'turnEnded'; runId: string }
   | { type: 'questionAsked'; runId: string; question: Question }
-  | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string };
+  | { type: 'attentionRaised'; runId: string; kind: 'question' | 'permission'; reason?: string }
+  // The agent called `propose_advance`.
+  | { type: 'advanceProposed'; runId: string; reason: string };
 
 // What artifact capture found after a tool call of the task's latest run,
 // with whether each of the task's files (old and new) is committed. Hooks
@@ -220,6 +237,8 @@ export type TaskLaunched = {
   issues: string[];
   groups: string[];
   tier: Tier;
+  // The tier the operator picked on the launch card, if any.
+  operatorTier: Tier | null;
   preset: FrozenPreset;
   // The start stage, and its first run's first message.
   stage: string;
@@ -229,10 +248,15 @@ export type TaskLaunched = {
   skillSet: string;
 };
 
+// The operator confirmed the advance sheet: the task leaves its stage for the
+// next one it didn't skip (only optional stages can be). The daemon names a
+// session, for a next stage whose context is fresh.
+export type StageAdvanced = { type: 'stageAdvanced'; taskId: string; skip: string[]; sessionId: string };
+
 // The daemon's clock found deadlines that have passed (ADR 0003).
 export type ClockEvent = { type: 'deadlinesDue' };
 
-export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched | ClockEvent | ArtifactsSeen;
+export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched | StageAdvanced | ClockEvent | ArtifactsSeen;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
@@ -288,6 +312,68 @@ export function lastUsedRepo(state: Lifecycle): string | null {
 
 export function artifactsOf(state: Lifecycle, task: Task): Artifact[] {
   return Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id);
+}
+
+// The task's issues of an artifact kind (`spec`…), as `owner/name#n`: those
+// captured in a stage whose exit is `artifact:<kind>`, so an issue the grill
+// merely printed is no spec.
+export function issuesOfKind(state: Lifecycle, task: Task, kind: string): string[] {
+  return artifactsOf(state, task).flatMap((artifact) => {
+    if (artifact.kind !== 'issue') return [];
+    const stage = stageOf(task, state.runs[artifact.runId]?.stage);
+    if (stage?.exit !== `artifact:${kind}`) return [];
+    return [issueRef(artifact.url)];
+  });
+}
+
+function stageOf(task: Task, id: string | null | undefined): Stage | undefined {
+  return task.preset?.stages.find((stage) => stage.id === id);
+}
+
+// Why the stage's exit doesn't hold yet, or null. On a HITL boundary the
+// operator's confirm ends the run completed, so `run-completed` holds.
+function unmetExit(state: Lifecycle, task: Task, stage: Stage): string | null {
+  if (stage.exit === undefined || stage.exit === 'run-completed') return null;
+  const kind = /^artifact:(.*)$/.exec(stage.exit)?.[1];
+  const why =
+    kind === undefined
+      ? `the factory can’t tell yet whether ${stage.exit} holds`
+      : issuesOfKind(state, task, kind).length === 0
+        ? `${task.id} has no ${kind} yet`
+        : null;
+  return why && `${stage.id}’s exit, ${stage.exit}, doesn’t hold: ${why}.`;
+}
+
+// A template variable of a stage's args, filled from what the task has: its
+// launch prompt, or its issues of an artifact kind, else the launch issue
+// refs that stand for that kind. Null when it has none.
+function argValue(state: Lifecycle, task: Task, variable: string): string | null {
+  if (variable === 'prompt') return task.inputs?.prompt.trim() || null;
+  const kind = variable.slice('artifacts.'.length);
+  const issues = issuesOfKind(state, task, kind);
+  if (issues.length) return issues.join(' ');
+  return task.inputs?.issueKinds.includes(kind) && task.inputs.issues.length ? task.inputs.issues.join(' ') : null;
+}
+
+// Where the advance sheet's confirm takes the task: past its stage and the
+// optional ones it skips, to the next HITL stage, or past the last stage
+// (null). An AFK stage next is the handoff's to start.
+function planAdvance(state: Lifecycle, task: Task, skip: string[]): { from: Stage; to: Stage | null } | { refusal: string } {
+  const { stages } = task.preset!;
+  const at = stages.findIndex(({ id }) => id === task.stage);
+  let next = at + 1;
+  for (; next < stages.length && skip.includes(stages[next]!.id); next++) {
+    if (!stages[next]!.optional) return { refusal: `${stages[next]!.id} isn’t optional, so it can’t be skipped.` };
+  }
+  const from = stages[at]!;
+  const to = stages[next] ?? null;
+  const between = stages.slice(at + 1, next).map(({ id }) => id);
+  const stray = skip.find((id) => !between.includes(id));
+  if (stray) return { refusal: `${stray} isn’t a stage between ${from.id} and ${to?.id ?? 'the end'}.` };
+  const unmet = unmetExit(state, task, from);
+  if (unmet) return { refusal: unmet };
+  if (to?.mode === 'AFK') return { refusal: `The next stage, ${to.id}, is AFK: hand ${task.id} off to start it.` };
+  return { from, to };
 }
 
 // The live runs whose park deadline has passed at `at`.
@@ -459,6 +545,17 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
     case 'questionAsked':
       return task.mode === 'HITL' ? null : 'In an AFK run a question is an attention request.';
+    case 'advanceProposed':
+      return task.mode === 'HITL' ? null : 'Only a HITL run proposes advancing; AFK stages advance on their own.';
+    case 'stageAdvanced': {
+      if (!task.preset || !task.stage) return `${task.id} follows no workflow preset.`;
+      if (task.mode !== 'HITL' || (task.state !== 'running' && task.state !== 'queued')) {
+        return `Only a HITL task in conversation or ready for you advances its stage (${task.id} is ${label(task)}).`;
+      }
+      const plan = planAdvance(state, task, action.skip);
+      if ('refusal' in plan) return plan.refusal;
+      return plan.to ? cantStartRuns(state, task) : null;
+    }
     case 'attentionRaised':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
     case 'repoRegistered': {
@@ -483,7 +580,14 @@ function nextId(state: Lifecycle, kind: keyof Lifecycle['counters']): string {
   return prefix + ++state.counters[kind];
 }
 
-function startRun(state: Lifecycle, task: Task, at: number): void {
+// A task's first run starts on its goal; later ones resume its session and
+// wait for the operator, unless they start a stage.
+function startRun(
+  state: Lifecycle,
+  task: Task,
+  at: number,
+  { opening = task.runIds.length === 0 ? task.goal : null, resumesSession = task.runIds.length > 0 } = {},
+): void {
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -492,10 +596,13 @@ function startRun(state: Lifecycle, task: Task, at: number): void {
     status: 'active',
     outcome: null,
     interruption: null,
-    resumesSession: task.runIds.length > 0,
-    turn: task.runIds.length === 0 && task.goal ? 'agent' : 'operator',
+    resumesSession,
+    turn: opening ? 'agent' : 'operator',
     queued: [],
     question: null,
+    stage: task.stage ?? null,
+    opening,
+    proposal: null,
     model: route(task.tier).model,
     cli: null,
     parksAt: null,
@@ -602,6 +709,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         skillSet: action.skillSet,
         preset: structuredClone(action.preset),
         stage: action.stage,
+        inputs: {
+          prompt: action.prompt,
+          issues: [...action.issues],
+          issueKinds: artifactKindsIn(action.preset.stages.find(({ id }) => id === action.stage)!),
+          tier: action.operatorTier,
+        },
         sessionId: action.sessionId,
         runIds: [],
         state: 'queued',
@@ -618,6 +731,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       startRun(state, task, at);
       break;
     case 'sendMessage':
+      // Talking on sets the agent's proposal aside.
+      run!.proposal = null;
       // The executor delivers it at once on the operator's turn; mid-turn it waits.
       if (run!.turn === 'agent') run!.queued.push(action.text);
       else run!.turn = 'agent';
@@ -673,6 +788,36 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'questionAsked':
       run!.question = action.question;
       break;
+    case 'advanceProposed':
+      run!.proposal = { reason: action.reason };
+      break;
+    case 'stageAdvanced': {
+      const plan = planAdvance(state, task, action.skip);
+      if ('refusal' in plan) break;
+      const { to } = plan;
+      if (run) endRun(run, 'completed', at);
+      // Past the last stage, the root task is the operator's to review.
+      if (!to) {
+        task.state = 'in-review';
+        break;
+      }
+      const filled = fillOpening(to, (variable) => argValue(state, task, variable));
+      if ('missing' in filled) {
+        // The stage raises an attention request instead of starting. The
+        // task stays at the stage it was leaving, to advance again from.
+        const placeholders = filled.missing.map((variable) => `{{${variable}}}`).join(' and ');
+        const kinds = filled.missing.map((variable) => variable.replace(/^artifacts\./, '')).join(' or ');
+        const reason = `${to.id} can’t start: its args need ${placeholders}, and ${task.id} has no ${kinds}.`;
+        raise(state, task, state.runs[task.runIds.at(-1)!]!, 'stage-blocked', false, reason, at);
+        break;
+      }
+      task.stage = to.id;
+      // The operator's tier, then the stage's, then the task's so far.
+      task.tier = task.inputs?.tier ?? to.model ?? task.tier;
+      if (to.context === 'fresh') task.sessionId = action.sessionId;
+      startRun(state, task, at, { opening: filled.opening, resumesSession: to.context !== 'fresh' });
+      break;
+    }
     case 'turnEnded':
       // A card the turn ended without is dropped. What waited is delivered
       // now, so the agent answers it at once.
