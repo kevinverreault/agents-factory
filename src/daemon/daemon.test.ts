@@ -28,7 +28,7 @@ describe('connecting to the daemon', () => {
 
     const tui = await attach();
 
-    expect(tui.protocolVersion).toBe(8);
+    expect(tui.protocolVersion).toBe(9);
   });
 
   test('a client without the token is refused', async () => {
@@ -44,7 +44,7 @@ describe('connecting to the daemon', () => {
 
     await expect(startDaemon()).rejects.toBeInstanceOf(DaemonAlreadyRunning);
     // The running daemon keeps its token and its clients.
-    expect((await attach()).protocolVersion).toBe(8);
+    expect((await attach()).protocolVersion).toBe(9);
   });
 });
 
@@ -97,7 +97,7 @@ describe('daemon status and stop', () => {
       ok: true,
       value: {
         pid: process.pid,
-        protocolVersion: 8,
+        protocolVersion: 9,
         startedAt: Date.UTC(2026, 9, 29, 9, 0, 0),
         attachedTuis: 1,
         activeRuns: 1,
@@ -186,7 +186,7 @@ describe('idle exit', () => {
     clock.advance(minutes(30));
     expect(await isStopped(daemon())).toBe(false);
 
-    executor.report('R1', { type: 'attentionRaised', kind: 'question' });
+    executor.report('R1', { type: 'attentionRaised', kind: 'permission', reason: 'Run `npm publish`?' });
     clock.advance(minutes(30));
     expect(await isStopped(daemon())).toBe(false);
 

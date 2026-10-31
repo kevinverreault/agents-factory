@@ -44,7 +44,8 @@ export function cardKey(question: Question, card: Card, draft: string, input: st
   return { kind: 'card', card: { ...card, picked }, clearDraft: false };
 }
 
-export function QuestionCard({ question, card }: { question: Question; card: Card }) {
+// `ownWords` says whether typed text can answer too: not on an answer sheet.
+export function QuestionCard({ question, card, ownWords = true }: { question: Question; card: Card; ownWords?: boolean }) {
   const asked = question.questions[card.index]!;
   const count = question.questions.length;
   return h(
@@ -66,6 +67,10 @@ export function QuestionCard({ question, card }: { question: Question; card: Car
         h(Text, { dimColor: true }, option.description),
       ),
     ),
-    h(Text, { dimColor: true }, asked.multiSelect ? 'digits toggle · enter confirm · or type your own answer' : 'digit picks · or type your own answer'),
+    h(
+      Text,
+      { dimColor: true },
+      `${asked.multiSelect ? 'digits toggle · enter confirm' : 'digit picks'}${ownWords ? ' · or type your own answer' : ''}`,
+    ),
   );
 }

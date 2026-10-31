@@ -73,8 +73,8 @@ export function agentSdkExecutor(): Executor {
       };
       const options: Options = {
         ...(start.mode === 'HITL'
-          ? hitlOptions(start.credential, askTheOperator(start.runId, spawning), hitlFactoryTools(start.runId, sink))
-          : l1Options(start.credential, start.maxTurns)),
+          ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink))
+          : l1Options(start.credential, start.maxTurns, askTheOperator(start.runId, spawning, l1Refusal))),
         cwd: start.cwd!,
         model: start.model,
         // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
@@ -192,23 +192,17 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
 // L1 AFK runs (ADR 0007) execute in the host worktree with edits accepted.
 // They load only project settings, with auto memory off, so they are the
 // same from one run to the next (ADR 0005), and `maxTurns` is their runaway
-// guard (ADR 0008). Nothing else that would prompt gets through: the
-// factory's allow list and permission requests, and AFK questions as
-// attention requests, arrive with their own slices.
-function l1Options(credential: CredentialProfile, maxTurns: number | null): Options {
+// guard (ADR 0008). `canUseTool` turns their questions into attention
+// requests; nothing else that would prompt gets through until the factory's
+// allow list and permission requests arrive with their own slice.
+function l1Options(credential: CredentialProfile, maxTurns: number | null, canUseTool: CanUseTool): Options {
   return {
     env: { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
     permissionMode: 'acceptEdits',
     settingSources: ['project'],
     settings: { hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
     ...(maxTurns !== null && { maxTurns }),
-    canUseTool: async (toolName) => ({
-      behavior: 'deny',
-      message:
-        toolName === 'AskUserQuestion'
-          ? 'Nobody is in this unattended run to answer. Decide for yourself, and say what you assumed.'
-          : `This unattended run may not use ${toolName}. Do without it, and say what you would have done.`,
-    }),
+    canUseTool,
   };
 }
 
@@ -228,24 +222,27 @@ function afkFailure(result: SDKResultMessage, maxTurns: number | null): string |
   return result.is_error ? result.result : null;
 }
 
-// `AskUserQuestion` becomes a question card that holds the turn until the
-// operator answers it. Anything else that would prompt is refused until the
-// conversation view can ask for permission.
-function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>): CanUseTool {
+// Why a run may not use a tool that would prompt, by mode.
+const hitlRefusal = (toolName: string) =>
+  `The factory can't ask the operator for permission to use ${toolName} yet. Say what you wanted to do instead.`;
+const l1Refusal = (toolName: string) => `This unattended run may not use ${toolName}. Do without it, and say what you would have done.`;
+
+// `AskUserQuestion` holds the turn until the operator answers it: a question
+// card in a HITL conversation, a question attention request that suspends an
+// AFK run. Anything else that would prompt is refused with `refusal`.
+function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>, refusal: (toolName: string) => string): CanUseTool {
   return async (toolName, input, { signal, toolUseID }) => {
-    if (toolName !== 'AskUserQuestion') {
-      return {
-        behavior: 'deny',
-        message: `The factory can't ask the operator for permission to use ${toolName} yet. Say what you wanted to do instead.`,
-      };
-    }
-    // The conversation shows one card at a time.
+    if (toolName !== 'AskUserQuestion') return { behavior: 'deny', message: refusal(toolName) };
+    // One question at a time.
     if (run.asking) return { behavior: 'deny', message: 'Another question is still open: ask one card at a time.' };
     const answers = await new Promise<Answers | null>((resolve) => {
       if (run.stopped || signal.aborted) return resolve(null);
       run.asking = { id: toolUseID, resolve };
       signal.addEventListener('abort', () => resolve(null), { once: true });
-      run.sink.report({ type: 'questionAsked', runId, question: { id: toolUseID, questions: questionsIn(input) } });
+      const question = { id: toolUseID, questions: questionsIn(input) };
+      run.sink.report(
+        run.mode === 'HITL' ? { type: 'questionAsked', runId, question } : { type: 'attentionRaised', runId, kind: 'question', question },
+      );
     });
     run.asking = null;
     return answers

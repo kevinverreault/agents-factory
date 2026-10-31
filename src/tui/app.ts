@@ -1,14 +1,17 @@
 // The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
-// the launch card (`N`) and the conversation view (`enter` on a task). Plain
-// .ts (no JSX) so Node runs it without a build step.
-import { createElement as h, useEffect, useState, type ReactNode } from 'react';
-import { Box, Text, useInput, useStdin } from 'ink';
+// the launch card (`N`), the conversation view (`enter` on a task) and Needs
+// you's answer sheet (`a`). Plain .ts (no JSX) so Node runs it without a
+// build step.
+import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
+import { Box, Text, useInput, useStdin, type Key } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
-import type { CloneView } from '../protocol/protocol.ts';
+import type { CloneView, Command } from '../protocol/protocol.ts';
+import { AnswerSheet, answerable, choicesFor, waitingFor } from './answer-sheet.ts';
 import { Conversation } from './conversation.ts';
 import { LaunchCard } from './launch-card.ts';
+import { cardKey, newCard, type Card } from './question-card.ts';
 
 type Tab = 'tasks' | 'needs-you';
 // What fills the screen: the tabs, the launch card over them, or one task's
@@ -39,6 +42,13 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
   // Each pane's cursor. It stays on the row it was on while the rows move,
   // so leaving a conversation comes back to exactly where the operator was.
   const [cursors, setCursors] = useState<Record<Tab, Cursor>>({ tasks: { row: null, index: 0 }, 'needs-you': { row: null, index: 0 } });
+  // Whether the digits answer the selected Needs you item instead of
+  // switching screens. Once nothing needs the operator they switch again.
+  const [answering, setAnswering] = useState(false);
+  // Keys typed in one burst arrive before a re-render, so the card the
+  // operator is answering on, and the requests already answered, are kept here.
+  const sheet = useRef<{ card: Card; cardFor: string | null; sent: Set<string> }>({ card: newCard(), cardFor: null, sent: new Set() });
+  const [, rerender] = useReducer((renders: number) => renders + 1, 0);
 
   useEffect(() => connection.subscribe((next) => setState(next)), [connection]);
   useEffect(() => connection.onClose(() => setClosed(true)), [connection]);
@@ -61,14 +71,60 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       return { ...cursors, [tab]: { row: rows[index] ?? null, index } };
     });
   // What enter opens: any task's conversation, or a live one Ready for you.
-  const item = queue[cursor];
-  const ready = item?.kind === 'ready' ? state?.tasks[item.taskId] : undefined;
+  const item = tab === 'needs-you' ? queue[cursor] : undefined;
+  const itemTask = item?.taskId ? state?.tasks[item.taskId] : undefined;
+  const ready = item?.kind === 'ready' ? itemTask : undefined;
   const opens = tab === 'tasks' ? tasks[cursor]?.id : ready?.liveRunId ? ready.id : undefined;
+  const card = item?.kind === 'attention' && sheet.current.cardFor === item.requestId ? sheet.current.card : newCard();
+
+  // Sends what the operator answered the selected request with. The cursor
+  // stays where it is, so once the request leaves Needs you the next item
+  // slides under it.
+  const sendAnswer = (command: Command, opens = false) => {
+    if (item?.kind !== 'attention') return;
+    const { requestId } = item;
+    sheet.current.sent.add(requestId);
+    setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } }));
+    void connection.send(command).then((reply) => {
+      setRefusal(reply.ok ? null : reply.reason);
+      if (reply.ok && opens && item.taskId) setView({ kind: 'conversation', taskId: item.taskId });
+      if (!reply.ok) {
+        sheet.current.sent.delete(requestId);
+        if (sheet.current.cardFor === requestId) sheet.current.card = newCard();
+      }
+      rerender();
+    });
+  };
+  // A digit on the selected item's answer sheet: an option of its question's
+  // card (toggled on a multi-select, which enter confirms), or a choice.
+  const answer = (input: string, key: Key) => {
+    if (item?.kind !== 'attention' || !item.taskId || sheet.current.sent.has(item.requestId)) return;
+    if (item.question) {
+      if (sheet.current.cardFor !== item.requestId) Object.assign(sheet.current, { card: newCard(), cardFor: item.requestId });
+      const onCard = cardKey(item.question, sheet.current.card, '', input, key);
+      if (onCard.kind === 'card') sheet.current.card = onCard.card;
+      if (onCard.kind === 'answered') sendAnswer({ type: 'answer', taskId: item.taskId, answers: onCard.answers });
+      rerender();
+      return;
+    }
+    const choice = /^[1-9]$/.test(input) ? choicesFor(item, itemTask)[Number(input) - 1] : undefined;
+    if (choice) sendAnswer(choice.command, choice.opens);
+  };
 
   // Keys need raw mode, which a piped stdin can't give.
   const { isRawModeSupported } = useStdin();
   useInput(
     (input, key) => {
+      if (answering && !item) setAnswering(false);
+      else if (answering) {
+        if (key.escape) setAnswering(false);
+        else if (key.upArrow) move(-1);
+        else if (key.downArrow) move(1);
+        else if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
+        else answer(input, key);
+        return;
+      }
+      if (tab === 'needs-you' && (input === 'a' || (key.return && answerable(item, itemTask)))) return setAnswering(true);
       if (input === '1') setTab('tasks');
       if (input === '2') setTab('needs-you');
       if (input === 'N' && state) setView({ kind: 'launch' });
@@ -109,6 +165,7 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       : tab === 'tasks'
         ? h(TaskList, { tasks, cursor })
         : h(NeedsYouList, { state, cursor }),
+    state && item ? h(AnswerSheet, { item, task: itemTask, card, answering }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
 }
@@ -149,13 +206,6 @@ function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }
       return h(Row, { key, id: taskId ?? '', title, detail: waitingFor(item, task), selected: i === cursor });
     }),
   );
-}
-
-// What the operator is asked for: the attention request, or else the task's
-// own label (Ready for you, In review).
-function waitingFor(item: AttentionQueueItem, task: TaskView | undefined): string {
-  if (item.kind === 'attention') return item.reason ? `${item.attention}: ${item.reason}` : item.attention;
-  return task?.label ?? '';
 }
 
 function column(children: ReactNode[]) {

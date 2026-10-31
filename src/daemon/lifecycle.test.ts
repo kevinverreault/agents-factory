@@ -67,6 +67,7 @@ describe('tasks end only Done or Cancelled', () => {
         attention: 'failure',
         holdsRun: false,
         reason: 'The agent hit max turns.',
+        question: null,
       },
     ]);
   });

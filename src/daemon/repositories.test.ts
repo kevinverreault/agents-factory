@@ -261,6 +261,7 @@ describe('a missing clone', () => {
     attention: 'repo-missing',
     holdsRun: false,
     reason: `The clone of acme/widgets is no longer at ${widgets}.`,
+    question: null,
   });
 
   test('a moved clone raises exactly one repo-missing attention request, however many runs would start', async () => {

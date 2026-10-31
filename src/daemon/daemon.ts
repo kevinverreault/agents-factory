@@ -15,6 +15,7 @@ import {
   isTerminal,
   liveRun,
   nextTaskId,
+  openRequest,
   overdueRuns,
   reduce,
   unfinishedTasks,
@@ -553,6 +554,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       executor.interrupt(run!.id);
     } else if (action.type === 'answerQuestion') {
       executor.answer(run!.id, action.questionId, action.answers);
+    } else if (action.type === 'answer') {
+      // A suspended run's question gets its answers as the card's would.
+      const request = openRequest(before, before.tasks[action.taskId]!)!;
+      if (request.holdsRun && request.question) executor.answer(request.runId!, request.question.id, action.answers!);
     } else if (action.type === 'turnEnded') {
       const { queued } = before.runs[action.runId]!;
       if (queued.length) executor.send(action.runId, queued.join('\n\n'));
