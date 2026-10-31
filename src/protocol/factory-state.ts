@@ -43,6 +43,8 @@ export type TaskView = {
   stage: string | null;
   // The tier its next run starts at.
   tier: Tier;
+  // The rules the operator allowed for the task.
+  allowRules: string[];
 };
 
 export type RunView = Pick<
@@ -90,6 +92,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       preset: structuredClone(task.preset ?? null),
       stage: task.stage ?? null,
       tier: nextTier(task),
+      allowRules: [...(task.allowRules ?? [])],
     };
   }
   const runs: Record<string, RunView> = {};

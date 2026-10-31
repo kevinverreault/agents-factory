@@ -43,6 +43,7 @@ import {
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import type { Routes } from '../models/routing.ts';
+import { covers, FACTORY_ALLOW_LIST, readOperatorRules, type ToolCall } from '../permissions/permissions.ts';
 import {
   builtInPresets,
   issueRefs,
@@ -74,6 +75,8 @@ export type DaemonOptions = {
   worktreeRoot: string;
   // The user scope of workflow presets.
   presetsDir: string;
+  // The operator's allow rules for L1 runs (ADR 0007).
+  permissionsPath: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
 };
@@ -111,6 +114,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // What each live run streamed since this daemon started it: the CLI writes
   // the session file a moment after it streams.
   const streamed = new Map<string, ConversationEvent[]>();
+  // Each suspended run's tool calls waiting on the gate until its request is answered.
+  const held = new Map<string, ToolCall[]>();
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolve) => (resolveStopped = resolve));
   let stopping: Promise<void> | null = null;
@@ -548,10 +553,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             credential: 'subscription-host',
             plugin: run.skillSet ? skillSets.pathOf(run.skillSet) : null,
           },
-          { report: (event) => void dispatch(event), converse: (event) => broadcast(run.id, event) },
+          {
+            report: (event) => void dispatch(event),
+            converse: (event) => broadcast(run.id, event),
+            askPermission: (call) => gate(run.id, call),
+          },
         );
       } else if (was && was.status !== 'ended' && run.status === 'ended') {
         streamed.delete(run.id);
+        held.delete(run.id);
         if (!('runId' in action && action.runId === run.id)) executor.stop(run.id);
       }
     }
@@ -567,13 +577,47 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     } else if (action.type === 'answerQuestion') {
       executor.answer(run!.id, action.questionId, action.answers);
     } else if (action.type === 'answer') {
-      // A suspended run's question gets its answers as the card's would.
+      // A suspended run's question gets its answers as the card's would, and
+      // its tool call the operator's verdict.
       const request = openRequest(before, before.tasks[action.taskId]!)!;
       if (request.holdsRun && request.question) executor.answer(request.runId!, request.question.id, action.answers!);
+      if (request.holdsRun && request.permission) {
+        const answer = action.permission!;
+        executor.permit(
+          request.runId!,
+          request.permission.id,
+          'deny' in answer ? { allow: false, message: `The operator denied this: ${answer.deny.trim()}` } : { allow: true },
+        );
+      }
+      // The run is back: the calls it held go to the gate in turn.
+      const waiting = request.holdsRun ? (held.get(request.runId!) ?? []) : [];
+      held.delete(request.runId!);
+      for (const call of waiting) gate(request.runId!, call);
+    } else if (action.type === 'permissionAsked') {
+      // Unless it raised a request, the operator's earlier answers allowed the call.
+      const { taskId } = lifecycle.runs[action.runId]!;
+      if (openRequest(lifecycle, lifecycle.tasks[taskId]!)?.permission?.id !== action.call.id) executor.permit(action.runId, action.call.id, { allow: true });
     } else if (action.type === 'turnEnded') {
       const { queued } = before.runs[action.runId]!;
       if (queued.length) executor.send(action.runId, queued.join('\n\n'));
     }
+  }
+
+  // The L1 gate (ADR 0007): a call the factory's allow list or the operator's
+  // permissions file covers runs at once. The file is read for every call, so
+  // a rule the operator adds holds from their next one. The Lifecycle decides
+  // the rest: by the operator's earlier answers, or with a permission
+  // request. A call asked about while another request holds its run is held
+  // until that one is answered; one the Lifecycle won't ask about otherwise
+  // is refused, with its reason.
+  function gate(runId: string, call: ToolCall): void {
+    const operatorRules = readOperatorRules(options.permissionsPath);
+    if (covers([...FACTORY_ALLOW_LIST, ...operatorRules.rules], call)) return executor.permit(runId, call.id, { allow: true });
+    void dispatch({ type: 'permissionAsked', runId, call, rulesProblem: operatorRules.error }).then((reply) => {
+      if (reply.ok) return;
+      if (lifecycle.runs[runId]?.status === 'suspended') held.set(runId, [...(held.get(runId) ?? []), call]);
+      else executor.permit(runId, call.id, { allow: false, message: reply.reason });
+    });
   }
 
   // The runs whose conversations some TUI has open.

@@ -17,7 +17,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import { processCreatedAt } from '../os/process-info.ts';
-import type { ConversationEvent, CredentialProfile, Executor, RunSink, RunStart } from './executor.ts';
+import type { ConversationEvent, CredentialProfile, Executor, RunSink, RunStart, Verdict } from './executor.ts';
 import { hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
 
@@ -33,6 +33,9 @@ type LiveRun = {
   // The question card the turn waits on: resolved with the operator's answers,
   // or null once the turn or the run is cut.
   asking: { id: string; resolve(answers: Answers | null): void } | null;
+  // The tool calls waiting on the factory's gate, by tool use id: resolved
+  // with its verdict, or null once the run is cut.
+  permitting: Map<string, (verdict: Verdict | null) => void>;
   stopped: boolean;
 };
 
@@ -69,12 +72,13 @@ export function agentSdkExecutor(): Executor {
         cli: null,
         reportedStart: false,
         asking: null,
+        permitting: new Map(),
         stopped: false,
       };
       const options: Options = {
         ...(start.mode === 'HITL'
           ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink))
-          : l1Options(start.credential, start.maxTurns, askTheOperator(start.runId, spawning, l1Refusal))),
+          : l1Options(start.credential, start.maxTurns, askTheOperator(start.runId, spawning, gateCall(spawning)))),
         cwd: start.cwd!,
         model: start.model,
         // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
@@ -109,11 +113,16 @@ export function agentSdkExecutor(): Executor {
       if (asking?.id === questionId) asking.resolve(answers);
     },
 
+    permit(runId, callId, verdict) {
+      runs.get(runId)?.permitting.get(callId)?.(verdict);
+    },
+
     stop(runId) {
       const run = runs.get(runId);
       if (!run) return;
       run.stopped = true;
       run.asking?.resolve(null);
+      for (const resolve of run.permitting.values()) resolve(null);
       runs.delete(runId);
       run.input.close();
       run.query.close();
@@ -192,14 +201,16 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
 // L1 AFK runs (ADR 0007) execute in the host worktree with edits accepted.
 // They load only project settings, with auto memory off, so they are the
 // same from one run to the next (ADR 0005), and `maxTurns` is their runaway
-// guard (ADR 0008). `canUseTool` turns their questions into attention
-// requests; nothing else that would prompt gets through until the factory's
-// allow list and permission requests arrive with their own slice.
+// guard (ADR 0008). Only policy-tier permission rules apply, and the factory
+// sets none, so the target repo's own rules grant nothing: everything that
+// would prompt reaches `canUseTool`, which turns questions into attention
+// requests and hands every other call to the factory's gate.
 function l1Options(credential: CredentialProfile, maxTurns: number | null, canUseTool: CanUseTool): Options {
   return {
     env: { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
     permissionMode: 'acceptEdits',
     settingSources: ['project'],
+    managedSettings: { allowManagedPermissionRulesOnly: true },
     settings: { hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
     ...(maxTurns !== null && { maxTurns }),
     canUseTool,
@@ -222,17 +233,36 @@ function afkFailure(result: SDKResultMessage, maxTurns: number | null): string |
   return result.is_error ? result.result : null;
 }
 
-// Why a run may not use a tool that would prompt, by mode.
-const hitlRefusal = (toolName: string) =>
-  `The factory can't ask the operator for permission to use ${toolName} yet. Say what you wanted to do instead.`;
-const l1Refusal = (toolName: string) => `This unattended run may not use ${toolName}. Do without it, and say what you would have done.`;
+// A HITL run may not use a tool that would prompt, until the factory can ask
+// the operator in the conversation.
+const hitlRefusal: CanUseTool = async (toolName) => ({
+  behavior: 'deny',
+  message: `The factory can't ask the operator for permission to use ${toolName} yet. Say what you wanted to do instead.`,
+});
+
+// Hands an L1 run's tool call to the factory's gate, and holds it until the
+// gate's verdict: at once, or once the operator answers its permission request.
+function gateCall(run: Omit<LiveRun, 'query'>): CanUseTool {
+  return async (toolName, input, { signal, toolUseID }) => {
+    const verdict = await new Promise<Verdict | null>((resolve) => {
+      if (run.stopped || signal.aborted) return resolve(null);
+      run.permitting.set(toolUseID, resolve);
+      signal.addEventListener('abort', () => resolve(null), { once: true });
+      run.sink.askPermission({ id: toolUseID, tool: toolName, input, summary: summarise(input) });
+    });
+    run.permitting.delete(toolUseID);
+    if (!verdict) return { behavior: 'deny', message: 'The run was stopped before the factory decided this call.' };
+    return verdict.allow ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: verdict.message };
+  };
+}
 
 // `AskUserQuestion` holds the turn until the operator answers it: a question
 // card in a HITL conversation, a question attention request that suspends an
-// AFK run. Anything else that would prompt is refused with `refusal`.
-function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>, refusal: (toolName: string) => string): CanUseTool {
-  return async (toolName, input, { signal, toolUseID }) => {
-    if (toolName !== 'AskUserQuestion') return { behavior: 'deny', message: refusal(toolName) };
+// AFK run. Anything else that would prompt goes to `otherwise`.
+function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>, otherwise: CanUseTool): CanUseTool {
+  return async (toolName, input, options) => {
+    if (toolName !== 'AskUserQuestion') return otherwise(toolName, input, options);
+    const { signal, toolUseID } = options;
     // One question at a time.
     if (run.asking) return { behavior: 'deny', message: 'Another question is still open: ask one card at a time.' };
     const answers = await new Promise<Answers | null>((resolve) => {

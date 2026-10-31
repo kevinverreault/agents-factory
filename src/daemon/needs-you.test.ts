@@ -49,10 +49,10 @@ describe('the Needs you order', () => {
 
     factory.executor.report('R2', { type: 'runCompleted' });
     factory.clock.advance(minutes(1));
-    factory.executor.report('R4', { type: 'attentionRaised', kind: 'permission', reason: 'Run `npm publish`?' });
+    factory.executor.askPermission('R4', { id: 'toolu_1', tool: 'Bash', input: { command: 'npm publish' } });
     await settled(operator);
     factory.clock.advance(minutes(1));
-    factory.executor.report('R1', { type: 'attentionRaised', kind: 'permission', reason: 'Run `docker build`?' });
+    factory.executor.askPermission('R1', { id: 'toolu_1', tool: 'Bash', input: { command: 'docker build' } });
     await settled(operator);
     factory.clock.advance(minutes(1));
     factory.executor.report('R3', { type: 'runFailed', reason: 'The agent hit max turns.' });
@@ -102,6 +102,7 @@ describe('an AFK question', () => {
         holdsRun: true,
         reason: 'Which identity provider times out?',
         question,
+        permission: null,
       },
     ]);
   });

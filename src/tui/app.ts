@@ -13,6 +13,7 @@ import { AnswerSheet, answerable, choicesFor, waitingFor } from './answer-sheet.
 import { Conversation } from './conversation.ts';
 import { LaunchCard } from './launch-card.ts';
 import { cardKey, newCard, type Card } from './question-card.ts';
+import { edit } from './text-input.ts';
 
 type Tab = 'tasks' | 'needs-you';
 // What fills the screen: the tabs, the launch card over them, or one task's
@@ -47,8 +48,14 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
   // switching screens. Once nothing needs the operator they switch again.
   const [answering, setAnswering] = useState(false);
   // Keys typed in one burst arrive before a re-render, so the card the
-  // operator is answering on, and the requests already answered, are kept here.
-  const sheet = useRef<{ card: Card; cardFor: string | null; sent: Set<string> }>({ card: newCard(), cardFor: null, sent: new Set() });
+  // operator is answering on, the note they are typing for a choice, and the
+  // requests already answered, are kept here.
+  const sheet = useRef<{
+    card: Card;
+    cardFor: string | null;
+    note: { for: string; choice: number; draft: string } | null;
+    sent: Set<string>;
+  }>({ card: newCard(), cardFor: null, note: null, sent: new Set() });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   // Each task's last re-tier sent, from the tier it had then, until the
   // daemon's answer shows: a burst of `t` goes on from it.
@@ -80,6 +87,7 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
   const ready = item?.kind === 'ready' ? itemTask : undefined;
   const opens = tab === 'tasks' ? tasks[cursor]?.id : ready?.liveRunId ? ready.id : undefined;
   const card = item?.kind === 'attention' && sheet.current.cardFor === item.requestId ? sheet.current.card : newCard();
+  const note = item?.kind === 'attention' && sheet.current.note?.for === item.requestId ? sheet.current.note : null;
 
   // Sends what the operator answered the selected request with. The cursor
   // stays where it is, so once the request leaves Needs you the next item
@@ -124,8 +132,23 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       rerender();
       return;
     }
-    const choice = /^[1-9]$/.test(input) ? choicesFor(item, itemTask)[Number(input) - 1] : undefined;
-    if (choice) sendAnswer(choice.command, choice.opens);
+    const index = /^[1-9]$/.test(input) ? Number(input) - 1 : -1;
+    const choice = choicesFor(item, itemTask)[index];
+    if (choice && 'note' in choice) {
+      sheet.current.note = { for: item.requestId, choice: index, draft: '' };
+      rerender();
+    } else if (choice) sendAnswer(choice.command, choice.opens);
+  };
+  // A key while the operator types the note a choice takes: enter sends it,
+  // unless it is empty, and esc sets it aside.
+  const takeNote = (input: string, key: Key) => {
+    const choice = note && choicesFor(item!, itemTask)[note.choice];
+    if (key.escape || !choice || !('note' in choice)) sheet.current.note = null;
+    else if (key.return && note.draft.trim()) {
+      sheet.current.note = null;
+      sendAnswer(choice.note(note.draft.trim()));
+    } else note.draft = edit(note.draft, input, key) ?? note.draft;
+    rerender();
   };
 
   // Keys need raw mode, which a piped stdin can't give.
@@ -134,7 +157,8 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
     (input, key) => {
       if (answering && !item) setAnswering(false);
       else if (answering) {
-        if (key.escape) setAnswering(false);
+        if (note) takeNote(input, key);
+        else if (key.escape) setAnswering(false);
         else if (key.upArrow) move(-1);
         else if (key.downArrow) move(1);
         else if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
@@ -183,7 +207,7 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       : tab === 'tasks'
         ? h(TaskList, { tasks, cursor })
         : h(NeedsYouList, { state, cursor }),
-    state && item ? h(AnswerSheet, { item, task: itemTask, card, answering }) : null,
+    state && item ? h(AnswerSheet, { item, task: itemTask, card, answering, note: note?.draft ?? null }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
 }

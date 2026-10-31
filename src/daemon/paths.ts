@@ -19,6 +19,8 @@ export type FactoryPaths = {
   presetsDir: string;
   // The routing table of model tiers to exact models (ADR 0009).
   modelsTable: string;
+  // The operator's own allow rules for L1 runs (ADR 0007).
+  permissionsPath: string;
 };
 
 export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths {
@@ -35,6 +37,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     skillsRoot: join(shortHome, 'skills'),
     presetsDir: join(shortHome, 'presets'),
     modelsTable: join(shortHome, 'models.yaml'),
+    permissionsPath: join(shortHome, 'permissions.yaml'),
   };
 }
 

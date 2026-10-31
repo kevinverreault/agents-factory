@@ -68,6 +68,7 @@ describe('tasks end only Done or Cancelled', () => {
         holdsRun: false,
         reason: 'The agent hit max turns.',
         question: null,
+        permission: null,
       },
     ]);
   });
@@ -118,11 +119,11 @@ describe('attention requests', () => {
     const { factory, operator, tui } = await attached();
     await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
 
-    factory.executor.report('R1', { type: 'attentionRaised', kind: 'permission', reason: 'Run `npm publish`?' });
+    factory.executor.askPermission('R1', { id: 'toolu_1', tool: 'Bash', input: { command: 'npm publish' } });
     await tui.until((state) => state.tasks.T1?.label === 'Needs you');
     expect(tui.state().slots.active).toBe(0);
 
-    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'once' } })).toEqual({ ok: true });
     const state = await tui.until((state) => state.tasks.T1?.label === 'Running');
     expect(state.tasks.T1?.liveRunId).toBe('R1');
     expect(state.attentionQueue).toEqual([]);
