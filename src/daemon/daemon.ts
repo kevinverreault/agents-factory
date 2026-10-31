@@ -41,7 +41,8 @@ import {
   type RepoCommand,
   type Reply,
 } from '../protocol/protocol.ts';
-import { DEFAULT_TIER } from '../models/routing.ts';
+import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
+import type { Routes } from '../models/routing.ts';
 import { covers, FACTORY_ALLOW_LIST, readOperatorRules, type ToolCall } from '../permissions/permissions.ts';
 import {
   builtInPresets,
@@ -69,6 +70,8 @@ export type DaemonOptions = {
   executor: Executor;
   git: Git;
   skillSets: SkillSets;
+  // The routing table each run's tier resolves through when it starts (ADR 0009).
+  routingTable: RoutingTableFile;
   worktreeRoot: string;
   // The user scope of workflow presets.
   presetsDir: string;
@@ -99,7 +102,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   mkdirSync(dirname(options.tokenPath), { recursive: true });
   writeFileSync(options.tokenPath, token, { mode: 0o600 });
 
-  const { store, clock, executor, git, skillSets } = options;
+  const { store, clock, executor, git, skillSets, routingTable } = options;
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
   let published: FactoryState = toFactoryState(lifecycle);
   const startedAt = clock.now();
@@ -271,7 +274,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         prompt,
         issues: command.issues ?? [],
         groups: command.groups ?? [],
-        tier: command.tier ?? DEFAULT_TIER,
         operatorTier: command.tier ?? null,
         // Frozen once resolved, with the worktree and skill set.
         preset: null!,
@@ -306,7 +308,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       action.stage = start.stage.id;
       action.opening = start.opening;
-      action.tier = command.tier ?? start.stage.model ?? DEFAULT_TIER;
       action.title = titleFrom(prompt.trim() || action.issues.join(' ') || resolved.preset.name);
       action.worktree = taskWorktree(options.worktreeRoot, repository!, taskId, action.title);
       try {
@@ -477,7 +478,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // clones were already found in place, so they aren't checked twice.
   async function settle(action: LifecycleAction, inPlace: Set<string>): Promise<string | null> {
     for (;;) {
-      const { state, refusal } = reduce(lifecycle, action, clock.now());
+      const { state, refusal } = reduce(lifecycle, action, clock.now(), routes());
       if (refusal) return refusal;
       const missing = await missingClones(state, inPlace);
       if (missing.length === 0) {
@@ -485,6 +486,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return null;
       }
       for (const [repo, reason] of missing) await settle({ type: 'repoMissing', repo, reason }, inPlace);
+    }
+  }
+
+  // The routing table, read afresh for each action, so `models update`
+  // reaches the next run that starts.
+  function routes(): Routes {
+    try {
+      return routingTable.current();
+    } catch (error) {
+      if (!(error instanceof RoutingTableError)) throw error;
+      return { unreadable: `${error.message} Fix it, or run \`agents-factory models update\` to reset it to the routes this factory ships.` };
     }
   }
 

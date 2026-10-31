@@ -19,7 +19,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, allowRules: [] };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [] };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -121,6 +121,42 @@ describe('the bare TUI', () => {
     await settle();
 
     await eventually(() => expect(app.lastFrame()).toContain('The daemon connection closed.'));
+  });
+});
+
+describe('re-tiering', () => {
+  test('each task shows the tier its next run starts at, and t moves the selected task to the next tier', async () => {
+    const { app, connection } = await started(
+      factoryState([task('T1', 'Settle the glossary', 'queued', 'Ready for you', 'HITL'), task('T2', 'Implement the store', 'running', 'Running')]),
+    );
+    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+Running · sonnet/));
+    expect(app.lastFrame()).toContain('t re-tier');
+
+    app.stdin.write('\x1b[B');
+    await settle();
+    // Typed in one burst: each press goes on from the last.
+    app.stdin.write('t');
+    app.stdin.write('t');
+    await eventually(() =>
+      expect(connection.sent).toEqual([
+        { type: 'retier', taskId: 'T2', tier: 'haiku' },
+        { type: 'retier', taskId: 'T2', tier: 'opus' },
+      ]),
+    );
+
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T2', 'tier'], value: 'opus' }]);
+    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+Running · opus/));
+    app.stdin.write('t');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'retier', taskId: 'T2', tier: 'sonnet' }));
+  });
+
+  test('a refused re-tier says why', async () => {
+    const { app, connection } = await started(factoryState([task('T1', 'Implement the store', 'done', 'Done')]));
+    connection.replyTo('retier', { ok: false, reason: 'T1 is already Done.' });
+
+    app.stdin.write('t');
+
+    await eventually(() => expect(app.lastFrame()).toContain('T1 is already Done.'));
   });
 });
 
@@ -237,6 +273,7 @@ describe('launching and conversing', () => {
     permission: null,
     stage: 'grill' as string | null,
     proposal: null as { reason: string } | null,
+    tier: 'sonnet' as const,
     model: 'claude-sonnet-5-5',
     maxTurns: null,
     cli: { pid: 4242, createdAt: 1 },

@@ -1,10 +1,11 @@
 // The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
-// the launch card (`N`), the conversation view (`enter` on a task) and Needs
-// you's answer sheet (`a`). Plain .ts (no JSX) so Node runs it without a
+// the launch card (`N`), the conversation view (`enter` on a task), re-tiering
+// a task (`t`) and Needs you's answer sheet (`a`). Plain .ts (no JSX) so Node runs it without a
 // build step.
 import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, useStdin, type Key } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
+import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import type { CloneView, Command } from '../protocol/protocol.ts';
@@ -56,6 +57,9 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
     sent: Set<string>;
   }>({ card: newCard(), cardFor: null, note: null, sent: new Set() });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
+  // Each task's last re-tier sent, from the tier it had then, until the
+  // daemon's answer shows: a burst of `t` goes on from it.
+  const retiers = useRef(new Map<string, { from: Tier; to: Tier }>());
 
   useEffect(() => connection.subscribe((next) => setState(next)), [connection]);
   useEffect(() => connection.onClose(() => setClosed(true)), [connection]);
@@ -101,6 +105,19 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
         if (sheet.current.cardFor === requestId) sheet.current.card = newCard();
       }
       rerender();
+    });
+  };
+  // Moves the selected task's next runs to the tier after its current one.
+  const retier = () => {
+    const task = tab === 'tasks' ? tasks[cursor] : undefined;
+    if (!task) return;
+    const pending = retiers.current.get(task.id);
+    const from = pending?.from === task.tier ? pending.to : task.tier;
+    const to = TIERS[(TIERS.indexOf(from) + 1) % TIERS.length]!;
+    retiers.current.set(task.id, { from: task.tier, to });
+    void connection.send({ type: 'retier', taskId: task.id, tier: to }).then((reply) => {
+      setRefusal(reply.ok ? null : reply.reason);
+      if (!reply.ok) retiers.current.delete(task.id);
     });
   };
   // A digit on the selected item's answer sheet: an option of its question's
@@ -155,6 +172,7 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       if (key.upArrow) move(-1);
       if (key.downArrow) move(1);
       if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
+      if (input === 't') retier();
       if (input === 'r' && unregistered) {
         void connection.send({ type: 'registerRepo', path: unregistered.path }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
       }
@@ -213,9 +231,10 @@ function Row({ id, title, detail, selected = false }: { id: string; title: strin
 
 function TaskList({ tasks, cursor }: { tasks: TaskView[]; cursor: number }) {
   if (tasks.length === 0) return h(Text, { dimColor: true }, 'No tasks yet. N launches one.');
-  return column(
-    tasks.map((task, i) => h(Row, { key: task.id, id: task.id, title: task.title, detail: task.label, selected: i === cursor })),
-  );
+  return column([
+    ...tasks.map((task, i) => h(Row, { key: task.id, id: task.id, title: task.title, detail: `${task.label} · ${task.tier}`, selected: i === cursor })),
+    h(Text, { key: 'keys', dimColor: true }, 'enter open · t re-tier · N launch'),
+  ]);
 }
 
 function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }) {

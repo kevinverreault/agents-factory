@@ -221,7 +221,7 @@ describe('skipping optional stages', () => {
 });
 
 describe('model tiers', () => {
-  test('each stage runs at its own tier, unless the operator picked one at launch', async () => {
+  test('each stage runs at its own tier, else the global default, unless the operator picked one at launch', async () => {
     const { factory, operator, tui } = await grilling('tiers', {
       tiers: hitl('id: first, skill: grill-me, args: "{{prompt}}", model: opus', 'id: second, skill: to-spec, model: haiku', 'id: third, skill: to-tickets'),
     });
@@ -229,8 +229,8 @@ describe('model tiers', () => {
     await tui.until((state) => state.tasks.T1?.stage === 'second');
     await operator.send({ type: 'advanceStage', taskId: 'T1' });
     await tui.until((state) => state.tasks.T1?.stage === 'third');
-    // The third stage names no tier: it keeps the task's.
-    expect(factory.executor.started.map((run) => run.model)).toEqual(['claude-opus-5-5', 'claude-haiku-5-5', 'claude-haiku-5-5']);
+    // The third stage names no tier: it runs at the global default, sonnet.
+    expect(factory.executor.started.map((run) => run.model)).toEqual(['claude-opus-5-5', 'claude-haiku-5-5', 'claude-sonnet-5-5']);
 
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'tiers', prompt, tier: 'sonnet' });
     await tui.until((state) => state.tasks.T2?.liveRunId === 'R4');

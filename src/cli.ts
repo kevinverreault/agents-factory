@@ -3,7 +3,8 @@
 // none is running). `daemon status` and `daemon stop` inspect and stop it;
 // `repo add`, `repo move` and `repo remove` register, re-point and unregister
 // the operator's clones; `skills update` and `skills status` move and inspect
-// the skill set pin. `hook` is run by Claude Code, not the operator: it
+// the skill set pin; `models update` moves each model tier to the model this
+// factory ships. `hook` is run by Claude Code, not the operator: it
 // relays a run's hook events to the daemon.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -12,6 +13,7 @@ import { render } from 'ink';
 import { connectOrStart } from './daemon/auto-start.ts';
 import { factoryPaths } from './daemon/paths.ts';
 import { relayHook } from './hooks/relay.ts';
+import { modelsCommand } from './models/models-command.ts';
 import { connect, HandshakeRefused, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
 import type { RepositoryView } from './protocol/factory-state.ts';
 import type { Command, DaemonStatus } from './protocol/protocol.ts';
@@ -25,6 +27,7 @@ const USAGE = [
   '       agents-factory repo move <new-path>',
   '       agents-factory repo remove <owner/name>',
   '       agents-factory skills update | skills status',
+  '       agents-factory models update',
 ].join('\n');
 
 async function main(args: string[]): Promise<number> {
@@ -86,6 +89,7 @@ async function main(args: string[]): Promise<number> {
   if (args[0] === 'skills' && (args[1] === 'update' || args[1] === 'status') && args.length === 2) {
     return skillsCommand(args[1], paths);
   }
+  if (args[0] === 'models' && args[1] === 'update' && args.length === 2) return modelsCommand(paths);
   console.error(USAGE);
   return 2;
 }
