@@ -64,6 +64,10 @@ _Avoid_: Step, phase
 The class of model a stage or run asks for, resolved to an exact model when the run starts. A delegating agent can only ask for its own tier or a lower one.
 _Avoid_: Model, size
 
+**Routing table**:
+The operator's map from each model tier to one exact model ID. It starts as the models the factory ships, and only an explicit `models update` moves a tier, so a model never changes under a task by surprise.
+_Avoid_: Model map, aliases
+
 **Skill set**:
 The pinned collection of skills a task's stages invoke: an upstream skill library at one fixed revision plus the factory's own skills. A task freezes its skill set when it launches, and only an explicit upgrade moves the pin for later tasks.
 _Avoid_: Bundle, plugin, skill pack

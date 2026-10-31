@@ -17,6 +17,8 @@ export type FactoryPaths = {
   skillsRoot: string;
   // The operator's own workflow presets: the user scope.
   presetsDir: string;
+  // The routing table of model tiers to exact models (ADR 0009).
+  modelsTable: string;
 };
 
 export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths {
@@ -32,6 +34,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     skillsLock: join(shortHome, 'skills.lock'),
     skillsRoot: join(shortHome, 'skills'),
     presetsDir: join(shortHome, 'presets'),
+    modelsTable: join(shortHome, 'models.yaml'),
   };
 }
 

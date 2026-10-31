@@ -5,7 +5,7 @@
 // A launched task freezes its workflow preset, starts at one of its stages
 // and advances across HITL boundaries on the operator's confirm; child tasks,
 // handoffs and AFK boundaries arrive with their own slices.
-import { DEFAULT_TIER, route, TIERS, type Tier } from '../models/routing.ts';
+import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
 
@@ -85,7 +85,9 @@ export type Task = {
   // Its first run's first message: for a launched task, its start stage's
   // skill invoked on the launch inputs.
   goal: string | null;
-  tier: Tier;
+  // The tier the operator picked, at launch or by re-tiering it, over every
+  // stage's; null when they picked none.
+  operatorTier?: Tier | null;
   // The task branch and its worktree, cut at launch.
   worktree: TaskWorktree | null;
   // The skill set version frozen at launch (ADR 0005): every run loads it.
@@ -96,8 +98,9 @@ export type Task = {
   stage?: string | null;
   // What it launched with: for later stages' args, the prompt and the issue
   // refs with the artifact kinds they stand for (those its start stage's args
-  // name), and the tier the operator picked over every stage's, if any.
-  inputs?: LaunchInputs & { issueKinds: string[]; tier: Tier | null };
+  // name). Tasks stored before `operatorTier` keep the operator's launch
+  // tier here.
+  inputs?: LaunchInputs & { issueKinds: string[]; tier?: Tier | null };
   sessionId: string | null;
   runIds: string[];
   state: TaskState;
@@ -131,8 +134,10 @@ export type Run = {
   // The message the run starts with, or null to wait for the operator's.
   opening: string | null;
   proposal: Proposal | null;
-  // The exact model: routed from the task's tier at start, then the one the
-  // CLI reports it runs.
+  // The tier it started at, and the exact model: routed from that tier at
+  // start, then the one the CLI reports it runs. Runs stored before tiers
+  // were recorded have only the model.
+  tier?: Tier;
   model: string;
   // An AFK run's runaway guard (ADR 0008): hitting it fails the run. HITL
   // runs have none, and neither do runs stored before it.
@@ -221,6 +226,8 @@ export type OperatorCommand =
   | { type: 'requestChanges'; taskId: string }
   | { type: 'markDone'; taskId: string }
   | { type: 'cancel'; taskId: string }
+  // Sets the tier the task's next runs start at; a live run keeps its model.
+  | { type: 'retier'; taskId: string; tier: Tier }
   | { type: 'setSlotCap'; cap: number }
   | { type: 'removeRepo'; repo: string };
 
@@ -266,7 +273,6 @@ export type TaskLaunched = {
   prompt: string;
   issues: string[];
   groups: string[];
-  tier: Tier;
   // The tier the operator picked on the launch card, if any.
   operatorTier: Tier | null;
   preset: FrozenPreset;
@@ -366,6 +372,12 @@ export function issuesOfKind(state: Lifecycle, task: Task, kind: string): string
     if (stage?.exit !== `artifact:${kind}`) return [];
     return [issueRef(artifact.url)];
   });
+}
+
+// The tier the task's next run starts at: the operator's, then its stage's,
+// then the global default.
+export function nextTier(task: Task): Tier {
+  return task.operatorTier ?? task.inputs?.tier ?? stageOf(task, task.stage)?.model ?? DEFAULT_TIER;
 }
 
 function stageOf(task: Task, id: string | null | undefined): Stage | undefined {
@@ -543,7 +555,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return action.priority === undefined ? null : priorityRefusal(action.priority);
     case 'taskLaunched':
       // Which launch inputs it needs is its start stage's to say.
-      if (!TIERS.includes(action.tier)) return `${action.tier} is not a model tier (${TIERS.slice(0, -1).join(', ')} or ${TIERS.at(-1)}).`;
+      if (action.operatorTier !== null && !isTier(action.operatorTier)) return tierRefusal(action.operatorTier);
       if (action.maxTurns !== null && !(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) {
         return 'Max turns must be a whole number of at least 1.';
       }
@@ -597,6 +609,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.state === 'in-review' ? null : `${task.id} is not in review.`;
     case 'cancel':
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
+    case 'retier':
+      if (!isTier(action.tier)) return tierRefusal(action.tier);
+      return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';
     case 'runStarted':
@@ -638,6 +653,10 @@ function takesNoChat(task: Task): string {
   return `${task.id} is AFK, so it takes no chat. Take it over to talk to it.`;
 }
 
+function tierRefusal(tier: string): string {
+  return `${tier} is not a model tier (${TIERS.slice(0, -1).join(', ')} or ${TIERS.at(-1)}).`;
+}
+
 function priorityRefusal(priority: Priority): string | null {
   return PRIORITIES.includes(priority) ? null : `${priority} is not a priority (${PRIORITIES.join(' or ')}).`;
 }
@@ -665,6 +684,7 @@ function startRun(
   } = {},
 ): void {
   task.resumeWith = null;
+  const tier = nextTier(task);
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -680,7 +700,9 @@ function startRun(
     stage: task.stage ?? null,
     opening,
     proposal: null,
-    model: route(task.tier).model,
+    tier,
+    // Routed by `reduce`, once it knows every run the action starts.
+    model: '',
     maxTurns: task.mode === 'AFK' ? (task.maxTurns ?? stageOf(task, task.stage)?.max_turns ?? DEFAULT_MAX_TURNS) : null,
     cli: null,
     parksAt: null,
@@ -791,7 +813,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         groups: [...(action.groups ?? [])],
         priority: action.priority ?? 'normal',
         goal: null,
-        tier: DEFAULT_TIER,
+        operatorTier: null,
         worktree: null,
         skillSet: null,
         sessionId: null,
@@ -817,7 +839,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         maxTurns: mode === 'AFK' ? action.maxTurns : null,
         groups: [...new Set(action.groups.map((group) => group.trim()).filter(Boolean))],
         goal: action.opening,
-        tier: action.tier,
+        operatorTier: action.operatorTier,
         worktree: { ...action.worktree },
         skillSet: action.skillSet,
         preset: structuredClone(action.preset),
@@ -826,7 +848,6 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
           prompt: action.prompt,
           issues: [...action.issues],
           issueKinds: artifactKindsIn(action.preset.stages.find(({ id }) => id === action.stage)!),
-          tier: action.operatorTier,
         },
         sessionId: action.sessionId,
         runIds: [],
@@ -893,6 +914,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (request) request.status = 'closed';
       task.state = 'cancelled';
       break;
+    case 'retier':
+      task.operatorTier = action.tier;
+      break;
     case 'setSlotCap':
       state.slotCap = action.cap;
       break;
@@ -927,8 +951,6 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         break;
       }
       task.stage = to.id;
-      // The operator's tier, then the stage's, then the task's so far.
-      task.tier = task.inputs?.tier ?? to.model ?? task.tier;
       if (to.context === 'fresh') task.sessionId = action.sessionId;
       startRun(state, task, at, { opening: filled.opening, resumesSession: to.context !== 'fresh' });
       break;
@@ -1023,13 +1045,21 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
   }
 }
 
-export function reduce(state: Lifecycle, action: LifecycleAction, at: number): Reduction {
+// `routes` is the routing table each run the action starts is routed
+// through (ADR 0009). While it can't be read, queued AFK tasks wait, and an
+// action that would start a run itself is refused.
+export function reduce(state: Lifecycle, action: LifecycleAction, at: number, routes: Routes): Reduction {
   const refusal = guard(state, action);
   if (refusal) return { state, refusal };
   const next = structuredClone(state);
   apply(next, action, at);
   placeInQueue(state, next);
-  schedule(next, at);
+  if (!('unreadable' in routes)) schedule(next, at);
+  const started = Object.values(next.runs).filter((run) => !state.runs[run.id]);
+  if (started.length) {
+    if ('unreadable' in routes) return { state, refusal: routes.unreadable };
+    for (const run of started) run.model = route(routes, run.tier!).model;
+  }
   armIdleParks(next, at);
   return { state: next, refusal: null };
 }

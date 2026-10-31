@@ -1,6 +1,7 @@
 // The daemon's entry point, started detached by the TUI (or by hand).
 import { agentSdkExecutor } from '../executor/agent-sdk.ts';
 import { gitCli } from '../git/git.ts';
+import { routingTable } from '../models/routing-table.ts';
 import { skillSetManager } from '../skills/skill-set.ts';
 import { openStore } from '../store/store.ts';
 import { systemClock } from './clock.ts';
@@ -17,6 +18,7 @@ try {
     executor: agentSdkExecutor(),
     git: gitCli,
     skillSets: skillSetManager({ root: paths.skillsRoot, lockPath: paths.skillsLock }),
+    routingTable: routingTable(paths.modelsTable),
   });
   await daemon.stopped;
 } catch (error) {

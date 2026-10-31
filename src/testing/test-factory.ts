@@ -1,11 +1,13 @@
 // Seam 1 harness: a real daemon core over a real store on a temp file, with a
-// scripted fake for every port and a controllable clock. Tests talk to it only
+// scripted fake for every port but the routing table (a small file in the
+// temp home that tests write as the operator would) and a controllable clock. Tests talk to it only
 // through the client protocol, as a TUI would.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { startDaemon, type Daemon, type DaemonOptions } from '../daemon/daemon.ts';
 import { factoryPaths, type FactoryPaths } from '../daemon/paths.ts';
+import { routingTable } from '../models/routing-table.ts';
 import { connect, type FactoryConnection } from '../protocol/client.ts';
 import { openStore } from '../store/store.ts';
 import { FakeClock } from './fake-clock.ts';
@@ -45,7 +47,8 @@ export async function startTestFactory(overrides: Partial<DaemonOptions> = {}): 
   async function start(more: Partial<DaemonOptions> = {}): Promise<Daemon> {
     const store = openStore(paths.storePath);
     try {
-      const daemon = await startDaemon({ ...paths, store, clock, executor, git, skillSets, ...overrides, ...more });
+      const table = routingTable(paths.modelsTable);
+      const daemon = await startDaemon({ ...paths, store, clock, executor, git, skillSets, routingTable: table, ...overrides, ...more });
       daemons.push(daemon);
       return daemon;
     } catch (error) {

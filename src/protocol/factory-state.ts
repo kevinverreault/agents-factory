@@ -7,6 +7,7 @@ import {
   label,
   lastUsedRepo,
   liveRun,
+  nextTier,
   readyForYou,
   type AutonomyLevel,
   type FrozenPreset,
@@ -19,6 +20,7 @@ import {
   type Run,
   type TaskState,
 } from '../lifecycle/lifecycle.ts';
+import type { Tier } from '../models/routing.ts';
 
 export type TaskView = {
   id: string;
@@ -39,12 +41,14 @@ export type TaskView = {
   // The preset frozen at launch, and the stage the task is at.
   preset: FrozenPreset | null;
   stage: string | null;
+  // The tier its next run starts at.
+  tier: Tier;
 };
 
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
-> & { maxTurns: number | null };
+> & { maxTurns: number | null; tier: Tier | null };
 
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
 
@@ -85,15 +89,17 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       skillSet: task.skillSet ?? null,
       preset: structuredClone(task.preset ?? null),
       stage: task.stage ?? null,
+      tier: nextTier(task),
     };
   }
   const runs: Record<string, RunView> = {};
   for (const run of Object.values(lifecycle.runs)) {
     const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
-    // Runs stored before stages, proposals and max turns have none.
+    // Runs stored before stages, proposals, max turns and tiers have none.
     const stage = run.stage ?? null;
     const proposal = run.proposal ?? null;
     const maxTurns = run.maxTurns ?? null;
+    const tier = run.tier ?? null;
     runs[id] = {
       id,
       taskId,
@@ -106,6 +112,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       question,
       stage,
       proposal,
+      tier,
       model,
       maxTurns,
       cli,
