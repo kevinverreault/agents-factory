@@ -69,7 +69,7 @@ import {
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import type { Routes } from '../models/routing.ts';
-import { allowRules, covers, type ToolCall } from '../permissions/permissions.ts';
+import { covers, readAllowRules, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
   appStages,
@@ -1029,7 +1029,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       plugin: run.skillSet ? skillSets.pathOf(run.skillSet) : null,
       guards,
       // Claude Code matches them itself, so most calls never reach the gate.
-      allowRules: run.mode === 'AFK' ? allowRules(options.permissionsPath).rules : [],
+      allowRules: run.mode === 'AFK' ? readAllowRules(options.permissionsPath).rules : [],
     };
     executor.start(start, {
       // A session is named for each completed run now, in case the next
@@ -1124,7 +1124,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // one is answered; one the Lifecycle won't ask about otherwise is refused,
   // with its reason.
   function gate(runId: string, call: ToolCall): void {
-    const { rules, error } = allowRules(options.permissionsPath);
+    const { rules, error } = readAllowRules(options.permissionsPath);
     if (covers(rules, call)) return executor.permit(runId, call.id, { allow: true });
     void dispatch({ type: 'permissionAsked', runId, call, rulesProblem: error }).then((reply) => {
       if (reply.ok) return;

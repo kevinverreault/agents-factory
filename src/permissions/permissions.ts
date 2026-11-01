@@ -53,7 +53,7 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
 // The rules an L1 call is allowed by without asking, besides its task's own:
 // the factory's allow list and the operator's permissions file at `path`, as
 // the file reads now. `error` says why the file grants nothing, when it doesn't.
-export function allowRules(path: string): { rules: string[]; error: string | null } {
+export function readAllowRules(path: string): { rules: string[]; error: string | null } {
   const operator = readOperatorRules(path);
   return { rules: [...FACTORY_ALLOW_LIST, ...operator.rules], error: operator.error };
 }

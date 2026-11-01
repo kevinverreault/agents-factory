@@ -226,7 +226,6 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
   expect(stdout).toContain('BLUE');
 });
 
-
 test('an L1 AFK run edits in its worktree without asking, takes no chat, and completes on its own when its turn ends', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'factory-afk-'));
   const executor = agentSdkExecutor();

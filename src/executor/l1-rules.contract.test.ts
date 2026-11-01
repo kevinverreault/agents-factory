@@ -23,15 +23,17 @@ function repo(): { cwd: string; origin: string } {
   git(origin, 'init', '--bare', '--quiet');
   git(cwd, 'init', '--quiet', '--initial-branch=main');
   writeFileSync(join(cwd, 'notes.txt'), 'an owl\na heron\nan owl again\n');
-  writeFileSync(join(cwd, 'package.json'), JSON.stringify({ name: 'widgets', version: '1.0.0', private: true }));
+  const scripts = { test: 'node -e "console.log(\'TESTED\')"' };
+  writeFileSync(join(cwd, 'package.json'), JSON.stringify({ name: 'widgets', version: '1.0.0', private: true, scripts }));
   git(cwd, 'add', '.');
   git(cwd, '-c', 'user.name=Factory Test', '-c', 'user.email=test@example.com', 'commit', '--quiet', '-m', 'Start');
   git(cwd, 'remote', 'add', 'origin', origin);
   return { cwd, origin };
 }
 
-// What the run's Bash calls did: the commands the gate was asked about, and
-// every command the agent ran, each on one line as the factory shows it.
+// What the run did: the Bash commands the gate was asked about and every
+// Bash command the agent ran, each on one line as the factory shows it, and
+// the run events it reported.
 type Replayed = { asked: string[]; ran: string[]; reported: RunEvent[] };
 
 // The first message of a run that makes each call, in turn.
@@ -93,6 +95,9 @@ const SHAPES = {
   'allow-listed, piped into head': 'git log --oneline | head -5',
   'allow-listed, chained': 'git status --short && git log --oneline -3',
   'allow-listed, redirected into the worktree': 'git status --short > status.txt',
+  // Calls Claude Code lets through only by an allow rule.
+  'allow-listed only': 'npm test',
+  'allow-listed only, piped and chained': 'npm test 2>&1 | tail -5 && git status --short',
 } as const;
 
 // Where an L1 call ends up: Claude Code runs it unasked, or it reaches the
@@ -137,29 +142,48 @@ test('an L1 run’s allow rules are matched by Claude Code itself; what still re
     'allow-listed, piped into head': 'Claude Code allows',
     'allow-listed, chained': 'Claude Code allows',
     'allow-listed, redirected into the worktree': 'Claude Code allows',
+    'allow-listed only': 'Claude Code allows',
+    'allow-listed only, piped and chained': 'Claude Code allows',
   });
+});
+
+test('without the allow rules, a call only they let through reaches the gate', async () => {
+  const { cwd } = repo();
+
+  const { asked, ran } = await replay(afkRun(cwd, runEach(['npm test']), 6, []));
+
+  expect(ran).toEqual(['npm test']);
+  expect(asked).toEqual(['npm test']);
 });
 
 test('a hard deny is refused without asking, even where an allow rule would let it through', async () => {
   const { cwd, origin } = repo();
-  // An operator rule that matches every git command, `git push` included.
-  const rules = [...FACTORY_ALLOW_LIST, 'Bash(git *)'];
-  const pushes = ['git status --short && git push origin HEAD:refs/heads/main', 'git push origin main'];
+  // Operator rules that match every git and gh command, hard denies
+  // included, beside rules Claude Code drops as invalid.
+  const rules = [...FACTORY_ALLOW_LIST, 'Bash(git *)', 'Bash(gh *)', 'Bash()', 'Nonsense(x)'];
+  const denied = [
+    'git status --short && git push origin HEAD:refs/heads/main',
+    'git push origin main',
+    'git switch -c elsewhere',
+    'git worktree list',
+    'gh auth status',
+  ];
 
-  const start = afkRun(cwd, runEach(pushes), 10, rules);
+  const start = afkRun(cwd, runEach(denied), 14, rules);
   const { asked, ran, reported } = await replay(start);
 
   expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runCompleted']);
-  expect(ran).toEqual(pushes);
+  expect(ran).toEqual(denied);
   expect(asked).toEqual([]);
-  // Nothing reached the remote.
-  expect(execFileSync('git', ['-C', origin, 'for-each-ref'], { encoding: 'utf8', windowsHide: true })).toBe('');
-  // Each push came back to the agent as the factory's refusal.
+  // Nothing reached the remote, and the branch stayed.
+  const git = (...args: string[]) => execFileSync('git', args, { encoding: 'utf8', windowsHide: true }).trim();
+  expect(git('-C', origin, 'for-each-ref')).toBe('');
+  expect(git('-C', cwd, 'branch', '--show-current')).toBe('main');
+  // Each call came back to the agent as the factory's refusal.
   const messages = await getSessionMessages(start.sessionId, { dir: cwd });
   const results = messages.flatMap((message) => {
     const content = (message.message as { content?: unknown } | null)?.content;
     return Array.isArray(content) ? content.filter((block) => block?.type === 'tool_result').map((block) => JSON.stringify(block.content)) : [];
   });
-  const refused = expect.stringContaining('the factory pushes for you');
-  expect(results).toEqual([refused, refused]);
+  expect(results).toEqual(denied.map(() => expect.stringContaining('the factory pushes for you')));
 });
