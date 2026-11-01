@@ -630,7 +630,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       guards,
     };
     executor.start(start, {
-      // A completed run is named a session now, for a next stage whose context is fresh.
+      // A session is named for each completed run now, in case the next
+      // stage's context is fresh, as it is for `advanceStage`.
       report: (event) =>
         void checkedAfterRun(event).then((checked) => dispatch(checked.type === 'runCompleted' ? { ...checked, sessionId: randomUUID() } : checked)),
       converse: (event) => broadcast(run.id, event),

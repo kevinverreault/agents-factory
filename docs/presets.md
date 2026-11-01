@@ -96,7 +96,7 @@ The launch card's start stage picker offers the stages whose `args` the launch i
 
 **AFK → AFK.** No one confirms: when an AFK stage's run completes, the factory checks the boundary itself.
 
-- When the stage's exit holds, the task moves to the next stage and queues its run, the skill invoked on its filled `args`, resuming the session or starting a new one with `context: fresh`. As work continuing something in flight it takes the slot just freed, unless urgent work is waiting.
+- When the stage's exit holds, the task moves to the next stage and queues its run, the skill invoked on its filled `args`, resuming the session or starting a new one with `context: fresh`. It queues as work continuing something in flight, so the scheduler gives it a slot after urgent work and before work not yet started.
 - A stage that `requires: L2` is skipped below L2, so at L1 `open-pr` is.
 - A `stage-blocked` attention request is raised instead, naming what's missing, when the exit doesn't hold (the factory can't evaluate `tickets-closed` or `map-cleared` yet, so those never hold), the next stage's `args` can't be filled, the next stage is HITL (take the task over to start it), or it is a factory action (none runs yet). The task stays at its stage. Answering the request sends its run on at that stage, told what was missing, and the boundary is checked again when that run completes.
 - Past the last stage, the root task goes In review and shows in Needs you.

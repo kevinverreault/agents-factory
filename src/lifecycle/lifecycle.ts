@@ -451,6 +451,15 @@ function cantFill(task: Task, stage: Stage, missing: string[]): string {
   return `${stage.id} can’t start: its args need ${placeholders}, and ${task.id} has no ${kinds}.`;
 }
 
+// Moves the task to the stage: the next run of a fresh-context one starts
+// the session the daemon named, `sessionId`, instead of resuming.
+function enterStage(task: Task, stage: Stage, sessionId: string | undefined): void {
+  task.stage = stage.id;
+  if (stage.context !== 'fresh' || !sessionId) return;
+  task.sessionId = sessionId;
+  task.newSession = true;
+}
+
 // The stage an AFK stage leads to, or null past the last: a stage that
 // requires L2 (such as open-pr) is skipped below it.
 function nextAfkStage(task: Task, from: Stage): Stage | null {
@@ -1073,9 +1082,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         raise(state, task, state.runs[task.runIds.at(-1)!]!, 'stage-blocked', false, cantFill(task, to, filled.missing), at);
         break;
       }
-      task.stage = to.id;
-      if (to.context === 'fresh') task.sessionId = action.sessionId;
-      startRun(state, task, at, { opening: filled.opening, resumesSession: to.context !== 'fresh' });
+      enterStage(task, to, action.sessionId);
+      startRun(state, task, at, { opening: filled.opening });
       break;
     }
     case 'turnEnded':
@@ -1119,13 +1127,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         blocked(cantFill(task, to, filled.missing));
         break;
       }
-      // Queued as work continuing something in flight, it takes the slot its
-      // stage's run just freed unless urgent work is waiting.
-      task.stage = to.id;
-      if (to.context === 'fresh' && action.sessionId) {
-        task.sessionId = action.sessionId;
-        task.newSession = true;
-      }
+      // Queued as work continuing something in flight, for the scheduler.
+      enterStage(task, to, action.sessionId);
       task.resumeWith = filled.opening;
       task.state = 'queued';
       break;
