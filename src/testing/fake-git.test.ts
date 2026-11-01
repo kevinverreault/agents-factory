@@ -30,6 +30,12 @@ describeGitContract('the fake git', async () => {
     async commitAll(worktreePath) {
       git.commitAll(worktreePath);
     },
+    async checkout(worktreePath, branch) {
+      git.checkout(worktreePath, branch);
+    },
+    async setPushUrl(worktreePath, remote, url) {
+      git.setPushUrl(worktreePath, remote, url);
+    },
     async dispose() {},
   };
 });

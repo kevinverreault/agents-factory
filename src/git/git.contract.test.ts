@@ -45,6 +45,9 @@ async function fixture(): Promise<CloneFixture> {
       git(seed, 'commit', '--quiet', '--allow-empty', '-m', 'Start');
       git(seed, 'push', '--quiet', origin, branch);
       git(root, 'clone', '--quiet', origin, path);
+      // The operator's own identity, which the adapter's commits are made under.
+      git(path, 'config', 'user.name', 'Factory Test');
+      git(path, 'config', 'user.email', 'test@example.com');
       origins.set(path, origin);
       return path;
     },
@@ -72,6 +75,12 @@ async function fixture(): Promise<CloneFixture> {
     async commitAll(worktreePath) {
       git(worktreePath, 'add', '--all');
       git(worktreePath, 'commit', '--quiet', '-m', 'Commit it all');
+    },
+    async checkout(worktreePath, branch) {
+      git(worktreePath, 'checkout', '--quiet', '-b', branch);
+    },
+    async setPushUrl(worktreePath, remote, url) {
+      git(worktreePath, 'config', `remote.${remote}.pushurl`, url);
     },
     async dispose() {
       rmSync(root, { recursive: true, force: true });

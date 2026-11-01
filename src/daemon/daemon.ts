@@ -7,10 +7,11 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
 import type { ConversationEvent, Executor, RunGuards, RunStart } from '../executor/executor.ts';
-import { GitError, type Git, type RunSnapshot } from '../git/git.ts';
+import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import {
   artifactsOf,
+  BRIEF_REQUEST,
   guard,
   initialLifecycle,
   isTerminal,
@@ -21,11 +22,13 @@ import {
   reduce,
   unfinishedTasks,
   type Lifecycle,
+  type Readiness,
   type LifecycleAction,
   type Repository,
   type RepoEvent,
   type Run,
   type RunEvent,
+  type Task,
   type TaskLaunched,
 } from '../lifecycle/lifecycle.ts';
 import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
@@ -37,6 +40,7 @@ import {
   type CloneView,
   type Command,
   type DaemonStatus,
+  type HandoffCommand,
   type HookEvent,
   type LaunchCommand,
   type PresetCommand,
@@ -200,6 +204,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       case 'advanceStage':
         // Named now, for a next stage whose context is fresh.
         return dispatch({ type: 'stageAdvanced', taskId: command.taskId, skip: command.skip ?? [], sessionId: randomUUID() });
+      case 'openHandoff':
+        return openHandoff(command.taskId);
+      case 'handoff':
+        return handOff(command);
       case 'listPresets':
         return listPresets(command);
       case 'hookEvent':
@@ -329,6 +337,77 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pruneSkillSets();
       return { ok: true, value: { taskId } };
     });
+  }
+
+  // Opens the handoff sheet on how the task's worktree stands now.
+  function openHandoff(taskId: string): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const action: LifecycleAction = { type: 'handoffOpened', taskId, readiness: { blockers: [], toCommit: [] } };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      action.readiness = await readiness(lifecycle.tasks[taskId]!);
+      const refusal = await settle(action, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
+  }
+
+  // The handoff sheet's confirm. Blocked unless the task's worktree is as
+  // its AFK run's guards accept it (ADR 0007), checked afresh. The task's
+  // uncommitted files are then committed to the task branch, as the HITL
+  // work they are, and the task goes AFK.
+  function handOff({ taskId, brief, continueAs, autonomy, tier, maxTurns }: Extract<HandoffCommand, { type: 'handoff' }>): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const action: LifecycleAction = { type: 'handedOff', taskId, brief, continueAs, autonomy, tier, maxTurns, committed: [], sessionId: randomUUID() };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      const task = lifecycle.tasks[taskId]!;
+      const ready = await readiness(task);
+      if (ready.blockers.length) {
+        // The sheet shows what blocks it.
+        await settle({ type: 'handoffOpened', taskId, readiness: ready }, new Set());
+        return { ok: false, reason: `The handoff is blocked. ${ready.blockers.join(' ')}` };
+      }
+      if (ready.toCommit.length) {
+        try {
+          await git.commit(task.worktree!.path, ready.toCommit, `Handoff of ${task.id}: ${task.title}`);
+        } catch (error) {
+          if (!(error instanceof GitError)) throw error;
+          return { ok: false, reason: `The handoff commit failed: ${error.message}` };
+        }
+      }
+      action.committed = ready.toCommit;
+      const refusal = await settle(action, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
+  }
+
+  // How the task's worktree stands for a handoff: the task branch checked
+  // out, no change but to the task's own files, which the handoff commit
+  // takes, and no `pushurl` the AFK run's push guard can't cover.
+  async function readiness(task: Task): Promise<Readiness> {
+    if (!task.worktree) return { blockers: [], toCommit: [] };
+    const { path, branch } = task.worktree;
+    let state: WorktreeState;
+    try {
+      state = await git.worktreeState(path);
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return { blockers: [`The factory couldn't read ${task.id}’s worktree at ${path}: ${error.message}`], toCommit: [] };
+    }
+    const files = new Set(artifactsOf(lifecycle, task).flatMap((artifact) => (artifact.kind === 'file' ? [artifact.path] : [])));
+    const toCommit = state.uncommitted.filter((file) => files.has(file));
+    const others = state.uncommitted.filter((file) => !files.has(file));
+    const blockers: string[] = [];
+    if (state.branch !== branch) blockers.push(`${branch} isn’t checked out in ${task.id}’s worktree: ${state.branch ? `${state.branch} is` : 'HEAD is detached'}.`);
+    if (others.length) {
+      blockers.push(`The worktree has changes that are no artifact of ${task.id}, which the handoff commit won’t take: ${others.join(', ')}. Commit or discard them first.`);
+    }
+    if (state.pushUrls.length) {
+      blockers.push(`A remote has a pushurl, which the AFK run’s push guard can’t cover: ${state.pushUrls.join(', ')}. Remove it first.`);
+    }
+    return { blockers, toCommit };
   }
 
   // Every preset a launch in the repository can pick from: the built-ins, the
@@ -584,10 +663,30 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // Unless it raised a request, the operator's earlier answers allowed the call.
       const { taskId } = lifecycle.runs[action.runId]!;
       if (openRequest(lifecycle, lifecycle.tasks[taskId]!)?.permission?.id !== action.call.id) executor.permit(action.runId, action.call.id, { allow: true });
+    } else if (action.type === 'handoffOpened' && run) {
+      // A run started for the brief opens on the request itself.
+      const was = before.runs[run.id];
+      if (was?.turn === 'operator' && run.turn === 'agent') executor.send(run.id, BRIEF_REQUEST);
+      else if (was?.turn === 'agent' && !before.tasks[action.taskId]!.handoff) executor.interrupt(run.id);
     } else if (action.type === 'turnEnded') {
       const { queued } = before.runs[action.runId]!;
-      if (queued.length) executor.send(action.runId, queued.join('\n\n'));
+      const { taskId } = lifecycle.runs[action.runId]!;
+      // The brief, asked for once the turn a handoff interrupted has ended.
+      if (!before.tasks[taskId]!.handoff?.asked && lifecycle.tasks[taskId]!.handoff?.asked) executor.send(action.runId, BRIEF_REQUEST);
+      else if (queued.length) executor.send(action.runId, queued.join('\n\n'));
     }
+    // What the agent's turn or its tool calls changed in the worktree shows on an open handoff sheet.
+    const task = action.type === 'turnEnded' ? lifecycle.tasks[lifecycle.runs[action.runId]!.taskId] : action.type === 'artifactsSeen' ? conversing : undefined;
+    if (task?.handoff) void rereadReadiness(task.id);
+  }
+
+  function rereadReadiness(taskId: string): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      const task = lifecycle.tasks[taskId];
+      if (stopping || !task?.handoff) return { ok: true };
+      const refusal = await settle({ type: 'readinessRead', taskId, readiness: await readiness(task) }, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
   }
 
   // Starts the run on the executor. An AFK run in a worktree starts guarded

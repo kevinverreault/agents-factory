@@ -3,6 +3,7 @@
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
+import { handOff } from '../testing/handoff.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -44,7 +45,7 @@ describe('freezing the skill set', () => {
     await operator.send(launch('Grill me about the login flow.'));
 
     factory.skillSets.pin('c3c3c3c3c3c3c3c3');
-    await operator.send({ type: 'handoff', taskId: 'T1', autonomy: 'L1' });
+    await handOff(operator, tui, factory.executor, 'T1');
     await operator.send(launch('Grill me about the logout flow.'));
 
     const state = await tui.until((state) => state.runs.R3 !== undefined);

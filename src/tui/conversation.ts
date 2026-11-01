@@ -1,7 +1,8 @@
 // The full-screen conversation view: a run's conversation, replayed from the
 // session file and then live, with a side rail of the task's artifacts. A HITL
-// run's has a line for the operator's next message and the advance sheet over
-// it; an AFK run never takes chat, so its view only follows it.
+// run's has a line for the operator's next message, and the advance and
+// handoff sheets over it; an AFK run never takes chat, so its view only
+// follows it.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
@@ -10,6 +11,7 @@ import type { ArtifactView, FactoryState } from '../protocol/factory-state.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
+import { HandoffSheet } from './handoff-sheet.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
 
@@ -53,11 +55,21 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   // A card answers its own question: a new question starts a new card.
   const card = question && typing.current.cardFor === question.id ? typing.current.card : newCard();
   const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
+  // The handoff sheet opens once the daemon has opened the task's handoff.
+  const handOff = () => void connection.send({ type: 'openHandoff', taskId }).then(tell);
+  const sheet = takesChat && task?.handoff ? task.handoff : null;
 
   useInput((input, key) => {
     const typed = typing.current;
     if (key.ctrl && input === 'b') return onLeave();
     if (!takesChat) return;
+    // At any moment: mid-turn and over an open card too.
+    if (key.ctrl && input === 'h') return handOff();
+    if (key.return && typed.draft.trim() === '/handoff') {
+      typed.draft = '';
+      rerender();
+      return handOff();
+    }
     if (key.ctrl && input === 'n') {
       if (canAdvance(task)) setAdvancing(true);
       return;
@@ -88,7 +100,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       typed.draft = edit(typed.draft, input, key) ?? typed.draft;
     }
     rerender();
-  }, { isActive: !advancing });
+  }, { isActive: !advancing && !sheet });
   const { draft } = typing.current;
   const keys = !takesChat
     ? 'AFK runs take no chat: take it over to talk to it'
@@ -97,7 +109,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       : midTurn
         ? 'enter queue · esc interrupt'
         : 'enter send';
-  const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''} · ctrl+b back`;
+  const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''}${takesChat ? ' · /handoff hand off' : ''} · ctrl+b back`;
 
   return h(
     Box,
@@ -123,9 +135,13 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
     ),
     question ? h(QuestionCard, { question, card }) : null,
-    live && run.proposal
+    live && run.proposal?.kind === 'advance'
       ? h(Text, { color: 'yellow' }, `◇ The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
       : null,
+    live && run.proposal?.kind === 'handoff' && !sheet
+      ? h(Text, { color: 'yellow' }, `◇ The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
+      : null,
+    sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run }) : null,
     advancing && canAdvance(task)
       ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
       : null,

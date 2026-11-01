@@ -42,6 +42,12 @@ export interface Git {
   // `ref` points at. A directory the commit lacks holds none. Throws a
   // `GitError` when `ref` names no commit.
   readDirectory(clonePath: string, ref: string, dir: string): Promise<{ commit: string; files: DirectoryFile[] }>;
+  // How the worktree stands for a handoff.
+  worktreeState(worktreePath: string): Promise<WorktreeState>;
+  // Commits exactly `paths` (relative, with `/`), new files included, under
+  // the worktree's own git identity, and returns the commit.
+  // Changes to other paths stay uncommitted.
+  commit(worktreePath: string, paths: string[], message: string): Promise<string>;
   // The worktree as an AFK run starting in it finds it.
   snapshot(worktreePath: string): Promise<RunSnapshot>;
   // How the worktree breaks the invariants of its snapshot from before the
@@ -54,6 +60,15 @@ export interface Git {
 }
 
 export type DirectoryFile = { path: string; content: string };
+
+export type WorktreeState = {
+  // The branch checked out, or null when HEAD is detached.
+  branch: string | null;
+  // Every path with changes not yet committed, untracked files included.
+  uncommitted: string[];
+  // The `remote.<name>.pushurl` settings there are, by name.
+  pushUrls: string[];
+};
 
 // What an AFK run must leave as it found it (ADR 0007), read before it starts.
 export type RunSnapshot = {
@@ -114,18 +129,24 @@ export const gitCli: Git = {
 
   async uncommitted(worktreePath, paths) {
     if (paths.length === 0) return [];
-    // NUL-separated, so paths come back unquoted: `XY path`, and after a
-    // rename's or a copy's entry, its old path on its own, changed too.
-    const listing = await output(worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...paths);
-    const fields = listing.split('\0');
-    const changed = new Set<string>();
-    for (let i = 0; i < fields.length; i++) {
-      const entry = fields[i]!;
-      if (entry.length < 4) continue;
-      changed.add(entry.slice(3));
-      if (entry[0] === 'R' || entry[0] === 'C') changed.add(fields[++i] ?? '');
-    }
+    const changed = new Set(changedIn(await output(worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...paths)));
     return paths.filter((path) => changed.has(path));
+  },
+
+  async worktreeState(worktreePath) {
+    const [branch, listing, pushUrls] = await Promise.all([
+      git(worktreePath, 'symbolic-ref', '--quiet', '--short', 'HEAD'),
+      output(worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all'),
+      git(worktreePath, 'config', '--name-only', '--get-regexp', '^remote\\..*\\.pushurl$'),
+    ]);
+    return { branch, uncommitted: changedIn(listing), pushUrls: lines(pushUrls ?? '') };
+  },
+
+  async commit(worktreePath, paths, message) {
+    // Staged first, so new files are known; `--only` leaves whatever else is staged out.
+    await run(worktreePath, 'add', '--all', '--', ...paths);
+    await run(worktreePath, 'commit', '--quiet', '--only', '--message', message, '--', ...paths);
+    return run(worktreePath, 'rev-parse', 'HEAD');
   },
 
   async repairWorktree(clonePath, path) {
@@ -191,6 +212,21 @@ export const gitCli: Git = {
     return found;
   },
 };
+
+// The paths a `status --porcelain=v1 -z` listing names: NUL-separated, so
+// unquoted, as `XY path`, and after a rename's or a copy's entry, its old
+// path on its own, changed too.
+function changedIn(listing: string): string[] {
+  const fields = listing.split('\0');
+  const changed: string[] = [];
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i]!;
+    if (entry.length < 4) continue;
+    changed.push(entry.slice(3));
+    if (entry[0] === 'R' || entry[0] === 'C') changed.push(fields[++i] ?? '');
+  }
+  return changed;
+}
 
 // The output's non-empty lines.
 function lines(text: string): string[] {

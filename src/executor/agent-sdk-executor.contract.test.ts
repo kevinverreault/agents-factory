@@ -112,6 +112,44 @@ test('the agent proposes advancing through the factory MCP server’s propose_ad
   executor.stop('R1');
 });
 
+test('the agent writes the handoff brief through write_handoff_brief, and its turn ends saying how full the context window is', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
+  const executor = agentSdkExecutor();
+  const reported: RunEvent[] = [];
+  const run: RunStart = {
+    runId: 'R1',
+    taskId: 'T1',
+    mode: 'HITL',
+    autonomy: null,
+    sessionId: randomUUID(),
+    resumesSession: false,
+    cwd,
+    firstMessage:
+      'We agreed: the button is blue. Call the write_handoff_brief tool with the goal "Make the button blue", ' +
+      'decided ["The button is blue"], and empty doneWhen, outOfScope and links. Then reply with only the word WRITTEN.',
+    model: 'claude-haiku-5-5',
+    maxTurns: null,
+    credential: 'subscription-host',
+    plugin: null,
+    guards: null,
+  };
+
+  executor.start(run, { report: (event) => reported.push(event), converse: () => {}, askPermission: () => {} });
+  await waitFor(() => reported.some((event) => event.type === 'turnEnded'), 120_000);
+
+  expect(reported.find((event) => event.type === 'briefWritten')).toEqual({
+    type: 'briefWritten',
+    runId: 'R1',
+    brief: { goal: expect.stringContaining('blue'), decided: [expect.stringContaining('blue')], doneWhen: [], outOfScope: [], links: [] },
+  });
+  const ended = reported.find((event) => event.type === 'turnEnded');
+  expect(ended).toMatchObject({ context: { used: expect.any(Number), window: expect.any(Number) } });
+  const { used, window } = (ended as Extract<RunEvent, { type: 'turnEnded' }>).context!;
+  expect(used).toBeGreaterThan(1_000);
+  expect(used).toBeLessThan(window);
+  executor.stop('R1');
+});
+
 test('AskUserQuestion holds the turn until answered, an interrupt ends only the turn, and the session resumes with `claude --resume` in a terminal', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
   const executor = agentSdkExecutor();

@@ -11,6 +11,7 @@ import {
   readyForYou,
   type AutonomyLevel,
   type FrozenPreset,
+  type HandoffSheet,
   type Lifecycle,
   type Mode,
   type Priority,
@@ -45,7 +46,14 @@ export type TaskView = {
   tier: Tier;
   // The rules the operator allowed for the task.
   allowRules: string[];
+  // What its runs work towards: its first run's first message, or the brief
+  // once handed off.
+  goal: string | null;
+  // Its open handoff sheet, if any.
+  handoff: HandoffView | null;
 };
+
+export type HandoffView = Omit<HandoffSheet, 'asked'>;
 
 export type RunView = Pick<
   Run,
@@ -93,14 +101,17 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       stage: task.stage ?? null,
       tier: nextTier(task),
       allowRules: [...(task.allowRules ?? [])],
+      goal: task.goal,
+      handoff: handoffView(task.handoff ?? null),
     };
   }
   const runs: Record<string, RunView> = {};
   for (const run of Object.values(lifecycle.runs)) {
     const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
-    // Runs stored before stages, proposals, max turns and tiers have none.
+    // Runs stored before stages, proposals, max turns and tiers have none,
+    // and proposals stored before handoffs proposed advancing.
     const stage = run.stage ?? null;
-    const proposal = run.proposal ?? null;
+    const proposal = run.proposal ? { ...run.proposal, kind: run.proposal.kind ?? 'advance' } : null;
     const maxTurns = run.maxTurns ?? null;
     const tier = run.tier ?? null;
     runs[id] = {
@@ -133,6 +144,13 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
     slots: { active: activeAfkRuns(lifecycle), cap: lifecycle.slotCap },
     lastUsedRepo: lastUsedRepo(lifecycle),
   };
+}
+
+// The sheet as a TUI shows it: whether the brief was asked for yet is the daemon's.
+function handoffView(sheet: HandoffSheet | null): HandoffView | null {
+  if (!sheet) return null;
+  const { asked, ...view } = structuredClone(sheet);
+  return view;
 }
 
 export function repositoryView({ id, path, baseBranch, defaultPreset, missing }: Repository): RepositoryView {

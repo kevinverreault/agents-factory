@@ -107,6 +107,10 @@ Moving a task from HITL to AFK so agents carry the rest of its flow. The operato
 The summary a HITL run writes as its last turn when handed off (goal, decisions, done-when, out of scope, links). The operator edits it, and the AFK run receives it as its first message.
 _Avoid_: Handoff summary, handover note
 
+**Handoff sheet**:
+Where the operator reviews and edits the handoff brief and confirms a handoff, with continue-as, autonomy level, model tier and max turns pre-filled from the next AFK stage. Opening it is never a commitment: backing out keeps the conversation going.
+_Avoid_: Handoff dialog, handover form
+
 **Advance sheet**:
 Where the operator moves a HITL task on to its next HITL stage, when the agent proposes it or whenever they choose, skipping optional stages on the way. Only the operator advances; the agent can only propose.
 _Avoid_: Next-stage dialog, stage picker

@@ -64,9 +64,42 @@ export type AttentionKind =
   | 'recovery-report';
 export type AttentionStatus = 'open' | 'answered' | 'superseded' | 'closed';
 
-// The agent's proposal to advance the task to its next stage (`propose_advance`),
-// shown until the operator confirms it or keeps talking instead.
-export type Proposal = { reason: string };
+// The agent's proposal to advance the task to its next stage
+// (`propose_advance`) or hand it off (`propose_handoff`), shown until the
+// operator acts on it or keeps talking instead.
+export type Proposal = { kind: 'advance' | 'handoff'; reason: string };
+
+// The handoff brief: what the HITL run agreed with the operator, which the
+// AFK run starts from. `links` are issue refs, file paths or URLs.
+export type Brief = { goal: string; decided: string[]; doneWhen: string[]; outOfScope: string[]; links: string[] };
+// Whether a handoff's AFK run resumes the conversation or starts a fresh
+// session from the brief alone.
+export type ContinueAs = 'resume' | 'fresh';
+export const CONTINUE_AS: readonly ContinueAs[] = ['resume', 'fresh'];
+// How the task's worktree stands for a handoff: why it can't be confirmed
+// yet, and the files the handoff commit takes.
+export type Readiness = { blockers: string[]; toCommit: string[] };
+// The handoff sheet, open on a HITL task from the operator's handoff until
+// they confirm it or back out. Its fields are pre-filled from the AFK stage
+// it hands off to; what the operator changes travels with the confirm.
+export type HandoffSheet = {
+  // The brief the HITL run wrote, or null while it hasn't yet.
+  brief: Brief | null;
+  // Whether a run was asked for the brief: an agent mid-turn is asked only
+  // once its interrupted turn has ended.
+  asked: boolean;
+  // The AFK stage the handoff starts, or null when the task has none ahead.
+  stage: string | null;
+  continueAs: ContinueAs;
+  autonomy: AutonomyLevel;
+  tier: Tier;
+  maxTurns: number;
+  // The share of the context window the conversation fills, when known.
+  contextShare: number | null;
+  readiness: Readiness;
+};
+// How much of its model's context window a session fills, as its latest turn left it.
+export type ContextUse = { used: number; window: number };
 
 // A root task's task branch and the worktree it is checked out in (ADR 0010).
 export type TaskWorktree = { branch: string; path: string };
@@ -127,6 +160,10 @@ export type Task = {
   // The rules the operator allowed once while its run was parked, which its
   // next run takes.
   allowOnce?: string[];
+  // Its open handoff sheet, if any. Tasks stored before handoffs have none.
+  handoff?: HandoffSheet | null;
+  // How much of the context window its session fills, once a turn said.
+  context?: ContextUse | null;
 };
 
 export type Run = {
@@ -240,7 +277,8 @@ export type OperatorCommand =
   // Cuts the agent's turn short; the run lives on.
   | { type: 'interrupt'; taskId: string }
   | { type: 'answerQuestion'; taskId: string; questionId: string; answers: Answers }
-  | { type: 'handoff'; taskId: string; autonomy: AutonomyLevel }
+  // Backs out of the handoff sheet: the conversation carries on.
+  | { type: 'closeHandoff'; taskId: string }
   | { type: 'takeOver'; taskId: string }
   // Answers the task's open attention request: a question's with `answers`,
   // a permission request's with `permission`.
@@ -262,7 +300,8 @@ export type RunEvent =
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
   // The agent finished answering: the conversation is the operator's again.
-  | { type: 'turnEnded'; runId: string }
+  // `context` is how full the session is now, when the executor knows.
+  | { type: 'turnEnded'; runId: string; context?: ContextUse }
   | { type: 'questionAsked'; runId: string; question: Question }
   // An AFK run asked the operator through `AskUserQuestion`.
   | { type: 'attentionRaised'; runId: string; kind: 'question'; question: Question }
@@ -271,7 +310,11 @@ export type RunEvent =
   // the operator's permissions file granted nothing, if it couldn't be read.
   | { type: 'permissionAsked'; runId: string; call: ToolCall; rulesProblem: string | null }
   // The agent called `propose_advance`.
-  | { type: 'advanceProposed'; runId: string; reason: string };
+  | { type: 'advanceProposed'; runId: string; reason: string }
+  // The agent called `propose_handoff`.
+  | { type: 'handoffProposed'; runId: string; reason: string }
+  // The HITL run wrote the handoff brief the factory asked it for.
+  | { type: 'briefWritten'; runId: string; brief: Brief };
 
 // What artifact capture found after a tool call of the task's latest run,
 // with whether each of the task's files (old and new) is committed. Hooks
@@ -321,10 +364,36 @@ export type TaskLaunched = {
 // session, for a next stage whose context is fresh.
 export type StageAdvanced = { type: 'stageAdvanced'; taskId: string; skip: string[]; sessionId: string };
 
+// The operator opened the handoff sheet (`ctrl+h` or `/handoff`), and the
+// daemon read how the task's worktree stands.
+export type HandoffOpened = { type: 'handoffOpened'; taskId: string; readiness: Readiness };
+
+// The daemon read the worktree again for the open handoff sheet, such as
+// once the agent's turn ended: it may have changed files meanwhile.
+export type ReadinessRead = { type: 'readinessRead'; taskId: string; readiness: Readiness };
+
+// The brief and fields the operator confirms the handoff sheet with.
+export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: number };
+
+// The operator confirmed the handoff sheet, and the daemon committed the
+// task's uncommitted files of `committed`. The daemon names a session, for
+// continuing fresh.
+export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string } & HandoffChoices;
+
 // The daemon's clock found deadlines that have passed (ADR 0003).
 export type ClockEvent = { type: 'deadlinesDue' };
 
-export type LifecycleAction = OperatorCommand | RunEvent | RepoEvent | TaskLaunched | StageAdvanced | ClockEvent | ArtifactsSeen;
+export type LifecycleAction =
+  | OperatorCommand
+  | RunEvent
+  | RepoEvent
+  | TaskLaunched
+  | StageAdvanced
+  | HandoffOpened
+  | ReadinessRead
+  | HandedOff
+  | ClockEvent
+  | ArtifactsSeen;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
@@ -336,6 +405,14 @@ export const DEFAULT_MAX_TURNS = 300;
 const AFK_RESUME = 'Carry on, unattended, from where this conversation left off.';
 export const PRIORITIES: readonly Priority[] = ['normal', 'urgent'];
 export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ['L1', 'L2'];
+// Past this share of the context window, the handoff sheet pre-selects
+// continuing fresh from the brief.
+export const FRESH_AT = 0.6;
+// What the factory asks a HITL run for when the operator opens the handoff sheet.
+export const BRIEF_REQUEST =
+  'The operator is handing this task off to an unattended AFK run. Write the handoff brief now with the factory’s ' +
+  '`write_handoff_brief` tool: the goal, what you decided together, when the work is done, what is out of scope, and ' +
+  'links to the issues and files that matter. Then end your turn: the operator reviews the brief before anything is handed off.';
 // How long a HITL run may wait on the operator's turn before it is parked.
 export const IDLE_PARK_MS = 30 * 60_000;
 // How long an attention request may keep its run suspended before the run is parked.
@@ -641,6 +718,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'sendMessage':
       if (task.mode === 'AFK') return takesNoChat(task);
       if (!action.text.trim()) return 'A message needs text.';
+      if (task.handoff) return sheetOpen(task);
       return liveRun(state, task)?.status === 'active' ? null : `${task.id} has no live conversation.`;
     case 'interrupt': {
       if (task.mode === 'AFK') return takesNoChat(task);
@@ -654,10 +732,20 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       const answered = question.questions.every(({ question }) => action.answers[question]?.trim());
       return answered ? null : 'Answer every question on the card.';
     }
-    case 'handoff':
-      return task.mode === 'HITL' && task.state === 'running'
-        ? null
-        : 'Only a task in a live HITL conversation can be handed off.';
+    case 'readinessRead':
+      return task.handoff ? null : `${task.id} has no handoff sheet open.`;
+    case 'handedOff': {
+      if (!task.handoff) return `${task.id} has no handoff sheet open.`;
+      if (!task.handoff.brief) return 'The agent hasn’t written the brief yet: you confirm the brief you have read.';
+      if (!tidyBrief(action.brief).goal) return 'The brief needs a goal.';
+      if (!CONTINUE_AS.includes(action.continueAs)) return 'Continue as resume, or fresh from the brief.';
+      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
+      if (action.autonomy !== 'L1') return 'L2 runs in a sandbox, which the factory doesn’t have yet: hand off at L1.';
+      if (!isTier(action.tier)) return tierRefusal(action.tier);
+      return Number.isInteger(action.maxTurns) && action.maxTurns >= 1 ? null : 'Max turns must be a whole number of at least 1.';
+    }
+    case 'closeHandoff':
+      return task.handoff ? null : `${task.id} has no handoff sheet open.`;
     case 'takeOver':
       return task.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state)
         ? cantStartRuns(state, task)
@@ -703,8 +791,21 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.mode === 'HITL' ? null : 'In an AFK run a question is an attention request.';
     case 'advanceProposed':
       return task.mode === 'HITL' ? null : 'Only a HITL run proposes advancing; AFK stages advance on their own.';
+    case 'handoffProposed':
+    case 'briefWritten':
+      return task.mode === 'HITL' ? null : `${task.id} is AFK already.`;
+    case 'handoffOpened': {
+      if (task.mode !== 'HITL' || (task.state !== 'running' && task.state !== 'queued')) {
+        return `Only a HITL task in conversation or ready for you can be handed off (${task.id} is ${label(task)}).`;
+      }
+      if (task.runIds.length === 0) return `There is nothing to hand off yet: ${task.id} has had no conversation.`;
+      const to = handoffStage(task);
+      if (to?.kind === 'action') return `The next AFK stage, ${to.id}, is a factory action, which the factory can’t run yet.`;
+      return liveRun(state, task) ? null : cantStartRuns(state, task);
+    }
     case 'stageAdvanced': {
       if (!task.preset || !task.stage) return `${task.id} follows no workflow preset.`;
+      if (task.handoff) return sheetOpen(task);
       if (task.mode !== 'HITL' || (task.state !== 'running' && task.state !== 'queued')) {
         return `Only a HITL task in conversation or ready for you advances its stage (${task.id} is ${label(task)}).`;
       }
@@ -740,6 +841,63 @@ function grantFor(task: Task, run: Run, call: ToolCall): 'task' | 'once' | null 
   const rule = ruleFor(call);
   if (task.allowRules?.includes(rule)) return 'task';
   return run.allowOnce?.includes(rule) ? 'once' : null;
+}
+
+// The conversation waits while the handoff sheet is open over it.
+function sheetOpen(task: Task): string {
+  return `The handoff sheet is open on ${task.id}: back out of it (esc) to keep talking.`;
+}
+
+// The AFK stage a handoff starts: the first from the task's own stage on.
+// Remaining HITL stages are skipped, and so is a stage that requires L2,
+// which a handoff doesn't reach yet. Null when the task has none ahead.
+function handoffStage(task: Task): Stage | null {
+  const stages = task.preset?.stages ?? [];
+  const from = Math.max(stages.findIndex(({ id }) => id === task.stage), 0);
+  return stages.slice(from).find((stage) => stage.mode === 'AFK' && stage.requires !== 'L2') ?? null;
+}
+
+// A new handoff sheet, pre-filled from the AFK stage it hands off to. L2
+// runs in a sandbox, which the factory doesn't have yet, so it hands off at L1.
+function newHandoffSheet(task: Task, readiness: Readiness): HandoffSheet {
+  const stage = handoffStage(task);
+  const share = task.context ? task.context.used / task.context.window : null;
+  return {
+    brief: null,
+    asked: false,
+    stage: stage?.id ?? null,
+    continueAs: share !== null && share > FRESH_AT ? 'fresh' : 'resume',
+    autonomy: 'L1',
+    tier: task.operatorTier ?? task.inputs?.tier ?? stage?.model ?? DEFAULT_TIER,
+    maxTurns: task.maxTurns ?? stage?.max_turns ?? DEFAULT_MAX_TURNS,
+    contextShare: share,
+    readiness,
+  };
+}
+
+// The brief with its text trimmed and its empty items dropped: it comes from
+// the agent's tool call, or the operator's edits.
+function tidyBrief(brief: Brief): Brief {
+  const items = (list: unknown) => (Array.isArray(list) ? list.map((item) => String(item).trim()).filter(Boolean) : []);
+  return {
+    goal: String(brief.goal ?? '').trim(),
+    decided: items(brief.decided),
+    doneWhen: items(brief.doneWhen),
+    outOfScope: items(brief.outOfScope),
+    links: items(brief.links),
+  };
+}
+
+// The brief as the AFK run reads it, its empty sections left out.
+export function briefText({ goal, decided, doneWhen, outOfScope, links }: Brief): string {
+  const sections: [string, string[]][] = [
+    ['Decided', decided],
+    ['Done when', doneWhen],
+    ['Out of scope', outOfScope],
+    ['Links', links],
+  ];
+  const listed = sections.filter(([, items]) => items.length).map(([heading, items]) => `## ${heading}\n\n${items.map((item) => `- ${item}`).join('\n')}`);
+  return ['# Handoff brief', goal, ...listed].join('\n\n');
 }
 
 // An AFK run is steered only through attention requests and takeover.
@@ -997,11 +1155,37 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // The executor hands the answers to the waiting turn.
       run!.question = null;
       break;
-    case 'handoff':
-      endRun(run!, 'handed off', at);
+    case 'handedOff': {
+      const sheet = task.handoff!;
+      if (run) endRun(run, 'handed off', at);
+      task.handoff = null;
       task.mode = 'AFK';
       task.autonomy = action.autonomy;
+      // What the operator changed on the sheet holds for every later stage too.
+      if (action.tier !== sheet.tier) task.operatorTier = action.tier;
+      if (action.maxTurns !== sheet.maxTurns) task.maxTurns = action.maxTurns;
+      // The brief is the task's goal of record, and the AFK run's first
+      // message, after its stage's skill: the brief stands in for args an
+      // early handoff skipped the stages for.
+      task.goal = briefText(tidyBrief(action.brief));
+      const to = stageOf(task, sheet.stage);
+      if (to) task.stage = to.id;
+      const opening = to && fillOpening(to, (variable) => argValue(state, task, variable) ?? '');
+      task.resumeWith = opening && 'opening' in opening && opening.opening ? `${opening.opening}\n\n${task.goal}` : task.goal;
+      if (action.continueAs === 'fresh') {
+        task.sessionId = action.sessionId;
+        task.newSession = true;
+        task.context = null;
+      }
+      for (const artifact of artifactsOf(state, task)) {
+        if (artifact.kind === 'file' && action.committed.includes(artifact.path)) artifact.committed = true;
+      }
+      // Queued as work continuing something in flight, for the scheduler.
       task.state = 'queued';
+      break;
+    }
+    case 'closeHandoff':
+      task.handoff = null;
       break;
     case 'takeOver':
       if (request) request.status = 'superseded';
@@ -1044,6 +1228,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'cancel':
       if (run) endRun(run, 'cancelled', at);
       if (request) request.status = 'closed';
+      task.handoff = null;
       task.state = 'cancelled';
       break;
     case 'retier':
@@ -1063,7 +1248,39 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       run!.question = action.question;
       break;
     case 'advanceProposed':
-      run!.proposal = { reason: action.reason };
+      run!.proposal = { kind: 'advance', reason: action.reason };
+      break;
+    case 'handoffProposed':
+      run!.proposal = { kind: 'handoff', reason: action.reason };
+      break;
+    case 'handoffOpened': {
+      const sheet = (task.handoff ??= newHandoffSheet(task, action.readiness));
+      sheet.readiness = action.readiness;
+      if (sheet.brief) break;
+      if (!run) {
+        // A parked conversation is resumed just to write the brief.
+        startRun(state, task, at, { opening: BRIEF_REQUEST });
+        sheet.asked = true;
+        break;
+      }
+      run.proposal = null;
+      if (run.turn === 'operator') {
+        // The executor asks at once, or again when the agent's turn ended without writing it.
+        run.turn = 'agent';
+        sheet.asked = true;
+      } else if (!sheet.asked) {
+        // The executor interrupts the turn: what it waited on goes with it.
+        run.queued = [];
+        run.question = null;
+      }
+      break;
+    }
+    case 'readinessRead':
+      task.handoff!.readiness = action.readiness;
+      break;
+    case 'briefWritten':
+      // A brief written after the operator backed out stays in the conversation only.
+      if (task.handoff && !task.handoff.brief) task.handoff.brief = tidyBrief(action.brief);
       break;
     case 'stageAdvanced': {
       const plan = planAdvance(state, task, action.skip);
@@ -1087,16 +1304,19 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     }
     case 'turnEnded':
+      if (action.context) task.context = { ...action.context };
       // A card the turn ended without is dropped. What waited is delivered
-      // now, so the agent answers it at once.
+      // now, so the agent answers it at once: the brief, once a handoff
+      // interrupted the turn.
       run!.question = null;
-      if (run!.queued.length) run!.queued = [];
+      if (task.handoff && !task.handoff.asked && !task.handoff.brief) task.handoff.asked = true;
+      else if (run!.queued.length) run!.queued = [];
       else run!.turn = 'operator';
       break;
     case 'runCompleted': {
       endRun(run!, 'completed', at);
       // A run of an AFK stage moves the task on by itself. Any other (a task
-      // with no preset, or one handed off from a HITL stage) is its last.
+      // with no preset, or one handed off with no AFK stage ahead) is its last.
       const from = stageOf(task, run!.stage);
       if (from?.mode !== 'AFK') {
         task.state = 'in-review';

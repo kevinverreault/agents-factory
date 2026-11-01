@@ -1,5 +1,5 @@
 import { relative, isAbsolute } from 'node:path';
-import { GitError, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree } from '../git/git.ts';
+import { GitError, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree, type WorktreeState } from '../git/git.ts';
 
 type CloneSetup = { originUrl?: string | null; defaultBranch?: string | null };
 
@@ -25,11 +25,15 @@ export class FakeGit implements Git {
   private readonly changes = new Map<string, Set<string>>();
   // Each commit's files, by path from the top.
   private readonly trees = new Map<string, Map<string, string>>();
-  private commits = 0;
+  private commitCount = 0;
   // What each worktree's AFK run broke, as the check after the run says it.
   private readonly broken = new Map<string, string[]>();
   // The worktrees checked after a run, each with the branches it was told to ignore.
   readonly checked: { worktreePath: string; branches: string[] }[] = [];
+  // Each worktree's remotes with a `pushurl`, and theirs.
+  private readonly pushUrls = new Map<string, Map<string, string>>();
+  // The commits made through the port, in order.
+  readonly commits: { worktreePath: string; paths: string[]; message: string }[] = [];
 
   addClone(path: string, { originUrl = null, defaultBranch = null }: CloneSetup = {}): void {
     const clone: FakeClone = {
@@ -43,7 +47,7 @@ export class FakeGit implements Git {
       unreachable: null,
     };
     if (defaultBranch) {
-      const start = this.commit();
+      const start = this.newCommit();
       clone.origin.set(defaultBranch, start);
       clone.fetched.set(defaultBranch, start);
       clone.branches.set(defaultBranch, start);
@@ -62,7 +66,7 @@ export class FakeGit implements Git {
   advanceOrigin(clonePath: string, branch: string, files: Record<string, string> = {}): string {
     const clone = this.cloneAt(clonePath);
     const before = clone.origin.get(branch);
-    const tip = this.commit(new Map([...(before ? this.trees.get(before)! : []), ...Object.entries(files)]));
+    const tip = this.newCommit(new Map([...(before ? this.trees.get(before)! : []), ...Object.entries(files)]));
     clone.origin.set(branch, tip);
     return tip;
   }
@@ -126,6 +130,41 @@ export class FakeGit implements Git {
     return paths.filter((path) => this.changes.get(worktreePath)?.has(path));
   }
 
+  // Something undoes the uncommitted change to `path` in the worktree.
+  discard(worktreePath: string, path: string): void {
+    this.changes.get(worktreePath)?.delete(path);
+  }
+
+  // Something checks `branch` out in the worktree instead of its own.
+  checkout(worktreePath: string, branch: string): void {
+    this.worktreeAt(worktreePath).branch = branch;
+  }
+
+  // Something sets the remote's `pushurl` in the worktree, or unsets it (null).
+  setPushUrl(worktreePath: string, remote: string, url: string | null): void {
+    const urls = this.pushUrls.get(worktreePath) ?? new Map<string, string>();
+    if (url === null) urls.delete(remote);
+    else urls.set(remote, url);
+    this.pushUrls.set(worktreePath, urls);
+  }
+
+  async worktreeState(worktreePath: string): Promise<WorktreeState> {
+    const { branch } = this.worktreeAt(worktreePath);
+    const pushUrls = [...(this.pushUrls.get(worktreePath)?.keys() ?? [])].map((remote) => `remote.${remote}.pushurl`);
+    return { branch, uncommitted: [...(this.changes.get(worktreePath) ?? [])], pushUrls };
+  }
+
+  async commit(worktreePath: string, paths: string[], message: string): Promise<string> {
+    const worktree = this.worktreeAt(worktreePath);
+    if (!paths.some((path) => this.changes.get(worktreePath)?.has(path))) throw new GitError('nothing to commit');
+    for (const path of paths) this.changes.get(worktreePath)?.delete(path);
+    const commit = this.newCommit(new Map(this.trees.get(worktree.head)));
+    worktree.head = commit;
+    this.cloneAt(worktree.linkedTo).branches.set(worktree.branch, commit);
+    this.commits.push({ worktreePath, paths, message });
+    return commit;
+  }
+
   // The run in the worktree breaks an invariant, which the check after it
   // reports with `reason`.
   breakInvariant(worktreePath: string, reason: string): void {
@@ -166,8 +205,8 @@ export class FakeGit implements Git {
     return { commit, files };
   }
 
-  private commit(files = new Map<string, string>()): string {
-    const commit = `c${++this.commits}`.padEnd(40, '0');
+  private newCommit(files = new Map<string, string>()): string {
+    const commit = `c${++this.commitCount}`.padEnd(40, '0');
     this.trees.set(commit, files);
     return commit;
   }

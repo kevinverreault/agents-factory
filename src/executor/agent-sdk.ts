@@ -149,6 +149,8 @@ export function agentSdkExecutor(): Executor {
       ended = event.type === 'runCompleted' || event.type === 'runFailed';
       run.sink.report(event);
     };
+    // How full the session is, as the main agent's latest API call left it.
+    let latest: { used: number; model: string } | null = null;
     try {
       for await (const message of run.query) {
         if (run.stopped) return;
@@ -156,10 +158,12 @@ export function agentSdkExecutor(): Executor {
           run.reportedStart = true;
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
         } else if (message.type === 'assistant' && !message.parent_tool_use_id) {
+          latest = contextOf(message.message) ?? latest;
           for (const event of eventsOf('assistant', message.uuid, message.message)) run.sink.converse(event);
         } else if (message.type === 'result' && run.mode === 'HITL') {
           // Every turn ends with a result, an interrupted one included.
-          report({ type: 'turnEnded', runId });
+          const window = latest && message.modelUsage[latest.model]?.contextWindow;
+          report({ type: 'turnEnded', runId, ...(latest && window && { context: { used: latest.used, window } }) });
         } else if (message.type === 'result') {
           // An AFK run is one turn on its first message, and takes no chat:
           // its result ends it, completed once the CLI exits, or failed.
@@ -350,6 +354,15 @@ export function eventsOf(type: 'user' | 'assistant', uuid: string, message: unkn
     if (block.type === 'tool_use' && block.name) return [{ type: 'toolUse', id, tool: block.name, summary: summarise(block.input) }];
     return [];
   });
+}
+
+// The context an API call's message leaves the session with: every token it
+// sent, cached or not, and every token it got back.
+function contextOf(message: unknown): { used: number; model: string } | null {
+  const { model, usage } = (message ?? {}) as { model?: unknown; usage?: Record<string, unknown> | null };
+  if (typeof model !== 'string' || !usage) return null;
+  const tokens = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'];
+  return { used: tokens.reduce((sum, field) => sum + (typeof usage[field] === 'number' ? (usage[field] as number) : 0), 0), model };
 }
 
 // What a tool call was pointed at, on one line.

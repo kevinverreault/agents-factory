@@ -4,12 +4,12 @@
 // directory, and only then may it subscribe or send commands.
 import type { Socket } from 'node:net';
 import type { ConversationEvent } from '../executor/executor.ts';
-import type { AutonomyLevel, OperatorCommand, Priority } from '../lifecycle/lifecycle.ts';
+import type { AutonomyLevel, HandoffChoices, OperatorCommand, Priority } from '../lifecycle/lifecycle.ts';
 import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 13;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
@@ -46,6 +46,11 @@ export type LaunchCommand = {
 // The advance sheet's confirm: the HITL task leaves its stage for the next
 // one, skipping the optional stages named in `skip`.
 export type AdvanceCommand = { type: 'advanceStage'; taskId: string; skip?: string[] };
+// The handoff sheet (`ctrl+h` or `/handoff`): opening it has the HITL run
+// write the brief, interrupting the agent mid-turn or resuming a parked
+// conversation, and `closeHandoff` backs out. `handoff` confirms it with the
+// brief and fields as the operator left them.
+export type HandoffCommand = { type: 'openHandoff'; taskId: string } | ({ type: 'handoff'; taskId: string } & HandoffChoices);
 // What a launch card offers in a repository. Replies with a `PresetsView`.
 export type PresetCommand = { type: 'listPresets'; repo: string };
 export type PresetsView = {
@@ -65,7 +70,15 @@ export type HookEvent = {
   tool_response?: unknown;
 };
 export type HookCommand = { type: 'hookEvent'; event: HookEvent };
-export type Command = OperatorCommand | DaemonCommand | RepoCommand | LaunchCommand | AdvanceCommand | PresetCommand | HookCommand;
+export type Command =
+  | OperatorCommand
+  | DaemonCommand
+  | RepoCommand
+  | LaunchCommand
+  | AdvanceCommand
+  | HandoffCommand
+  | PresetCommand
+  | HookCommand;
 
 export type DaemonStatus = {
   pid: number;

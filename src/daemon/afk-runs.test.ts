@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
+import { handOff } from '../testing/handoff.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -93,7 +94,7 @@ describe('the slot cap', () => {
     await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Plan the billing page', mode: 'HITL', submit: true });
     await operator.send({ type: 'open', taskId: 'T3' });
     expect((await tui.until((state) => state.tasks.T3?.liveRunId === 'R2')).slots).toEqual({ active: 1, cap: 1 });
-    await operator.send({ type: 'handoff', taskId: 'T3', autonomy: 'L1' });
+    await handOff(operator, tui, factory.executor, 'T3');
     await operator.send(afk('Hotfix the outage', 'urgent'));
 
     const finish = async (runId: string, taskId: string) => {
@@ -105,12 +106,12 @@ describe('the slot cap', () => {
     await finish('R4', 'T3');
 
     expect(startedTasks(factory)).toEqual(['T1', 'T3', 'T4', 'T3', 'T2']);
-    // An AFK run takes no chat, so a resumed one is told to carry on.
+    // The handed-off run resumes the conversation on the brief.
     expect(factory.executor.started.at(-2)).toMatchObject({
       taskId: 'T3',
       mode: 'AFK',
       resumesSession: true,
-      firstMessage: 'Carry on, unattended, from where this conversation left off.',
+      firstMessage: '# Handoff brief\n\nCarry the work on.',
     });
   });
 

@@ -22,6 +22,10 @@ export type CloneFixture = {
   editFile(worktreePath: string, path: string): Promise<void>;
   // Commits everything changed in the worktree.
   commitAll(worktreePath: string): Promise<void>;
+  // Cuts `branch` and checks it out in the worktree instead of its own.
+  checkout(worktreePath: string, branch: string): Promise<void>;
+  // Sets the remote's `pushurl`, as seen from the worktree.
+  setPushUrl(worktreePath: string, remote: string, url: string): Promise<void>;
   dispose(): Promise<void>;
 };
 
@@ -117,6 +121,44 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
 
         await editFile(path, 'GLOSSARY.md');
         expect(await git.uncommitted(path, files)).toEqual(['GLOSSARY.md']);
+      }));
+
+    test('a worktree’s state tells the branch checked out, every uncommitted path and each remote’s pushurl', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, editFile, checkout, setPushUrl }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        expect(await git.worktreeState(path)).toEqual({ branch: 'factory/T1-a', uncommitted: [], pushUrls: [] });
+
+        await editFile(path, 'GLOSSARY.md');
+        await editFile(path, 'src/sso cookies.ts');
+        await checkout(path, 'spike');
+        await setPushUrl(path, 'origin', 'https://github.com/someone/else.git');
+
+        expect(await git.worktreeState(path)).toEqual({
+          branch: 'spike',
+          uncommitted: ['GLOSSARY.md', 'src/sso cookies.ts'],
+          pushUrls: ['remote.origin.pushurl'],
+        });
+      }));
+
+    test('a commit takes exactly the paths given, new files included, onto the branch, and leaves other changes uncommitted', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, editFile }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        const before = (await git.worktrees(clone))[0]!.head;
+        await editFile(path, 'GLOSSARY.md');
+        await editFile(path, 'docs/adr/0001 sso cookies.md');
+        await editFile(path, 'src/scratch.ts');
+
+        const commit = await git.commit(path, ['GLOSSARY.md', 'docs/adr/0001 sso cookies.md'], 'Handoff of T1');
+
+        expect(commit).not.toBe(before);
+        expect(await git.worktrees(clone)).toEqual([{ path, branch: 'factory/T1-a', head: commit }]);
+        expect((await git.worktreeState(path)).uncommitted).toEqual(['src/scratch.ts']);
       }));
 
     test('a task worktree stops working when its clone moves, and works again once repaired from the new path', () =>
