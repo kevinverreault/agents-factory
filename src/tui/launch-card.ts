@@ -221,7 +221,8 @@ function step(draft: Draft, card: Card, repositories: string[], input: string, k
   return draft;
 }
 
-function cycle<T>(values: readonly T[], current: T, by: number): T {
+// The value `by` steps from `current` in `values`, wrapping round.
+export function cycle<T>(values: readonly T[], current: T, by: number): T {
   if (values.length === 0) return current;
   const at = values.indexOf(current);
   return values[(at + by + values.length) % values.length]!;

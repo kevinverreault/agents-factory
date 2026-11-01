@@ -94,6 +94,13 @@ The launch card's start stage picker offers the stages whose `args` the launch i
 - raises a `stage-blocked` attention request instead, naming what's missing, when the next stage's `args` can't be filled. The run still ends, and the task stays at the stage it was leaving, to advance from again once the request is answered.
 - past the last stage, puts the root task in review.
 
+**HITL → AFK.** The agent may call `propose_handoff`, shown as a banner that changes nothing else. Only the operator hands off, from any HITL stage, with `/handoff` (or `ctrl+h`, where the terminal tells it from Backspace). That interrupts an agent mid-turn, drops an open question card and any queued messages, and opens the handoff sheet. The HITL run writes the handoff brief (goal, decided, done when, out of scope, links) through `write_handoff_brief` as its last turn, and a task with no live run first resumes its session just for that. The sheet hands off to the first AFK stage from the task's own stage on, skipping the remaining HITL stages, and pre-fills its fields from that stage: continue-as (resume, or fresh from the brief once the conversation fills more than 60% of the context window), autonomy (L1 until the sandbox arrives), tier and max turns. `esc` backs out and the conversation carries on. Confirming:
+
+- is refused until the agent has written the brief, and blocked while the task branch isn't checked out, the worktree has changes to files that are no artifact of the task, or a remote has a `pushurl`.
+- commits the task's uncommitted artifacts (its glossary and ADR edits) to the task branch, under the operator's identity, as the HITL work they are.
+- ends the HITL run `handed off` and queues the AFK stage's run. Its first message is the stage's skill, then the edited brief, which also becomes the task's goal of record. Args an early handoff skipped the stages for are left out, and the brief stands in for them. Fresh from the brief starts a new session.
+- with no AFK stage ahead (or no preset), queues one AFK run on the brief, after which the root task goes In review.
+
 **AFK → AFK.** No one confirms: when an AFK stage's run completes, the factory checks the boundary itself.
 
 - When the stage's exit holds, the task moves to the next stage and queues its run, the skill invoked on its filled `args`, resuming the session or starting a new one with `context: fresh`. It queues as work continuing something in flight, so the scheduler gives it a slot after urgent work and before work not yet started.

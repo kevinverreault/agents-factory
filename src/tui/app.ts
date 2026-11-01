@@ -1,7 +1,7 @@
 // The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
-// a task (`t`) and Needs you's answer sheet (`a`). Plain .ts (no JSX) so Node runs it without a
-// build step.
+// a task (`t`), handing one off (`ctrl+h`) and Needs you's answer sheet
+// (`a`). Plain .ts (no JSX) so Node runs it without a build step.
 import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, useStdin, type Key } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
@@ -120,6 +120,16 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       if (!reply.ok) retiers.current.delete(task.id);
     });
   };
+  // Hands the selected HITL task off from its conversation, where the
+  // handoff sheet opens: a parked one first resumes to write the brief.
+  const handOff = () => {
+    const task = tab === 'tasks' ? tasks[cursor] : undefined;
+    if (task?.mode !== 'HITL') return;
+    void connection.send({ type: 'openHandoff', taskId: task.id }).then((reply) => {
+      setRefusal(reply.ok ? null : reply.reason);
+      if (reply.ok) setView({ kind: 'conversation', taskId: task.id });
+    });
+  };
   // A digit on the selected item's answer sheet: an option of its question's
   // card (toggled on a multi-select, which enter confirms), or a choice.
   const answer = (input: string, key: Key) => {
@@ -173,6 +183,7 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
       if (key.downArrow) move(1);
       if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
       if (input === 't') retier();
+      if (key.ctrl && input === 'h') handOff();
       if (input === 'r' && unregistered) {
         void connection.send({ type: 'registerRepo', path: unregistered.path }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
       }

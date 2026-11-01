@@ -1,7 +1,7 @@
 // Seam 2: the TUI against an in-memory fake protocol client.
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
+import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { PresetsView } from '../protocol/protocol.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
 import { App } from './app.ts';
@@ -19,7 +19,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [] };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -272,7 +272,7 @@ describe('launching and conversing', () => {
     question: null,
     permission: null,
     stage: 'grill' as string | null,
-    proposal: null as { reason: string } | null,
+    proposal: null as RunView['proposal'],
     tier: 'sonnet' as const,
     model: 'claude-sonnet-5-5',
     maxTurns: null,
@@ -843,7 +843,7 @@ describe('launching and conversing', () => {
     await eventually(() => expect(app.lastFrame()).toContain('ctrl+n advance'));
     expect(app.lastFrame()).not.toContain('proposes');
 
-    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, proposal: { reason: 'The login flow is settled.' } } }]);
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, proposal: { kind: 'advance', reason: 'The login flow is settled.' } } }]);
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('The agent proposes advancing: The login flow is settled. ctrl+n review'));
 
     app.stdin.write(CTRL_N);
@@ -925,6 +925,144 @@ describe('launching and conversing', () => {
     await settle();
     expect(app.lastFrame()).not.toContain('Advance');
     expect(app.lastFrame()).not.toContain('ctrl+n');
+  });
+
+  // ctrl+h as a terminal with the kitty keyboard protocol sends it; Windows
+  // Terminal sends Backspace's byte instead, so `/handoff` is the way there.
+  const CTRL_H = '\x1b[104;5u';
+  const brief = {
+    goal: 'Failed webhook deliveries are retried.',
+    decided: ['Retry 5xx and timeouts only.'],
+    doneWhen: [],
+    outOfScope: [],
+    links: ['acme/widgets#31'],
+  };
+  const sheet = {
+    brief: null,
+    stage: 'implement',
+    continueAs: 'resume' as const,
+    autonomy: 'L1' as const,
+    tier: 'sonnet' as const,
+    maxTurns: 300,
+    contextShare: 0.23,
+    readiness: { blockers: [], toCommit: ['GLOSSARY.md'] },
+  };
+
+  test('the agent’s proposal to hand off shows as a banner, and ctrl+h or /handoff opens the handoff sheet, even over an open card', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toContain('/handoff hand off'));
+
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, proposal: { kind: 'handoff', reason: 'The retry policy is settled.' } } }]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('The agent proposes handing off: The retry policy is settled. ctrl+h or /handoff review'));
+
+    app.stdin.write(CTRL_H);
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'openHandoff', taskId: 'T1' }]));
+
+    const question = {
+      id: 'toolu_1',
+      questions: [{ question: 'Retry 4xx too?', header: 'Retries', options: [{ label: 'No', description: '' }], multiSelect: false }],
+    };
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, question } }]);
+    await eventually(() => expect(app.lastFrame()).toContain('Retry 4xx too?'));
+    await type(app, '/handoff');
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'openHandoff', taskId: 'T1' }, { type: 'openHandoff', taskId: 'T1' }]));
+  });
+
+  test('the sheet waits on the agent’s brief, then the operator edits it, changes continue-as and max turns, and enter hands off', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: sheet }]), runs: { R1: run } }, { connection });
+    app.stdin.write('\r');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('Hand off T1 to implement (AFK)');
+      expect(frame).toContain('The agent is writing the brief…');
+      expect(frame).toContain('the conversation fills 23% of the context window');
+      expect(frame).toContain('The handoff commit takes GLOSSARY.md.');
+    });
+    // Enter waits for the brief: the operator confirms what they have read.
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.sent).toEqual([]);
+
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...onLean, handoff: { ...sheet, brief } } }]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› Goal Failed webhook deliveries are retried\. Decided - Retry 5xx and timeouts only\. \+ Done when \+/));
+
+    await type(app, ' with backoff');
+    // Down past the decided item, onto the line that adds one.
+    await press(app, DOWN, DOWN);
+    await type(app, 'Never 4xx.');
+    // Down to the fields, past done when's, out of scope's and links' lines.
+    await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, RIGHT, DOWN, DOWN, '\x7f', '\x7f', '\x7f', '5', '0');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('- Never 4xx.');
+      expect(frame).toContain('Continue as ‹ fresh ›');
+      expect(frame).toContain('› Max turns 50');
+    });
+
+    app.stdin.write('\r');
+    await eventually(() =>
+      expect(connection.sent).toEqual([
+        {
+          type: 'handoff',
+          taskId: 'T1',
+          brief: { ...brief, goal: 'Failed webhook deliveries are retried. with backoff', decided: ['Retry 5xx and timeouts only.', 'Never 4xx.'] },
+          continueAs: 'fresh',
+          autonomy: 'L1',
+          tier: 'sonnet',
+          maxTurns: 50,
+        },
+      ]),
+    );
+  });
+
+  test('ctrl+h on a HITL task in the list hands it off from its conversation, a parked one included', async () => {
+    const connection = new FakeConnection();
+    const parked = { ...onLean, state: 'queued' as const, label: 'Ready for you', liveRunId: null };
+    const ended = { ...run, status: 'ended' as const, outcome: 'parked' as const };
+    const afk = task('T2', 'Implement the store', 'running', 'Running');
+    const { app } = await started({ ...factoryState([parked, afk]), runs: { R1: ended } }, { connection });
+
+    await press(app, DOWN, CTRL_H);
+    await settle();
+    expect(connection.sent).toEqual([]);
+    await press(app, UP, CTRL_H);
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'openHandoff', taskId: 'T1' }]));
+    await eventually(() => expect(app.lastFrame()).toContain('claude --resume'));
+  });
+
+  test('a blocked handoff shows what blocks it, and esc backs out of the sheet to keep talking', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('handoff', { ok: false, reason: 'The handoff is blocked. spike is checked out.' });
+    const blocked = { ...sheet, brief, readiness: { blockers: ['factory/T1 isn’t checked out in T1’s worktree: spike is.'], toCommit: [] } };
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: blocked }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    app.stdin.write('\r');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('✗ factory/T1 isn’t checked out in T1’s worktree: spike is.');
+      expect(frame).toContain('Nothing to commit.');
+    });
+
+    app.stdin.write('\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('The handoff is blocked. spike is checked out.'));
+    // The conversation's draft line takes no keys while the sheet is open.
+    await type(app, 'x');
+    expect(app.lastFrame()).not.toContain('› x');
+
+    app.stdin.write('\x1b');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'closeHandoff', taskId: 'T1' }));
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: onLean }]);
+    await eventually(() => expect(app.lastFrame()).not.toContain('Hand off T1'));
+    await settle();
+    await type(app, 'One more thing');
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'sendMessage', taskId: 'T1', text: 'One more thing' }));
+    expect(connection.sent.filter((command) => command.type === 'interrupt')).toEqual([]);
   });
 });
 
