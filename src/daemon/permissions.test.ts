@@ -101,7 +101,7 @@ describe('a tool call no rule covers', () => {
           tool: 'Bash',
           summary: 'npm publish',
           rule: 'Bash(npm publish)',
-          uncovered: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
+          proposed: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
         },
       },
     ]);
@@ -120,9 +120,27 @@ describe('a tool call no rule covers', () => {
       reason: "Bash: npm install zod · sed -i 's/a/b/' src/a.ts · sed -i 's/c/d/' src/b.ts",
       permission: {
         rule: "Bash(npm install zod && sed -i 's/a/b/' src/a.ts && npm test && sed -i 's/c/d/' src/b.ts)",
-        uncovered: [
+        proposed: [
           { part: 'npm install zod', rule: 'Bash(npm install *)' },
           { part: "sed -i 's/a/b/' src/a.ts", rule: 'Bash(sed -i *)' },
+        ],
+      },
+    });
+  });
+
+  test('run by an interpreter, a script proposes a pattern for that script, and inline code only its exact command', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    await tui.until((state) => state.tasks.T1?.label === 'Running');
+
+    factory.executor.askPermission('R1', bash('toolu_1', 'node scripts/seed.js --fresh; python -c "import this"'));
+
+    const state = await tui.until((state) => state.attentionQueue.length === 1);
+    expect(state.attentionQueue[0]).toMatchObject({
+      permission: {
+        proposed: [
+          { part: 'node scripts/seed.js --fresh', rule: 'Bash(node scripts/seed.js *)' },
+          { part: 'python -c "import this"', rule: 'Bash(python -c "import this")' },
         ],
       },
     });

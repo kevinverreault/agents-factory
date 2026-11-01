@@ -1123,7 +1123,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const operatorRules = readOperatorRules(options.permissionsPath);
     const parts = uncovered([...FACTORY_ALLOW_LIST, ...operatorRules.rules], call);
     if (parts.length === 0) return executor.permit(runId, call.id, { allow: true });
-    void dispatch({ type: 'permissionAsked', runId, call, uncovered: parts, rulesProblem: operatorRules.error }).then((reply) => {
+    void dispatch({ type: 'permissionAsked', runId, call, parts, rulesProblem: operatorRules.error }).then((reply) => {
       if (reply.ok) return;
       if (lifecycle.runs[runId]?.status === 'suspended') held.set(runId, [...(held.get(runId) ?? []), call]);
       else executor.permit(runId, call.id, { allow: false, message: reply.reason });

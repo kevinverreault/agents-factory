@@ -19,6 +19,7 @@ import { edit } from './text-input.ts';
 export type Choice =
   | { label: string; command: Command; opens?: boolean }
   | { label: string; fields: Field[]; send: (values: string[]) => Command | null; enter: string };
+// One line the operator types into, under its prompt.
 export type Field = { prompt: string; value: string };
 
 // A choice that takes one typed note, which it sends unless it is blank.
@@ -26,11 +27,16 @@ function noted(label: string, prompt: string, enter: string, command: (text: str
   return { label, fields: [{ prompt, value: '' }], send: ([text = '']) => (text.trim() ? command(text.trim()) : null), enter };
 }
 
+// An answer to a permission request that allows by rules: what its choice
+// reads, what enter does, and the answer the confirmed rules make.
+type ByRules = { label: string; enter: string; answer: (rules: string[]) => PermissionAnswer };
+const FOR_THIS_TASK: ByRules = { label: 'Allow for this task', enter: 'allows for this task', answer: (rules) => ({ allow: 'task', rules }) };
+
 // A choice that allows the call by rules the operator can widen or narrow
 // first: one field per part no rule covers, under that part, holding the
 // rule proposed for it. Enter sends the rules left that aren't blank.
-function byRules(label: string, enter: string, permission: Permission, answer: (rules: string[]) => PermissionAnswer, taskId: string): Choice {
-  const proposed = permission.uncovered ?? [{ part: permission.summary, rule: permission.rule }];
+function byRules(taskId: string, permission: Permission, { label, enter, answer }: ByRules): Choice {
+  const proposed = permission.proposed ?? [{ part: permission.summary, rule: permission.rule }];
   return {
     label: `${label}: ${proposed.map(({ rule }) => rule).join(', ')}`,
     fields: proposed.map(({ part, rule }) => ({ prompt: part, value: rule })),
@@ -65,7 +71,7 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
     case 'permission': {
       // Requests stored before they named their call allow it for the task as it is.
       const forTask: Choice = item.permission
-        ? byRules('Allow for this task', 'allows for this task', item.permission, (rules) => ({ allow: 'task', rules }), taskId)
+        ? byRules(taskId, item.permission, FOR_THIS_TASK)
         : { label: 'Allow for this task: this call', command: { type: 'answer', taskId, permission: { allow: 'task' } } };
       return [
         { label: 'Allow once', command: { type: 'answer', taskId, permission: { allow: 'once' } } },
@@ -131,6 +137,8 @@ export function useAnswering(
   const card = item?.kind === 'attention' && sheet.current.cardFor === itemKey ? sheet.current.card : newCard();
   const form = itemKey !== null && sheet.current.form?.for === itemKey ? sheet.current.form : null;
   const formChoice = form && item ? choicesFor(item, task)[form.choice] : undefined;
+  // The fields being filled in, with the choice they are for, while it still takes them.
+  const filling = form && formChoice && 'fields' in formChoice ? { form, choice: formChoice } : null;
   const confirm = itemKey !== null && sheet.current.confirm?.for === itemKey ? sheet.current.confirm : null;
 
   const send = (command: Command, opens = false) => {
@@ -172,16 +180,17 @@ export function useAnswering(
   // (or tab) move between them, enter sends what they make, if anything,
   // and esc sets them aside.
   const fill = (input: string, key: Key) => {
-    const command = key.return && form && formChoice && 'fields' in formChoice ? formChoice.send(form.values) : null;
-    if (key.escape || !form || !formChoice || !('fields' in formChoice)) sheet.current.form = null;
-    else if (key.return) {
+    if (key.escape || !filling) sheet.current.form = null;
+    else {
+      const { form, choice } = filling;
+      const command = key.return ? choice.send(form.values) : null;
       if (command) {
         sheet.current.form = null;
         send(command);
-      }
-    } else if (key.upArrow) form.at = Math.max(form.at - 1, 0);
-    else if (key.downArrow || key.tab) form.at = Math.min(form.at + 1, form.values.length - 1);
-    else form.values[form.at] = edit(form.values[form.at]!, input, key) ?? form.values[form.at]!;
+      } else if (key.upArrow) form.at = Math.max(form.at - 1, 0);
+      else if (key.downArrow || key.tab) form.at = Math.min(form.at + 1, form.values.length - 1);
+      else form.values[form.at] = edit(form.values[form.at]!, input, key) ?? form.values[form.at]!;
+    }
     rerender();
   };
   // A key while the sheet asks whether to go ahead anyway: y does, n or esc doesn't.
@@ -196,10 +205,11 @@ export function useAnswering(
   return {
     card,
     // The fields being filled in, if any: while they are, every key is theirs.
-    form:
-      form && formChoice && 'fields' in formChoice
-        ? { fields: formChoice.fields.map(({ prompt }, i) => ({ prompt, value: form.values[i]! })), at: form.at, enter: formChoice.enter }
-        : null,
+    form: filling && {
+      fields: filling.choice.fields.map(({ prompt }, i) => ({ prompt, value: filling.form.values[i]! })),
+      at: filling.form.at,
+      enter: filling.choice.enter,
+    },
     // What a refusal asks back, if anything: while it does, every key is its answer's.
     confirm: confirm?.reason ?? null,
     key: (input: string, key: Key) => (confirm ? goAhead(input, key) : form ? fill(input, key) : answer(input, key)),

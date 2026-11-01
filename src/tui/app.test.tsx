@@ -1235,7 +1235,7 @@ describe('answering from Needs you', () => {
       tool: 'Bash',
       summary: 'npm publish',
       rule: 'Bash(npm publish)',
-      uncovered: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
+      proposed: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
     },
   };
 
@@ -1272,7 +1272,7 @@ describe('answering from Needs you', () => {
         tool: 'Bash',
         summary: "npm install zod && sed -i 's/a/b/' src/a.ts && npm test",
         rule: "Bash(npm install zod && sed -i 's/a/b/' src/a.ts && npm test)",
-        uncovered: [
+        proposed: [
           { part: 'npm install zod', rule: 'Bash(npm install *)' },
           { part: "sed -i 's/a/b/' src/a.ts", rule: 'Bash(sed -i *)' },
         ],
