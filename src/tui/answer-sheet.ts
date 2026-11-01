@@ -1,12 +1,15 @@
-// The answer sheet: the bottom pane of Needs you, for the selected item. A
-// question shows its card, whose options the digits pick; any other request
-// lists what each digit does. Ready and review items take no digits here.
-import { createElement as h } from 'react';
-import { Box, Text } from 'ink';
+// The answer sheet: the bottom pane of Needs you, for the selected item, and
+// of the conversation of a task that needs the operator. A question shows its
+// card, whose options the digits pick; any other request lists what each
+// digit does. Ready and review items take no digits here.
+import { createElement as h, useReducer, useRef } from 'react';
+import { Box, Text, type Key } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
+import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
-import type { Command } from '../protocol/protocol.ts';
-import { QuestionCard, type Card } from './question-card.ts';
+import type { Command, Reply } from '../protocol/protocol.ts';
+import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
+import { edit } from './text-input.ts';
 
 // What a digit on the sheet does. A choice that `opens` takes the operator
 // into the task's conversation once the daemon accepts it; one with a `note`
@@ -52,6 +55,84 @@ export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined)
   return task?.label ?? '';
 }
 
+// What `onReply` hears of a sent answer: the daemon's reply, the task it
+// answered for, and whether its choice opens that task's conversation.
+export type Answered = { reply: Reply; taskId: string; opens: boolean };
+
+// The operator answering an item on its sheet: `key` takes a key while the
+// digits are the sheet's. Keys typed in one burst arrive before a re-render,
+// so the card the operator is answering on, the note they are typing for a
+// choice, and the requests already answered, are kept across renders.
+// `onSend` hears of each answer as it goes out, `onReply` once it is back.
+export function useAnswering(
+  connection: FactoryConnection,
+  item: AttentionQueueItem | undefined,
+  task: TaskView | undefined,
+  { onSend, onReply }: { onSend?(): void; onReply(answered: Answered): void },
+) {
+  const sheet = useRef<{
+    card: Card;
+    cardFor: string | null;
+    note: { for: string; choice: number; draft: string } | null;
+    sent: Set<string>;
+  }>({ card: newCard(), cardFor: null, note: null, sent: new Set() });
+  const [, rerender] = useReducer((renders: number) => renders + 1, 0);
+  const card = item?.kind === 'attention' && sheet.current.cardFor === item.requestId ? sheet.current.card : newCard();
+  const note = item?.kind === 'attention' && sheet.current.note?.for === item.requestId ? sheet.current.note : null;
+
+  const send = (command: Command, opens = false) => {
+    if (item?.kind !== 'attention' || !item.taskId) return;
+    const { requestId, taskId } = item;
+    sheet.current.sent.add(requestId);
+    onSend?.();
+    void connection.send(command).then((reply) => {
+      if (!reply.ok) {
+        sheet.current.sent.delete(requestId);
+        if (sheet.current.cardFor === requestId) sheet.current.card = newCard();
+      }
+      onReply({ reply, taskId, opens });
+      rerender();
+    });
+  };
+  // A digit on the item's sheet: an option of its question's card (toggled
+  // on a multi-select, which enter confirms), or a choice.
+  const answer = (input: string, key: Key) => {
+    if (item?.kind !== 'attention' || !item.taskId || sheet.current.sent.has(item.requestId)) return;
+    if (item.question) {
+      if (sheet.current.cardFor !== item.requestId) Object.assign(sheet.current, { card: newCard(), cardFor: item.requestId });
+      const onCard = cardKey(item.question, sheet.current.card, '', input, key);
+      if (onCard.kind === 'card') sheet.current.card = onCard.card;
+      if (onCard.kind === 'answered') send({ type: 'answer', taskId: item.taskId, answers: onCard.answers });
+      rerender();
+      return;
+    }
+    const index = /^[1-9]$/.test(input) ? Number(input) - 1 : -1;
+    const choice = choicesFor(item, task)[index];
+    if (choice && 'note' in choice) {
+      sheet.current.note = { for: item.requestId, choice: index, draft: '' };
+      rerender();
+    } else if (choice) send(choice.command, choice.opens);
+  };
+  // A key while the operator types the note a choice takes: enter sends it,
+  // unless it is empty, and esc sets it aside.
+  const takeNote = (input: string, key: Key) => {
+    const choice = note && item && choicesFor(item, task)[note.choice];
+    if (key.escape || !choice || !('note' in choice)) sheet.current.note = null;
+    else if (key.return && note.draft.trim()) {
+      sheet.current.note = null;
+      send(choice.note(note.draft.trim()));
+    } else note.draft = edit(note.draft, input, key) ?? note.draft;
+    rerender();
+  };
+
+  return {
+    card,
+    // The note being typed, if any: while it is, every key is the note's.
+    note: note?.draft ?? null,
+    key: (input: string, key: Key) => (note ? takeNote(input, key) : answer(input, key)),
+  };
+}
+
 type Props = {
   item: AttentionQueueItem;
   task: TaskView | undefined;
@@ -61,9 +142,12 @@ type Props = {
   answering: boolean;
   // The note the operator is typing for a choice that takes one, if any.
   note: string | null;
+  // Whether esc gives the digits back to the screens: on Needs you, not in a
+  // conversation, whose own hint says what its keys do.
+  escBack?: boolean;
 };
 
-export function AnswerSheet({ item, task, card, answering, note }: Props) {
+export function AnswerSheet({ item, task, card, answering, note, escBack = true }: Props) {
   // A request about a repository itself has no task: the repository takes the title's place.
   const title = task ? `${task.id} ${task.title}` : item.kind === 'attention' ? item.repo : '';
   const question = item.kind === 'attention' ? item.question : null;
@@ -71,7 +155,7 @@ export function AnswerSheet({ item, task, card, answering, note }: Props) {
     ? note !== null
       ? 'enter denies · esc back'
       : answering
-      ? 'digits answer · esc back'
+      ? escBack ? 'digits answer · esc back' : null
       : 'a answer'
     : item.kind === 'ready' && task?.liveRunId
       ? 'enter opens the conversation'
