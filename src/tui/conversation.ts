@@ -2,8 +2,8 @@
 // session file and then live, with a side rail of the task's artifacts. A HITL
 // run's has a line for the operator's next message, and the advance and
 // handoff sheets over it; an AFK run never takes chat, so its view only
-// follows it. A task that needs the operator shows its request's answer
-// sheet, whose digits answer it here as on Needs you.
+// follows it until `c` takes the task over. A task that needs the operator
+// shows its request's answer sheet, whose digits answer it here as on Needs you.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
@@ -65,10 +65,16 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const request = state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId);
   const answers = useAnswering(connection, request, task, { onReply: ({ reply }) => tell(reply) });
   const answering = answerable(request, task);
+  // A live AFK task is talked to only once taken over, which `c` does from
+  // here too, unless the answer sheet is taking what the operator types.
+  const canTakeOver =
+    task?.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state) && answers.form === null && answers.confirm === null;
+  const takeOver = () => void connection.send({ type: 'takeOver', taskId }).then(tell);
 
   useInput((input, key) => {
     const typed = typing.current;
     if (key.ctrl && input === 'b') return onLeave();
+    if (canTakeOver && input === 'c') return takeOver();
     if (answering) return answers.key(input, key);
     if (!takesChat) return;
     // At any moment: mid-turn and over an open card too.
@@ -111,9 +117,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   }, { isActive: !advancing && !sheet });
   const { draft } = typing.current;
   const keys = answering
-    ? 'digits answer'
+    ? `digits answer${canTakeOver ? ' · c take over' : ''}`
     : !takesChat
-      ? 'AFK runs take no chat: take it over to talk to it'
+      ? `AFK runs take no chat${canTakeOver ? ': c takes it over to talk to it' : ''}`
       : question
         ? 'esc interrupt'
         : midTurn
