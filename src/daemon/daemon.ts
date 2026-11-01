@@ -58,6 +58,7 @@ import type { Routes } from '../models/routing.ts';
 import { covers, FACTORY_ALLOW_LIST, readOperatorRules, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
+  appStages,
   builtInPresets,
   issueRefs,
   launchDefault,
@@ -67,7 +68,6 @@ import {
   REPO_PRESETS,
   resolvePreset,
   userPresets,
-  writingStages,
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
@@ -414,11 +414,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const start = planStart(resolved.preset, command.stage, action);
       if ('error' in start) return { ok: false, reason: start.error };
       // No fallback to the operator's account (ADR 0004): a task whose
-      // preset writes to GitHub launches only where the App can write.
-      const writes = writingStages(resolved.preset);
-      if (writes.length) {
+      // preset has AFK stages launches only where the App can work.
+      const stages = appStages(resolved.preset);
+      if (stages.length) {
         const check = await checkApp(repo);
-        const blocked = appBlock(resolved.preset.name, writes, check);
+        const blocked = appBlock(resolved.preset.name, stages, check);
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
       }
       action.preset = { ...resolved.preset, repoCommit: presets.commit };

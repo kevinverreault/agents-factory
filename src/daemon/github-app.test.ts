@@ -1,7 +1,8 @@
 // Seam 1: the factory identity (ADR 0004) through the client protocol.
 // `setup github` creates the App and keeps its private key in the credential
 // store alone; each repository says whether the App is installed on it, with
-// a fix; a launch whose preset writes to GitHub is blocked without it; and
+// a fix; a launch whose preset has AFK stages, which work as the App, is
+// blocked without it; and
 // AFK runs read GitHub through a read-only bot token, refreshed before it
 // expires, while HITL runs act as the operator.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -144,16 +145,21 @@ describe('whether the App is installed on a repository', () => {
 });
 
 describe('launching where the App isn’t installed', () => {
-  test('a preset with a stage that writes to GitHub is blocked with a reason, and one without isn’t', async () => {
+  test('a preset with AFK stages is blocked with a reason, whether or not they write, and one without isn’t', async () => {
     const { factory, operator, tui } = await attached();
     await register(factory, operator);
 
     expect(await operator.send(launch('main-flow'))).toEqual({
       ok: false,
       reason:
-        'main-flow writes to GitHub as the factory’s App (at implement, open-pr). ' +
+        'main-flow works unattended as the factory’s App (at implement, review, pr-body, open-pr). ' +
         'The factory’s GitHub App, agents-factory-operator, isn’t installed on acme/widgets. ' +
         'Install it from https://github.com/apps/agents-factory-operator/installations/new, then launch again.',
+    });
+    // Its one AFK run writes nothing to GitHub, but reads it as the App.
+    expect(await operator.send(launch('child'))).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/^child works unattended as the factory’s App \(at work\)\./),
     });
     expect(await operator.send(launch('setup', ''))).toEqual({ ok: true, value: { taskId: 'T1' } });
     expect(Object.keys(tui.state().tasks)).toEqual(['T1']);
@@ -233,19 +239,21 @@ describe('what a run reads GitHub as', () => {
     expect(factory.github.minted).toEqual([]);
   });
 
-  test('an AFK run whose bot token can’t be minted fails with the reason', async () => {
-    const { factory, operator, tui } = await attached();
-    await register(factory, operator);
-    // The child preset writes nothing, so the launch isn't blocked.
+  test('an AFK run whose bot token can’t be minted when it starts fails with the reason', async () => {
+    const { factory, operator, tui } = await running('child');
+    await operator.send({ type: 'setSlotCap', cap: 1 });
     await operator.send(launch('child'));
+    await tui.until((state) => state.tasks.T2?.label === 'Queued');
+    factory.github.unreachable('GitHub couldn’t be reached: socket hang up');
 
-    const state = await tui.until((state) => state.tasks.T1?.state === 'waiting');
-    const [request] = state.attentionQueue;
-    expect(request).toMatchObject({
+    factory.executor.report('R1', { type: 'runCompleted' });
+
+    const state = await tui.until((state) => state.tasks.T2?.state === 'waiting');
+    expect(state.attentionQueue.find((item) => item.taskId === 'T2')).toMatchObject({
       kind: 'attention',
-      reason: 'The factory couldn’t give the run its read-only GitHub token: The factory’s App isn’t installed on acme/widgets.',
+      reason: 'The factory couldn’t give the run its read-only GitHub token: GitHub couldn’t be reached: socket hang up',
     });
-    expect(factory.executor.started).toEqual([]);
+    expect(factory.executor.started.map((run) => run.taskId)).toEqual(['T1']);
   });
 });
 

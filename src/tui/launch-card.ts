@@ -3,8 +3,8 @@
 // stage the handoff fields: autonomy level (L1 until the sandbox arrives),
 // max turns and priority. The
 // daemon resolves and freezes the preset; the card offers what it lists for
-// the repository. Where the factory's App isn't installed, a preset that
-// writes to GitHub shows why its launch is blocked, and `ctrl+o` opens the
+// the repository. Where the factory's App isn't installed, a preset with
+// AFK stages shows why its launch is blocked, and `ctrl+o` opens the
 // App's installation settings.
 import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
@@ -91,7 +91,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const card = cardFor(draft);
   // As last checked: the launch itself checks afresh.
   const app = draft.repo ? (state.repositories[draft.repo]?.app ?? null) : null;
-  const blocked = card.choice && 'writes' in card.choice ? appBlock(card.choice.name, card.choice.writes, app) : null;
+  const blocked = card.choice && 'appStages' in card.choice ? appBlock(card.choice.name, card.choice.appStages, app) : null;
   const fixUrl = blocked && app && !app.installed ? app.fixUrl : null;
 
   useInput((input, key) => {

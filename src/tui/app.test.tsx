@@ -354,15 +354,15 @@ describe('launching and conversing', () => {
           { id: 'tickets', mode: 'HITL', model: 'opus', needs: ['issues'] },
           { id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['issues'] },
         ],
-        writes: ['implement', 'open-pr'],
+        appStages: ['implement', 'review', 'pr-body', 'open-pr'],
       },
       { name: 'nightly', source: 'user', error: 'Preset nightly (user, nightly.preset.yaml): stage implement: exit all-green is not an exit condition.' },
-      { name: 'quick', source: 'built-in', description: null, startStages: [{ id: 'grill', mode: 'HITL', model: 'opus', needs: ['prompt'] }], writes: ['open-pr'] },
-      { name: 'setup', source: 'built-in', description: null, startStages: [{ id: 'setup', mode: 'HITL', model: 'sonnet', needs: [] }], writes: [] },
+      { name: 'quick', source: 'built-in', description: null, startStages: [{ id: 'grill', mode: 'HITL', model: 'opus', needs: ['prompt'] }], appStages: ['implement', 'review', 'pr-body', 'open-pr'] },
+      { name: 'setup', source: 'built-in', description: null, startStages: [{ id: 'setup', mode: 'HITL', model: 'sonnet', needs: [] }], appStages: [] },
     ],
   };
 
-  test('where the App isn’t installed, a preset that writes to GitHub shows why, and ctrl+o opens the installation settings', async () => {
+  test('where the App isn’t installed, a preset with AFK stages shows why, and ctrl+o opens the installation settings', async () => {
     const connection = inWidgets();
     connection.replyTo('listPresets', { ok: true, value: presetsView });
     const fixUrl = 'https://github.com/apps/agents-factory-kevin/installations/new';
@@ -380,7 +380,7 @@ describe('launching and conversing', () => {
     await settle();
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toContain('main-flow writes to GitHub as the factory’s App (at implement, open-pr).');
+      expect(frame).toContain('main-flow works unattended as the factory’s App (at implement, review, pr-body, open-pr).');
       expect(frame).toContain('isn’t installed on acme/widgets.');
       expect(frame).toContain('ctrl+o opens its installation settings');
     });
@@ -391,13 +391,13 @@ describe('launching and conversing', () => {
     expect(app.lastFrame()).toContain('Launch a task');
     // Once the operator has installed it, the fresh check lifts the block.
     connection.servePatch([{ op: 'set', path: ['repositories', 'acme/widgets'], value: { ...uninstalled, app: { installed: true, checkedAt: 2 } } }]);
-    await eventually(() => expect(app.lastFrame()).not.toContain('writes to GitHub'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('works unattended'));
     connection.servePatch([{ op: 'set', path: ['repositories', 'acme/widgets'], value: uninstalled }]);
 
-    // A preset that writes nothing launches as usual.
+    // A preset with no AFK stage launches as usual.
     await press(app, UP, UP, LEFT);
     await eventually(() => expect(app.lastFrame()).toMatch(/Preset\s+‹ setup \(built-in\) ›/));
-    expect(app.lastFrame()).not.toContain('writes to GitHub');
+    expect(app.lastFrame()).not.toContain('works unattended');
   });
 
   test('a start stage that needs no launch input launches with an empty prompt', async () => {
