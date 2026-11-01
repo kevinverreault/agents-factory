@@ -30,8 +30,9 @@ export class FakeGit implements Git {
   private commitCount = 0;
   // What each worktree's AFK run broke, as the check after the run says it.
   private readonly broken = new Map<string, string[]>();
-  // The worktrees checked after a run, each with the branches it was told to ignore.
-  readonly checked: { worktreePath: string; branches: string[] }[] = [];
+  // The worktrees checked after a run, each with the branches it was told to
+  // ignore and the run's committer.
+  readonly checked: { worktreePath: string; branches: string[]; committer: string }[] = [];
   // Each worktree's remotes with a `pushurl`, and theirs.
   private readonly pushUrls = new Map<string, Map<string, string>>();
   // The commits made through the port, in order.
@@ -227,12 +228,12 @@ export class FakeGit implements Git {
 
   async snapshot(worktreePath: string): Promise<RunSnapshot> {
     const worktree = this.worktreeAt(worktreePath);
-    return { branch: worktree.branch, head: worktree.head, refs: [], remotes: [], config: '', hooks: {} };
+    return { branch: worktree.branch, head: worktree.head, refs: [], remotes: [], config: [], hooks: {} };
   }
 
-  async violations(worktreePath: string, _before: RunSnapshot, branches: string[]): Promise<string[]> {
+  async violations(worktreePath: string, _before: RunSnapshot, branches: string[], committer: string): Promise<string[]> {
     this.worktreeAt(worktreePath);
-    this.checked.push({ worktreePath, branches });
+    this.checked.push({ worktreePath, branches, committer });
     return this.broken.get(worktreePath) ?? [];
   }
 

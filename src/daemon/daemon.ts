@@ -1087,7 +1087,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     );
     let broken: string[];
     try {
-      broken = await git.violations(guard.worktree, guard.snapshot, branches);
+      broken = await git.violations(guard.worktree, guard.snapshot, branches, FACTORY_IDENTITY.email);
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
       broken = [`The factory couldn't check the run's worktree: ${error.message}`];

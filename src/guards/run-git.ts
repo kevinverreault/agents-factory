@@ -99,12 +99,16 @@ export function prepareRunGit(dir: string, identity: FactoryIdentity, trailers: 
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: gitconfig,
     // Command-scope settings beat the repository's own config: its hooks
-    // path, credential helpers and identity can't take the run's place.
-    GIT_CONFIG_COUNT: '2',
+    // path, credential helpers and identity can't take the run's place. Every
+    // ref the run updates, tags too, is logged under its identity, by which
+    // the check after it tells the run's refs from the operator's.
+    GIT_CONFIG_COUNT: '3',
     GIT_CONFIG_KEY_0: 'core.hooksPath',
     GIT_CONFIG_VALUE_0: hooks,
     GIT_CONFIG_KEY_1: 'credential.helper',
     GIT_CONFIG_VALUE_1: '',
+    GIT_CONFIG_KEY_2: 'core.logAllRefUpdates',
+    GIT_CONFIG_VALUE_2: 'always',
     GIT_AUTHOR_NAME: identity.name,
     GIT_AUTHOR_EMAIL: identity.email,
     GIT_COMMITTER_NAME: identity.name,

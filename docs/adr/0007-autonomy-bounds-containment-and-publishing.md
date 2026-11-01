@@ -48,14 +48,15 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
   - no refs or remotes were added;
   - `.git/config` and `.git/hooks/` match their snapshot from before the run.
 
-  A violation is a run or iteration failure.
+  A violation is a run or iteration failure. The clone is the operator's too (ADR 0010), and their own sessions and editors change it while a run works, so the check counts only what the run could have done. A run logs every ref it updates under the bot's identity, so an added ref whose reflog names someone else is not the run's. A ref with no reflog still counts, unless the factory cut it for another task. In the config, other branches' `branch.*` settings don't count, and neither do the task branch's settings other than `remote`, `pushRemote` and `merge`. Tools such as `git push -u` and VS Code write those settings for the operator.
 
 - **A cleaned environment makes pushes fail in git itself.** Each AFK run gets:
   - `GIT_CONFIG_NOSYSTEM=1`, because Git for Windows's system config sets `credential.helper=manager`;
   - `GIT_CONFIG_GLOBAL` pointing at a per-run gitconfig, with the bot as author, no credential helper, and `pushInsteadOf` rewriting GitHub push URLs to an unreachable scheme, so fetch still works;
   - the read-only `GH_CONFIG_DIR` from ADR 0004;
   - `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY` and `SSH_AUTH_SOCK` unset;
-  - `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, and an ssh command that fails.
+  - `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, and an ssh command that fails;
+  - `core.logAllRefUpdates=always`, so every ref it makes, tags included, has a reflog naming it.
 
   `pushInsteadOf` is ignored when a remote has an explicit `pushurl`, which is why the handoff sheet and the check after each run look for one.
 
