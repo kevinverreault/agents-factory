@@ -6,21 +6,25 @@ const TOKEN_LIFETIME_MS = 60 * 60_000;
 
 type Minted = { repo: string; permissions: Permissions } & InstallationToken;
 
-type FakeIssue = { open: boolean; stateReason: 'completed' | null; labels: string[]; blockedBy: string[]; subIssues: string[]; comments: string[] };
+// Why an issue is in its state, as GitHub says: closed as completed, or reopened.
+type StateReason = 'completed' | 'reopened' | null;
+
+type FakeIssue = { open: boolean; stateReason: StateReason; labels: string[]; blockedBy: string[]; subIssues: string[]; comments: string[] };
 
 // GitHub as the factory identity sees it: Apps created from manifest codes,
 // the repositories each is installed on, a record of every token minted with
 // its scope, and issues with their sub-issues and native dependencies, with a
 // record of each write and the scope of the token it was made with. A test
-// can make it unreachable.
+// can make it unreachable, or hold its writes mid-call.
 export class FakeGitHub implements GitHub {
   readonly minted: Minted[] = [];
-  readonly writes: { action: 'close'; ref: string; comment: string; token: Minted }[] = [];
+  readonly writes: { action: 'close' | 'reopen'; ref: string; comment: string; token: Minted }[] = [];
   private readonly codes = new Map<string, string>();
   private readonly apps = new Map<number, FactoryApp>();
   private readonly installed = new Set<string>();
   private readonly issues = new Map<string, FakeIssue>();
   private failure: string | null = null;
+  private hold: { arrived(): void; released: Promise<void> } | null = null;
 
   constructor(private readonly clock: FakeClock) {}
 
@@ -47,6 +51,21 @@ export class FakeGitHub implements GitHub {
     this.failure = reason;
   }
 
+  // The writes from now on wait, unmade, until `release`: `held` settles
+  // once the first of them arrives.
+  holdWrites(): { held: Promise<void>; release(): void } {
+    const held = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+    this.hold = { arrived: held.resolve, released: released.promise };
+    return {
+      held: held.promise,
+      release: () => {
+        this.hold = null;
+        released.resolve();
+      },
+    };
+  }
+
   // An open issue (`owner/name#n`) with `labels`, added last among the
   // sub-issues of `parent`, and blocked by the issues `blockedBy`.
   addIssue(ref: string, { parent, labels = [], blockedBy = [] }: { parent?: string; labels?: string[]; blockedBy?: string[] } = {}): void {
@@ -65,7 +84,7 @@ export class FakeGitHub implements GitHub {
   }
 
   // The issue as GitHub has it now.
-  issueState(ref: string): { open: boolean; stateReason: 'completed' | null; comments: string[] } {
+  issueState(ref: string): { open: boolean; stateReason: StateReason; comments: string[] } {
     const { open, stateReason, comments } = this.issueAt(ref);
     return { open, stateReason, comments: [...comments] };
   }
@@ -106,12 +125,30 @@ export class FakeGitHub implements GitHub {
   }
 
   async closeIssue(token: string, ref: string, comment: string): Promise<void> {
+    await this.held();
     const minted = this.scoped(token, ref, 'issues', 'write');
     const issue = this.found(ref);
     issue.comments.push(comment);
     issue.open = false;
     issue.stateReason = 'completed';
     this.writes.push({ action: 'close', ref, comment, token: { ...minted, permissions: { ...minted.permissions } } });
+  }
+
+  async reopenIssue(token: string, ref: string, comment: string): Promise<void> {
+    await this.held();
+    const minted = this.scoped(token, ref, 'issues', 'write');
+    const issue = this.found(ref);
+    issue.comments.push(comment);
+    issue.open = true;
+    issue.stateReason = 'reopened';
+    this.writes.push({ action: 'reopen', ref, comment, token: { ...minted, permissions: { ...minted.permissions } } });
+  }
+
+  // Waits while writes are held.
+  private async held(): Promise<void> {
+    if (!this.hold) return;
+    this.hold.arrived();
+    await this.hold.released;
   }
 
   private reach(): void {

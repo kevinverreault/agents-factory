@@ -1,7 +1,7 @@
 // The GitHub port's contract, shared by the fake and the REST adapter so the
 // two can't drift apart.
 import { describe, expect, test } from 'vitest';
-import { GitHubError, READ_ONLY, type FactoryApp, type GitHub } from './github.ts';
+import { GitHubError, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub } from './github.ts';
 
 export type GitHubFixture = {
   github: GitHub;
@@ -49,6 +49,18 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
 
       expect(await github.readIssue(token, openIssue)).toMatchObject({ ref: openIssue, open: true });
       await expect(github.closeIssue(token, openIssue, 'A read-only token can’t close this.')).rejects.toThrow(GitHubError);
+      await expect(github.reopenIssue(token, openIssue, 'A read-only token can’t reopen this.')).rejects.toThrow(GitHubError);
+      expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
+    });
+
+    test('a ticket-writing token closes an issue and reopens it, leaving it open', async () => {
+      const { github, app, installedRepo, openIssue } = await makeFixture();
+      const { token } = await github.mintToken(app, installedRepo, TICKET_WRITE);
+
+      await github.closeIssue(token, openIssue, 'Closed by the contract test.');
+      expect(await github.readIssue(token, openIssue)).toMatchObject({ open: false });
+      await github.reopenIssue(token, openIssue, 'Reopened by the contract test.');
+
       expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
     });
 

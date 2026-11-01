@@ -198,6 +198,62 @@ describe('an iteration that fails the judgement', () => {
     expect(factory.github.issueState('acme/widgets#11').open).toBe(false);
   });
 
+  test('waits on the operator: nothing is retried or skipped until they answer', async () => {
+    const { factory, tui } = await looping();
+
+    factory.executor.report('R1', { type: 'runFailed', reason: 'The agent hit max turns.' });
+
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    factory.clock.advance(10 * 60_000);
+    expect(factory.executor.started.map(({ runId }) => runId)).toEqual(['R1']);
+    expect(tui.state().tasks.T1).toMatchObject({ label: 'Needs you', skippedTickets: [] });
+  });
+
+  test('skipped moves on to the next frontier ticket in a fresh session, leaving the skipped one open', async () => {
+    const { factory, operator, tui } = await looping();
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', skip: true })).toEqual({ ok: true });
+
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    const [first, next] = factory.executor.started;
+    expect(next).toMatchObject({ resumesSession: false });
+    expect(next!.sessionId).not.toBe(first!.sessionId);
+    expect(tui.state().runs.R2).toMatchObject({ ticket: 'acme/widgets#12' });
+    expect(tui.state().tasks.T1?.skippedTickets).toEqual(['acme/widgets#11']);
+    expect(factory.github.issueState('acme/widgets#11').open).toBe(true);
+  });
+
+  test('once only skipped tickets are left open, the loop ends and the next stage starts', async () => {
+    const { factory, operator, tui } = await looping();
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    await operator.send({ type: 'answer', taskId: 'T1', skip: true });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    await commit(factory, tui.state().tasks.T1!.worktree!, 'src/session.ts');
+
+    factory.executor.report('R2', { type: 'runCompleted' });
+
+    const reviewing = await tui.until((state) => state.tasks.T1?.liveRunId === 'R3');
+    expect(reviewing.tasks.T1).toMatchObject({ stage: 'review' });
+    expect(reviewing.tasks.T1!.closedTickets.map(({ ref }) => ref)).toEqual(['acme/widgets#12']);
+    expect(factory.github.issueState('acme/widgets#11').open).toBe(true);
+  });
+
+  test('can’t be skipped when it isn’t an iteration’s', async () => {
+    const { operator, tui } = await withSpec();
+    // An issue GitHub doesn't have: the factory can't read its tickets.
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#99'] });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(tui.state().attentionQueue).toMatchObject([{ attention: 'failure' }]);
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', skip: true })).toEqual({
+      ok: false,
+      reason: 'Only a failed iteration’s ticket can be skipped.',
+    });
+  });
+
   test('that left the tree dirty doesn’t close its ticket, even with a commit', async () => {
     const { factory, tui } = await looping();
     const worktree = tui.state().tasks.T1!.worktree!;
@@ -311,6 +367,138 @@ describe('the end of the stage', () => {
     expect(reviewing.tasks.T1!.closedTickets.map(({ ref }) => ref)).toEqual(['acme/widgets#11', 'acme/widgets#12']);
     // The ticket not ready for an agent was never worked.
     expect(factory.github.issueState('acme/widgets#13').open).toBe(true);
+  });
+});
+
+describe('finishing after this ticket', () => {
+  test('lets the live iteration finish and close its ticket, then ends the loop: the next stage starts', async () => {
+    const { factory, operator, tui } = await looping();
+
+    expect(await operator.send({ type: 'finishLoop', taskId: 'T1' })).toEqual({ ok: true });
+
+    expect(tui.state().tasks.T1).toMatchObject({ label: 'Running', liveRunId: 'R1', loop: { ticket: 'acme/widgets#11', finishing: true } });
+    expect(factory.executor.stopped).toEqual([]);
+    await commit(factory, tui.state().tasks.T1!.worktree!, 'src/logout.ts');
+    factory.executor.report('R1', { type: 'runCompleted' });
+
+    const reviewing = await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    expect(reviewing.tasks.T1).toMatchObject({ stage: 'review', loop: null });
+    expect(reviewing.runs.R2).toMatchObject({ stage: 'review', ticket: null });
+    expect(factory.github.issueState('acme/widgets#11').open).toBe(false);
+    expect(factory.github.issueState('acme/widgets#12').open).toBe(true);
+  });
+
+  test('a finishing iteration that fails still asks: skipping it ends the loop', async () => {
+    const { factory, operator, tui } = await looping();
+    await operator.send({ type: 'finishLoop', taskId: 'T1' });
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+
+    await operator.send({ type: 'answer', taskId: 'T1', skip: true });
+
+    const reviewing = await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    expect(reviewing.tasks.T1).toMatchObject({ stage: 'review' });
+  });
+
+  test('outlasts a takeover: handed back, the loop ends instead of picking another ticket', async () => {
+    const { factory, operator, tui } = await looping();
+    await operator.send({ type: 'finishLoop', taskId: 'T1' });
+
+    await operator.send({ type: 'takeOver', taskId: 'T1' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    await handOff(operator, tui, factory.executor, 'T1');
+
+    const reviewing = await tui.until((state) => state.tasks.T1?.mode === 'AFK' && state.tasks.T1.liveRunId === 'R3');
+    expect(reviewing.tasks.T1).toMatchObject({ stage: 'review' });
+    expect(reviewing.runs.R3).toMatchObject({ ticket: null });
+  });
+
+  test('is only for a task working through its loop', async () => {
+    const { operator, tui } = await withSpec();
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', prompt: 'Fix #45' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
+
+    expect(await operator.send({ type: 'finishLoop', taskId: 'T1' })).toEqual({ ok: false, reason: 'T1 isn’t working through a Ralph loop.' });
+  });
+});
+
+describe('cancelling the task', () => {
+  // T1 closed #11 and is mid-iteration on #12.
+  async function closedOne(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
+    const looped = await looping();
+    await commit(looped.factory, looped.tui.state().tasks.T1!.worktree!, 'src/logout.ts');
+    looped.factory.executor.report('R1', { type: 'runCompleted' });
+    await looped.tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    return looped;
+  }
+
+  test('reopens each ticket it closed as the App, with a comment that its work wasn’t merged; skipped and unworked tickets are left alone', async () => {
+    const { factory, operator, tui } = await closedOne();
+    const { branch } = tui.state().tasks.T1!;
+
+    expect(await operator.send({ type: 'cancel', taskId: 'T1', branch: 'keep' })).toEqual({ ok: true });
+
+    await tui.until((state) => state.tasks.T1?.reopening === null && state.tasks.T1.cleanup === null);
+    expect(factory.github.issueState('acme/widgets#11')).toMatchObject({ open: true, stateReason: 'reopened' });
+    const reopen = factory.github.writes.find(({ action }) => action === 'reopen')!;
+    expect(reopen).toMatchObject({ ref: 'acme/widgets#11', token: { repo: 'acme/widgets', permissions: { issues: 'write', metadata: 'read' } } });
+    expect(reopen.comment).toContain('T1');
+    expect(reopen.comment).toContain(branch!);
+    expect(reopen.comment).toContain('wasn’t merged');
+    expect(factory.github.writes.filter(({ action }) => action === 'reopen').map(({ ref }) => ref)).toEqual(['acme/widgets#11']);
+  });
+
+  test('a ticket the factory couldn’t reopen raises github-write, and is tried again once the operator fixes it and answers', async () => {
+    const { factory, operator, tui } = await closedOne();
+    factory.github.uninstall('acme/widgets');
+
+    await operator.send({ type: 'cancel', taskId: 'T1', branch: 'keep' });
+
+    const failed = await tui.until((state) => !!state.tasks.T1?.reopening?.problem);
+    const reason =
+      'The factory couldn’t reopen acme/widgets#11 on GitHub as its App: The factory’s App isn’t installed on acme/widgets. Fix it, then answer to try again.';
+    expect(failed.tasks.T1).toMatchObject({ label: 'Cancelled', reopening: { tickets: ['acme/widgets#11'], problem: reason } });
+    expect(failed.attentionQueue).toMatchObject([{ taskId: 'T1', attention: 'github-write', reason }]);
+    expect(factory.github.issueState('acme/widgets#11').open).toBe(false);
+
+    factory.github.install('acme/widgets');
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+
+    const reopened = await tui.until((state) => state.tasks.T1?.reopening === null);
+    expect(reopened.tasks.T1?.label).toBe('Cancelled');
+    expect(reopened.attentionQueue).toEqual([]);
+    expect(factory.github.issueState('acme/widgets#11').open).toBe(true);
+  });
+
+  test('a ticket the factory couldn’t reopen is tried again once the daemon starts again, which settles its request', async () => {
+    const { factory, operator, tui } = await closedOne();
+    factory.github.uninstall('acme/widgets');
+    await operator.send({ type: 'cancel', taskId: 'T1', branch: 'keep' });
+    await tui.until((state) => state.attentionQueue.length === 1);
+
+    factory.github.install('acme/widgets');
+    await factory.restart();
+    const later = watch(await factory.attach());
+
+    const reopened = await later.until((state) => state.tasks.T1?.reopening === null);
+    expect(reopened.attentionQueue).toEqual([]);
+    expect(factory.github.issueState('acme/widgets#11').open).toBe(true);
+  });
+
+  test('a ticket whose close lands after the cancel is reopened too', async () => {
+    const { factory, operator, tui } = await looping();
+    await commit(factory, tui.state().tasks.T1!.worktree!, 'src/logout.ts');
+    const closing = factory.github.holdWrites();
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await closing.held;
+
+    await operator.send({ type: 'cancel', taskId: 'T1', branch: 'keep' });
+    await tui.until((state) => state.tasks.T1?.label === 'Cancelled');
+    closing.release();
+
+    await tui.until((state) => state.tasks.T1?.closedTickets.length === 1 && state.tasks.T1.reopening === null);
+    expect(factory.github.writes.map(({ action, ref }) => `${action} ${ref}`)).toEqual(['close acme/widgets#11', 'reopen acme/widgets#11']);
+    expect(factory.github.issueState('acme/widgets#11').open).toBe(true);
   });
 });
 

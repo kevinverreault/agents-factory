@@ -127,6 +127,9 @@ export type Loop = {
   // commits it made since, once it succeeded.
   base: string | null;
   commits: string[];
+  // True once the operator chose to finish after this ticket: the loop ends
+  // at its next pick. Loops stored before it carry on.
+  finishing?: boolean;
 };
 
 // An ended task's cleanup while it hasn't finished (ADR 0011): why it last
@@ -140,6 +143,12 @@ export const BRANCH_CHOICES: readonly BranchChoice[] = ['keep', 'discard'];
 
 // A ticket the task closed, with the commits that did its work.
 export type ClosedTicket = { ref: string; commits: string[] };
+
+// The tickets a cancelled task closed that the factory hasn't reopened yet
+// (ADR 0006), and why it last failed to, if it did. They are tried again
+// once the operator answers the request the failure raised, or the daemon
+// next starts.
+export type Reopening = { tickets: string[]; problem: string | null };
 
 // What a `fix-once` review stage's runs found, whether its one fix pass
 // has begun, and what is left over: everything found, until the fix pass
@@ -218,6 +227,11 @@ export type Task = {
   loop?: Loop | null;
   // The tickets it closed: those ADR 0006's cancel cascade is to reopen.
   closedTickets?: ClosedTicket[];
+  // The tickets the operator skipped on a failed iteration: its loop picks
+  // none of them again, and they stay open.
+  skippedTickets?: string[];
+  // Once it is cancelled, while the tickets it closed aren't all reopened.
+  reopening?: Reopening | null;
   // Its review's findings, once a `fix-once` review stage's run reported
   // some. They live on the task, so a run parked meanwhile loses none.
   findings?: Findings | null;
@@ -371,9 +385,13 @@ export type OperatorCommand =
   // Backs out of the handoff sheet: the conversation carries on.
   | { type: 'closeHandoff'; taskId: string }
   | { type: 'takeOver'; taskId: string }
+  // Finish after this ticket: the task's Ralph loop ends once its live
+  // iteration, if any, is judged and its ticket closed.
+  | { type: 'finishLoop'; taskId: string }
   // Answers the task's open attention request: a question's with `answers`,
-  // a permission request's with `permission`.
-  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer }
+  // a permission request's with `permission`. A failed iteration's is
+  // retried, unless `skip` moves its loop on past its ticket.
+  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; skip?: boolean }
   // Resumes the root's session on the operator's review comments.
   | { type: 'requestChanges'; taskId: string; comments: string }
   // Finishes a root In review. Unless `anyway`, the daemon first checks that
@@ -506,6 +524,12 @@ export type LoopEvent =
   | { type: 'ticketClosed'; taskId: string; ticket: string; commits: string[] }
   | { type: 'ticketUnclosed'; taskId: string; ticket: string; reason: string };
 
+// What the daemon did on GitHub for a cancelled task's cancel cascade: it
+// reopened a ticket the task closed, or couldn't.
+export type ReopenEvent =
+  | { type: 'ticketReopened'; taskId: string; ticket: string }
+  | { type: 'ticketUnreopened'; taskId: string; ticket: string; reason: string };
+
 export type LifecycleAction =
   | OperatorCommand
   | RunEvent
@@ -517,6 +541,7 @@ export type LifecycleAction =
   | HandedOff
   | ClockEvent
   | LoopEvent
+  | ReopenEvent
   | CleanupEvent
   | ArtifactsSeen;
 
@@ -715,9 +740,9 @@ function enterLoop(state: Lifecycle, task: Task, stage: Stage): boolean {
   return true;
 }
 
-// A loop about to pick its next ticket.
-function picking(): Loop {
-  return { step: 'pick', ticket: null, base: null, commits: [] };
+// A loop about to pick its next ticket, unless it is `finishing`.
+function picking(finishing = false): Loop {
+  return { step: 'pick', ticket: null, base: null, commits: [], finishing };
 }
 
 // Moves the task on from the AFK stage whose exit holds: to the next AFK
@@ -955,7 +980,8 @@ export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = 
   }
   for (const task of Object.values(state.tasks)) {
     const request = openRequest(state, task);
-    if (task.state === 'waiting' && request) requests.push(request);
+    // A cancelled task's open request is its cancel cascade's.
+    if ((task.state === 'waiting' || task.state === 'cancelled') && request) requests.push(request);
     if (readyForYou(state, task, watched)) ready.push({ kind: 'ready', taskId: task.id });
     if (task.state === 'in-review') reviews.push({ kind: 'review', taskId: task.id });
   }
@@ -1053,8 +1079,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state)
         ? cantStartRuns(state, task)
         : 'Only a live AFK task (queued, running or needing you) can be taken over.';
+    case 'finishLoop':
+      if (isTerminal(task) || task.mode !== 'AFK' || !task.loop) return `${task.id} isn’t working through a Ralph loop.`;
+      return task.loop.finishing ? `${task.id} already finishes after this ticket.` : null;
     case 'answer': {
-      const request = task.state === 'waiting' ? openRequest(state, task) : undefined;
+      // A cancelled task's only open request is its cascade's.
+      const request = task.state === 'waiting' || task.state === 'cancelled' ? openRequest(state, task) : undefined;
       if (!request) return `${task.id} has no open attention request.`;
       if (request.permission && !validPermissionAnswer(action.permission)) {
         return 'Allow it once, for this task or always, or deny it with a note for the agent.';
@@ -1067,6 +1097,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
         // Requests stored before they named their call have no rule to add.
         if (allow === 'always' && !request.permission) return 'This request doesn’t name its call: allow it once or for this task.';
       }
+      if (action.skip && !(request.kind === 'failure' && failedIteration(task))) return 'Only a failed iteration’s ticket can be skipped.';
       const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
       return answered ? null : 'Answer every question on the card.';
     }
@@ -1158,10 +1189,19 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'ticketClosed':
       // A ticket closed is the task's however it stands now, even cancelled.
       return null;
+    case 'ticketReopened':
+    case 'ticketUnreopened':
+      return task.reopening?.tickets.includes(action.ticket) ? null : `${task.id} isn’t reopening ${action.ticket}.`;
     case 'cleanedUp':
     case 'cleanupFailed':
       return task.cleanup ? null : `${task.id} has no cleanup under way.`;
   }
+}
+
+// Whether the task's loop stopped on an iteration: its ticket is the one a
+// failure request is about.
+function failedIteration(task: Task): boolean {
+  return !!task.loop?.ticket && task.loop.step === null;
 }
 
 // Allow once, for the task or always, or deny with a note that isn't blank.
@@ -1421,6 +1461,22 @@ function raise(
   holdsRun: boolean,
   reason: string | null,
   at: number,
+  extra: { question?: Question | null; permission?: Permission | null } = {},
+): void {
+  addRequest(state, task, run, kind, holdsRun, reason, at, extra);
+  task.state = 'waiting';
+}
+
+// A request about the task that leaves its state as it is, such as one a
+// cancelled task's cascade raises.
+function addRequest(
+  state: Lifecycle,
+  task: Task,
+  run: Run | undefined,
+  kind: AttentionKind,
+  holdsRun: boolean,
+  reason: string | null,
+  at: number,
   { question = null, permission = null }: { question?: Question | null; permission?: Permission | null } = {},
 ): void {
   const request: AttentionRequest = {
@@ -1437,7 +1493,6 @@ function raise(
     raisedAt: at,
   };
   state.requests[request.id] = request;
-  task.state = 'waiting';
 }
 
 function addArtifact(state: Lifecycle, artifact: DistributiveOmit<Artifact, 'id'>): void {
@@ -1576,14 +1631,17 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.goal = briefText(tidyBrief(action.brief));
       task.brief = task.goal;
       const to = stageOf(task, sheet.stage);
-      // A loop taken over before it closed its last ticket closes it first.
-      const closing = task.loop?.step === 'close' && to?.id === task.stage ? task.loop : null;
+      // A loop taken over before it closed its last ticket closes it first,
+      // and one finishing ends at its next pick.
+      const kept = to?.id === task.stage ? task.loop : null;
+      const closing = kept?.step === 'close' ? kept : null;
       if (to) task.stage = to.id;
       // A loop with a ticket set starts from its tickets; one without runs
       // once from the brief.
       task.loop = null;
       const loops = !!to && enterLoop(state, task, to);
       if (loops && closing) task.loop = closing;
+      else if (loops && kept?.finishing) task.loop = picking(true);
       const opening = to && fillOpening(to, (variable) => argValue(state, task, variable) ?? '');
       if (!loops) task.resumeWith = opening && 'opening' in opening && opening.opening ? `${stageOpening(task, to, opening.opening)}\n\n${task.goal}` : task.goal;
       if (action.continueAs === 'fresh') {
@@ -1607,8 +1665,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.mode = 'HITL';
       task.autonomy = null;
       // The operator works the ticket now: handing back off picks afresh. A
-      // ticket the loop did but hasn't closed yet still closes on hand-back.
-      if (task.loop?.step !== 'close') task.loop = null;
+      // ticket the loop did but hasn't closed yet still closes on hand-back,
+      // and a finishing loop still ends there.
+      if (task.loop?.step !== 'close') task.loop = task.loop?.finishing ? picking(true) : null;
       // What an AFK run was to open on is the operator's to say now.
       task.resumeWith = null;
       // A fresh session no run has started yet gives way to the one the
@@ -1620,8 +1679,16 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       }
       startRun(state, task, at);
       break;
+    case 'finishLoop':
+      task.loop!.finishing = true;
+      break;
     case 'answer':
       request!.status = 'answered';
+      // The daemon tries the tickets left to reopen again; the task stays Cancelled.
+      if (task.state === 'cancelled') {
+        if (task.reopening) task.reopening.problem = null;
+        break;
+      }
       // Allow always's rules are the operator's file's, which the daemon added them to.
       if (request!.permission && allowsByRules(action.permission) && action.permission.allow === 'task') {
         const rules = (task.allowRules ??= []);
@@ -1642,6 +1709,11 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         // An AFK stage that couldn't move on carries on, told why.
         if (request!.kind === 'stage-blocked' && task.mode === 'AFK' && !task.loop?.step) {
           task.resumeWith = `The factory couldn’t move this task on: ${request!.reason}\n\n${AFK_RESUME}`;
+        }
+        // Skipped, the ticket stays open and the loop picks past it.
+        if (action.skip) {
+          (task.skippedTickets ??= []).push(task.loop!.ticket!);
+          task.loop = picking(task.loop!.finishing);
         }
         task.state = 'queued';
       }
@@ -1674,6 +1746,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         cancelled.handoff = null;
         cancelled.loop = null;
         cancelled.state = 'cancelled';
+        // The daemon reopens the tickets it closed: their work wasn't merged (ADR 0006).
+        const closed = cancelled.closedTickets ?? [];
+        if (closed.length) cancelled.reopening = { tickets: closed.map(({ ref }) => ref), problem: null };
         // The daemon archives its transcripts, then removes its worktree and
         // branch, unless the operator kept it.
         if (cancelled.worktree) cancelled.cleanup = { problem: null, keepBranch: cancelled === task && action.branch !== 'discard' };
@@ -1898,10 +1973,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'ticketsRead': {
       const stage = stageOf(task, task.stage)!;
       const last = lastRun(state, task);
+      // Finishing after its last ticket, the loop ends early: the stage moves on.
+      if (task.loop!.finishing) {
+        advanceFrom(state, task, stage, last, action.sessionId, at);
+        break;
+      }
       const tickets = action.tickets.filter(({ labels }) => labels.includes(READY_FOR_AGENT));
-      const open = tickets.filter((ticket) => ticket.open);
+      const open = tickets.filter((ticket) => ticket.open && !task.skippedTickets?.includes(ticket.ref));
       if (open.length === 0) {
-        // Every ticket is closed: tickets-closed holds.
+        // Every ticket is closed, or skipped: tickets-closed holds.
         if (tickets.length || task.closedTickets?.length) advanceFrom(state, task, stage, last, action.sessionId, at);
         else raise(state, task, last, 'stage-blocked', false, `${stage.id} has no tickets: ${ticketSources(state, task)!.refs.join(', ')} hold no open issue labelled ${READY_FOR_AGENT}.`, at);
         break;
@@ -1926,8 +2006,25 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'ticketClosed':
       (task.closedTickets ??= []).push({ ref: action.ticket, commits: [...action.commits] });
-      if (task.loop?.step === 'close' && task.loop.ticket === action.ticket) task.loop = picking();
+      if (task.loop?.step === 'close' && task.loop.ticket === action.ticket) task.loop = picking(task.loop.finishing);
+      // Closed after its task was cancelled, it is reopened like the others.
+      if (task.state === 'cancelled') (task.reopening ??= { tickets: [], problem: null }).tickets.push(action.ticket);
       break;
+    case 'ticketReopened': {
+      const tickets = task.reopening!.tickets.filter((ticket) => ticket !== action.ticket);
+      task.reopening = tickets.length ? { ...task.reopening!, tickets } : null;
+      // Every ticket reopened, nothing is left for the operator to answer.
+      if (!task.reopening && request) request.status = 'closed';
+      break;
+    }
+    case 'ticketUnreopened': {
+      // Tried again once the operator answers, or the daemon next starts,
+      // and never as the operator (ADR 0004). The task stays Cancelled.
+      const problem = `The factory couldn’t reopen ${action.ticket} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`;
+      task.reopening!.problem = problem;
+      if (!request) addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
+      break;
+    }
     case 'ticketUnclosed':
       // Retried once the operator answers, and never as the operator (ADR 0004).
       raise(

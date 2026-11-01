@@ -2,7 +2,8 @@
 // identity, a GitHub App. It turns the manifest flow's code into the App,
 // says whether the App is installed on a repository, and mints installation
 // tokens narrowed to one repository and the permissions asked for. With such
-// a token it reads the Ralph loop's tickets and closes them (ADR 0006). The
+// a token it reads the Ralph loop's tickets, closes them, and reopens them
+// when their task is cancelled (ADR 0006). The
 // REST adapter (`gitHubApi`) is the real one.
 import { sign } from 'node:crypto';
 import { issueRef } from '../artifacts/capture.ts';
@@ -17,8 +18,8 @@ export type Permissions = Partial<Record<Permission, 'read' | 'write'>>;
 // What an AFK run reads GitHub with: Issues, Pull requests and Metadata read.
 export const READ_ONLY: Permissions = { issues: 'read', pull_requests: 'read', metadata: 'read' };
 
-// What closing a ticket writes with: a comment and the issue's state.
-export const CLOSE_TICKET: Permissions = { issues: 'write', metadata: 'read' };
+// What closing a ticket, or reopening it, writes with: a comment and the issue's state.
+export const TICKET_WRITE: Permissions = { issues: 'write', metadata: 'read' };
 
 export type InstallationToken = { token: string; expiresAt: number };
 
@@ -41,6 +42,9 @@ export interface GitHub {
   // Comments `comment` on the issue, then closes it as completed, with
   // `token`, which needs Issues write.
   closeIssue(token: string, ref: string, comment: string): Promise<void>;
+  // Comments `comment` on the issue, then reopens it, with `token`, which
+  // needs Issues write.
+  reopenIssue(token: string, ref: string, comment: string): Promise<void>;
 }
 
 // GitHub couldn't be reached, or refused, saying why.
@@ -149,6 +153,12 @@ export function gitHubApi(): GitHub {
       if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
       const closed = await call('PATCH', issuePath(ref), token, { state: 'closed', state_reason: 'completed' });
       if (closed.status !== 200) throw refused(`close ${ref}`, closed);
+    },
+    async reopenIssue(token, ref, comment) {
+      const commented = await call('POST', `${issuePath(ref)}/comments`, token, { body: comment });
+      if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
+      const reopened = await call('PATCH', issuePath(ref), token, { state: 'open', state_reason: 'reopened' });
+      if (reopened.status !== 200) throw refused(`reopen ${ref}`, reopened);
     },
   };
 }

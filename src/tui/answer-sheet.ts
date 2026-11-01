@@ -53,7 +53,7 @@ function byRules(taskId: string, permission: Permission, { label, enter, answer 
 
 // The digits' choices on a request other than a question with its card, or
 // on a root in review. Kinds whose answers arrive with their own slices (a
-// closed PR, a GitHub write) take none yet.
+// closed PR) take none yet.
 export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined): Choice[] {
   if (item.kind === 'review') {
     const { taskId } = item;
@@ -66,10 +66,15 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
   if (item.kind !== 'attention' || item.taskId === null || item.question) return [];
   const { taskId } = item;
   const answer: Command = { type: 'answer', taskId };
+  const takeOver: Choice[] = task?.mode === 'AFK' ? [{ label: 'Take over', command: { type: 'takeOver', taskId }, opens: true }] : [];
+  const cancel: Choice = { label: 'Cancel', command: { type: 'cancel', taskId } };
   switch (item.attention) {
     case 'failure': {
-      const takeOver: Choice = { label: 'Take over', command: { type: 'takeOver', taskId }, opens: true };
-      return [{ label: 'Retry', command: answer }, ...(task?.mode === 'AFK' ? [takeOver] : [])];
+      // Only the operator decides what a failure means (ADR 0006): a failed
+      // AFK iteration's ticket can be skipped too.
+      const ticket = task?.mode === 'AFK' ? task.loop?.ticket : null;
+      const skip: Choice[] = ticket ? [{ label: `Skip ${ticket}`, command: { type: 'answer', taskId, skip: true } }] : [];
+      return [{ label: 'Retry', command: answer }, ...skip, ...takeOver, cancel];
     }
     case 'permission': {
       // Requests stored before they named their call allow it for the task
@@ -83,8 +88,12 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
         noted('Deny with a note', 'Note for the agent', 'denies', (text) => ({ type: 'answer', taskId, permission: { deny: text } })),
       ];
     }
+    case 'github-write':
+      // Answered once the operator fixed what refused the write.
+      return [{ label: 'Try again', command: answer }];
     case 'stage-blocked':
-      return [{ label: 'Dismiss', command: answer }];
+      // A stalled loop picks again once answered.
+      return task?.mode === 'AFK' && task.loop ? [{ label: 'Retry', command: answer }, ...takeOver, cancel] : [{ label: 'Dismiss', command: answer }];
     default:
       return [];
   }

@@ -19,7 +19,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], prBody: null, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -215,6 +215,21 @@ describe('cancelling', () => {
     await press(app, 'x');
 
     await eventually(() => expect(app.lastFrame()).toContain('T1 is already Done.'));
+  });
+});
+
+describe('finishing a loop', () => {
+  test('f finishes the selected loop after its ticket, and its row says so', async () => {
+    const looping = { ...task('T1', 'Implement the spec', 'running', 'Running'), loop: { ticket: 'acme/widgets#11', finishing: false } };
+    const { app, connection } = await started(factoryState([looping]));
+    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Implement the spec\s+Running · sonnet · on acme\/widgets#11/));
+    expect(app.lastFrame()).toContain('f finish after this ticket');
+
+    await press(app, 'f');
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'finishLoop', taskId: 'T1' }]));
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'loop'], value: { ticket: 'acme/widgets#11', finishing: true } }]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Running · sonnet · on acme\/widgets#11, finishing after it/));
   });
 });
 
@@ -1283,7 +1298,7 @@ describe('answering from Needs you', () => {
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
       expect(frame).toMatch(/› T2 Implement the store failure: The agent hit max turns\./);
-      expect(frame).toContain('T2 Implement the store ── failure: The agent hit max turns. 1 Retry 2 Take over a answer');
+      expect(frame).toContain('T2 Implement the store ── failure: The agent hit max turns. 1 Retry 2 Take over 3 Cancel a answer');
     });
 
     await press(app, 'a', '1');
@@ -1320,6 +1335,73 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(app.lastFrame()).toContain('a answer'));
     await press(app, '1');
     await eventually(() => expect(app.lastFrame()).not.toContain('a answer'));
+  });
+
+  test('a failed iteration of a loop can be retried, skipped, taken over or cancelled: a digit skips its ticket', async () => {
+    const connection = new FakeConnection();
+    const looping = { ...failing, loop: { ticket: 'acme/widgets#11', finishing: false } };
+    const { app } = await started(factoryState([looping], [failure]), { connection });
+    await press(app, '2');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain('failure: The agent hit max turns. 1 Retry 2 Skip acme/widgets#11 3 Take over 4 Cancel a answer'),
+    );
+
+    await press(app, 'a', '2');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', skip: true }));
+  });
+
+  test('a failure of a loop’s ticket taken over offers no skip: the operator works it', async () => {
+    const takenOver = { ...failing, mode: 'HITL' as const, loop: { ticket: 'acme/widgets#11', finishing: false } };
+    const { app } = await started(factoryState([takenOver], [failure]));
+    await press(app, '2');
+
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('failure: The agent hit max turns. 1 Retry 2 Cancel a answer'));
+  });
+
+  test('a stalled loop can be retried once its blockers move, taken over or cancelled', async () => {
+    const connection = new FakeConnection();
+    const stalled = { ...failing, loop: { ticket: null, finishing: false } };
+    const blocked = { ...failure, attention: 'stage-blocked' as const, reason: 'implement’s loop stalled: every open ticket is blocked (acme/widgets#12 by acme/widgets#11).' };
+    const { app } = await started(factoryState([stalled], [blocked]), { connection });
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('acme/widgets#11). 1 Retry 2 Take over 3 Cancel a answer'));
+
+    await press(app, 'a', '1');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
+  });
+
+  test('a GitHub write the factory couldn’t make is tried again once the operator answers', async () => {
+    const connection = new FakeConnection();
+    const cancelled = task('T2', 'Implement the store', 'cancelled', 'Cancelled');
+    const unreopened = { ...failure, attention: 'github-write' as const, reason: 'The factory couldn’t reopen acme/widgets#11 on GitHub as its App.' };
+    const { app } = await started(factoryState([cancelled], [unreopened]), { connection });
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('as its App. 1 Try again a answer'));
+
+    await press(app, 'a', '1');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
+  });
+
+  test('cancelling a failed task from its sheet asks first when work would be lost', async () => {
+    const connection = new FakeConnection();
+    const keep = { type: 'cancel' as const, taskId: 'T2', branch: 'keep' as const };
+    const choose = [
+      { label: 'Keep branch', command: keep },
+      { label: 'Discard work', command: { ...keep, branch: 'discard' as const } },
+    ];
+    connection.replyTo('cancel', { ok: false, reason: 'factory/T2-implement-the-store has 1 commit that exists nowhere else.', choose });
+    const { app } = await started(factoryState([failing], [failure]), { connection });
+
+    await press(app, '2', 'a', '3');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'cancel', taskId: 'T2' }));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('1 Keep branch 2 Discard work'));
+    connection.replyTo('cancel', { ok: true });
+    await press(app, ENTER);
+    await eventually(() => expect(connection.sent.at(-1)).toEqual(keep));
   });
 
   test('once nothing needs the operator, the digits switch screens again', async () => {

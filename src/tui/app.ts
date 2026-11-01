@@ -2,7 +2,8 @@
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
 // a task (`t`), conversing with or taking over one (`c`), handing one off
 // (`ctrl+h`), cancelling one with its subtree (`x`, with the cancel sheet
-// when work would be lost), Needs you's answer sheet (`a`)
+// when work would be lost), finishing a loop after its ticket (`f`), Needs
+// you's answer sheet (`a`)
 // and Set up now (`s`) or Re-check (`R`) for a repository without the skill
 // set's setup.
 // Plain .ts (no JSX) so Node runs it without a build step.
@@ -139,6 +140,13 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       setCancelSheet(asks);
     });
   };
+  // Finish after this ticket: the selected task's loop ends once its live
+  // iteration is done.
+  const finishLoop = () => {
+    const task = tab === 'tasks' ? tasks[cursor] : undefined;
+    if (!task || !finishable(task)) return;
+    void connection.send({ type: 'finishLoop', taskId: task.id }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
+  };
   // Set up now: the repository's `setup` task, one HITL run of the setup
   // skill, opened in its conversation.
   const setUp = () => {
@@ -186,6 +194,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (input === 'c') converse();
       const selected = tab === 'tasks' ? tasks[cursor] : undefined;
       if (input === 'x' && selected) cancel({ type: 'cancel', taskId: selected.id });
+      if (input === 'f') finishLoop();
       if (key.ctrl && input === 'h') handOff();
       if (input === 's') setUp();
       if (input === 'R') recheck();
@@ -282,10 +291,23 @@ function Row({ id, title, detail, selected = false }: { id: string; title: strin
 
 function TaskList({ tasks, cursor }: { tasks: TaskView[]; cursor: number }) {
   if (tasks.length === 0) return h(Text, { dimColor: true }, 'No tasks yet. N launches one.');
+  const finishes = finishable(tasks[cursor]) ? ' · f finish after this ticket' : '';
   return column([
-    ...tasks.map((task, i) => h(Row, { key: task.id, id: task.id, title: task.title, detail: `${task.label} · ${task.tier}`, selected: i === cursor })),
-    h(Text, { key: 'keys', dimColor: true }, 'enter open · c converse or take over · t re-tier · x cancel · N launch'),
+    ...tasks.map((task, i) => h(Row, { key: task.id, id: task.id, title: task.title, detail: `${task.label} · ${task.tier}${loopDetail(task)}`, selected: i === cursor })),
+    h(Text, { key: 'keys', dimColor: true }, `enter open · c converse or take over · t re-tier · x cancel${finishes} · N launch`),
   ]);
+}
+
+// Whether the task's Ralph loop can still be finished after its ticket.
+function finishable(task: TaskView | undefined): boolean {
+  return task?.mode === 'AFK' && !!task.loop && !task.loop.finishing;
+}
+
+// The ticket a task's loop works, and whether it ends after it.
+function loopDetail({ loop }: TaskView): string {
+  if (!loop) return '';
+  if (!loop.ticket) return loop.finishing ? ' · finishing' : '';
+  return ` · on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
 }
 
 function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }) {
