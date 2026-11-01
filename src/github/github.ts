@@ -1,9 +1,11 @@
 // The GitHub port (ADR 0004): what the factory asks GitHub as its factory
 // identity, a GitHub App. It turns the manifest flow's code into the App,
 // says whether the App is installed on a repository, and mints installation
-// tokens narrowed to one repository and the permissions asked for. The REST
-// adapter (`gitHubApi`) is the real one.
+// tokens narrowed to one repository and the permissions asked for. With such
+// a token it reads the Ralph loop's tickets and closes them (ADR 0006). The
+// REST adapter (`gitHubApi`) is the real one.
 import { sign } from 'node:crypto';
+import { issueRef } from '../artifacts/capture.ts';
 
 // The factory identity's App as the daemon keeps it, private key included, in
 // the credential store.
@@ -15,7 +17,14 @@ export type Permissions = Partial<Record<Permission, 'read' | 'write'>>;
 // What an AFK run reads GitHub with: Issues, Pull requests and Metadata read.
 export const READ_ONLY: Permissions = { issues: 'read', pull_requests: 'read', metadata: 'read' };
 
+// What closing a ticket writes with: a comment and the issue's state.
+export const CLOSE_TICKET: Permissions = { issues: 'write', metadata: 'read' };
+
 export type InstallationToken = { token: string; expiresAt: number };
+
+// An issue (`owner/name#n`) as the Ralph loop reads it: whether it is open,
+// its labels, and the open issues blocking it (GitHub's native dependencies).
+export type Issue = { ref: string; open: boolean; labels: string[]; openBlockers: string[] };
 
 export interface GitHub {
   // The App GitHub created from the factory's manifest, by the code its
@@ -26,6 +35,12 @@ export interface GitHub {
   // A token of the App's installation on the repository, for that repository
   // alone and with those permissions alone.
   mintToken(app: FactoryApp, repo: string, permissions: Permissions): Promise<InstallationToken>;
+  // The issue's sub-issues, in their order on GitHub, read with `token`.
+  subIssues(token: string, ref: string): Promise<string[]>;
+  readIssue(token: string, ref: string): Promise<Issue>;
+  // Comments `comment` on the issue, then closes it as completed, with
+  // `token`, which needs Issues write.
+  closeIssue(token: string, ref: string, comment: string): Promise<void>;
 }
 
 // GitHub couldn't be reached, or refused, saying why.
@@ -83,6 +98,17 @@ export function gitHubApi(): GitHub {
     return reply.json.id as number;
   }
 
+  // Each page of a listing, a hundred at a time.
+  async function list(path: string, token: string, what: string): Promise<any[]> {
+    const items: any[] = [];
+    for (let page = 1; ; page++) {
+      const reply = await call('GET', `${path}?per_page=100&page=${page}`, token);
+      if (reply.status !== 200) throw refused(what, reply);
+      items.push(...reply.json);
+      if (reply.json.length < 100) return items;
+    }
+  }
+
   return {
     async createApp(code) {
       const reply = await call('POST', `/app-manifests/${encodeURIComponent(code)}/conversions`, null);
@@ -103,7 +129,34 @@ export function gitHubApi(): GitHub {
       if (reply.status !== 201) throw refused(`mint a token for ${repo}`, reply);
       return { token: reply.json.token, expiresAt: Date.parse(reply.json.expires_at) };
     },
+    async subIssues(token, ref) {
+      const issues = await list(`${issuePath(ref)}/sub_issues`, token, `list the sub-issues of ${ref}`);
+      return issues.map((issue) => issueRef(issue.html_url));
+    },
+    async readIssue(token, ref) {
+      const reply = await call('GET', issuePath(ref), token);
+      if (reply.status !== 200) throw refused(`read ${ref}`, reply);
+      const blockers = await list(`${issuePath(ref)}/dependencies/blocked_by`, token, `read what blocks ${ref}`);
+      return {
+        ref,
+        open: reply.json.state === 'open',
+        labels: (reply.json.labels as { name: string }[]).map(({ name }) => name),
+        openBlockers: blockers.filter((issue) => issue.state === 'open').map((issue) => issueRef(issue.html_url)),
+      };
+    },
+    async closeIssue(token, ref, comment) {
+      const commented = await call('POST', `${issuePath(ref)}/comments`, token, { body: comment });
+      if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
+      const closed = await call('PATCH', issuePath(ref), token, { state: 'closed', state_reason: 'completed' });
+      if (closed.status !== 200) throw refused(`close ${ref}`, closed);
+    },
   };
+}
+
+// The REST path of an issue `owner/name#n`.
+function issuePath(ref: string): string {
+  const [repo, number] = ref.split('#');
+  return `/repos/${repo}/issues/${number}`;
 }
 
 // The App's own JWT, valid for 9 minutes from a minute ago, which allows for

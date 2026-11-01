@@ -50,6 +50,9 @@ export interface Git {
   commit(worktreePath: string, paths: string[], message: string): Promise<string>;
   // The worktree as an AFK run starting in it finds it.
   snapshot(worktreePath: string): Promise<RunSnapshot>;
+  // The commits on the worktree's HEAD since `base`, which is in its
+  // history, oldest first.
+  commitsSince(worktreePath: string, base: string): Promise<string[]>;
   // How the worktree breaks the invariants of its snapshot from before the
   // run, one reason each, or none: the branch is still checked out, its old
   // tip is in its history, the tree is clean, no ref, remote, config or hook
@@ -184,6 +187,10 @@ export const gitCli: Git = {
       config: [join(commonDir, 'config'), join(gitDir, 'config.worktree')].map(readOrEmpty).join('\n'),
       hooks: hooksIn(join(commonDir, 'hooks')),
     };
+  },
+
+  async commitsSince(worktreePath, base) {
+    return lines(await run(worktreePath, 'rev-list', '--reverse', `${base}..HEAD`));
   },
 
   async violations(worktreePath, before, branches) {

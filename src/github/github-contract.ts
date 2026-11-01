@@ -10,6 +10,8 @@ export type GitHubFixture = {
   // A repository the App is installed on, and one it isn't.
   installedRepo: string;
   uninstalledRepo: string;
+  // An open issue of the installed repository, as `owner/name#n`.
+  openIssue: string;
   // GitHub's time now.
   now(): number;
 };
@@ -39,6 +41,15 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, uninstalledRepo } = await makeFixture();
 
       await expect(github.mintToken(app, uninstalledRepo, READ_ONLY)).rejects.toThrow(GitHubError);
+    });
+
+    test('a read-only token reads an open issue, but can’t close it', async () => {
+      const { github, app, installedRepo, openIssue } = await makeFixture();
+      const { token } = await github.mintToken(app, installedRepo, READ_ONLY);
+
+      expect(await github.readIssue(token, openIssue)).toMatchObject({ ref: openIssue, open: true });
+      await expect(github.closeIssue(token, openIssue, 'A read-only token can’t close this.')).rejects.toThrow(GitHubError);
+      expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
     });
 
     test('refuses an App whose private key isn’t the one GitHub issued', async () => {

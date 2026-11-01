@@ -61,6 +61,7 @@ if (!repo) {
     app: await storedApp(),
     installedRepo: repo,
     uninstalledRepo: 'octocat/Hello-World',
+    openIssue: `${repo}#${issue}`,
     now: () => Date.now(),
   }));
 

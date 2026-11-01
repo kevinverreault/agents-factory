@@ -2,8 +2,8 @@
 // subscriber gets one snapshot, then patches that turn its copy into the
 // daemon's current state.
 import {
-  activeAfkRuns,
   attentionQueue,
+  heldSlots,
   label,
   lastUsedRepo,
   liveRun,
@@ -11,6 +11,7 @@ import {
   readyForYou,
   type AppCheck,
   type AutonomyLevel,
+  type ClosedTicket,
   type FrozenPreset,
   type HandoffSheet,
   type Lifecycle,
@@ -52,6 +53,8 @@ export type TaskView = {
   goal: string | null;
   // Its open handoff sheet, if any.
   handoff: HandoffView | null;
+  // The tickets its Ralph loop closed, with their commits.
+  closedTickets: ClosedTicket[];
 };
 
 export type HandoffView = Omit<HandoffSheet, 'asked'>;
@@ -59,7 +62,7 @@ export type HandoffView = Omit<HandoffSheet, 'asked'>;
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
-> & { maxTurns: number | null; tier: Tier | null };
+> & { maxTurns: number | null; tier: Tier | null; ticket: string | null };
 
 // `app` is null until the daemon has checked the App's installation.
 export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'> & { app: AppCheck | null };
@@ -105,6 +108,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       allowRules: [...(task.allowRules ?? [])],
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
+      closedTickets: structuredClone(task.closedTickets ?? []),
     };
   }
   const runs: Record<string, RunView> = {};
@@ -131,6 +135,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       tier,
       model,
       maxTurns,
+      ticket: run.ticket ?? null,
       cli,
       skillSet: skillSet ?? null,
       startedAt,
@@ -143,7 +148,8 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
     runs,
     artifacts: structuredClone(lifecycle.artifacts),
     attentionQueue: attentionQueue(lifecycle, watched),
-    slots: { active: activeAfkRuns(lifecycle), cap: lifecycle.slotCap },
+    // A loop between its iterations keeps its slot.
+    slots: { active: heldSlots(lifecycle), cap: lifecycle.slotCap },
     lastUsedRepo: lastUsedRepo(lifecycle),
   };
 }

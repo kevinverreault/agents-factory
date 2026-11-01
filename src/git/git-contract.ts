@@ -161,6 +161,25 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
         expect((await git.worktreeState(path)).uncommitted).toEqual(['src/scratch.ts']);
       }));
 
+    test('the commits since a base are those made on the branch after it, oldest first', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        const base = (await git.worktrees(clone))[0]!.head;
+        expect(await git.commitsSince(path, base)).toEqual([]);
+
+        await editFile(path, 'src/logout.ts');
+        const first = await git.commit(path, ['src/logout.ts'], 'Add the logout button');
+        await editFile(path, 'src/session.ts');
+        await commitAll(path);
+
+        const [head] = await git.worktrees(clone);
+        expect(await git.commitsSince(path, base)).toEqual([first, head!.head]);
+        expect(await git.commitsSince(path, first)).toEqual([head!.head]);
+      }));
+
     test('a task worktree stops working when its clone moves, and works again once repaired from the new path', () =>
       withFixture(async ({ git, root, cloneWithOrigin, move }) => {
         const clone = await cloneWithOrigin('widgets', 'main');
