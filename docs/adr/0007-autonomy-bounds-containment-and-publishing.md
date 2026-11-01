@@ -17,7 +17,7 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
   | Factory GitHub writes | issue bookkeeping only (close and reopen tickets, templated comments) | plus `push` of the task branch and `open-pr` |
 
 - **The L1 gate is factory rules, not `auto` mode.** Edits and file operations inside the worktree are auto-approved, along with:
-  - a fixed allow list: read-only tools, WebFetch and WebSearch, the factory's MCP tools, read-only and local-commit git, package-manager scripts and test runners, and common read-only shell commands;
+  - a fixed allow list: read-only tools, WebFetch and WebSearch, the factory's MCP tools, read-only and local-commit git, reading issues and PRs with `gh`, package-manager scripts and test runners, and common read-only shell commands;
   - rules from `~/.agent-factory/permissions.yaml`;
   - the task's own rules.
 

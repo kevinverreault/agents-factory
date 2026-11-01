@@ -30,6 +30,9 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
   // Read-only and local-commit git.
   ...['status', 'diff', 'log', 'show', 'blame', 'ls-files', 'rev-parse', 'grep', 'add', 'commit'].map((verb) => `Bash(git ${verb} *)`),
   'Bash(git branch --show-current)',
+  // Reading issues and PRs, which an AFK run does as the App's bot with its
+  // read-only token (ADR 0004).
+  ...['issue view', 'issue list', 'pr view', 'pr list', 'pr diff'].map((verb) => `Bash(gh ${verb} *)`),
   // Package-manager scripts and test runners.
   ...['npm', 'pnpm', 'yarn'].flatMap((manager) => [`Bash(${manager} test *)`, `Bash(${manager} run *)`]),
   ...['vitest', 'jest', 'tsc', 'eslint'].map((runner) => `Bash(npx ${runner} *)`),

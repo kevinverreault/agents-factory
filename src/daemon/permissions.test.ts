@@ -43,9 +43,15 @@ describe('a tool call the rules cover', () => {
     factory.executor.askPermission('R1', bash('toolu_1', 'npm test'));
     factory.executor.askPermission('R1', bash('toolu_2', 'git add src/login.ts && git commit -m "Fix the login bug"'));
     factory.executor.askPermission('R1', { id: 'toolu_3', tool: 'WebFetch', input: { url: 'https://docs.example.com/sso' } });
+    factory.executor.askPermission('R1', bash('toolu_4', 'gh issue view 47 --repo acme/widgets --comments; git log --oneline | head -5; git status --short'));
     await settled(operator);
 
-    expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_2: { allow: true }, toolu_3: { allow: true } });
+    expect(factory.executor.verdicts('R1')).toEqual({
+      toolu_1: { allow: true },
+      toolu_2: { allow: true },
+      toolu_3: { allow: true },
+      toolu_4: { allow: true },
+    });
     expect(tui.state().tasks.T1?.label).toBe('Running');
     expect(tui.state().attentionQueue).toEqual([]);
   });
