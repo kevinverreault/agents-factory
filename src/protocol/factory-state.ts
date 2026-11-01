@@ -20,6 +20,7 @@ import {
   type Priority,
   type AttentionQueueItem,
   type Artifact,
+  type Reopening,
   type Repository,
   type Run,
   type SkillsSetup,
@@ -57,6 +58,13 @@ export type TaskView = {
   handoff: HandoffView | null;
   // The tickets its Ralph loop closed, with their commits.
   closedTickets: ClosedTicket[];
+  // The tickets the operator skipped, which its loop leaves open.
+  skippedTickets: string[];
+  // Its Ralph loop, while it is at a loop stage with a ticket set: the
+  // ticket its iteration works, and whether it ends after that one.
+  loop: { ticket: string | null; finishing: boolean } | null;
+  // Once it is cancelled, while the tickets it closed aren't all reopened, and why it last failed to.
+  reopening: Reopening | null;
   // Its PR body, once its PR body stage wrote it.
   prBody: string | null;
   // While its cleanup, once it ended Done or Cancelled, hasn't finished, and why it last failed.
@@ -121,6 +129,9 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
       closedTickets: structuredClone(task.closedTickets ?? []),
+      skippedTickets: [...(task.skippedTickets ?? [])],
+      loop: task.loop ? { ticket: task.loop.ticket, finishing: task.loop.finishing ?? false } : null,
+      reopening: task.reopening ? structuredClone(task.reopening) : null,
       prBody: task.prBody ?? null,
       cleanup: task.cleanup ? { ...task.cleanup } : null,
       transcripts: task.transcripts ?? null,

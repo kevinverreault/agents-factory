@@ -9,10 +9,10 @@ import { capture } from '../artifacts/capture.ts';
 import { ArchiveError, type ConversationEvent, type Executor, type RunGuards, type RunStart } from '../executor/executor.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
-  CLOSE_TICKET,
   GitHubError,
   installationSettings,
   READ_ONLY,
+  TICKET_WRITE,
   type FactoryApp,
   type GitHub,
   type InstallationToken,
@@ -45,6 +45,7 @@ import {
   type Readiness,
   type LifecycleAction,
   type LoopEvent,
+  type ReopenEvent,
   type Repository,
   type RepoEvent,
   type Run,
@@ -178,6 +179,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // still under way. One that failed is tried again by the next daemon.
   const cleanupsStarted = new Set<string>();
   const cleanupsInFlight = new Set<string>();
+  // The cancelled tasks' tickets, as `<task> <ticket>`, whose reopening this
+  // daemon has started, and those of them still under way. One that failed
+  // is tried again once the operator answers, or by the next daemon.
+  const reopensStarted = new Set<string>();
+  const reopensInFlight = new Set<string>();
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
   let storedApp: Promise<FactoryApp | null> | null = null;
@@ -769,7 +775,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // A loop between its iterations does too.
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + stepsInFlight.size + cleanupsInFlight.size > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -792,10 +798,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // So is whether the App is installed on each, and the skill set set up.
     await checkEveryApp();
     await checkEverySetup();
-    // A loop the daemon stopped between iterations carries on, and so does
-    // a cleanup it didn't finish.
+    // A loop the daemon stopped between iterations carries on, and so do
+    // a cleanup and a cancelled task's reopening it didn't finish.
     driveLoops();
     driveCleanups();
+    driveReopens();
   });
 
   // Deadlines are wall-clock times persisted in the store (ADR 0003), never
@@ -907,6 +914,46 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveExecutor(before, action);
     driveLoops();
     driveCleanups();
+    driveReopens();
+  }
+
+  // Reopens each ticket a cancelled task closed (ADR 0006): once per daemon,
+  // and again once the operator answers the request a failure raised. Its
+  // outcome goes through the Lifecycle like any other event.
+  function driveReopens(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      for (const ticket of task.reopening?.tickets ?? []) {
+        const key = `${task.id} ${ticket}`;
+        if (stopping || reopensInFlight.has(key) || (reopensStarted.has(key) && task.reopening!.problem)) continue;
+        reopensStarted.add(key);
+        reopensInFlight.add(key);
+        void reopenTicket(task, ticket).then(
+          (event) =>
+            serially(async () => {
+              reopensInFlight.delete(key);
+              if (!stopping) await settle(event, new Set());
+            }),
+          (error) => {
+            reopensInFlight.delete(key);
+            throw error;
+          },
+        );
+      }
+    }
+  }
+
+  // Reopens a ticket the cancelled task closed, as the App, with a token
+  // minted for this write alone (ADR 0004), and a comment saying its work
+  // wasn't merged.
+  async function reopenTicket(task: Task, ticket: string): Promise<ReopenEvent> {
+    try {
+      const { token } = await appToken(task.repo, TICKET_WRITE);
+      await github.reopenIssue(token, ticket, reopeningComment(task));
+      return { type: 'ticketReopened', taskId: task.id, ticket };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'ticketUnreopened', taskId: task.id, ticket, reason: error.message };
+    }
   }
 
   // Cleans up after each ended task whose cleanup is pending (ADR 0011), once
@@ -1011,7 +1058,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function closeTicket(task: Task): Promise<LoopEvent> {
     const { ticket, commits } = task.loop! as { ticket: string; commits: string[] };
     try {
-      const { token } = await appToken(task.repo, CLOSE_TICKET);
+      const { token } = await appToken(task.repo, TICKET_WRITE);
       await github.closeIssue(token, ticket, closingComment(task, commits));
       return { type: 'ticketClosed', taskId: task.id, ticket, commits };
     } catch (error) {
@@ -1299,6 +1346,15 @@ function closingComment(task: Task, commits: string[]): string {
   return (
     `Done on the task branch \`${task.worktree!.branch}\` by the agents factory’s task ${task.id} (${task.title}), ` +
     `in ${commits.map((commit) => commit.slice(0, 7)).join(', ')}.${where}`
+  );
+}
+
+// What reopening a cancelled task's ticket says on it (ADR 0006): the work
+// that closed it never made it off the task branch.
+function reopeningComment(task: Task): string {
+  return (
+    `Reopened: the agents factory’s task ${task.id} (${task.title}) was cancelled, so its work on the task branch ` +
+    `\`${task.worktree!.branch}\` wasn’t merged.`
   );
 }
 
