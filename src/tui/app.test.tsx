@@ -1552,6 +1552,42 @@ describe('answering in the conversation', () => {
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { deny: 'Read it from the brief' } }));
   });
 
+  test('a long request stays whole on a full screen: the events give way, not the sheet', async () => {
+    const command = 'for f in src/lifecycle/lifecycle.ts src/daemon/daemon.ts src/protocol/protocol.ts src/tui/app.ts; do sed -i s/a/b/ $f; done';
+    const long = {
+      ...permission,
+      reason: `Bash: ${command}`,
+      permission: {
+        id: 'toolu_1',
+        tool: 'Bash',
+        summary: command,
+        rule: `Bash(${command})`,
+        proposed: [
+          { part: 'for f in …', rule: 'Bash(for f *)' },
+          { part: 'sed -i s/a/b/ $f', rule: 'Bash(do sed *)' },
+          { part: 'done', rule: 'Bash(done *)' },
+        ],
+      },
+    };
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([waiting], [long]), runs: { R1: suspended } }, { connection });
+    Object.defineProperty(app.stdout, 'rows', { value: 20 });
+    await press(app, ENTER);
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    connection.serveConversation(
+      'R1',
+      ...Array.from({ length: 30 }, (_, i) => ({ type: 'message' as const, id: `E${i}`, from: 'agent' as const, text: `Step ${i}.` })),
+    );
+    await settle();
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain(`permission: Bash: ${command} 1 Allow once 2 Allow for this task: Bash(for f *), Bash(do sed *), Bash(done *) 3`);
+      expect(frame).toContain('digits answer · c take over · ctrl+b back');
+      expect(frame).toContain('Step 29.');
+      expect(frame).not.toContain('Step 0.');
+    });
+  });
+
   test('a question request shows its card in the conversation, and a digit answers it', async () => {
     const connection = new FakeConnection();
     const question = {
