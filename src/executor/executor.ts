@@ -2,6 +2,7 @@
 // and reports run events and the conversation. The Agent SDK adapter
 // (`agent-sdk.ts`) is the real one.
 import type { Answers, AutonomyLevel, Mode, Report, RunEvent } from '../lifecycle/lifecycle.ts';
+import type { Tier } from '../models/routing.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
 
 export type RunStart = {
@@ -76,7 +77,7 @@ export type RunSink = {
 // What an agent asks of the factory about its children. `toolUseId` is the
 // spawning call's, so a replay finds the child it spawned.
 export type Delegation =
-  | { type: 'spawnChild'; toolUseId: string; goal: string; skill?: string; tier?: string; autonomy?: string; await?: boolean }
+  | { type: 'spawnChild'; toolUseId: string; goal: string; skill?: string; tier?: Tier; autonomy?: AutonomyLevel; await?: boolean }
   | { type: 'listChildren' }
   | { type: 'cancelChild'; id: string };
 export type DelegationReply = { ok: true; text: string } | { ok: false; error: string };

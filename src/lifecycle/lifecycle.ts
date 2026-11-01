@@ -807,6 +807,7 @@ export function spawnLimit(state: Lifecycle, task: Task): string | null {
 // root. Null for a task with no descendants.
 export type Rollup = { done: number; running: number; needsYou: number; cancelled: number; failed: { taskId: string; reason: string | null }[] };
 
+// The task's rollup over its descendants, or null when it has none.
 export function treeRollup(state: Lifecycle, task: Task): Rollup | null {
   const descendants = subtree(state, task).slice(1);
   if (descendants.length === 0) return null;
@@ -1391,6 +1392,7 @@ function childOpening(state: Lifecycle, parent: Task, child: Task, spawn: ChildS
   ].join('\n\n');
 }
 
+// The text on one line, cut to fit a row: an agent's status, a root's goal.
 function oneLine(text: string): string {
   const line = text.replace(/\s+/g, ' ').trim();
   return line.length > 200 ? `${line.slice(0, 199)}…` : line;
@@ -1400,19 +1402,30 @@ function oneLine(text: string): string {
 // and the daemon removes its worktree, and the branch of a fire-and-forget
 // child, which can never join the root (ADR 0011).
 function finishChild(task: Task, run: Run, { commits = [], result }: Extract<RunEvent, { type: 'runCompleted' }>): void {
+  closeReport(task, { summary: result?.trim() || 'The child ended without a summary.', status: 'completed', commits, outcome: run.outcome });
+  task.state = 'done';
+  if (task.worktree) task.cleanup = { problem: null, keepBranch: task.child!.awaited };
+}
+
+// Settles the ended child's report: what its agent reported through
+// `report_result`, over the factory's `fallback` summary and status, with the
+// facts the factory holds. A `forced` end (a cancel) has its own status.
+function closeReport(
+  task: Task,
+  fallback: { summary: string; status: string; commits: string[]; outcome: RunOutcome | null },
+  { forced = false } = {},
+): void {
   const child = task.child!;
-  const reported = child.reported;
+  const { reported } = child;
   child.report = {
-    summary: reported?.summary ?? (result?.trim() || 'The child ended without a summary.'),
-    status: reported?.status ?? 'completed',
+    summary: reported?.summary ?? fallback.summary,
+    status: forced ? fallback.status : (reported?.status ?? fallback.status),
     notes: reported?.notes ?? '',
     branch: task.worktree?.branch ?? '',
-    commits: [...commits],
-    outcome: run.outcome,
+    commits: [...fallback.commits],
+    outcome: fallback.outcome,
   };
   child.reported = null;
-  task.state = 'done';
-  if (task.worktree) task.cleanup = { problem: null, keepBranch: child.awaited };
 }
 
 // Cancel means everything stops: the task and its whole subtree end
@@ -1427,18 +1440,7 @@ function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: nu
     cancelled.handoff = null;
     cancelled.loop = null;
     cancelled.state = 'cancelled';
-    if (cancelled.child) {
-      const { reported } = cancelled.child;
-      cancelled.child.report = {
-        summary: reported?.summary ?? 'Cancelled before it finished.',
-        status: 'cancelled',
-        notes: reported?.notes ?? '',
-        branch: cancelled.worktree?.branch ?? '',
-        commits: [],
-        outcome: 'cancelled',
-      };
-      cancelled.child.reported = null;
-    }
+    if (cancelled.child) closeReport(cancelled, { summary: 'Cancelled before it finished.', status: 'cancelled', commits: [], outcome: 'cancelled' }, { forced: true });
     // The daemon reopens the tickets it closed: their work wasn't merged (ADR 0006).
     const closed = cancelled.closedTickets ?? [];
     if (closed.length) cancelled.reopening = { tickets: closed.map(({ ref }) => ref), problem: null };

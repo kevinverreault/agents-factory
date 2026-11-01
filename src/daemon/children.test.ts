@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
+import { handOff } from '../testing/handoff.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -280,6 +281,21 @@ describe('the tree', () => {
     const state = await tui.until((state) => state.tasks.T2?.label === 'Cancelled');
     expect(state.tasks.T2!.child!.report).toMatchObject({ status: 'cancelled', outcome: 'cancelled' });
     expect(state.tasks.T1!.label).toBe('Running');
+  });
+
+  test('a child taken over and handed back still ends Done with its report', async () => {
+    const { factory, operator, tui } = await running();
+    await spawn(factory, 'R1', 'Survey sign-out.');
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    await operator.send({ type: 'takeOver', taskId: 'T2' });
+    await tui.until((state) => state.tasks.T2?.mode === 'HITL' && state.tasks.T2.liveRunId === 'R3');
+
+    await handOff(operator, tui, factory.executor, 'T2');
+    const back = await tui.until((state) => state.tasks.T2?.mode === 'AFK' && !!state.tasks.T2.liveRunId && state.tasks.T2.liveRunId !== 'R3');
+    factory.executor.report(back.tasks.T2!.liveRunId!, { type: 'runCompleted', result: 'Sign-out is in auth.ts.' });
+
+    const done = await tui.until((state) => state.tasks.T2?.label === 'Done');
+    expect(done.tasks.T2!.child!.report).toMatchObject({ summary: 'Sign-out is in auth.ts.', outcome: 'completed' });
   });
 
   test('cancel_child cancels the agent’s own child with its subtree, and no other task', async () => {

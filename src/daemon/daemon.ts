@@ -102,7 +102,7 @@ import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
-import { cutWorktree, fetchBase, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
+import { childWorktree, cutWorktree, fetchBase, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
 import type { Clock } from './clock.ts';
 
 export type DaemonOptions = {
@@ -1258,8 +1258,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         title: titleFrom(goal),
         goal,
         skill: request.skill?.trim() || null,
-        tier: (request.tier ?? null) as ChildSpawned['tier'],
-        autonomy: (request.autonomy ?? null) as ChildSpawned['autonomy'],
+        tier: request.tier ?? null,
+        autonomy: request.autonomy ?? null,
         awaited: request.await ?? false,
         // Filled once the limits allow it.
         preset: null!,
@@ -1277,8 +1277,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if ('error' in resolved) return { ok: false, error: resolved.error };
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       const childId = nextTaskId(lifecycle);
-      const n = childrenOf(lifecycle, parent).length + 1;
-      action.worktree = { branch: `${parent.worktree!.branch}--c${n}`, path: join(options.worktreeRoot, repository.id.replace('/', '-'), childId) };
+      action.worktree = childWorktree(options.worktreeRoot, repository, parent.worktree!, childId, childrenOf(lifecycle, parent).length + 1);
       try {
         action.base = (await git.snapshot(parent.worktree!.path)).head;
         await git.addWorktree(repository.path, { ...action.worktree, startPoint: action.base });
@@ -1287,7 +1286,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return { ok: false, error: `The factory couldn’t cut ${action.worktree.branch} for the child: ${error.message}` };
       }
       const refusal = await settle(action, new Set());
-      if (refusal) return { ok: false, error: refusal };
+      if (refusal) {
+        // No child holds them: the worktree and branch just cut go again.
+        await git.removeWorktree(repository.path, action.worktree.path).catch(() => {});
+        await git.deleteBranch(repository.path, action.worktree.branch).catch(() => {});
+        return { ok: false, error: refusal };
+      }
       return { ok: true, text: spawnedText(lifecycle.tasks[childId]!) };
     });
   }
