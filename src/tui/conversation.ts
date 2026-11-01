@@ -131,12 +131,18 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   return h(
     Box,
     { flexDirection: 'column', height: (stdout as NodeJS.WriteStream).rows || undefined },
-    h(Box, { gap: 2 }, h(Text, { bold: true }, taskId), h(Text, { wrap: 'truncate' }, task?.title ?? '')),
-    h(Text, { dimColor: true }, [task?.branch, task?.stage, run?.model, task?.label].filter(Boolean).join(' · ')),
-    // The escape hatch: the same session in the operator's own terminal.
-    task?.sessionId
-      ? h(Text, { dimColor: true, wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
-      : null,
+    // On a full screen only the events give way: squeezed, wrapped text
+    // would draw its lines over the next ones.
+    h(
+      Box,
+      { flexDirection: 'column', flexShrink: 0 },
+      h(Box, { gap: 2 }, h(Text, { bold: true }, taskId), h(Text, { wrap: 'truncate' }, task?.title ?? '')),
+      h(Text, { dimColor: true }, [task?.branch, task?.stage, run?.model, task?.label].filter(Boolean).join(' · ')),
+      // The escape hatch: the same session in the operator's own terminal.
+      task?.sessionId
+        ? h(Text, { dimColor: true, wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
+        : null,
+    ),
     h(
       Box,
       { flexGrow: 1, marginY: 1, gap: 2 },
@@ -151,22 +157,26 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       ),
       h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
     ),
-    question ? h(QuestionCard, { question, card }) : null,
-    live && run.proposal?.kind === 'advance'
-      ? h(Text, { color: 'yellow' }, `◇ The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
-      : null,
-    live && run.proposal?.kind === 'handoff' && !sheet
-      ? h(Text, { color: 'yellow' }, `◇ The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
-      : null,
-    sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run }) : null,
-    advancing && canAdvance(task)
-      ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
-      : null,
-    request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
-    live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
-    refusal ? h(Text, { color: 'red' }, refusal) : null,
-    chat ? h(Text, null, `› ${draft}▏`) : null,
-    h(Text, { dimColor: true }, hint),
+    h(
+      Box,
+      { flexDirection: 'column', flexShrink: 0 },
+      question ? h(QuestionCard, { question, card }) : null,
+      live && run.proposal?.kind === 'advance'
+        ? h(Text, { color: 'yellow' }, `◇ The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
+        : null,
+      live && run.proposal?.kind === 'handoff' && !sheet
+        ? h(Text, { color: 'yellow' }, `◇ The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
+        : null,
+      sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run }) : null,
+      advancing && canAdvance(task)
+        ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
+        : null,
+      request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
+      live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
+      refusal ? h(Text, { color: 'red' }, refusal) : null,
+      chat ? h(Text, null, `› ${draft}▏`) : null,
+      h(Text, { dimColor: true }, hint),
+    ),
   );
 }
 
