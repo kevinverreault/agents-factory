@@ -5,22 +5,28 @@
 // and nowhere else.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  getSessionInfo,
   getSessionMessages,
+  importSessionToStore,
   query,
   type CanUseTool,
   type HookCallback,
   type Options,
   type Query,
   type SDKResultMessage,
+  type SessionKey,
+  type SessionStore,
   type SpawnOptions,
 } from '@anthropic-ai/claude-agent-sdk';
 import { HARD_DENY_RULES, refusal, runHistoryIn } from '../guards/hard-denies.ts';
 import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import { processCreatedAt } from '../os/process-info.ts';
-import type { ConversationEvent, CredentialProfile, Executor, RunGuards, RunSink, RunStart, Verdict } from './executor.ts';
+import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunGuards, type RunSink, type RunStart, type Verdict } from './executor.ts';
 import { hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
 
@@ -131,11 +137,23 @@ export function agentSdkExecutor(): Executor {
       run.query.close();
     },
 
-    async history({ sessionId, cwd }) {
-      const messages = await getSessionMessages(sessionId, { dir: cwd });
+    async history({ sessionId, cwd, archive }) {
+      const messages = await getSessionMessages(sessionId, { dir: cwd, ...(archive ? { sessionStore: archiveStore(archive) } : {}) });
       return messages.flatMap((message) =>
         message.type === 'system' || message.parent_tool_use_id ? [] : eventsOf(message.type, message.uuid, message.message),
       );
+    },
+
+    async archive({ sessionId, cwd }, dir) {
+      try {
+        if (!(await getSessionInfo(sessionId, { dir: cwd }))) return;
+        // A copy from an earlier try goes first: the import appends.
+        rmSync(join(dir, `${sessionId}.jsonl`), { force: true });
+        rmSync(join(dir, sessionId), { recursive: true, force: true });
+        await importSessionToStore(sessionId, archiveStore(dir), { dir: cwd });
+      } catch (error) {
+        throw new ArchiveError((error as Error).message);
+      }
     },
   };
 
@@ -186,6 +204,31 @@ export function agentSdkExecutor(): Executor {
       runs.delete(runId);
     }
   }
+}
+
+// The session transcripts archived in `dir` (ADR 0011), one JSONL file per
+// session as the CLI writes it, and its in-run subagents' under the
+// session's id. The directory is the task's alone, so the project key plays
+// no part.
+function archiveStore(dir: string): SessionStore {
+  const file = ({ sessionId, subpath }: SessionKey) => join(dir, subpath ? join(sessionId, `${subpath}.jsonl`) : `${sessionId}.jsonl`);
+  return {
+    async append(key, entries) {
+      mkdirSync(dirname(file(key)), { recursive: true });
+      appendFileSync(file(key), entries.map((entry) => `${JSON.stringify(entry)}\n`).join(''));
+    },
+    async load(key) {
+      let text: string;
+      try {
+        text = readFileSync(file(key), 'utf8');
+      } catch (error) {
+        // A transcript never archived; any other failure is the read's.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+      return text.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    },
+  };
 }
 
 // HITL runs act as the operator (ADR 0005): every settings source loads,

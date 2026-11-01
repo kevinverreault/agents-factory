@@ -82,6 +82,12 @@ async function fixture(): Promise<CloneFixture> {
     async setPushUrl(worktreePath, remote, url) {
       git(worktreePath, 'config', `remote.${remote}.pushurl`, url);
     },
+    async push(clonePath, branch) {
+      git(clonePath, 'push', '--quiet', 'origin', branch);
+    },
+    async merge(clonePath, branch, base) {
+      git(clonePath, 'push', '--quiet', 'origin', `${branch}:${base}`);
+    },
     async dispose() {
       rmSync(root, { recursive: true, force: true });
     },

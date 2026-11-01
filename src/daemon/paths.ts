@@ -23,6 +23,8 @@ export type FactoryPaths = {
   permissionsPath: string;
   // Each AFK run's own git config and hooks, while it runs (ADR 0007).
   runsRoot: string;
+  // Each ended task's session transcripts, by task id (ADR 0011).
+  transcriptsRoot: string;
   // What the factory's secrets are named under in the OS credential store
   // (ADR 0004): a moved home keeps its own.
   credentialPrefix: string;
@@ -44,6 +46,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     modelsTable: join(shortHome, 'models.yaml'),
     permissionsPath: join(shortHome, 'permissions.yaml'),
     runsRoot: join(shortHome, 'runs'),
+    transcriptsRoot: join(shortHome, 'transcripts'),
     credentialPrefix: env.AGENTS_FACTORY_HOME ? `agents-factory-${hashOf(home)}` : 'agents-factory',
   };
 }

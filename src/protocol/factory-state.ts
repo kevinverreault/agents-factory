@@ -11,6 +11,7 @@ import {
   readyForYou,
   type AppCheck,
   type AutonomyLevel,
+  type Cleanup,
   type ClosedTicket,
   type FrozenPreset,
   type HandoffSheet,
@@ -55,6 +56,10 @@ export type TaskView = {
   handoff: HandoffView | null;
   // The tickets its Ralph loop closed, with their commits.
   closedTickets: ClosedTicket[];
+  // While a Done root's cleanup hasn't finished, and why it last failed.
+  cleanup: Cleanup | null;
+  // Where its transcripts were archived once it ended.
+  transcripts: string | null;
 };
 
 export type HandoffView = Omit<HandoffSheet, 'asked'>;
@@ -109,6 +114,8 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
       closedTickets: structuredClone(task.closedTickets ?? []),
+      cleanup: task.cleanup ? { ...task.cleanup } : null,
+      transcripts: task.transcripts ?? null,
     };
   }
   const runs: Record<string, RunView> = {};

@@ -92,7 +92,11 @@ class Connection implements FactoryConnection {
       case 'reply': {
         const resolve = this.pending.get(message.id);
         this.pending.delete(message.id);
-        resolve?.(message.ok ? { ok: true, value: message.value } : { ok: false, reason: message.reason });
+        resolve?.(
+          message.ok
+            ? { ok: true, value: message.value }
+            : { ok: false, reason: message.reason, ...(message.confirm ? { confirm: message.confirm } : {}) },
+        );
         break;
       }
       case 'snapshot':

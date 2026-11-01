@@ -3,7 +3,7 @@
 // The resume check runs the operator's own `claude` from PATH.
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -72,6 +72,15 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   expect(history).toEqual(live);
+
+  // Archived, twice over, the session replays the same from the archive; a
+  // session with no transcript leaves nothing there.
+  const archive = join(cwd, 'archive');
+  await executor.archive({ sessionId: run.sessionId, cwd }, archive);
+  await executor.archive({ sessionId: run.sessionId, cwd }, archive);
+  await executor.archive({ sessionId: randomUUID(), cwd }, archive);
+  expect(await executor.history({ sessionId: run.sessionId, cwd, archive })).toEqual(live);
+  expect(readdirSync(archive)).toEqual([`${run.sessionId}.jsonl`]);
 
   executor.stop('R1');
   await waitFor(() => !isAlive(pid), 15_000);

@@ -30,6 +30,15 @@ export interface Git {
   // `path`. Throws a `GitError` when the branch exists or `path` is taken.
   addWorktree(clonePath: string, worktree: { path: string; branch: string; startPoint: string }): Promise<void>;
   worktrees(clonePath: string): Promise<Worktree[]>;
+  // Removes the worktree at `path`, uncommitted changes and all, if the
+  // clone still has it.
+  removeWorktree(clonePath: string, path: string): Promise<void>;
+  // Deletes `branch`, merged or not, if the clone still has it. Throws a
+  // `GitError` when a worktree has it checked out.
+  deleteBranch(clonePath: string, branch: string): Promise<void>;
+  // Whether `branch`'s tip is in the history of `into` (such as
+  // `origin/main`). Throws a `GitError` when either names no commit.
+  isMerged(clonePath: string, branch: string, into: string): Promise<boolean>;
   // Which of `paths` (relative to the worktree, with `/`) have changes not
   // yet committed there, untracked files included.
   uncommitted(worktreePath: string, paths: string[]): Promise<string[]>;
@@ -128,6 +137,30 @@ export const gitCli: Git = {
         const branch = fields.get('branch')?.replace(/^refs\/heads\//, '');
         return path && head && branch ? [{ path: resolve(path), branch, head }] : [];
       });
+  },
+
+  async removeWorktree(clonePath, path) {
+    const worktrees = await gitCli.worktrees(clonePath);
+    // Twice forced: a locked worktree goes too.
+    if (worktrees.some((worktree) => worktree.path === resolve(path))) await run(clonePath, 'worktree', 'remove', '--force', '--force', path);
+    // A worktree whose directory was deleted by hand is only a record.
+    await run(clonePath, 'worktree', 'prune');
+  },
+
+  async deleteBranch(clonePath, branch) {
+    if ((await git(clonePath, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`)) === null) return;
+    await run(clonePath, 'branch', '--quiet', '-D', branch);
+  },
+
+  async isMerged(clonePath, branch, into) {
+    const [tip, base] = await Promise.all(
+      [`refs/heads/${branch}`, into].map((ref) =>
+        run(clonePath, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`).catch(() => {
+          throw new GitError(`${ref} names no commit.`);
+        }),
+      ),
+    );
+    return (await git(clonePath, 'merge-base', '--is-ancestor', tip!, base!)) !== null;
   },
 
   async uncommitted(worktreePath, paths) {

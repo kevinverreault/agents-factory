@@ -69,8 +69,21 @@ export class FakeGit implements Git {
     const clone = this.cloneAt(clonePath);
     const before = clone.origin.get(branch);
     const tip = this.newCommit(new Map([...(before ? this.trees.get(before)! : []), ...Object.entries(files)]));
+    if (before) this.parents.set(tip, before);
     clone.origin.set(branch, tip);
     return tip;
+  }
+
+  // Pushes the clone's `branch` to origin under the same name.
+  push(clonePath: string, branch: string): void {
+    const clone = this.cloneAt(clonePath);
+    clone.origin.set(branch, clone.branches.get(branch)!);
+  }
+
+  // Origin's `base` moves to the clone's `branch`, as merging its PR would.
+  merge(clonePath: string, branch: string, base: string): void {
+    const clone = this.cloneAt(clonePath);
+    clone.origin.set(base, clone.branches.get(branch)!);
   }
 
   // Origin stops answering the clone's fetches.
@@ -109,6 +122,28 @@ export class FakeGit implements Git {
 
   async worktrees(clonePath: string): Promise<Worktree[]> {
     return this.cloneAt(clonePath).worktrees.map(({ path, branch, head }) => ({ path, branch, head }));
+  }
+
+  async removeWorktree(clonePath: string, path: string): Promise<void> {
+    const clone = this.cloneAt(clonePath);
+    clone.worktrees = clone.worktrees.filter((worktree) => worktree.path !== path);
+    this.changes.delete(path);
+  }
+
+  async deleteBranch(clonePath: string, branch: string): Promise<void> {
+    const clone = this.cloneAt(clonePath);
+    const worktree = clone.worktrees.find((worktree) => worktree.branch === branch);
+    if (worktree) throw new GitError(`error: cannot delete branch '${branch}' used by worktree at '${worktree.path}'`);
+    clone.branches.delete(branch);
+  }
+
+  async isMerged(clonePath: string, branch: string, into: string): Promise<boolean> {
+    const clone = this.cloneAt(clonePath);
+    const tip = clone.branches.get(branch);
+    const base = into.startsWith('origin/') ? clone.fetched.get(into.slice('origin/'.length)) : clone.branches.get(into);
+    if (!tip || !base) throw new GitError(`fatal: Not a valid commit name ${tip ? into : branch}`);
+    for (let commit: string | undefined = base; commit; commit = this.parents.get(commit)) if (commit === tip) return true;
+    return false;
   }
 
   async repairWorktree(clonePath: string, path: string): Promise<void> {

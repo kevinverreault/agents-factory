@@ -160,7 +160,7 @@ describe('conversing', () => {
       { type: 'toolUse', tool: 'Bash', summary: 'git log --oneline -5' },
     ]);
     const { sessionId, cwd } = factory.executor.started[0]!;
-    expect(factory.executor.historyReads.at(-1)).toEqual({ sessionId, cwd });
+    expect(factory.executor.historyReads.at(-1)).toEqual({ sessionId, cwd, archive: null });
 
     factory.executor.converse('R1', { type: 'message', from: 'agent', text: 'Found it.' });
     expect((await second.until(4)).at(-1)).toEqual({ type: 'message', from: 'agent', text: 'Found it.' });

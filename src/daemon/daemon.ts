@@ -6,7 +6,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
-import type { ConversationEvent, Executor, RunGuards, RunStart } from '../executor/executor.ts';
+import { ArchiveError, type ConversationEvent, type Executor, type RunGuards, type RunStart } from '../executor/executor.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   CLOSE_TICKET,
@@ -32,9 +32,11 @@ import {
   openRequest,
   overdueRuns,
   reduce,
+  sessionsOf,
   ticketSources,
   unfinishedTasks,
   type AppCheck,
+  type CleanupEvent,
   type Lifecycle,
   type Readiness,
   type LifecycleAction,
@@ -110,6 +112,8 @@ export type DaemonOptions = {
   permissionsPath: string;
   // Where each AFK run's own git config and hooks go while it runs.
   runsRoot: string;
+  // Where each Done task's session transcripts are archived (ADR 0011).
+  transcriptsRoot: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
 };
@@ -162,6 +166,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
   // The tasks whose loop's step between iterations is under way on GitHub.
   const stepsInFlight = new Set<string>();
+  // The Done roots whose cleanup this daemon has started, and those of them
+  // still under way. One that failed is tried again by the next daemon.
+  const cleanupsStarted = new Set<string>();
+  const cleanupsInFlight = new Set<string>();
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
   let storedApp: Promise<FactoryApp | null> | null = null;
@@ -250,6 +258,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       case 'advanceStage':
         // Named now, for a next stage whose context is fresh.
         return dispatch({ type: 'stageAdvanced', taskId: command.taskId, skip: command.skip ?? [], sessionId: randomUUID() });
+      case 'markDone':
+        return markDone(command);
       case 'openHandoff':
         return openHandoff(command.taskId);
       case 'handoff':
@@ -454,6 +464,44 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
   }
 
+  // Mark done (ADR 0011): a root without a PR finishes once its task branch
+  // is merged into the freshly fetched base branch on origin. Otherwise, or
+  // when that can't be checked, the operator is asked to finish anyway.
+  function markDone({ taskId, anyway = false }: Extract<LifecycleAction, { type: 'markDone' }>): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const action: LifecycleAction = { type: 'markDone', taskId };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      const unmerged = anyway ? null : await whyUnmerged(lifecycle.tasks[taskId]!);
+      if (unmerged) return { ok: false, reason: `${unmerged} Finish anyway?`, confirm: { type: 'markDone', taskId, anyway: true } };
+      const refusal = await settle(action, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
+  }
+
+  // Why the task's branch isn't known to be merged into its base branch on
+  // origin, or null when it is (or the task has none).
+  async function whyUnmerged(task: Task): Promise<string | null> {
+    const repository = lifecycle.repositories[task.repo];
+    if (!task.worktree || !repository) return null;
+    const { id, path, baseBranch } = repository;
+    const unchecked = `Couldn’t check whether ${task.id} is merged:`;
+    try {
+      await git.fetch(path, baseBranch);
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return `${unchecked} couldn’t fetch ${baseBranch} from the origin of ${id} (${error.message}).`;
+    }
+    try {
+      if (await git.isMerged(path, task.worktree.branch, `origin/${baseBranch}`)) return null;
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return `${unchecked} ${error.message}`;
+    }
+    return `Not merged into ${baseBranch}: ${task.worktree.branch}’s tip isn’t on origin/${baseBranch}.`;
+  }
+
   // Opens the handoff sheet on how the task's worktree stands now.
   function openHandoff(taskId: string): Promise<Reply> {
     return serially(async (): Promise<Reply> => {
@@ -594,8 +642,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     publish();
     // Taken now, so a run that ends during the read still has it.
     const live = streamed.get(runId) ?? [];
+    // A Done task's conversation is read from its archive.
+    const sessionId = run.sessionId ?? task.sessionId;
     const history =
-      task.sessionId && task.worktree ? await executor.history({ sessionId: task.sessionId, cwd: task.worktree.path }) : [];
+      sessionId && task.worktree ? await executor.history({ sessionId, cwd: task.worktree.path, archive: task.transcripts ?? null }) : [];
     // The client left, or asked again, while the file was read.
     if (watchers.get(socket) !== replay) return;
     const replayed = new Set(history.map((event) => event.id));
@@ -630,7 +680,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // A loop between its iterations does too.
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + stepsInFlight.size > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + stepsInFlight.size + cleanupsInFlight.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -652,8 +702,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     // So is whether the App is installed on each.
     await checkEveryApp();
-    // A loop the daemon stopped between iterations carries on.
+    // A loop the daemon stopped between iterations carries on, and so does
+    // a cleanup it didn't finish.
     driveLoops();
+    driveCleanups();
   });
 
   // Deadlines are wall-clock times persisted in the store (ADR 0003), never
@@ -734,6 +786,55 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     publish();
     driveExecutor(before, action);
     driveLoops();
+    driveCleanups();
+  }
+
+  // Cleans up after each Done root whose cleanup is pending (ADR 0011), once
+  // per daemon. Its outcome goes through the Lifecycle like any other event.
+  function driveCleanups(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (stopping || !task.cleanup || cleanupsStarted.has(task.id)) continue;
+      cleanupsStarted.add(task.id);
+      cleanupsInFlight.add(task.id);
+      void cleanUp(task).then(
+        (event) =>
+          serially(async () => {
+            cleanupsInFlight.delete(task.id);
+            if (!stopping) await settle(event, new Set());
+          }),
+        (error) => {
+          cleanupsInFlight.delete(task.id);
+          throw error;
+        },
+      );
+    }
+  }
+
+  // Archives every session transcript of the task, then removes its worktree
+  // and force-deletes its local task branch: a squash merge fails `git branch
+  // -d`, and Mark done either found the branch merged or the operator chose
+  // to finish anyway. Nothing is removed unless every
+  // transcript is archived. Each step can be done again.
+  async function cleanUp(task: Task): Promise<CleanupEvent> {
+    const { path, branch } = task.worktree!;
+    const failed = (reason: string): CleanupEvent => ({ type: 'cleanupFailed', taskId: task.id, reason });
+    const transcripts = join(options.transcriptsRoot, task.id);
+    try {
+      for (const sessionId of sessionsOf(lifecycle, task)) await executor.archive({ sessionId, cwd: path }, transcripts);
+    } catch (error) {
+      if (!(error instanceof ArchiveError)) throw error;
+      return failed(`The factory couldn’t archive ${task.id}’s transcripts, so it removed nothing yet: ${error.message}`);
+    }
+    const repository = lifecycle.repositories[task.repo];
+    if (!repository) return failed(`${task.repo} isn’t registered any more, so ${task.id}’s worktree at ${path} stays.`);
+    try {
+      await git.removeWorktree(repository.path, path);
+      await git.deleteBranch(repository.path, branch);
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return failed(`The factory couldn’t remove ${task.id}’s worktree at ${path} and its branch ${branch}: ${error.message}`);
+    }
+    return { type: 'cleanedUp', taskId: task.id, transcripts };
   }
 
   // Starts the step on GitHub of each loop between its iterations (ADR 0006):

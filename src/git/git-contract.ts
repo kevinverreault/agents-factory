@@ -26,6 +26,10 @@ export type CloneFixture = {
   checkout(worktreePath: string, branch: string): Promise<void>;
   // Sets the remote's `pushurl`, as seen from the worktree.
   setPushUrl(worktreePath: string, remote: string, url: string): Promise<void>;
+  // Pushes the clone's `branch` to origin under the same name.
+  push(clonePath: string, branch: string): Promise<void>;
+  // Fast-forwards origin's `base` to the clone's `branch`, as merging its PR would.
+  merge(clonePath: string, branch: string, base: string): Promise<void>;
   dispose(): Promise<void>;
 };
 
@@ -220,6 +224,50 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
           files: [{ path: '.agent-factory/presets/nightly.preset.yaml', content: preset }],
         });
         await expect(git.readDirectory(clone, 'origin/nowhere', '.agent-factory/presets')).rejects.toThrow();
+      }));
+
+    test('a task branch is merged once origin’s base branch, as fetched, has its tip in its history', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll, merge }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        // Cut from origin's tip, with nothing of its own yet.
+        expect(await git.isMerged(clone, 'factory/T1-a', 'origin/main')).toBe(true);
+
+        await editFile(path, 'src/logout.ts');
+        await commitAll(path);
+        expect(await git.isMerged(clone, 'factory/T1-a', 'origin/main')).toBe(false);
+
+        await merge(clone, 'factory/T1-a', 'main');
+        await git.fetch(clone, 'main');
+        expect(await git.isMerged(clone, 'factory/T1-a', 'origin/main')).toBe(true);
+        await expect(git.isMerged(clone, 'factory/T9-gone', 'origin/main')).rejects.toThrow();
+      }));
+
+    test('a task worktree is removed with its uncommitted changes, then its branch, and the branch checks out again from origin', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll, push }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        await editFile(path, 'src/logout.ts');
+        await commitAll(path);
+        const { head } = (await git.worktrees(clone))[0]!;
+        await push(clone, 'factory/T1-a');
+        await editFile(path, 'notes.txt');
+
+        await git.removeWorktree(clone, path);
+        await git.deleteBranch(clone, 'factory/T1-a');
+
+        expect(await git.worktrees(clone)).toEqual([]);
+        await expect(git.isMerged(clone, 'factory/T1-a', 'origin/main')).rejects.toThrow();
+        // Both are gone already: doing it again is no error.
+        await git.removeWorktree(clone, path);
+        await git.deleteBranch(clone, 'factory/T1-a');
+        await git.fetch(clone, 'factory/T1-a');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/factory/T1-a' });
+        expect(await git.worktrees(clone)).toEqual([{ path, branch: 'factory/T1-a', head }]);
       }));
 
     test('repairing a path that is no worktree of the clone fails', () =>

@@ -156,7 +156,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     advancing && canAdvance(task)
       ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
       : null,
-    request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, note: answers.note, escBack: false }) : null,
+    request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, note: answers.note, confirm: answers.confirm, escBack: false }) : null,
     live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
     refusal ? h(Text, { color: 'red' }, refusal) : null,
     chat ? h(Text, null, `› ${draft}▏`) : null,

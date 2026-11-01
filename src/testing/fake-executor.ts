@@ -1,4 +1,4 @@
-import type { ConversationEvent, Executor, RunSink, RunStart, Session, Verdict } from '../executor/executor.ts';
+import { ArchiveError, type ConversationEvent, type Executor, type RunSink, type RunStart, type Session, type Verdict } from '../executor/executor.ts';
 import type { Answers, RunEvent } from '../lifecycle/lifecycle.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
 
@@ -16,6 +16,11 @@ export class FakeExecutor implements Executor {
   readonly answered: { runId: string; questionId: string; answers: Answers }[] = [];
   readonly permitted: { runId: string; callId: string; verdict: Verdict }[] = [];
   readonly historyReads: Session[] = [];
+  // Each session archived, where, and how many events it held then.
+  readonly archived: { sessionId: string; dir: string; events: number }[] = [];
+  // Each archive directory's copies, by session id.
+  private readonly archives = new Map<string, Map<string, ConversationEvent[]>>();
+  private archiveFailure: string | null = null;
   private readonly runs = new Map<string, { sink: RunSink; sessionId: string }>();
   private readonly transcripts = new Map<string, ConversationEvent[]>();
   private events = 0;
@@ -51,7 +56,22 @@ export class FakeExecutor implements Executor {
   async history(session: Session): Promise<ConversationEvent[]> {
     this.historyReads.push(session);
     await this.held;
-    return [...(this.transcripts.get(session.sessionId) ?? [])];
+    const from = session.archive ? this.archives.get(session.archive) : this.transcripts;
+    return [...(from?.get(session.sessionId) ?? [])];
+  }
+
+  async archive({ sessionId }: Session, dir: string): Promise<void> {
+    if (this.archiveFailure) throw new ArchiveError(this.archiveFailure);
+    const transcript = this.transcripts.get(sessionId);
+    if (!transcript) return;
+    const copies = this.archives.get(dir) ?? new Map<string, ConversationEvent[]>();
+    this.archives.set(dir, copies.set(sessionId, [...transcript]));
+    this.archived.push({ sessionId, dir, events: transcript.length });
+  }
+
+  // Archiving fails with `reason` from now on, or works again (null).
+  failArchive(reason: string | null): void {
+    this.archiveFailure = reason;
   }
 
   report(runId: string, event: DistributiveOmit<RunEvent, 'runId'>): void {
