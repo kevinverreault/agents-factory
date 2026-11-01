@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { expect, test } from 'vitest';
 import type { RunEvent } from '../lifecycle/lifecycle.ts';
-import { covers, FACTORY_ALLOW_LIST, type ToolCall } from '../permissions/permissions.ts';
+import { FACTORY_ALLOW_LIST, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { waitFor } from '../os/test-support.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, RunStart } from './executor.ts';
@@ -117,7 +117,8 @@ test('an L1 run’s allow rules are matched by Claude Code itself; what still re
   const outcomes = Object.fromEntries(
     shapes.map(([name, command]): [string, Outcome] => {
       if (!asked.includes(oneLine(command))) return [name, 'Claude Code allows'];
-      return [name, covers(FACTORY_ALLOW_LIST, { tool: 'Bash', input: { command } }) ? 'factory matcher allows' : 'asks the operator'];
+      const call = { id: name, tool: 'Bash', input: { command }, summary: command };
+      return [name, uncovered(FACTORY_ALLOW_LIST, call).length === 0 ? 'factory matcher allows' : 'asks the operator'];
     }),
   );
   // The record, as of Agent SDK 0.3.312. Claude Code now lets A13 and A14

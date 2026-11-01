@@ -1230,16 +1230,22 @@ describe('answering from Needs you', () => {
     attention: 'permission' as const,
     holdsRun: true,
     reason: 'Bash: npm publish',
-    permission: { id: 'toolu_1', tool: 'Bash', summary: 'npm publish', rule: 'Bash(npm publish)' },
+    permission: {
+      id: 'toolu_1',
+      tool: 'Bash',
+      summary: 'npm publish',
+      rule: 'Bash(npm publish)',
+      proposed: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
+    },
   };
 
-  test('a permission request is allowed once, or for the task by its rule, with a digit', async () => {
+  test('a permission request is allowed once with a digit, or for the task by the rule it proposes, which enter confirms', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([failing], [permission]), { connection });
     await press(app, '2');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        '── T2 Implement the store ── permission: Bash: npm publish 1 Allow once 2 Allow for this task: Bash(npm publish) 3 Deny with a note a answer',
+        '── T2 Implement the store ── permission: Bash: npm publish 1 Allow once 2 Allow for this task: Bash(npm publish *) 3 Deny with a note a answer',
       ),
     );
 
@@ -1248,7 +1254,60 @@ describe('answering from Needs you', () => {
     connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [{ ...permission, requestId: 'A4' }] }]);
     await settle();
     await press(app, '2');
-    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'task' } }));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *) enter allows for this task · esc back'));
+    expect(connection.sent).toHaveLength(1);
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'task', rules: ['Bash(npm publish *)'] } }),
+    );
+  });
+
+  test('Allow for this task offers a rule for each part no rule covers, which the operator edits before enter confirms', async () => {
+    const connection = new FakeConnection();
+    const chained = {
+      ...permission,
+      reason: "Bash: npm install zod · sed -i 's/a/b/' src/a.ts",
+      permission: {
+        id: 'toolu_1',
+        tool: 'Bash',
+        summary: "npm install zod && sed -i 's/a/b/' src/a.ts && npm test",
+        rule: "Bash(npm install zod && sed -i 's/a/b/' src/a.ts && npm test)",
+        proposed: [
+          { part: 'npm install zod', rule: 'Bash(npm install *)' },
+          { part: "sed -i 's/a/b/' src/a.ts", rule: 'Bash(sed -i *)' },
+        ],
+      },
+    };
+    const { app } = await started(factoryState([failing], [chained]), { connection });
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('2 Allow for this task: Bash(npm install *), Bash(sed -i *)'));
+
+    await press(app, 'a', '2');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain(
+        "› npm install zod: Bash(npm install *) sed -i 's/a/b/' src/a.ts: Bash(sed -i *) ↑↓ field · enter allows for this task · esc back",
+      ),
+    );
+    await press(app, DOWN, ...Array(6).fill('\x7f'));
+    app.stdin.write(' *)');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain("› sed -i 's/a/b/' src/a.ts: Bash(sed *)"));
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'task', rules: ['Bash(npm install *)', 'Bash(sed *)'] } }),
+    );
+  });
+
+  test('Allow for this task sends nothing while every rule is blank, and esc backs out of the rules', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([failing], [permission]), { connection });
+    await press(app, '2', 'a', '2', ...Array('Bash(npm publish *)'.length).fill('\x7f'), ENTER);
+    await settle();
+    expect(connection.sent).toEqual([]);
+
+    await press(app, ESC);
+    await eventually(() => expect(app.lastFrame()).not.toContain('enter allows for this task'));
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *)'));
   });
 
   test('Deny takes a typed note, which enter sends and esc sets aside', async () => {
@@ -1381,8 +1440,13 @@ describe('answering in the conversation', () => {
       expect(frame).not.toContain('esc back');
     });
 
+    // A request stored before rules were proposed per part proposes the call's own.
     await press(app, '2');
-    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task' } }));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('gh issue view 12: Bash(gh issue view 12) enter allows for this task · esc back'));
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: ['Bash(gh issue view 12)'] } }),
+    );
     // Still in the conversation, which follows the run as it resumes.
     expect(app.lastFrame()).toContain('ctrl+b back');
   });

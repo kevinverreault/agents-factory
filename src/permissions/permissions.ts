@@ -74,32 +74,65 @@ function readOperatorRules(path: string): { rules: string[]; error: string | nul
     return { rules: [], error: `${path} couldn’t be read: ${(error as Error).message}` };
   }
   const allow = (raw as { allow?: unknown } | null)?.allow ?? [];
-  if (!Array.isArray(allow) || !allow.every((rule) => typeof rule === 'string' && parseRule(rule))) {
+  if (!Array.isArray(allow) || !allow.every(isRule)) {
     return { rules: [], error: `${path} must hold \`allow:\`, a list of rules such as \`Bash(make *)\`.` };
   }
   return { rules: allow, error: null };
 }
 
-// Whether any of the rules covers the call. A Bash command chained with
-// `&&`, `||`, `;`, `&` or `|` is covered when every part of it is.
-export function covers(rules: readonly string[], call: Pick<ToolCall, 'tool' | 'input'>): boolean {
+// The parts of the call no rule covers, each a call of its own: the commands
+// of a Bash chain (`&&`, `||`, `;`, `&` or `|`), less what they redirect to
+// a stream or the null device, or else the call itself. A Bash command that
+// can't be split is one part, which only its exact rule covers. None when
+// the rules cover the call.
+export function uncovered(rules: readonly string[], call: ToolCall): ToolCall[] {
   const parsed = rules.flatMap((rule) => parseRule(rule) ?? []).filter((rule) => toolMatches(rule.tool, call.tool));
-  if (parsed.some((rule) => rule.specifier === null)) return true;
+  if (parsed.some((rule) => rule.specifier === null)) return [];
   if (call.tool === 'Bash') {
-    const parts = commandParts(String(call.input.command ?? ''));
-    return parts !== null && parts.every((part) => parsed.some((rule) => bashMatches(rule.specifier!, part)));
+    const command = String(call.input.command ?? '');
+    const parts = commandParts(command);
+    if (parts === null) return parsed.some((rule) => rule.specifier === command.trim()) ? [] : [call];
+    const left = parts.filter((part) => !parsed.some((rule) => bashMatches(rule.specifier!, part)));
+    return left.map((part) => (parts.length === 1 ? call : { ...call, input: { ...call.input, command: part }, summary: part }));
   }
   if (call.tool === 'WebFetch') {
     const host = hostOf(call.input.url);
-    return host !== null && parsed.some((rule) => rule.specifier!.startsWith('domain:') && glob(rule.specifier!.slice(7)).test(host));
+    return host !== null && parsed.some((rule) => rule.specifier!.startsWith('domain:') && glob(rule.specifier!.slice(7)).test(host)) ? [] : [call];
   }
   const target = targetOf(call.input);
-  return target !== null && parsed.some((rule) => glob(slashed(rule.specifier!)).test(posix.normalize(slashed(target))));
+  return target !== null && parsed.some((rule) => glob(slashed(rule.specifier!)).test(posix.normalize(slashed(target)))) ? [] : [call];
 }
 
-// The call's own rule, for Allow for this task and Allow once: its exact
-// command, its URL's domain, or its path. Those rules hold for calls with the
-// same rule, never as patterns, so a `*` in a command stays a `*`.
+// The rule Allow for this task proposes for a part no rule covers: a Bash
+// command's program and its subcommand or leading option, with any
+// arguments (`Bash(npm install *)`, `Bash(sed -i *)`). An interpreter's
+// pattern names the script it runs (`Bash(node scripts/seed.js *)`), and
+// inline code gets its exact command, as does a command that can't be
+// split, and a call to any other tool its own rule.
+export function patternFor(part: Pick<ToolCall, 'tool' | 'input'>): string {
+  const parts = part.tool === 'Bash' ? commandParts(String(part.input.command ?? '')) : null;
+  if (parts?.length !== 1) return ruleFor(part);
+  const [program = '', next] = parts[0]!.split(/\s+/);
+  if (INTERPRETERS.has(program) && next !== undefined) {
+    if (INLINE_CODE.test(next)) return `Bash(${parts[0]})`;
+    if (!next.startsWith('-')) return `Bash(${program} ${next} *)`;
+  }
+  const words = next !== undefined && /^-{0,2}[A-Za-z][\w-]*$/.test(next) ? [program, next] : [program];
+  return `Bash(${words.join(' ')} *)`;
+}
+
+// Programs that run a script or inline code they are given, and the options
+// that give them inline code.
+const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell', 'cmd', 'node', 'deno', 'python', 'python3', 'ruby', 'perl']);
+const INLINE_CODE = /^(?:-c|-e|--eval|-command|\/c)$/i;
+
+// Whether the text is a rule: `Tool`, or `Tool(specifier)`.
+export function isRule(rule: unknown): rule is string {
+  return typeof rule === 'string' && parseRule(rule) !== null;
+}
+
+// The call's own rule, for Allow once: its exact command, its URL's domain,
+// or its path.
 export function ruleFor({ tool, input }: Pick<ToolCall, 'tool' | 'input'>): string {
   if (tool === 'Bash' && typeof input.command === 'string') return `Bash(${input.command.trim()})`;
   if (tool === 'WebFetch') {

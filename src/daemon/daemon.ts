@@ -69,7 +69,7 @@ import {
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import type { Routes } from '../models/routing.ts';
-import { covers, readAllowRules, type ToolCall } from '../permissions/permissions.ts';
+import { readAllowRules, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
   appStages,
@@ -1119,14 +1119,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // list or the operator's permissions file covers runs at once. The file is
   // read afresh for every call, so a rule the operator adds holds from their
   // next one, even in a run already under way. The Lifecycle decides the
-  // rest: by the operator's earlier answers, or with a permission request. A
-  // call asked about while another request holds its run is held until that
-  // one is answered; one the Lifecycle won't ask about otherwise is refused,
-  // with its reason.
+  // parts they leave uncovered: by the operator's earlier answers, or with a
+  // permission request. A call asked about while another request holds its
+  // run is held until that one is answered; one the Lifecycle won't ask about
+  // otherwise is refused, with its reason.
   function gate(runId: string, call: ToolCall): void {
     const { rules, error } = readAllowRules(options.permissionsPath);
-    if (covers(rules, call)) return executor.permit(runId, call.id, { allow: true });
-    void dispatch({ type: 'permissionAsked', runId, call, rulesProblem: error }).then((reply) => {
+    const parts = uncovered(rules, call);
+    if (parts.length === 0) return executor.permit(runId, call.id, { allow: true });
+    void dispatch({ type: 'permissionAsked', runId, call, parts, rulesProblem: error }).then((reply) => {
       if (reply.ok) return;
       if (lifecycle.runs[runId]?.status === 'suspended') held.set(runId, [...(held.get(runId) ?? []), call]);
       else executor.permit(runId, call.id, { allow: false, message: reply.reason });

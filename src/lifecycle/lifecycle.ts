@@ -10,7 +10,7 @@ import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../m
 import { issueRef } from '../artifacts/capture.ts';
 import type { Issue } from '../github/github.ts';
 import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
-import { ruleFor, type ToolCall } from '../permissions/permissions.ts';
+import { isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -47,11 +47,17 @@ export type Question = {
   questions: { question: string; header: string; options: { label: string; description: string }[]; multiSelect: boolean }[];
 };
 // The tool call a `permission` request asks about (ADR 0007): `id` is the
-// tool use's, and `rule` what Allow for this task adds to the task's rules.
-export type Permission = { id: string; tool: string; summary: string; rule: string };
-// How the operator answers a permission request: allow the call once, allow
-// it for the rest of the task, or deny it with a note the agent reads.
-export type PermissionAnswer = { allow: 'once' | 'task' } | { deny: string };
+// tool use's, and `rule` the call's own, which Allow once allows. `proposed`
+// holds what Allow for this task proposes for the parts no rule covers.
+// Requests stored before it have none, and propose `rule`.
+export type Permission = { id: string; tool: string; summary: string; rule: string; proposed?: ProposedRule[] };
+// A pattern proposed for a part of a call no rule covers, with that part's
+// summary. Parts that get the same pattern share one, under the first.
+export type ProposedRule = { part: string; rule: string };
+// How the operator answers a permission request: allow the call once; allow
+// it, and the calls `rules` cover, for the rest of the task (the request's
+// proposed rules if absent); or deny it with a note the agent reads.
+export type PermissionAnswer = { allow: 'once' } | { allow: 'task'; rules?: string[] } | { deny: string };
 // Each question's text with its answer: an option's label (a multi-select's
 // labels joined by ", "), or the operator's own words.
 export type Answers = Record<string, string>;
@@ -364,9 +370,10 @@ export type RunEvent =
   // An AFK run asked the operator through `AskUserQuestion`.
   | { type: 'attentionRaised'; runId: string; kind: 'question'; question: Question }
   // An AFK run's tool call that neither the factory's allow list nor the
-  // operator's rules cover (the daemon checks those). `rulesProblem` says why
-  // the operator's permissions file granted nothing, if it couldn't be read.
-  | { type: 'permissionAsked'; runId: string; call: ToolCall; rulesProblem: string | null }
+  // operator's rules cover (the daemon checks those): `parts` is the parts
+  // of it they leave uncovered, the whole call if absent. `rulesProblem`
+  // says why the operator's permissions file granted nothing, if it couldn't be read.
+  | { type: 'permissionAsked'; runId: string; call: ToolCall; parts?: ToolCall[]; rulesProblem: string | null }
   // The agent called `propose_advance`.
   | { type: 'advanceProposed'; runId: string; reason: string }
   // The agent called `propose_handoff`.
@@ -855,7 +862,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     if (!run) return `There is no run ${action.runId}.`;
     if (run.status === 'suspended' && action.type === 'permissionAsked') {
       // The task's rules still decide a suspended run's other calls.
-      if (!grantFor(state.tasks[run.taskId]!, run, action.call)) return 'Another request of this run is waiting on the operator.';
+      if (!grantFor(state.tasks[run.taskId]!, run, action)) return 'Another request of this run is waiting on the operator.';
     } else if (run.status !== 'active' && !(run.status === 'suspended' && action.type === 'runFailed')) {
       // A suspended run can still fail: its CLI may exit while it waits on the operator.
       return `Run ${run.id} is not active.`;
@@ -930,6 +937,10 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!request) return `${task.id} has no open attention request.`;
       if (request.permission && !validPermissionAnswer(action.permission)) {
         return 'Allow it once, allow it for this task, or deny it with a note for the agent.';
+      }
+      const rules = forTask(action.permission) ? action.permission.rules : undefined;
+      if (rules !== undefined && !(Array.isArray(rules) && rules.length > 0 && rules.every(isRule))) {
+        return 'Allow for this task needs at least one rule, each such as `Bash(sed -i *)`.';
       }
       const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
       return answered ? null : 'Answer every question on the card.';
@@ -1028,13 +1039,39 @@ function validPermissionAnswer(answer: PermissionAnswer | undefined): boolean {
   return 'deny' in answer ? typeof answer.deny === 'string' && answer.deny.trim() !== '' : answer.allow === 'once' || answer.allow === 'task';
 }
 
-// Which of the operator's answers lets the call through, if any: the
-// task's rules, or a rule allowed once for the run. Either is the call's own
-// rule, never a pattern.
-function grantFor(task: Task, run: Run, call: ToolCall): 'task' | 'once' | null {
-  const rule = ruleFor(call);
-  if (task.allowRules?.includes(rule)) return 'task';
+// Whether the answer allows the call for the rest of the task.
+function forTask(answer: PermissionAnswer | undefined): answer is Extract<PermissionAnswer, { allow: 'task' }> {
+  return !!answer && 'allow' in answer && answer.allow === 'task';
+}
+
+// Which of the operator's answers lets the call through, if any: the task's
+// rules, when they cover every part the factory's and operator's rules left
+// uncovered, or the call's own rule allowed once for the run.
+function grantFor(task: Task, run: Run, asked: PermissionAsked): 'task' | 'once' | null {
+  const rule = ruleFor(asked.call);
+  // Rules stored before patterns were each a whole call's own.
+  if (task.allowRules?.includes(rule) || leftUncovered(task, asked).length === 0) return 'task';
   return run.allowOnce?.includes(rule) ? 'once' : null;
+}
+
+// A run's call the factory's and operator's rules left parts of uncovered.
+type PermissionAsked = Extract<RunEvent, { type: 'permissionAsked' }>;
+
+// The parts of the call no rule covers, the task's included.
+function leftUncovered(task: Task, { call, parts = [call] }: PermissionAsked): ToolCall[] {
+  return parts.flatMap((part) => uncovered(task.allowRules ?? [], part));
+}
+
+// What a permission request proposes for the parts left uncovered: a pattern
+// for each, once.
+function proposals(parts: ToolCall[]): ProposedRule[] {
+  // Each pattern, with the summary of the first part it was proposed for.
+  const proposed = new Map<string, string>();
+  for (const part of parts) {
+    const rule = patternFor(part);
+    if (!proposed.has(rule)) proposed.set(rule, part.summary);
+  }
+  return [...proposed].map(([rule, summary]) => ({ part: summary, rule }));
 }
 
 // The conversation waits while the handoff sheet is open over it.
@@ -1208,16 +1245,23 @@ function suspend(run: Run, at: number): void {
 
 // What the operator answered a permission request with, for the run that
 // resumes after its asker parked.
-function openingWithVerdict({ tool, summary }: Permission, answer: PermissionAnswer): string {
+function openingWithVerdict(permission: Permission, answer: PermissionAnswer): string {
+  const { tool, summary } = permission;
   const verdict =
     'deny' in answer
       ? `denied ${tool}: ${summary}. Their note: ${answer.deny.trim()}`
       : answer.allow === 'once'
         ? `allowed ${tool} once: ${summary}. Make that call again now.`
-        : `allowed ${tool} for the rest of this task: ${summary}.`;
+        : `allowed ${tool}: ${summary}, and for the rest of this task the calls these rules cover: ${taskRules(permission, answer).join(', ')}.`;
   return `While this conversation was parked, the operator ${verdict}
 
 ${AFK_RESUME}`;
+}
+
+// The rules Allow for this task adds to the task's: the operator's, or else
+// the ones the request proposed.
+function taskRules(permission: Permission, answer: { allow: 'task'; rules?: string[] }): string[] {
+  return answer.rules?.map((rule) => rule.trim()) ?? permission.proposed?.map(({ rule }) => rule) ?? [permission.rule];
 }
 
 function raise(
@@ -1419,9 +1463,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'answer':
       request!.status = 'answered';
-      if (request!.permission && action.permission && 'allow' in action.permission && action.permission.allow === 'task') {
+      if (request!.permission && forTask(action.permission)) {
         const rules = (task.allowRules ??= []);
-        if (!rules.includes(request!.permission.rule)) rules.push(request!.permission.rule);
+        for (const rule of taskRules(request!.permission, action.permission)) if (!rules.includes(rule)) rules.push(rule);
       }
       if (request!.holdsRun) {
         // Resumes at once, even over the slot cap.
@@ -1585,14 +1629,16 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'permissionAsked': {
       // The executor lets a call the operator allowed through, using up a
       // rule allowed once.
-      const grant = grantFor(task, run!, action.call);
+      const grant = grantFor(task, run!, action);
       if (grant === 'once') run!.allowOnce!.splice(run!.allowOnce!.indexOf(ruleFor(action.call)), 1);
       if (grant) break;
       const { id, tool, summary } = action.call;
       suspend(run!, at);
+      // Named by the parts no rule covers.
+      const parts = leftUncovered(task, action);
       const problem = action.rulesProblem && ` (${action.rulesProblem.replace(/\.$/, '')}, so its rules granted nothing.)`;
-      const permission = { id, tool, summary, rule: ruleFor(action.call) };
-      raise(state, task, run!, 'permission', true, `${tool}: ${summary}${problem ?? ''}`, at, { permission });
+      const permission = { id, tool, summary, rule: ruleFor(action.call), proposed: proposals(parts) };
+      raise(state, task, run!, 'permission', true, `${tool}: ${parts.map((part) => part.summary).join(' · ')}${problem ?? ''}`, at, { permission });
       break;
     }
     case 'artifactsSeen': {

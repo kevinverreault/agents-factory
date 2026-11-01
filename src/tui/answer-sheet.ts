@@ -4,7 +4,7 @@
 // review, lists what each digit does. Ready items take no digits here.
 import { createElement as h, useReducer, useRef } from 'react';
 import { Box, Text, type Key } from 'ink';
-import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
+import type { AttentionQueueItem, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
 import type { Command, Reply } from '../protocol/protocol.ts';
@@ -12,12 +12,41 @@ import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
 
 // What a digit on the sheet does. A choice that `opens` takes the operator
-// into the task's conversation once the daemon accepts it; one with a `note`
-// first takes the operator's typed note, under `prompt`, and sends what it
-// makes of it on enter, which `enter` names.
+// into the task's conversation once the daemon accepts it; one with `fields`
+// first takes what the operator types into them, each under its `prompt`
+// and starting at its `value`, and on enter sends what `send` makes of
+// them, which `enter` names: nothing while `send` makes nothing of them.
 export type Choice =
   | { label: string; command: Command; opens?: boolean }
-  | { label: string; note: (text: string) => Command; prompt: string; enter: string };
+  | { label: string; fields: Field[]; send: (values: string[]) => Command | null; enter: string };
+// One line the operator types into, under its prompt.
+export type Field = { prompt: string; value: string };
+
+// A choice that takes one typed note, which it sends unless it is blank.
+function noted(label: string, prompt: string, enter: string, command: (text: string) => Command): Choice {
+  return { label, fields: [{ prompt, value: '' }], send: ([text = '']) => (text.trim() ? command(text.trim()) : null), enter };
+}
+
+// An answer to a permission request that allows by rules: what its choice
+// reads, what enter does, and the answer the confirmed rules make.
+type ByRules = { label: string; enter: string; answer: (rules: string[]) => PermissionAnswer };
+const FOR_THIS_TASK: ByRules = { label: 'Allow for this task', enter: 'allows for this task', answer: (rules) => ({ allow: 'task', rules }) };
+
+// A choice that allows the call by rules the operator can widen or narrow
+// first: one field per part no rule covers, under that part, holding the
+// rule proposed for it. Enter sends the rules left that aren't blank.
+function byRules(taskId: string, permission: Permission, { label, enter, answer }: ByRules): Choice {
+  const proposed = permission.proposed ?? [{ part: permission.summary, rule: permission.rule }];
+  return {
+    label: `${label}: ${proposed.map(({ rule }) => rule).join(', ')}`,
+    fields: proposed.map(({ part, rule }) => ({ prompt: part, value: rule })),
+    send: (values) => {
+      const rules = values.map((rule) => rule.trim()).filter(Boolean);
+      return rules.length > 0 ? { type: 'answer', taskId, permission: answer(rules) } : null;
+    },
+    enter,
+  };
+}
 
 // The digits' choices on a request other than a question with its card, or
 // on a root in review. Kinds whose answers arrive with their own slices (a
@@ -26,7 +55,7 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
   if (item.kind === 'review') {
     const { taskId } = item;
     return [
-      { label: 'Request changes', note: (comments) => ({ type: 'requestChanges', taskId, comments }), prompt: 'Review comments', enter: 'requests changes' },
+      noted('Request changes', 'Review comments', 'requests changes', (comments) => ({ type: 'requestChanges', taskId, comments })),
       { label: 'Mark done', command: { type: 'markDone', taskId } },
       { label: 'Cancel', command: { type: 'cancel', taskId } },
     ];
@@ -40,11 +69,14 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
       return [{ label: 'Retry', command: answer }, ...(task?.mode === 'AFK' ? [takeOver] : [])];
     }
     case 'permission': {
-      const allow = (allow: 'once' | 'task'): Command => ({ type: 'answer', taskId, permission: { allow } });
+      // Requests stored before they named their call allow it for the task as it is.
+      const forTask: Choice = item.permission
+        ? byRules(taskId, item.permission, FOR_THIS_TASK)
+        : { label: 'Allow for this task: this call', command: { type: 'answer', taskId, permission: { allow: 'task' } } };
       return [
-        { label: 'Allow once', command: allow('once') },
-        { label: `Allow for this task: ${item.permission?.rule ?? 'this call'}`, command: allow('task') },
-        { label: 'Deny with a note', note: (text) => ({ type: 'answer', taskId, permission: { deny: text } }), prompt: 'Note for the agent', enter: 'denies' },
+        { label: 'Allow once', command: { type: 'answer', taskId, permission: { allow: 'once' } } },
+        forTask,
+        noted('Deny with a note', 'Note for the agent', 'denies', (text) => ({ type: 'answer', taskId, permission: { deny: text } })),
       ];
     }
     case 'stage-blocked':
@@ -76,14 +108,15 @@ export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined)
 // answered for, and whether its choice opens that task's conversation.
 export type Answered = { reply: Reply; taskId: string; opens: boolean };
 
-// The note the operator is typing for a choice, with what it is for.
-export type Note = { draft: string; prompt: string; enter: string };
+// The fields the operator is filling in for a choice, as they stand: `at`
+// is the one they are typing into, and `enter` what enter does.
+export type Form = { fields: Field[]; at: number; enter: string };
 
 // The operator answering an item on its sheet: `key` takes a key while the
 // digits are the sheet's. Keys typed in one burst arrive before a re-render,
-// so the card the operator is answering on, the note they are typing for a
-// choice, what a refusal asks back, and the items already answered, are
-// kept across renders. `onSend` hears of each answer as it goes out,
+// so the card the operator is answering on, the fields they are filling in
+// for a choice, what a refusal asks back, and the items already answered,
+// are kept across renders. `onSend` hears of each answer as it goes out,
 // `onReply` once it is back, unless the reply asks whether to go ahead
 // anyway: the sheet asks that instead, and y sends what it confirms.
 export function useAnswering(
@@ -95,14 +128,17 @@ export function useAnswering(
   const sheet = useRef<{
     card: Card;
     cardFor: string | null;
-    note: { for: string; choice: number; draft: string } | null;
+    form: { for: string; choice: number; values: string[]; at: number } | null;
     confirm: { for: string; reason: string; command: Command } | null;
     sent: Set<string>;
-  }>({ card: newCard(), cardFor: null, note: null, confirm: null, sent: new Set() });
+  }>({ card: newCard(), cardFor: null, form: null, confirm: null, sent: new Set() });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const itemKey = item ? keyOf(item) : null;
   const card = item?.kind === 'attention' && sheet.current.cardFor === itemKey ? sheet.current.card : newCard();
-  const note = itemKey !== null && sheet.current.note?.for === itemKey ? sheet.current.note : null;
+  const form = itemKey !== null && sheet.current.form?.for === itemKey ? sheet.current.form : null;
+  const formChoice = form && item ? choicesFor(item, task)[form.choice] : undefined;
+  // The fields being filled in, with the choice they are for, while it still takes them.
+  const filling = form && formChoice && 'fields' in formChoice ? { form, choice: formChoice } : null;
   const confirm = itemKey !== null && sheet.current.confirm?.for === itemKey ? sheet.current.confirm : null;
 
   const send = (command: Command, opens = false) => {
@@ -135,20 +171,26 @@ export function useAnswering(
     }
     const index = /^[1-9]$/.test(input) ? Number(input) - 1 : -1;
     const choice = choicesFor(item, task)[index];
-    if (choice && 'note' in choice) {
-      sheet.current.note = { for: itemKey, choice: index, draft: '' };
+    if (choice && 'fields' in choice) {
+      sheet.current.form = { for: itemKey, choice: index, values: choice.fields.map(({ value }) => value), at: 0 };
       rerender();
     } else if (choice) send(choice.command, choice.opens);
   };
-  // A key while the operator types the note a choice takes: enter sends it,
-  // unless it is empty, and esc sets it aside.
-  const takeNote = (input: string, key: Key) => {
-    const choice = note && item && choicesFor(item, task)[note.choice];
-    if (key.escape || !choice || !('note' in choice)) sheet.current.note = null;
-    else if (key.return && note.draft.trim()) {
-      sheet.current.note = null;
-      send(choice.note(note.draft.trim()));
-    } else note.draft = edit(note.draft, input, key) ?? note.draft;
+  // A key while the operator fills in the fields a choice takes: up and down
+  // (or tab) move between them, enter sends what they make, if anything,
+  // and esc sets them aside.
+  const fill = (input: string, key: Key) => {
+    if (key.escape || !filling) sheet.current.form = null;
+    else {
+      const { form, choice } = filling;
+      const command = key.return ? choice.send(form.values) : null;
+      if (command) {
+        sheet.current.form = null;
+        send(command);
+      } else if (key.upArrow) form.at = Math.max(form.at - 1, 0);
+      else if (key.downArrow || key.tab) form.at = Math.min(form.at + 1, form.values.length - 1);
+      else form.values[form.at] = edit(form.values[form.at]!, input, key) ?? form.values[form.at]!;
+    }
     rerender();
   };
   // A key while the sheet asks whether to go ahead anyway: y does, n or esc doesn't.
@@ -159,15 +201,18 @@ export function useAnswering(
     } else if (input === 'n' || key.escape) sheet.current.confirm = null;
     rerender();
   };
-  const noteChoice = note && item ? choicesFor(item, task)[note.choice] : undefined;
 
   return {
     card,
-    // The note being typed, if any: while it is, every key is the note's.
-    note: note && noteChoice && 'note' in noteChoice ? { draft: note.draft, prompt: noteChoice.prompt, enter: noteChoice.enter } : null,
+    // The fields being filled in, if any: while they are, every key is theirs.
+    form: filling && {
+      fields: filling.choice.fields.map(({ prompt }, i) => ({ prompt, value: filling.form.values[i]! })),
+      at: filling.form.at,
+      enter: filling.choice.enter,
+    },
     // What a refusal asks back, if anything: while it does, every key is its answer's.
     confirm: confirm?.reason ?? null,
-    key: (input: string, key: Key) => (confirm ? goAhead(input, key) : note ? takeNote(input, key) : answer(input, key)),
+    key: (input: string, key: Key) => (confirm ? goAhead(input, key) : form ? fill(input, key) : answer(input, key)),
   };
 }
 
@@ -178,8 +223,8 @@ type Props = {
   card: Card;
   // Whether the digits are the sheet's, not the screens'.
   answering: boolean;
-  // The note the operator is typing for a choice that takes one, if any.
-  note: Note | null;
+  // The fields the operator is filling in for a choice that takes some, if any.
+  form: Form | null;
   // What a refusal asks back, if anything.
   confirm?: string | null;
   // Whether esc gives the digits back to the screens: on Needs you, not in a
@@ -187,15 +232,15 @@ type Props = {
   escBack?: boolean;
 };
 
-export function AnswerSheet({ item, task, card, answering, note, confirm = null, escBack = true }: Props) {
+export function AnswerSheet({ item, task, card, answering, form, confirm = null, escBack = true }: Props) {
   // A request about a repository itself has no task: the repository takes the title's place.
   const title = task ? `${task.id} ${task.title}` : item.kind === 'attention' ? item.repo : '';
   const question = item.kind === 'attention' ? item.question : null;
   const hint = answerable(item, task)
     ? confirm !== null
       ? 'y yes · n no'
-      : note !== null
-      ? `enter ${note.enter} · esc back`
+      : form !== null
+      ? `${form.fields.length > 1 ? '↑↓ field · ' : ''}enter ${form.enter} · esc back`
       : answering
       ? escBack ? 'digits answer · esc back' : null
       : 'a answer'
@@ -212,7 +257,10 @@ export function AnswerSheet({ item, task, card, answering, note, confirm = null,
     ...choicesFor(item, task).map((choice, i) =>
       h(Box, { key: choice.label, gap: 1 }, h(Text, { bold: true, color: 'cyan' }, String(i + 1)), h(Text, null, choice.label)),
     ),
-    note !== null ? h(Text, null, h(Text, { bold: true }, `${note.prompt}: `), note.draft) : null,
+    // With more than one field, › marks the one being typed into.
+    ...(form?.fields ?? []).map(({ prompt, value }, i) =>
+      h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? '› ' : '  ') : '', h(Text, { bold: true }, `${prompt}: `), value),
+    ),
     confirm !== null ? h(Text, { color: 'yellow' }, confirm) : null,
     hint ? h(Text, { dimColor: true }, hint) : null,
   );
