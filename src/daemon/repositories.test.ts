@@ -22,8 +22,10 @@ afterEach(async () => {
 
 const widgets = resolve('/clones/widgets');
 
+// With the factory's App installed on it, so its tasks can launch.
 function addWidgetsClone(factory: TestFactory): void {
   factory.git.addClone(widgets, { originUrl: 'https://github.com/acme/widgets.git', defaultBranch: 'main' });
+  factory.github.install('acme/widgets');
 }
 
 // A factory with acme/widgets registered from its clone at `widgets`.
@@ -41,7 +43,7 @@ describe('repo add', () => {
 
     expect(await operator.send({ type: 'registerRepo', path: widgets })).toEqual({
       ok: true,
-      value: { id: 'acme/widgets', path: widgets, baseBranch: 'main', defaultPreset: 'main-flow', missing: false },
+      value: { id: 'acme/widgets', path: widgets, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now() } },
     });
 
     const state = await tui.until((state) => 'acme/widgets' in state.repositories);
@@ -51,6 +53,7 @@ describe('repo add', () => {
       baseBranch: 'main',
       defaultPreset: 'main-flow',
       missing: false,
+      app: { installed: true, checkedAt: factory.clock.now() },
     });
   });
 
@@ -129,6 +132,7 @@ describe('repo add', () => {
       baseBranch: 'release',
       defaultPreset: 'quick',
       missing: false,
+      app: { installed: true, checkedAt: factory.clock.now() },
     });
   });
 });
@@ -212,7 +216,7 @@ describe('repo move', () => {
 
     expect(await operator.send({ type: 'moveRepo', path: resolve(moved, 'src') })).toEqual({
       ok: true,
-      value: { id: 'acme/widgets', path: moved, baseBranch: 'main', defaultPreset: 'main-flow', missing: false },
+      value: { id: 'acme/widgets', path: moved, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now() } },
     });
 
     expect((await tui.until((state) => state.repositories['acme/widgets']?.path === moved)).attentionQueue).toEqual([]);

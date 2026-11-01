@@ -20,7 +20,7 @@ export type CommitTrailers = { task: string; run: string; model: string };
 
 // Removed from an AFK run's environment: the operator's GitHub and SSH
 // credentials, and an API key that would win over the subscription login.
-export const AFK_UNSET = ['GH_TOKEN', 'GITHUB_TOKEN', 'ANTHROPIC_API_KEY', 'SSH_AUTH_SOCK', 'GIT_ASKPASS', 'SSH_ASKPASS'] as const;
+export const AFK_UNSET = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'SSH_AUTH_SOCK', 'GIT_ASKPASS', 'SSH_ASKPASS'] as const;
 
 // The URL scheme every push is rewritten to: git has no helper for it, and
 // says so with the scheme's name.

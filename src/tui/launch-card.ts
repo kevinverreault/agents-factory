@@ -3,12 +3,14 @@
 // stage the handoff fields: autonomy level (L1 until the sandbox arrives),
 // max turns and priority. The
 // daemon resolves and freezes the preset; the card offers what it lists for
-// the repository.
+// the repository. Where the factory's App isn't installed, a preset with
+// AFK stages shows why its launch is blocked, and `ctrl+o` opens the
+// App's installation settings.
 import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
 import { DEFAULT_MAX_TURNS, PRIORITIES, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
-import type { PresetChoice, StartStage } from '../presets/presets.ts';
+import { appBlock, type PresetChoice, type StartStage } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
@@ -21,6 +23,7 @@ type Props = {
   here: string | null;
   onLaunched(taskId: string): void;
   onCancel(): void;
+  openUrl(url: string): void;
 };
 
 type Field = 'repo' | 'preset' | 'stage' | 'prompt' | 'issues' | 'groups' | 'autonomy' | 'tier' | 'maxTurns' | 'priority';
@@ -44,7 +47,7 @@ type Listing = PresetsView | { refusal: string };
 
 const LABEL = 12;
 
-export function LaunchCard({ connection, state, here, onLaunched, onCancel }: Props) {
+export function LaunchCard({ connection, state, here, onLaunched, onCancel, openUrl }: Props) {
   const repositories = Object.keys(state.repositories);
   const [draft, setDraft] = useState<Draft>(() => ({
     field: 'prompt',
@@ -76,11 +79,27 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel }: Pr
     });
   }, [connection, draft.repo]);
 
-  const cardFor = (draft: Draft) => cardOf(draft, draft.repo ? listings[draft.repo] : undefined);
+  // A cached check that found the App missing may be stale, as when the
+  // operator has just installed it: the card asks GitHub again, and the
+  // repository's state shows the answer.
+  useEffect(() => {
+    const { repo } = draft;
+    if (repo && state.repositories[repo]?.app?.installed === false) void connection.send({ type: 'checkApp', repo });
+  }, [connection, draft.repo]);
+
+  const cardFor = (draft: Draft) =>cardOf(draft, draft.repo ? listings[draft.repo] : undefined);
   const card = cardFor(draft);
+  // As last checked: the launch itself checks afresh.
+  const app = draft.repo ? (state.repositories[draft.repo]?.app ?? null) : null;
+  const blocked = card.choice && 'appStages' in card.choice ? appBlock(card.choice.name, card.choice.appStages, app) : null;
+  const fixUrl = blocked && app && !app.installed ? app.fixUrl : null;
 
   useInput((input, key) => {
     if (key.escape) return onCancel();
+    if (key.ctrl && input === 'o') {
+      if (fixUrl) openUrl(fixUrl);
+      return;
+    }
     if (key.return) {
       const command = launchCommand(draft, card);
       if (!command) return;
@@ -155,6 +174,8 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel }: Pr
       : null,
     afk ? row('priority', 'Priority', draft.priority ?? 'normal') : null,
     listing && 'warning' in listing && listing.warning ? h(Text, { color: 'yellow' }, listing.warning) : null,
+    blocked ? h(Text, { color: 'red' }, blocked) : null,
+    fixUrl ? h(Text, { dimColor: true }, 'ctrl+o opens its installation settings') : null,
     refusal ? h(Text, { color: 'red' }, refusal) : null,
     h(Text, { dimColor: true }, 'enter launch · ↑↓ field · ←→ choose · esc back'),
   );

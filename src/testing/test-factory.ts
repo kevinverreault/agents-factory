@@ -5,7 +5,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { startDaemon, type Daemon, type DaemonOptions } from '../daemon/daemon.ts';
+import { GITHUB_APP_SECRET, startDaemon, type Daemon, type DaemonOptions } from '../daemon/daemon.ts';
 import { factoryPaths, type FactoryPaths } from '../daemon/paths.ts';
 import { routingTable } from '../models/routing-table.ts';
 import { connect, type FactoryConnection } from '../protocol/client.ts';
@@ -13,6 +13,8 @@ import { openStore } from '../store/store.ts';
 import { FakeClock } from './fake-clock.ts';
 import { FakeExecutor } from './fake-executor.ts';
 import { FakeGit } from './fake-git.ts';
+import { FakeGitHub } from './fake-github.ts';
+import { FakeSecrets } from './fake-secrets.ts';
 import { FakeSkillSets } from './fake-skill-sets.ts';
 
 export type TestFactory = {
@@ -20,12 +22,15 @@ export type TestFactory = {
   clock: FakeClock;
   executor: FakeExecutor;
   git: FakeGit;
+  github: FakeGitHub;
+  secrets: FakeSecrets;
   skillSets: FakeSkillSets;
   // The daemon currently running, if any.
   daemon(): Daemon;
   // Connects a client holding the operator's token.
   attach(): Promise<FactoryConnection>;
-  // Adds a clone of acme/widgets and registers it, as `repo add` would.
+  // Adds a clone of acme/widgets and registers it, as `repo add` would,
+  // with the factory's App installed on it.
   registerRepo(): Promise<void>;
   // Starts another daemon instance over the same factory home and store.
   startDaemon(overrides?: Partial<DaemonOptions>): Promise<Daemon>;
@@ -34,13 +39,20 @@ export type TestFactory = {
   dispose(): Promise<void>;
 };
 
-export async function startTestFactory(overrides: Partial<DaemonOptions> = {}): Promise<TestFactory> {
+// The factory's App is set up, as `setup github` leaves it, unless `withoutApp`.
+export async function startTestFactory({
+  withoutApp = false,
+  ...overrides
+}: Partial<DaemonOptions> & { withoutApp?: boolean } = {}): Promise<TestFactory> {
   const home = mkdtempSync(join(tmpdir(), 'factory-seam1-'));
   const paths = factoryPaths({ AGENTS_FACTORY_HOME: home });
   const clock = new FakeClock();
   const executor = new FakeExecutor();
   const git = new FakeGit();
   const skillSets = new FakeSkillSets();
+  const github = new FakeGitHub(clock);
+  const secrets = new FakeSecrets();
+  if (!withoutApp) await secrets.write(GITHUB_APP_SECRET, JSON.stringify(await github.createApp(github.manifestCode())));
   const connections: FactoryConnection[] = [];
   const daemons: Daemon[] = [];
 
@@ -48,7 +60,7 @@ export async function startTestFactory(overrides: Partial<DaemonOptions> = {}): 
     const store = openStore(paths.storePath);
     try {
       const table = routingTable(paths.modelsTable);
-      const daemon = await startDaemon({ ...paths, store, clock, executor, git, skillSets, routingTable: table, ...overrides, ...more });
+      const daemon = await startDaemon({ ...paths, store, clock, executor, git, github, secrets, skillSets, routingTable: table, ...overrides, ...more });
       daemons.push(daemon);
       return daemon;
     } catch (error) {
@@ -64,6 +76,8 @@ export async function startTestFactory(overrides: Partial<DaemonOptions> = {}): 
     clock,
     executor,
     git,
+    github,
+    secrets,
     skillSets,
     daemon: () => daemons.at(-1)!,
     async attach() {
@@ -74,6 +88,7 @@ export async function startTestFactory(overrides: Partial<DaemonOptions> = {}): 
     async registerRepo() {
       const path = resolve('/clones/widgets');
       git.addClone(path, { originUrl: 'https://github.com/acme/widgets.git', defaultBranch: 'main' });
+      github.install('acme/widgets');
       const connection = await connect(paths);
       const reply = await connection.send({ type: 'registerRepo', path });
       connection.close();

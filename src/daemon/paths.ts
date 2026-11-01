@@ -23,6 +23,9 @@ export type FactoryPaths = {
   permissionsPath: string;
   // Each AFK run's own git config and hooks, while it runs (ADR 0007).
   runsRoot: string;
+  // What the factory's secrets are named under in the OS credential store
+  // (ADR 0004): a moved home keeps its own.
+  credentialPrefix: string;
 };
 
 export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths {
@@ -41,6 +44,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     modelsTable: join(shortHome, 'models.yaml'),
     permissionsPath: join(shortHome, 'permissions.yaml'),
     runsRoot: join(shortHome, 'runs'),
+    credentialPrefix: env.AGENTS_FACTORY_HOME ? `agents-factory-${hashOf(home)}` : 'agents-factory',
   };
 }
 
@@ -52,6 +56,9 @@ function defaultHome(env: NodeJS.ProcessEnv): string {
 // The pipe name is the single-instance lock: one daemon per factory home.
 export function pipePathFor(home: string): string {
   if (process.platform !== 'win32') return join(home, 'daemon.sock');
-  const hash = createHash('sha256').update(home.toLowerCase()).digest('hex').slice(0, 12);
-  return `\\\\.\\pipe\\agents-factory-${userInfo().username}-${hash}`;
+  return `\\\\.\\pipe\\agents-factory-${userInfo().username}-${hashOf(home)}`;
+}
+
+function hashOf(home: string): string {
+  return createHash('sha256').update(home.toLowerCase()).digest('hex').slice(0, 12);
 }

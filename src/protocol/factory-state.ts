@@ -9,6 +9,7 @@ import {
   liveRun,
   nextTier,
   readyForYou,
+  type AppCheck,
   type AutonomyLevel,
   type FrozenPreset,
   type HandoffSheet,
@@ -60,7 +61,8 @@ export type RunView = Pick<
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
 > & { maxTurns: number | null; tier: Tier | null };
 
-export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'>;
+// `app` is null until the daemon has checked the App's installation.
+export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'> & { app: AppCheck | null };
 
 // A file or issue linked to its task, in the order captured.
 export type ArtifactView = Artifact;
@@ -153,8 +155,8 @@ function handoffView(sheet: HandoffSheet | null): HandoffView | null {
   return view;
 }
 
-export function repositoryView({ id, path, baseBranch, defaultPreset, missing }: Repository): RepositoryView {
-  return { id, path, baseBranch, defaultPreset, missing };
+export function repositoryView({ id, path, baseBranch, defaultPreset, missing, app }: Repository): RepositoryView {
+  return { id, path, baseBranch, defaultPreset, missing, app: app ? { ...app } : null };
 }
 
 // A patch sets or deletes the value at a path. The diff goes two levels deep

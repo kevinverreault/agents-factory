@@ -239,7 +239,15 @@ export type Repository = {
   // True while the clone is no longer at `path`: its runs can't start.
   missing: boolean;
   registeredAt: number;
+  // Whether the factory identity's App is installed on it, as last checked.
+  // Repositories stored before the check have none until the daemon starts.
+  app?: AppCheck;
 };
+
+// Whether the factory identity's App is installed on a repository (ADR 0004),
+// and when the daemon last asked GitHub. Where it isn't, `reason` says why
+// and `fixUrl` opens the installation settings, unless the fix is elsewhere.
+export type AppCheck = { installed: true; checkedAt: number } | { installed: false; checkedAt: number; reason: string; fixUrl: string | null };
 
 // A file or GitHub issue a run produced, linked to its task. A file is the
 // glossary or an ADR in the task's worktree, by its path there (with `/`);
@@ -331,6 +339,7 @@ export type RepoEvent =
   | { type: 'repoRegistered'; repo: string; path: string; baseBranch: string; defaultPreset: string }
   | { type: 'repoMissing'; repo: string; reason: string }
   | { type: 'repoFound'; repo: string }
+  | { type: 'appChecked'; repo: string; check: AppCheck }
   // `repo move`: the clone is at `path` now, and its task worktrees repaired.
   | { type: 'repoMoved'; repo: string; path: string };
 
@@ -823,6 +832,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'repoMissing':
     case 'repoFound':
     case 'repoMoved':
+    case 'appChecked':
     case 'deadlinesDue':
       return null;
   }
@@ -1433,6 +1443,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'repoFound':
       state.repositories[action.repo]!.missing = false;
       closeRepoRequest(state, action.repo);
+      break;
+    case 'appChecked':
+      state.repositories[action.repo]!.app = action.check;
       break;
     case 'deadlinesDue':
       for (const overdue of overdueRuns(state, at)) park(state, state.tasks[overdue.taskId]!, overdue, at);

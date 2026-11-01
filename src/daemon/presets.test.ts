@@ -252,6 +252,7 @@ describe('groups and model tier', () => {
     const { factory, operator, tui } = await attached();
     expect(tui.state().lastUsedRepo).toBeNull();
     factory.git.addClone(resolve('/clones/gadgets'), { originUrl: 'https://github.com/acme/gadgets.git', defaultBranch: 'main' });
+    factory.github.install('acme/gadgets');
     await operator.send({ type: 'registerRepo', path: resolve('/clones/gadgets') });
 
     await operator.send({ type: 'launchTask', repo: 'acme/gadgets', prompt });

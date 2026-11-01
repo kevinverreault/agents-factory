@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { z } from 'zod';
 import { TIERS, type Tier } from '../models/routing.ts';
+import type { AppCheck } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_PRESET } from '../repositories/registry.ts';
 
 export type PresetScope = 'built-in' | 'user' | 'repo';
@@ -164,10 +165,26 @@ export function planStart(
   return { stage, opening: openingMessage(stage, inputs) };
 }
 
-// A preset as a launch card offers it: the stages it can start at, or why it
-// doesn't resolve.
+// The stages of the preset that work as the factory's App (ADR 0004): its
+// AFK stages, whose runs read GitHub as it and whose factory actions and
+// loops (closing each ticket, ADR 0006) write as it. HITL stages act as the
+// operator.
+export function appStages(preset: ResolvedPreset): string[] {
+  return preset.stages.filter((stage) => stage.mode === 'AFK').map(({ id }) => id);
+}
+
+// Why a launch of the preset is blocked where the App's installation was
+// checked as `check`, or null when it isn't: only a preset with stages that
+// work as the App (`stages`) needs it.
+export function appBlock(preset: string, stages: string[], check: AppCheck | null): string | null {
+  if (stages.length === 0 || !check || check.installed) return null;
+  return `${preset} works unattended as the factory’s App (at ${stages.join(', ')}). ${check.reason}`;
+}
+
+// A preset as a launch card offers it: the stages it can start at and those
+// that work as the factory's App, or why it doesn't resolve.
 export type PresetChoice =
-  | { name: string; source: PresetScope; description: string | null; startStages: StartStage[] }
+  | { name: string; source: PresetScope; description: string | null; startStages: StartStage[]; appStages: string[] }
   | { name: string; source: PresetScope; error: string };
 
 // Every preset name among `files`, by name, each as it resolves.
@@ -177,7 +194,7 @@ export function presetChoices(files: PresetFile[]): PresetChoice[] {
     const { scope } = winner(files, name)!;
     if ('error' in result) return { name, source: scope, error: result.error };
     const { description } = result.preset;
-    return { name, source: scope, description, startStages: startStages(result.preset) };
+    return { name, source: scope, description, startStages: startStages(result.preset), appStages: appStages(result.preset) };
   });
 }
 
