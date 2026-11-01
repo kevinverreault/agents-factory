@@ -1282,3 +1282,113 @@ describe('answering from Needs you', () => {
     expect(connection.sent).toEqual([]);
   });
 });
+
+describe('answering in the conversation', () => {
+  const [ESC, ENTER] = ['\x1b', '\r'];
+  const waiting: TaskView = { ...task('T1', 'Implement acme/widgets#12', 'waiting', 'Needs you'), liveRunId: 'R1' };
+  const suspended = {
+    id: 'R1',
+    taskId: 'T1',
+    mode: 'AFK' as const,
+    autonomy: 'L1' as const,
+    status: 'suspended' as const,
+    outcome: null,
+    turn: 'agent' as const,
+    queued: [] as string[],
+    question: null,
+    permission: null,
+    stage: 'implement',
+    proposal: null,
+    tier: 'sonnet' as const,
+    model: 'claude-sonnet-5-5',
+    maxTurns: 300,
+    cli: { pid: 4242, createdAt: 1 },
+    skillSet: null,
+    startedAt: 1,
+    endedAt: null,
+  };
+  const permission = {
+    kind: 'attention' as const,
+    taskId: 'T1',
+    repo: 'acme/widgets',
+    requestId: 'A1',
+    attention: 'permission' as const,
+    holdsRun: true,
+    reason: 'Bash: gh issue view 12',
+    question: null,
+    permission: { id: 'toolu_1', tool: 'Bash', summary: 'gh issue view 12', rule: 'Bash(gh issue view 12)' },
+  };
+
+  // Opens the task's conversation from the Tasks tab.
+  async function opened(item: FactoryState['attentionQueue'][number], connection = new FakeConnection()) {
+    const { app } = await started({ ...factoryState([waiting], [item]), runs: { R1: suspended } }, { connection });
+    await press(app, ENTER);
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    return app;
+  }
+
+  test('an AFK task that needs the operator shows its request in its conversation, and a digit answers it there', async () => {
+    const connection = new FakeConnection();
+    const app = await opened(permission, connection);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('permission: Bash: gh issue view 12 1 Allow once 2 Allow for this task: Bash(gh issue view 12) 3 Deny with a note');
+      expect(frame).toContain('digits answer · ctrl+b back');
+      expect(frame).not.toContain('esc back');
+    });
+
+    await press(app, '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task' } }));
+    // Still in the conversation, which follows the run as it resumes.
+    expect(app.lastFrame()).toContain('ctrl+b back');
+  });
+
+  test('Deny takes a typed note in the conversation, which esc sets aside and enter sends', async () => {
+    const connection = new FakeConnection();
+    const app = await opened(permission, connection);
+    await press(app, '3');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
+    await press(app, ESC);
+    await eventually(() => expect(app.lastFrame()).not.toContain('Note for the agent'));
+
+    await press(app, '3');
+    app.stdin.write('Read it from the brief');
+    await settle();
+    await press(app, ENTER);
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { deny: 'Read it from the brief' } }));
+  });
+
+  test('a question request shows its card in the conversation, and a digit answers it', async () => {
+    const connection = new FakeConnection();
+    const question = {
+      id: 'toolu_02',
+      questions: [
+        {
+          question: 'Which endpoint?',
+          header: 'API',
+          options: [
+            { label: 'v1', description: 'The old one' },
+            { label: 'v2', description: 'The new one' },
+          ],
+          multiSelect: false,
+        },
+      ],
+    };
+    const app = await opened({ ...permission, attention: 'question', reason: 'Which endpoint?', question, permission: null }, connection);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/API Which endpoint\? 1 v1 The old one 2 v2 The new one/));
+
+    await press(app, '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which endpoint?': 'v2' } }));
+  });
+
+  test('a refused answer shows its reason in the conversation and can be answered again', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('answer', { ok: false, reason: 'T1 has no open attention request.' });
+    const app = await opened(permission, connection);
+    await press(app, '1');
+    await eventually(() => expect(app.lastFrame()).toContain('T1 has no open attention request.'));
+
+    await press(app, '1');
+    await eventually(() => expect(connection.sent.filter((command) => command.type === 'answer')).toHaveLength(2));
+  });
+});

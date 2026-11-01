@@ -2,7 +2,8 @@
 // session file and then live, with a side rail of the task's artifacts. A HITL
 // run's has a line for the operator's next message, and the advance and
 // handoff sheets over it; an AFK run never takes chat, so its view only
-// follows it.
+// follows it. A task that needs the operator shows its request's answer
+// sheet, whose digits answer it here as on Needs you.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
@@ -11,6 +12,7 @@ import type { ArtifactView, FactoryState } from '../protocol/factory-state.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
+import { AnswerSheet, answerable, useAnswering } from './answer-sheet.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
@@ -58,10 +60,16 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   // The handoff sheet opens once the daemon has opened the task's handoff.
   const handOff = () => void connection.send({ type: 'openHandoff', taskId }).then(tell);
   const sheet = takesChat && task?.handoff ? task.handoff : null;
+  // The task's open request, while it needs the operator: when its sheet
+  // takes digits, every key but ctrl+b is the sheet's.
+  const request = state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId);
+  const answers = useAnswering(connection, request, task, { onReply: ({ reply }) => tell(reply) });
+  const answering = answerable(request, task);
 
   useInput((input, key) => {
     const typed = typing.current;
     if (key.ctrl && input === 'b') return onLeave();
+    if (answering) return answers.key(input, key);
     if (!takesChat) return;
     // At any moment: mid-turn and over an open card too.
     if (key.ctrl && input === 'h') return handOff();
@@ -102,14 +110,17 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     rerender();
   }, { isActive: !advancing && !sheet });
   const { draft } = typing.current;
-  const keys = !takesChat
-    ? 'AFK runs take no chat: take it over to talk to it'
-    : question
-      ? 'esc interrupt'
-      : midTurn
-        ? 'enter queue · esc interrupt'
-        : 'enter send';
-  const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''}${takesChat ? ' · /handoff hand off' : ''} · ctrl+b back`;
+  const keys = answering
+    ? 'digits answer'
+    : !takesChat
+      ? 'AFK runs take no chat: take it over to talk to it'
+      : question
+        ? 'esc interrupt'
+        : midTurn
+          ? 'enter queue · esc interrupt'
+          : 'enter send';
+  const chat = takesChat && !answering;
+  const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''}${chat ? ' · /handoff hand off' : ''} · ctrl+b back`;
 
   return h(
     Box,
@@ -145,9 +156,10 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     advancing && canAdvance(task)
       ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
       : null,
+    request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, note: answers.note, escBack: false }) : null,
     live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
     refusal ? h(Text, { color: 'red' }, refusal) : null,
-    takesChat ? h(Text, null, `› ${draft}▏`) : null,
+    chat ? h(Text, null, `› ${draft}▏`) : null,
     h(Text, { dimColor: true }, hint),
   );
 }

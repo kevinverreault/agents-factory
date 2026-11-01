@@ -2,19 +2,17 @@
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
 // a task (`t`), handing one off (`ctrl+h`) and Needs you's answer sheet
 // (`a`). Plain .ts (no JSX) so Node runs it without a build step.
-import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
-import { Box, Text, useInput, useStdin, type Key } from 'ink';
+import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Box, Text, useInput, useStdin } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
-import type { CloneView, Command } from '../protocol/protocol.ts';
-import { AnswerSheet, answerable, choicesFor, waitingFor } from './answer-sheet.ts';
+import type { CloneView } from '../protocol/protocol.ts';
+import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-sheet.ts';
 import { Conversation } from './conversation.ts';
 import { LaunchCard } from './launch-card.ts';
-import { cardKey, newCard, type Card } from './question-card.ts';
-import { edit } from './text-input.ts';
 
 type Tab = 'tasks' | 'needs-you';
 // What fills the screen: the tabs, the launch card over them, or one task's
@@ -50,16 +48,6 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // Whether the digits answer the selected Needs you item instead of
   // switching screens. Once nothing needs the operator they switch again.
   const [answering, setAnswering] = useState(false);
-  // Keys typed in one burst arrive before a re-render, so the card the
-  // operator is answering on, the note they are typing for a choice, and the
-  // requests already answered, are kept here.
-  const sheet = useRef<{
-    card: Card;
-    cardFor: string | null;
-    note: { for: string; choice: number; draft: string } | null;
-    sent: Set<string>;
-  }>({ card: newCard(), cardFor: null, note: null, sent: new Set() });
-  const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   // Each task's last re-tier sent, from the tier it had then, until the
   // daemon's answer shows: a burst of `t` goes on from it.
   const retiers = useRef(new Map<string, { from: Tier; to: Tier }>());
@@ -89,27 +77,15 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const itemTask = item?.taskId ? state?.tasks[item.taskId] : undefined;
   const ready = item?.kind === 'ready' ? itemTask : undefined;
   const opens = tab === 'tasks' ? tasks[cursor]?.id : ready?.liveRunId ? ready.id : undefined;
-  const card = item?.kind === 'attention' && sheet.current.cardFor === item.requestId ? sheet.current.card : newCard();
-  const note = item?.kind === 'attention' && sheet.current.note?.for === item.requestId ? sheet.current.note : null;
-
-  // Sends what the operator answered the selected request with. The cursor
-  // stays where it is, so once the request leaves Needs you the next item
-  // slides under it.
-  const sendAnswer = (command: Command, opens = false) => {
-    if (item?.kind !== 'attention') return;
-    const { requestId } = item;
-    sheet.current.sent.add(requestId);
-    setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } }));
-    void connection.send(command).then((reply) => {
+  // The selected request's answer. The cursor stays where it is, so once the
+  // request leaves Needs you the next item slides under it.
+  const answers = useAnswering(connection, item, itemTask, {
+    onSend: () => setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } })),
+    onReply: ({ reply, taskId, opens }) => {
       setRefusal(reply.ok ? null : reply.reason);
-      if (reply.ok && opens && item.taskId) setView({ kind: 'conversation', taskId: item.taskId });
-      if (!reply.ok) {
-        sheet.current.sent.delete(requestId);
-        if (sheet.current.cardFor === requestId) sheet.current.card = newCard();
-      }
-      rerender();
-    });
-  };
+      if (reply.ok && opens) setView({ kind: 'conversation', taskId });
+    },
+  });
   // Moves the selected task's next runs to the tier after its current one.
   const retier = () => {
     const task = tab === 'tasks' ? tasks[cursor] : undefined;
@@ -133,49 +109,18 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (reply.ok) setView({ kind: 'conversation', taskId: task.id });
     });
   };
-  // A digit on the selected item's answer sheet: an option of its question's
-  // card (toggled on a multi-select, which enter confirms), or a choice.
-  const answer = (input: string, key: Key) => {
-    if (item?.kind !== 'attention' || !item.taskId || sheet.current.sent.has(item.requestId)) return;
-    if (item.question) {
-      if (sheet.current.cardFor !== item.requestId) Object.assign(sheet.current, { card: newCard(), cardFor: item.requestId });
-      const onCard = cardKey(item.question, sheet.current.card, '', input, key);
-      if (onCard.kind === 'card') sheet.current.card = onCard.card;
-      if (onCard.kind === 'answered') sendAnswer({ type: 'answer', taskId: item.taskId, answers: onCard.answers });
-      rerender();
-      return;
-    }
-    const index = /^[1-9]$/.test(input) ? Number(input) - 1 : -1;
-    const choice = choicesFor(item, itemTask)[index];
-    if (choice && 'note' in choice) {
-      sheet.current.note = { for: item.requestId, choice: index, draft: '' };
-      rerender();
-    } else if (choice) sendAnswer(choice.command, choice.opens);
-  };
-  // A key while the operator types the note a choice takes: enter sends it,
-  // unless it is empty, and esc sets it aside.
-  const takeNote = (input: string, key: Key) => {
-    const choice = note && choicesFor(item!, itemTask)[note.choice];
-    if (key.escape || !choice || !('note' in choice)) sheet.current.note = null;
-    else if (key.return && note.draft.trim()) {
-      sheet.current.note = null;
-      sendAnswer(choice.note(note.draft.trim()));
-    } else note.draft = edit(note.draft, input, key) ?? note.draft;
-    rerender();
-  };
-
   // Keys need raw mode, which a piped stdin can't give.
   const { isRawModeSupported } = useStdin();
   useInput(
     (input, key) => {
       if (answering && !item) setAnswering(false);
       else if (answering) {
-        if (note) takeNote(input, key);
+        if (answers.note !== null) answers.key(input, key);
         else if (key.escape) setAnswering(false);
         else if (key.upArrow) move(-1);
         else if (key.downArrow) move(1);
         else if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
-        else answer(input, key);
+        else answers.key(input, key);
         return;
       }
       if (tab === 'needs-you' && (input === 'a' || (key.return && answerable(item, itemTask)))) return setAnswering(true);
@@ -222,7 +167,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       : tab === 'tasks'
         ? h(TaskList, { tasks, cursor })
         : h(NeedsYouList, { state, cursor }),
-    state && item ? h(AnswerSheet, { item, task: itemTask, card, answering, note: note?.draft ?? null }) : null,
+    state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, note: answers.note }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
 }
