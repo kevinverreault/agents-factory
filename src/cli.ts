@@ -87,7 +87,7 @@ async function main(args: string[]): Promise<number> {
       const { id, path, baseBranch, defaultPreset, app, skills } = reply.value as RepositoryView;
       console.log(`Registered ${id} at ${path} (base branch ${baseBranch}, default preset ${defaultPreset}).`);
       if (app && !app.installed) console.log(app.fixUrl ? `${app.reason} Install it there: ${app.fixUrl}` : app.reason);
-      if (skills && !skills.present) console.log(`${skills.reason} Set it up from the TUI with s (Set up now).`);
+      if (skills && !skills.present) console.log(skills.failed ? skills.reason : `${skills.reason} Set it up from the TUI with s (Set up now).`);
     } else if (command.type === 'moveRepo') {
       const { id, path } = reply.value as RepositoryView;
       console.log(`Moved ${id} to ${path}.`);

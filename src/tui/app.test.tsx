@@ -213,7 +213,8 @@ describe('repositories', () => {
     skills: {
       present: false as const,
       checkedAt: 1,
-      reason: 'acme/widgets has no setup for the skill set on main (docs/agents/issue-tracker.md): its skills won’t find the issue tracker and labels they expect.',
+      reason: 'acme/widgets has no setup for the skill set on main (missing docs/agents/issue-tracker.md): its skills won’t find the issue tracker and labels they expect.',
+      failed: false,
     },
   };
 
@@ -232,19 +233,23 @@ describe('repositories', () => {
     await eventually(() => expect(app.lastFrame()).not.toContain('1 Tasks'));
   });
 
-  test('once set up, or while a setup task is unfinished, nothing is offered and s does nothing', async () => {
+  test('once set up, while a setup task is unfinished, or when the check failed, nothing is offered and s does nothing', async () => {
     const present = { ...widgets, skills: { present: true as const, checkedAt: 1 } };
     const setUp = await started({ ...factoryState([]), repositories: { 'acme/widgets': present } });
     const setup = { ...task('T1', 'setup', 'waiting', 'Ready for you', 'HITL'), preset: { name: 'setup' } as TaskView['preset'] };
     const settingUp = await started({ ...factoryState([setup]), repositories: { 'acme/widgets': unset } });
+    const reason = 'The factory couldn’t check the skill set’s setup in acme/widgets: couldn’t fetch main from origin (fatal: no network).';
+    const failed = { ...widgets, skills: { present: false as const, checkedAt: 1, reason, failed: true } };
+    const unchecked = await started({ ...factoryState([]), repositories: { 'acme/widgets': failed } });
 
-    for (const { app, connection } of [setUp, settingUp]) {
+    for (const { app, connection } of [setUp, settingUp, unchecked]) {
       app.stdin.write('s');
       await settle();
       expect(app.lastFrame()).not.toContain('Set up now');
       expect(connection.sent).toEqual([]);
     }
     expect(settingUp.app.lastFrame()).toContain('acme/widgets is being set up for the skill set in T1.');
+    expect(unwrapped(unchecked.app.lastFrame()!)).toContain(reason);
   });
 
   test('a refused setup launch shows its reason', async () => {

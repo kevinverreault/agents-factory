@@ -51,6 +51,10 @@ export interface Git {
   // `ref` points at. A directory the commit lacks holds none. Throws a
   // `GitError` when `ref` names no commit.
   readDirectory(clonePath: string, ref: string, dir: string): Promise<{ commit: string; files: DirectoryFile[] }>;
+  // Those of `paths` (from the top, with `/`) committed at `ref`, in path
+  // order, with the commit `ref` points at. Throws a `GitError` when `ref`
+  // names no commit.
+  readFiles(clonePath: string, ref: string, paths: string[]): Promise<{ commit: string; files: DirectoryFile[] }>;
   // How the worktree stands for a handoff.
   worktreeState(worktreePath: string): Promise<WorktreeState>;
   // Commits exactly `paths` (relative, with `/`), new files included, under
@@ -189,18 +193,12 @@ export const gitCli: Git = {
     await run(clonePath, 'worktree', 'repair', path);
   },
 
-  async readDirectory(clonePath, ref, dir) {
-    const commit = await run(clonePath, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`).catch(() => {
-      throw new GitError(`${ref} names no commit.`);
-    });
-    // `<mode> <type> <hash>\t<path>` per entry, NUL-separated and unquoted.
-    const listing = await output(clonePath, 'ls-tree', '-z', commit, '--', `${dir}/`);
-    const files: DirectoryFile[] = [];
-    for (const entry of listing.split('\0')) {
-      const [, type, hash, path] = /^\d+ (\w+) ([0-9a-f]+)\t(.*)$/s.exec(entry) ?? [];
-      if (type === 'blob') files.push({ path: path!, content: await output(clonePath, 'cat-file', 'blob', hash!) });
-    }
-    return { commit, files };
+  readDirectory(clonePath, ref, dir) {
+    return readTree(clonePath, ref, [`${dir}/`]);
+  },
+
+  readFiles(clonePath, ref, paths) {
+    return readTree(clonePath, ref, paths);
   },
 
   async snapshot(worktreePath) {
@@ -296,6 +294,22 @@ function hooksIn(dir: string): Record<string, string> {
     return {};
   }
   return Object.fromEntries(names.map((name) => [name, createHash('sha256').update(readFileSync(join(dir, name))).digest('hex')]));
+}
+
+// The files `pathspecs` match at `ref`, with the commit it points at.
+// `ls-tree` names no file twice and lists them in path order.
+async function readTree(clonePath: string, ref: string, pathspecs: string[]): Promise<{ commit: string; files: DirectoryFile[] }> {
+  const commit = await run(clonePath, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`).catch(() => {
+    throw new GitError(`${ref} names no commit.`);
+  });
+  // `<mode> <type> <hash>\t<path>` per entry, NUL-separated and unquoted.
+  const listing = await output(clonePath, 'ls-tree', '-z', commit, '--', ...pathspecs);
+  const files: DirectoryFile[] = [];
+  for (const entry of listing.split('\0')) {
+    const [, type, hash, path] = /^\d+ (\w+) ([0-9a-f]+)\t(.*)$/s.exec(entry) ?? [];
+    if (type === 'blob') files.push({ path: path!, content: await output(clonePath, 'cat-file', 'blob', hash!) });
+  }
+  return { commit, files };
 }
 
 // The command's trimmed output, or null when it fails.

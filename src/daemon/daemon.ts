@@ -87,7 +87,7 @@ import {
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
-import { checkSkillsSetup } from '../skills/repo-setup.ts';
+import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { cutWorktree, fetchBase, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
@@ -371,6 +371,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     for (const repo of Object.keys(lifecycle.repositories)) await checkApp(repo);
   }
 
+  async function checkEverySetup(): Promise<void> {
+    for (const repo of Object.keys(lifecycle.repositories)) await checkSkills(repo);
+  }
+
   // Reads whether the skill set's per-repo setup is on the repository's base
   // branch, as its clone last fetched it or, with `fetch`, freshly fetched,
   // and caches the answer on it. A missing clone keeps its last answer.
@@ -384,10 +388,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       check = await checkSkillsSetup(git, repository, clock.now());
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
-      const reason = `The factory couldn’t check the skill set’s setup in ${repo}: couldn’t fetch ${repository.baseBranch} from origin (${error.message}).`;
-      check = { present: false, checkedAt: clock.now(), reason };
+      check = unchecked(repository, clock.now(), `couldn’t fetch ${repository.baseBranch} from origin (${error.message})`);
     }
-    await settle({ type: 'skillsChecked', repo, check }, new Set());
+    // The repository may have been removed meanwhile.
+    if (lifecycle.repositories[repo]) await settle({ type: 'skillsChecked', repo, check }, new Set());
     return check;
   }
 
@@ -459,6 +463,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       action.issues = refs.issues;
       const unfetched = await fetchBase(git, repository!);
       if (unfetched) return { ok: false, reason: unfetched };
+      // A missing setup is a warning on the repository, never a block (ADR 0010).
+      await checkSkills(repo);
       const presets = await presetsOf(repository!);
       if ('error' in presets) return { ok: false, reason: presets.error };
       const resolved = resolvePreset(presets.files, command.preset ?? launchDefault(presets.files, repo, repository!.defaultPreset).name);
@@ -506,6 +512,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const refusal = await settle(action, new Set());
       if (refusal) return { ok: false, reason: refusal };
       // A setup task's work, say, may just have landed on the base branch.
+      // Unless finished anyway, `whyUnmerged` has just fetched it.
       await checkSkills(lifecycle.tasks[taskId]!.repo, { fetch: anyway });
       return { ok: true };
     });
@@ -733,7 +740,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     // So is whether the App is installed on each, and the skill set set up.
     await checkEveryApp();
-    for (const repo of Object.keys(lifecycle.repositories)) await checkSkills(repo);
+    await checkEverySetup();
     // A loop the daemon stopped between iterations carries on, and so does
     // a cleanup it didn't finish.
     driveLoops();

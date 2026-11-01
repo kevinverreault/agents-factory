@@ -63,7 +63,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     });
   }, [connection, cwd]);
   const unregistered = clone && state && !(clone.repo in state.repositories) ? clone : null;
-  const unset = state ? withoutSetup(state, clone?.repo ?? null) : null;
+  const missingSetup = state ? withoutSetup(state, clone?.repo ?? null) : null;
   const tasks = state ? Object.values(state.tasks) : [];
   const queue = state?.attentionQueue ?? [];
   const rows = tab === 'tasks' ? tasks.map((task) => task.id) : queue.map(rowOf);
@@ -115,8 +115,8 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // Set up now: the repository's `setup` task, one HITL run of the setup
   // skill, opened in its conversation.
   const setUp = () => {
-    if (!unset || unset.settingUp) return;
-    void connection.send({ type: 'launchTask', repo: unset.repo, preset: SETUP_PRESET }).then((reply) => {
+    if (!missingSetup?.offered) return;
+    void connection.send({ type: 'launchTask', repo: missingSetup.repo, preset: SETUP_PRESET }).then((reply) => {
       setRefusal(reply.ok ? null : reply.reason);
       if (reply.ok) setView({ kind: 'conversation', taskId: (reply.value as { taskId: string }).taskId });
     });
@@ -164,10 +164,12 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     unregistered
       ? h(Text, { key: 'register' }, `${unregistered.repo} is not registered. `, h(Text, { bold: true }, 'r'), ' Register this repo')
       : null,
-    unset
-      ? unset.settingUp
-        ? h(Text, { key: 'setup', dimColor: true }, `${unset.repo} is being set up for the skill set in ${unset.settingUp}.`)
-        : h(Text, { key: 'setup', color: 'yellow' }, `${unset.reason} `, h(Text, { bold: true }, 's'), ' Set up now')
+    missingSetup
+      ? missingSetup.settingUp
+        ? h(Text, { key: 'setup', dimColor: true }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
+        : missingSetup.offered
+          ? h(Text, { key: 'setup', color: 'yellow' }, `${missingSetup.reason} `, h(Text, { bold: true }, 's'), ' Set up now')
+          : h(Text, { key: 'setup', dimColor: true }, missingSetup.reason)
       : null,
     refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
     state && view.kind === 'launch'
@@ -190,17 +192,23 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   );
 }
 
-// The repository whose skill set setup is missing, as last checked: the one
-// holding the working directory first, then any. `settingUp` is its
-// unfinished `setup` task, if it has one.
-function withoutSetup(state: FactoryState, here: string | null): { repo: string; reason: string; settingUp: string | null } | null {
-  const repositories = Object.values(state.repositories).filter(({ skills }) => skills && !skills.present);
-  const repository = repositories.find(({ id }) => id === here) ?? repositories[0];
-  if (!repository?.skills || repository.skills.present) return null;
+// The repository whose skill set setup isn't known to be there, as last
+// checked: the one holding the working directory first, then any.
+// `settingUp` is its unfinished `setup` task, if it has one; Set up now is
+// `offered` only without one, and only when the check found the setup missing
+// rather than failed to look.
+function withoutSetup(
+  state: FactoryState,
+  here: string | null,
+): { repo: string; reason: string; settingUp: string | null; offered: boolean } | null {
+  const unset = Object.values(state.repositories).flatMap(({ id, skills }) => (skills && !skills.present ? [{ id, skills }] : []));
+  const found = unset.find(({ id }) => id === here) ?? unset[0];
+  if (!found) return null;
   const task = Object.values(state.tasks).find(
-    (task) => task.repo === repository.id && task.preset?.name === SETUP_PRESET && task.state !== 'done' && task.state !== 'cancelled',
+    (task) => task.repo === found.id && task.preset?.name === SETUP_PRESET && task.state !== 'done' && task.state !== 'cancelled',
   );
-  return { repo: repository.id, reason: repository.skills.reason, settingUp: task?.id ?? null };
+  const settingUp = task?.id ?? null;
+  return { repo: found.id, reason: found.skills.reason, settingUp, offered: !settingUp && !found.skills.failed };
 }
 
 function Tabs({ tab, needsYou }: { tab: Tab; needsYou: number }) {

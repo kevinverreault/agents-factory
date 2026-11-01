@@ -297,11 +297,11 @@ export type Repository = {
 // and `fixUrl` opens the installation settings, unless the fix is elsewhere.
 export type AppCheck = { installed: true; checkedAt: number } | { installed: false; checkedAt: number; reason: string; fixUrl: string | null };
 
-// Whether the docs the skill set's skills expect in a repository (its issue
-// tracker and triage labels) are on its base branch on origin, and when the
-// daemon last looked. Where they aren't, `reason` says which are missing,
-// and the `setup` preset sets them up.
-export type SkillsSetup = { present: true; checkedAt: number } | { present: false; checkedAt: number; reason: string };
+// Whether the skill set's per-repo setup (ADR 0010) is on a repository's
+// base branch on origin, and when the daemon last looked. Where it isn't,
+// `reason` says what is missing, and the `setup` preset sets it up; or, when
+// `failed`, why the daemon couldn't look.
+export type SkillsSetup = { present: true; checkedAt: number } | { present: false; checkedAt: number; reason: string; failed: boolean };
 
 // A file or GitHub issue a run produced, linked to its task. A file is the
 // glossary or an ADR in the task's worktree, by its path there (with `/`);

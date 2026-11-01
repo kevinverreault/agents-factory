@@ -1,9 +1,9 @@
-// Seam 1: the skill set's per-repo setup through the client protocol. Each
-// repository says whether the docs its skills expect (the issue tracker and
-// triage labels under `docs/agents/`) are on its base branch on origin, as
-// last checked; "Set up now" is the `setup` preset, one HITL run of
-// `/factory:setup-matt-pocock-skills`; and once that setup lands, the check
-// finds it.
+// Seam 1: the skill set's per-repo setup (ADR 0010) through the client
+// protocol. Each repository says whether `docs/agents/issue-tracker.md` and
+// an `## Agent skills` block in AGENTS.md or CLAUDE.md are on its base branch
+// on origin, as last checked; "Set up now" is the `setup` preset, one HITL
+// run of `/factory:setup-matt-pocock-skills`; and once that setup lands, the
+// check finds it.
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -19,7 +19,7 @@ afterEach(async () => {
 const widgets = resolve('/clones/widgets');
 const SETUP = {
   'docs/agents/issue-tracker.md': '# Issue tracker: GitHub\n',
-  'docs/agents/triage-labels.md': '# Triage Labels\n',
+  'AGENTS.md': '# Widgets\n\n## Agent skills\n\n### Issue tracker\n\nGitHub. See `docs/agents/issue-tracker.md`.\n',
 };
 
 // A factory attached to, with a clone of acme/widgets that has the App
@@ -43,41 +43,74 @@ async function onMain(factory: TestFactory, files: Record<string, string>): Prom
 }
 
 const MISSING =
-  'acme/widgets has no setup for the skill set on main (docs/agents/issue-tracker.md, docs/agents/triage-labels.md): ' +
+  'acme/widgets has no setup for the skill set on main ' +
+  '(missing docs/agents/issue-tracker.md and an `## Agent skills` block in AGENTS.md or CLAUDE.md): ' +
   'its skills won’t find the issue tracker and labels they expect.';
 
 describe('whether a repository has the skill set’s setup', () => {
-  test('a repository without it shows that it’s missing, and which docs', async () => {
+  test('a repository without it shows that it’s missing, and what', async () => {
     const { factory, operator, tui } = await attached();
 
     expect(await operator.send({ type: 'registerRepo', path: widgets })).toMatchObject({
       ok: true,
-      value: { skills: { present: false, checkedAt: factory.clock.now(), reason: MISSING } },
+      value: { skills: { present: false, checkedAt: factory.clock.now(), reason: MISSING, failed: false } },
     });
     expect((await tui.until((state) => 'acme/widgets' in state.repositories)).repositories['acme/widgets']!.skills).toEqual({
       present: false,
       checkedAt: factory.clock.now(),
       reason: MISSING,
+      failed: false,
     });
   });
 
-  test('one with only some of the docs names those it lacks', async () => {
+  test('one with a CLAUDE.md but no `## Agent skills` block in it names what it lacks', async () => {
     const { factory, operator } = await attached();
-    await onMain(factory, { 'docs/agents/issue-tracker.md': '# Issue tracker: GitHub\n' });
+    await onMain(factory, { 'docs/agents/issue-tracker.md': '# Issue tracker: GitHub\n', 'CLAUDE.md': '# Widgets\n\n## Agent skills are TBD\n' });
 
     expect(await operator.send({ type: 'registerRepo', path: widgets })).toMatchObject({
       ok: true,
-      value: { skills: { present: false, reason: expect.stringContaining('on main (docs/agents/triage-labels.md):') } },
+      value: { skills: { present: false, reason: expect.stringContaining('on main (missing an `## Agent skills` block in AGENTS.md or CLAUDE.md):') } },
     });
   });
 
-  test('one whose base branch has the docs shows it present', async () => {
+  test('one whose base branch has the setup shows it present, its block in AGENTS.md or in CLAUDE.md', async () => {
     const { factory, operator } = await attached();
     await onMain(factory, SETUP);
 
     expect(await operator.send({ type: 'registerRepo', path: widgets })).toMatchObject({
       ok: true,
       value: { skills: { present: true, checkedAt: factory.clock.now() } },
+    });
+
+    factory.git.advanceOrigin(widgets, 'main', { 'AGENTS.md': '', 'CLAUDE.md': '# Widgets\r\n\r\n## Agent skills\r\n' });
+    expect(await operator.send({ type: 'checkSkills', repo: 'acme/widgets' })).toMatchObject({ ok: true, value: { present: true } });
+  });
+
+  test('every launch checks again, on the base branch it fetches, and a missing setup never blocks it', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send({ type: 'registerRepo', path: widgets });
+    factory.git.advanceOrigin(widgets, 'main', SETUP);
+    factory.clock.advance(60_000);
+
+    expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'setup' })).toMatchObject({ ok: true });
+    await tui.until((state) => state.repositories['acme/widgets']?.skills?.present === true);
+    expect(tui.state().repositories['acme/widgets']!.skills!.checkedAt).toBe(factory.clock.now());
+  });
+
+  test('a base branch the clone never fetched says the check failed, not that the setup is missing', async () => {
+    const { factory, operator } = await attached();
+    factory.git.addClone(resolve('/clones/gadgets'), { originUrl: 'https://github.com/acme/gadgets.git', defaultBranch: 'main' });
+    factory.github.install('acme/gadgets');
+
+    expect(await operator.send({ type: 'registerRepo', path: resolve('/clones/gadgets'), baseBranch: 'trunk' })).toMatchObject({
+      ok: true,
+      value: {
+        skills: {
+          present: false,
+          failed: true,
+          reason: 'The factory couldn’t check the skill set’s setup in acme/gadgets: couldn’t read origin/trunk (origin/trunk names no commit.).',
+        },
+      },
     });
   });
 
@@ -117,7 +150,7 @@ describe('after the setup lands', () => {
   // The setup task's branch, with the docs it wrote, merged into main on origin.
   function landed(factory: TestFactory, tui: Watched): void {
     const { worktree, branch } = tui.state().tasks.T1!;
-    for (const path of Object.keys(SETUP)) factory.git.editFile(worktree!, path);
+    for (const [path, content] of Object.entries(SETUP)) factory.git.editFile(worktree!, path, content);
     factory.git.commitAll(worktree!);
     factory.git.merge(widgets, branch!, 'main');
   }
@@ -155,6 +188,7 @@ describe('after the setup lands', () => {
         present: false,
         checkedAt: factory.clock.now(),
         reason: 'The factory couldn’t check the skill set’s setup in acme/widgets: couldn’t fetch main from origin (fatal: unable to access origin).',
+        failed: true,
       },
     });
   });

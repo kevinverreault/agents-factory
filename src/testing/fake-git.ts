@@ -261,12 +261,23 @@ export class FakeGit implements Git {
   }
 
   async readDirectory(clonePath: string, ref: string, dir: string): Promise<{ commit: string; files: DirectoryFile[] }> {
+    return this.readTree(clonePath, ref, (path) => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'));
+  }
+
+  async readFiles(clonePath: string, ref: string, paths: string[]): Promise<{ commit: string; files: DirectoryFile[] }> {
+    return this.readTree(clonePath, ref, (path) => paths.includes(path));
+  }
+
+  // The files at `ref` whose paths `wanted`, in path order.
+  private readTree(clonePath: string, ref: string, wanted: (path: string) => boolean): { commit: string; files: DirectoryFile[] } {
     const clone = this.cloneAt(clonePath);
-    // Only origin's branches are read: the factory reads presets nowhere else.
+    // Only origin's branches are read: the factory reads presets and the
+    // skill set's setup nowhere else.
     const commit = ref.startsWith('origin/') ? clone.fetched.get(ref.slice('origin/'.length)) : undefined;
     if (!commit) throw new GitError(`${ref} names no commit.`);
     const files = [...this.trees.get(commit)!]
-      .filter(([path]) => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'))
+      .filter(([path]) => wanted(path))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([path, content]) => ({ path, content }));
     return { commit, files };
   }
