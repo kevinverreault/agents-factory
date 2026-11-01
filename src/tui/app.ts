@@ -1,7 +1,9 @@
 // The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
-// a task (`t`), handing one off (`ctrl+h`) and Needs you's answer sheet
-// (`a`). Plain .ts (no JSX) so Node runs it without a build step.
+// a task (`t`), handing one off (`ctrl+h`), Needs you's answer sheet (`a`)
+// and Set up now (`s`) or Re-check (`R`) for a repository without the skill
+// set's setup.
+// Plain .ts (no JSX) so Node runs it without a build step.
 import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, useStdin } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
@@ -10,6 +12,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView } from '../protocol/protocol.ts';
+import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-sheet.ts';
 import { Conversation } from './conversation.ts';
 import { LaunchCard } from './launch-card.ts';
@@ -61,6 +64,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     });
   }, [connection, cwd]);
   const unregistered = clone && state && !(clone.repo in state.repositories) ? clone : null;
+  const missingSetup = state ? withoutSetup(state, clone?.repo ?? null) : null;
   const tasks = state ? Object.values(state.tasks) : [];
   const queue = state?.attentionQueue ?? [];
   const rows = tab === 'tasks' ? tasks.map((task) => task.id) : queue.map(rowOf);
@@ -109,6 +113,21 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (reply.ok) setView({ kind: 'conversation', taskId: task.id });
     });
   };
+  // Set up now: the repository's `setup` task, one HITL run of the setup
+  // skill, opened in its conversation.
+  const setUp = () => {
+    if (!missingSetup?.offered) return;
+    void connection.send({ type: 'launchTask', repo: missingSetup.repo, preset: SETUP_PRESET }).then((reply) => {
+      setRefusal(reply.ok ? null : reply.reason);
+      if (reply.ok) setView({ kind: 'conversation', taskId: (reply.value as { taskId: string }).taskId });
+    });
+  };
+  // Re-check: the daemon fetches the base branch and looks again, and the
+  // repository's state shows the answer.
+  const recheck = () => {
+    if (!missingSetup) return;
+    void connection.send({ type: 'checkSkills', repo: missingSetup.repo }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
+  };
   // Keys need raw mode, which a piped stdin can't give.
   const { isRawModeSupported } = useStdin();
   useInput(
@@ -132,6 +151,8 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
       if (input === 't') retier();
       if (key.ctrl && input === 'h') handOff();
+      if (input === 's') setUp();
+      if (input === 'R') recheck();
       if (input === 'r' && unregistered) {
         void connection.send({ type: 'registerRepo', path: unregistered.path }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
       }
@@ -150,6 +171,18 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     h(Tabs, { tab, needsYou: state?.attentionQueue.length ?? 0 }),
     unregistered
       ? h(Text, { key: 'register' }, `${unregistered.repo} is not registered. `, h(Text, { bold: true }, 'r'), ' Register this repo')
+      : null,
+    missingSetup
+      ? missingSetup.settingUp
+        ? h(Text, { key: 'setup', dimColor: true }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
+        : h(
+            Text,
+            { key: 'setup', ...(missingSetup.offered ? { color: 'yellow' } : { dimColor: true }) },
+            `${missingSetup.reason} `,
+            ...(missingSetup.offered ? [h(Text, { key: 's', bold: true }, 's'), ' Set up now · '] : []),
+            h(Text, { key: 'R', bold: true }, 'R'),
+            ' re-check',
+          )
       : null,
     refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
     state && view.kind === 'launch'
@@ -170,6 +203,25 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
+}
+
+// The repository whose skill set setup isn't known to be there, as last
+// checked: the one holding the working directory first, then any.
+// `settingUp` is its unfinished `setup` task, if it has one; Set up now is
+// `offered` only without one, and only when the check found the setup missing
+// rather than failed to look.
+function withoutSetup(
+  state: FactoryState,
+  here: string | null,
+): { repo: string; reason: string; settingUp: string | null; offered: boolean } | null {
+  const unset = Object.values(state.repositories).flatMap(({ id, skills }) => (skills && !skills.present ? [{ id, skills }] : []));
+  const found = unset.find(({ id }) => id === here) ?? unset[0];
+  if (!found) return null;
+  const task = Object.values(state.tasks).find(
+    (task) => task.repo === found.id && task.preset?.name === SETUP_PRESET && task.state !== 'done' && task.state !== 'cancelled',
+  );
+  const settingUp = task?.id ?? null;
+  return { repo: found.id, reason: found.skills.reason, settingUp, offered: !settingUp && !found.skills.failed };
 }
 
 function Tabs({ tab, needsYou }: { tab: Tab; needsYou: number }) {

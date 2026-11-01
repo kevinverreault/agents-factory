@@ -9,7 +9,7 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
@@ -29,6 +29,10 @@ export type CloneView = { repo: string; path: string };
 // again whether the App is installed on the repository, and replies with the
 // repository's `AppCheck`.
 export type GitHubCommand = { type: 'setupGitHub'; code: string } | { type: 'checkApp'; repo: string };
+// The skill set's per-repo setup: `checkSkills` fetches the repository's base
+// branch and looks for it there again, and replies with the repository's
+// `SkillsSetup`. "Set up now" is a launch of the `setup` preset.
+export type SkillsCommand = { type: 'checkSkills'; repo: string };
 export type SetupView = { slug: string; installationSettings: string };
 // Launches a task from the launch card: the preset (by default the
 // repository's) is resolved and frozen, and the task starts at `stage` (by
@@ -82,6 +86,7 @@ export type Command =
   | DaemonCommand
   | RepoCommand
   | GitHubCommand
+  | SkillsCommand
   | LaunchCommand
   | AdvanceCommand
   | HandoffCommand

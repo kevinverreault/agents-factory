@@ -226,6 +226,22 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
         await expect(git.readDirectory(clone, 'origin/nowhere', '.agent-factory/presets')).rejects.toThrow();
       }));
 
+    test('named files are read at a ref as committed there, and those it lacks are left out', () =>
+      withFixture(async ({ git, cloneWithOrigin, advanceOrigin }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const tip = await advanceOrigin(clone, 'main', { 'AGENTS.md': '## Agent skills\n', 'docs/agents/issue-tracker.md': '# GitHub\n' });
+        await git.fetch(clone, 'main');
+
+        expect(await git.readFiles(clone, 'origin/main', ['AGENTS.md', 'CLAUDE.md', 'docs/agents/issue-tracker.md'])).toEqual({
+          commit: tip,
+          files: [
+            { path: 'AGENTS.md', content: '## Agent skills\n' },
+            { path: 'docs/agents/issue-tracker.md', content: '# GitHub\n' },
+          ],
+        });
+        await expect(git.readFiles(clone, 'origin/nowhere', ['AGENTS.md'])).rejects.toThrow();
+      }));
+
     test('a task branch is merged once origin’s base branch, as fetched, has its tip in its history', () =>
       withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll, merge }) => {
         const clone = await cloneWithOrigin('widgets', 'main');

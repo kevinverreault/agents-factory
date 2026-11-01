@@ -161,7 +161,7 @@ describe('re-tiering', () => {
 });
 
 describe('repositories', () => {
-  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null };
+  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
 
   function inClone() {
     const connection = new FakeConnection();
@@ -208,6 +208,77 @@ describe('repositories', () => {
     await eventually(() => expect(app.lastFrame()).toContain('The clone at /clones/widgets has no GitHub origin.'));
   });
 
+  const unset = {
+    ...widgets,
+    skills: {
+      present: false as const,
+      checkedAt: 1,
+      reason: 'acme/widgets has no setup for the skill set on main (missing docs/agents/issue-tracker.md): its skills won’t find the issue tracker and labels they expect.',
+      failed: false,
+    },
+  };
+
+  test('a repository without the skill set’s setup shows why, and s launches its HITL setup task into the conversation', async () => {
+    const connection = inClone();
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': unset } }, { cwd: widgets.path, connection });
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(`${unset.skills.reason} s Set up now`));
+
+    app.stdin.write('s');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'setup' }));
+    const setup = { ...task('T1', 'setup', 'running', 'In conversation', 'HITL'), preset: { name: 'setup' } as TaskView['preset'] };
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: setup }]);
+    await eventually(() => expect(app.lastFrame()).not.toContain('1 Tasks'));
+  });
+
+  test('once set up, while a setup task is unfinished, or when the check failed, nothing is offered and s does nothing', async () => {
+    const present = { ...widgets, skills: { present: true as const, checkedAt: 1 } };
+    const setUp = await started({ ...factoryState([]), repositories: { 'acme/widgets': present } });
+    const setup = { ...task('T1', 'setup', 'waiting', 'Ready for you', 'HITL'), preset: { name: 'setup' } as TaskView['preset'] };
+    const settingUp = await started({ ...factoryState([setup]), repositories: { 'acme/widgets': unset } });
+    const reason = 'The factory couldn’t check the skill set’s setup in acme/widgets: couldn’t fetch main from origin (fatal: no network).';
+    const failed = { ...widgets, skills: { present: false as const, checkedAt: 1, reason, failed: true } };
+    const unchecked = await started({ ...factoryState([]), repositories: { 'acme/widgets': failed } });
+
+    for (const { app, connection } of [setUp, settingUp, unchecked]) {
+      app.stdin.write('s');
+      await settle();
+      expect(app.lastFrame()).not.toContain('Set up now');
+      expect(connection.sent).toEqual([]);
+    }
+    expect(settingUp.app.lastFrame()).toContain('acme/widgets is being set up for the skill set in T1.');
+    expect(unwrapped(unchecked.app.lastFrame()!)).toContain(reason);
+  });
+
+  test('a refused setup launch shows its reason', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('launchTask', { ok: false, reason: 'The daemon is stopping.' });
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': unset } }, { connection });
+
+    app.stdin.write('s');
+    await settle();
+
+    await eventually(() => expect(app.lastFrame()).toContain('The daemon is stopping.'));
+  });
+
+  test('R re-checks the repository’s setup, a failed check included, and the answer replaces the line', async () => {
+    const reason = 'The factory couldn’t check the skill set’s setup in acme/widgets: couldn’t fetch main from origin (fatal: no network).';
+    const failed = { ...widgets, skills: { present: false as const, checkedAt: 1, reason, failed: true } };
+    const connection = new FakeConnection();
+    connection.replyTo('checkSkills', { ok: true, value: { present: true, checkedAt: 2 } });
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': failed } }, { connection });
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(`${reason} R re-check`));
+
+    app.stdin.write('R');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'checkSkills', repo: 'acme/widgets' }));
+    connection.servePatch([{ op: 'set', path: ['repositories', 'acme/widgets'], value: { ...widgets, skills: { present: true, checkedAt: 2 } } }]);
+    await eventually(() => expect(app.lastFrame()).not.toContain('re-check'));
+  });
+
   test('a missing repository shows in Needs you under its name', async () => {
     const { app } = await started(
       factoryState(
@@ -251,7 +322,7 @@ async function press(app: { stdin: { write(data: string): void } }, ...keys: str
 }
 
 describe('launching and conversing', () => {
-  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null };
+  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
   const gadgets = { ...widgets, id: 'acme/gadgets', path: '/clones/gadgets' };
   const conversing: TaskView = {
     ...task('T1', 'Grill me about the login flow.', 'running', 'In conversation', 'HITL'),

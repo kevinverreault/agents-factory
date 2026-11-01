@@ -49,6 +49,7 @@ import {
   type Run,
   type RulesAnswer,
   type RunEvent,
+  type SkillsSetup,
   type Task,
   type TaskLaunched,
 } from '../lifecycle/lifecycle.ts';
@@ -90,6 +91,7 @@ import {
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
+import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { cutWorktree, fetchBase, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
@@ -257,6 +259,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           if (!lifecycle.repositories[command.repo]) return { ok: false, reason: `${command.repo} is not registered.` };
           return { ok: true, value: await checkApp(command.repo) };
         });
+      case 'checkSkills':
+        return serially(async (): Promise<Reply> => {
+          if (!lifecycle.repositories[command.repo]) return { ok: false, reason: `${command.repo} is not registered.` };
+          return { ok: true, value: await checkSkills(command.repo, { fetch: true }) };
+        });
       case 'launchTask':
         return launch(command);
       case 'advanceStage':
@@ -302,6 +309,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const refusal = await settle(action, new Set());
       if (refusal) return { ok: false, reason: refusal };
       await checkApp(clone.repo);
+      await checkSkills(clone.repo);
       return { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) };
     });
   }
@@ -365,6 +373,30 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   async function checkEveryApp(): Promise<void> {
     for (const repo of Object.keys(lifecycle.repositories)) await checkApp(repo);
+  }
+
+  async function checkEverySetup(): Promise<void> {
+    for (const repo of Object.keys(lifecycle.repositories)) await checkSkills(repo);
+  }
+
+  // Reads whether the skill set's per-repo setup is on the repository's base
+  // branch, as its clone last fetched it or, with `fetch`, freshly fetched,
+  // and caches the answer on it. A missing clone keeps its last answer.
+  // Called only from inside `serially`.
+  async function checkSkills(repo: string, { fetch = false } = {}): Promise<SkillsSetup | null> {
+    const repository = lifecycle.repositories[repo];
+    if (!repository || repository.missing) return repository?.skills ?? null;
+    let check: SkillsSetup;
+    try {
+      if (fetch) await git.fetch(repository.path, repository.baseBranch);
+      check = await checkSkillsSetup(git, repository, clock.now());
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      check = unchecked(repository, clock.now(), `couldn’t fetch ${repository.baseBranch} from origin (${error.message})`);
+    }
+    // The repository may have been removed meanwhile.
+    if (lifecycle.repositories[repo]) await settle({ type: 'skillsChecked', repo, check }, new Set());
+    return check;
   }
 
   // Re-points the repository whose clone now holds `path` there, after
@@ -435,6 +467,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       action.issues = refs.issues;
       const unfetched = await fetchBase(git, repository!);
       if (unfetched) return { ok: false, reason: unfetched };
+      // A missing setup is a warning on the repository, never a block (ADR 0010).
+      await checkSkills(repo);
       const presets = await presetsOf(repository!);
       if ('error' in presets) return { ok: false, reason: presets.error };
       const resolved = resolvePreset(presets.files, command.preset ?? launchDefault(presets.files, repo, repository!.defaultPreset).name);
@@ -480,7 +514,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const unmerged = anyway ? null : await whyUnmerged(lifecycle.tasks[taskId]!);
       if (unmerged) return { ok: false, reason: `${unmerged} Finish anyway?`, confirm: { type: 'markDone', taskId, anyway: true } };
       const refusal = await settle(action, new Set());
-      return refusal ? { ok: false, reason: refusal } : { ok: true };
+      if (refusal) return { ok: false, reason: refusal };
+      // A setup task's work, say, may just have landed on the base branch.
+      // Unless finished anyway, `whyUnmerged` has just fetched it.
+      await checkSkills(lifecycle.tasks[taskId]!.repo, { fetch: anyway });
+      return { ok: true };
     });
   }
 
@@ -704,8 +742,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (reason) await settle({ type: 'repoMissing', repo: id, reason }, new Set());
       else if (missing) await settle({ type: 'repoFound', repo: id }, new Set([id]));
     }
-    // So is whether the App is installed on each.
+    // So is whether the App is installed on each, and the skill set set up.
     await checkEveryApp();
+    await checkEverySetup();
     // A loop the daemon stopped between iterations carries on, and so does
     // a cleanup it didn't finish.
     driveLoops();

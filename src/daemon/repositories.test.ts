@@ -43,7 +43,7 @@ describe('repo add', () => {
 
     expect(await operator.send({ type: 'registerRepo', path: widgets })).toEqual({
       ok: true,
-      value: { id: 'acme/widgets', path: widgets, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now() } },
+      value: { id: 'acme/widgets', path: widgets, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now() }, skills: expect.objectContaining({ present: false }) },
     });
 
     const state = await tui.until((state) => 'acme/widgets' in state.repositories);
@@ -54,6 +54,7 @@ describe('repo add', () => {
       defaultPreset: 'main-flow',
       missing: false,
       app: { installed: true, checkedAt: factory.clock.now() },
+      skills: expect.objectContaining({ present: false }),
     });
   });
 
@@ -133,6 +134,7 @@ describe('repo add', () => {
       defaultPreset: 'quick',
       missing: false,
       app: { installed: true, checkedAt: factory.clock.now() },
+      skills: expect.objectContaining({ present: false }),
     });
   });
 });
@@ -216,7 +218,7 @@ describe('repo move', () => {
 
     expect(await operator.send({ type: 'moveRepo', path: resolve(moved, 'src') })).toEqual({
       ok: true,
-      value: { id: 'acme/widgets', path: moved, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now() } },
+      value: { id: 'acme/widgets', path: moved, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now() }, skills: expect.objectContaining({ present: false }) },
     });
 
     expect((await tui.until((state) => state.repositories['acme/widgets']?.path === moved)).attentionQueue).toEqual([]);
