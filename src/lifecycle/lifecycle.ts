@@ -119,6 +119,10 @@ export type Loop = {
   commits: string[];
 };
 
+// A Done root's cleanup while it hasn't finished (ADR 0011): why it last
+// failed, if it did.
+export type Cleanup = { problem: string | null };
+
 // A ticket the task closed, with the commits that did its work.
 export type ClosedTicket = { ref: string; commits: string[] };
 
@@ -191,6 +195,15 @@ export type Task = {
   loop?: Loop | null;
   // The tickets it closed: those ADR 0006's cancel cascade is to reopen.
   closedTickets?: ClosedTicket[];
+  // True once the operator requested changes on it in review: past its last
+  // stage, each of its runs that completes puts it back In review.
+  changesRequested?: boolean;
+  // While a Done root's cleanup (ADR 0011) hasn't finished: why it last
+  // failed, if it did. It is tried again when the daemon next starts.
+  cleanup?: Cleanup | null;
+  // Where its session transcripts were archived once it ended: its
+  // conversation is read from there.
+  transcripts?: string | null;
 };
 
 export type Run = {
@@ -202,6 +215,8 @@ export type Run = {
   outcome: RunOutcome | null;
   interruption: Interruption | null;
   resumesSession: boolean;
+  // The session it works in. Runs stored before it have their task's.
+  sessionId?: string;
   // Whose turn the conversation is on. A run starts on the agent's turn when
   // it has a first message to answer.
   turn: Turn;
@@ -321,8 +336,11 @@ export type OperatorCommand =
   // Answers the task's open attention request: a question's with `answers`,
   // a permission request's with `permission`.
   | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer }
-  | { type: 'requestChanges'; taskId: string }
-  | { type: 'markDone'; taskId: string }
+  // Resumes the root's session on the operator's review comments.
+  | { type: 'requestChanges'; taskId: string; comments: string }
+  // Finishes a root In review. Unless `anyway`, the daemon first checks that
+  // its task branch is merged into the base branch on origin.
+  | { type: 'markDone'; taskId: string; anyway?: boolean }
   | { type: 'cancel'; taskId: string }
   // Sets the tier the task's next runs start at; a live run keeps its model.
   | { type: 'retier'; taskId: string; tier: Tier }
@@ -421,6 +439,11 @@ export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: A
 // continuing fresh.
 export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string } & HandoffChoices;
 
+// What the daemon did to clean up after a Done root (ADR 0011): archived its
+// transcripts to `transcripts`, then removed its worktree and local task
+// branch, or failed to, saying why.
+export type CleanupEvent = { type: 'cleanedUp'; taskId: string; transcripts: string } | { type: 'cleanupFailed'; taskId: string; reason: string };
+
 // The daemon's clock found deadlines that have passed (ADR 0003).
 export type ClockEvent = { type: 'deadlinesDue' };
 
@@ -445,6 +468,7 @@ export type LifecycleAction =
   | HandedOff
   | ClockEvent
   | LoopEvent
+  | CleanupEvent
   | ArtifactsSeen;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
@@ -552,6 +576,12 @@ export function ticketSources(state: Lifecycle, task: Task): TicketSources | nul
   if (specs.length) return { kind: 'spec', refs: specs };
   const tickets = issuesFor(state, task, 'tickets');
   return tickets.length ? { kind: 'tickets', refs: tickets } : null;
+}
+
+// Every session the task's runs worked in, in order.
+export function sessionsOf(state: Lifecycle, task: Task): string[] {
+  const sessions = task.runIds.map((id) => state.runs[id]!.sessionId ?? task.sessionId);
+  return [...new Set(sessions.filter((session) => session !== null))];
 }
 
 // The run the task last had, if any.
@@ -850,9 +880,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return priorityRefusal(action.priority);
     case 'removeRepo': {
       const unfinished = unfinishedTasks(state, action.repo);
-      return unfinished.length
-        ? `${action.repo} has unfinished tasks (${unfinished.map((task) => task.id).join(', ')}). Finish or cancel them first.`
-        : null;
+      if (unfinished.length) return `${action.repo} has unfinished tasks (${unfinished.map((task) => task.id).join(', ')}). Finish or cancel them first.`;
+      const cleaning = Object.values(state.tasks).filter((task) => task.repo === action.repo && task.cleanup);
+      return cleaning.length ? `The factory is still cleaning up after ${cleaning.map((task) => task.id).join(', ')} in ${action.repo}.` : null;
     }
     case 'submit':
       return task.state === 'draft' ? null : 'Only a draft can be submitted.';
@@ -905,6 +935,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return answered ? null : 'Answer every question on the card.';
     }
     case 'requestChanges':
+      if (task.state !== 'in-review') return `${task.id} is not in review.`;
+      return typeof action.comments === 'string' && action.comments.trim() ? null : 'Request changes needs your review comments: say what to change.';
     case 'markDone':
       return task.state === 'in-review' ? null : `${task.id} is not in review.`;
     case 'cancel':
@@ -984,6 +1016,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'ticketClosed':
       // A ticket closed is the task's however it stands now, even cancelled.
       return null;
+    case 'cleanedUp':
+    case 'cleanupFailed':
+      return task.cleanup ? null : `${task.id} has no cleanup under way.`;
   }
 }
 
@@ -1090,7 +1125,7 @@ function startRun(
   task: Task,
   at: number,
   {
-    opening = task.runIds.length === 0 ? task.goal : task.mode === 'AFK' ? (task.resumeWith ?? AFK_RESUME) : null,
+    opening = task.runIds.length === 0 ? task.goal : (task.resumeWith ?? (task.mode === 'AFK' ? AFK_RESUME : null)),
     resumesSession = task.runIds.length > 0 && !task.newSession,
   } = {},
 ): void {
@@ -1099,6 +1134,7 @@ function startRun(
   const tier = nextTier(task);
   const allowOnce = task.allowOnce ?? [];
   task.allowOnce = [];
+  task.sessionId ??= `S${task.id.slice(1)}`;
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -1108,6 +1144,7 @@ function startRun(
     outcome: null,
     interruption: null,
     resumesSession,
+    sessionId: task.sessionId,
     turn: opening ? 'agent' : 'operator',
     queued: [],
     question: null,
@@ -1127,7 +1164,6 @@ function startRun(
     startedAt: at,
     endedAt: null,
   };
-  task.sessionId ??= `S${task.id.slice(1)}`;
   state.runs[run.id] = run;
   task.runIds.push(run.id);
   task.state = 'running';
@@ -1148,6 +1184,14 @@ function park(state: Lifecycle, task: Task, run: Run, at: number): void {
   const request = openRequest(state, task);
   if (request?.holdsRun) request.holdsRun = false;
   else task.state = 'queued';
+}
+
+// What the run that resumes a root on the operator's review comments opens on.
+function changesOpening(task: Task, comments: string): string {
+  const asked = `The operator reviewed ${task.id} and requested changes:\n\n${comments.trim()}`;
+  // A HITL run's operator is there to say more.
+  if (task.mode === 'HITL') return asked;
+  return `${asked}\n\nMake them, unattended, and commit them to the task branch: the task goes back to the operator’s review once your run ends.`;
 }
 
 // What a question's answers are, for the run that resumes after its asker parked.
@@ -1369,6 +1413,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.autonomy = null;
       // The operator works the ticket now: handing back off picks afresh.
       task.loop = null;
+      // What an AFK run was to open on is the operator's to say now.
+      task.resumeWith = null;
       startRun(state, task, at);
       break;
     case 'answer':
@@ -1397,10 +1443,21 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       }
       break;
     case 'requestChanges':
+      task.changesRequested = true;
+      task.resumeWith = changesOpening(task, action.comments);
       task.state = 'queued';
       break;
     case 'markDone':
       task.state = 'done';
+      // The daemon archives its transcripts, then removes its worktree and branch.
+      if (task.worktree) task.cleanup = { problem: null };
+      break;
+    case 'cleanedUp':
+      task.cleanup = null;
+      task.transcripts = action.transcripts;
+      break;
+    case 'cleanupFailed':
+      task.cleanup = { problem: action.reason };
       break;
     case 'cancel':
       if (run) endRun(run, 'cancelled', at);
@@ -1495,7 +1552,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // A run of an AFK stage moves the task on by itself. Any other (a task
       // with no preset, or one handed off with no AFK stage ahead) is its last.
       const from = stageOf(task, run!.stage);
-      if (from?.mode !== 'AFK') {
+      if (from?.mode !== 'AFK' || task.changesRequested) {
         task.state = 'in-review';
         break;
       }

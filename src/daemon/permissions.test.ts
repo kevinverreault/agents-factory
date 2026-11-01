@@ -192,7 +192,7 @@ describe('answering a permission request', () => {
 
     factory.executor.askPermission('R1', bash('toolu_2', 'npm publish'));
     factory.executor.report('R1', { type: 'runCompleted' });
-    await operator.send({ type: 'requestChanges', taskId: 'T1' });
+    await operator.send({ type: 'requestChanges', taskId: 'T1', comments: 'Tighten it up.' });
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R3');
     factory.executor.askPermission('R3', bash('toolu_3', 'npm publish'));
     factory.executor.askPermission('R2', bash('toolu_4', 'npm publish'));
@@ -270,12 +270,26 @@ describe('answering a permission request whose run parked', () => {
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
 
     factory.executor.report('R2', { type: 'runCompleted' });
-    await operator.send({ type: 'requestChanges', taskId: 'T1' });
+    await operator.send({ type: 'requestChanges', taskId: 'T1', comments: 'Tighten it up.' });
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R3');
     factory.executor.askPermission('R3', bash('toolu_2', 'npm publish'));
 
     await tui.until((state) => state.tasks.T1?.label === 'Needs you');
     expect(factory.executor.verdicts('R3')).toEqual({});
+  });
+
+  test('taken over before its next run starts, the task opens its conversation on the operator’s turn, not on the answer', async () => {
+    const { factory, operator, tui } = await parked();
+    await operator.send({ type: 'setSlotCap', cap: 1 });
+    await operator.send(afk('Add dark mode'));
+    await tui.until((state) => state.tasks.T2?.label === 'Running');
+    await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'once' } });
+    await tui.until((state) => state.tasks.T1?.label === 'Queued');
+
+    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: true });
+
+    const taken = await tui.until((state) => state.tasks.T1?.mode === 'HITL' && state.tasks.T1.liveRunId !== null);
+    expect(factory.executor.started.find((run) => run.runId === taken.tasks.T1!.liveRunId)).toMatchObject({ mode: 'HITL', firstMessage: null });
   });
 
   test('Allow for this task opens the next run on it, with the rule on the task', async () => {

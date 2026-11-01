@@ -61,7 +61,12 @@ export type RunSink = {
 // agent reads.
 export type Verdict = { allow: true } | { allow: false; message: string };
 
-export type Session = { sessionId: string; cwd: string };
+// `archive` is the directory the session was archived to, once its task
+// ended: it is read from there.
+export type Session = { sessionId: string; cwd: string; archive?: string | null };
+
+// A session transcript couldn't be archived.
+export class ArchiveError extends Error {}
 
 export interface Executor {
   start(run: RunStart, sink: RunSink): void;
@@ -76,4 +81,8 @@ export interface Executor {
   stop(runId: string): void;
   // The conversation so far, read from the Claude session file.
   history(session: Session): Promise<ConversationEvent[]>;
+  // Copies the session's transcript, its in-run subagents' included, into `dir`,
+  // replacing any copy there; a session with no transcript yet has nothing
+  // to copy. Throws an `ArchiveError` when it can't.
+  archive(session: Session, dir: string): Promise<void>;
 }

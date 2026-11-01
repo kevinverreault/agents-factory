@@ -36,6 +36,12 @@ describeGitContract('the fake git', async () => {
     async setPushUrl(worktreePath, remote, url) {
       git.setPushUrl(worktreePath, remote, url);
     },
+    async push(clonePath, branch) {
+      git.push(clonePath, branch);
+    },
+    async merge(clonePath, branch, base) {
+      git.merge(clonePath, branch, base);
+    },
     async dispose() {},
   };
 });

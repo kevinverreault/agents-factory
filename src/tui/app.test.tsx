@@ -19,7 +19,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [] };
+  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -1273,6 +1273,48 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { deny: 'Use 2 tags' } }));
   });
 
+  const reviewing = task('T3', 'Add a logout button', 'in-review', 'In review');
+  const review = { kind: 'review' as const, taskId: 'T3' };
+
+  test('a root in review offers Request changes, Mark done and Cancel, and Request changes sends the typed review comments', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([reviewing], [review]), { connection });
+    await press(app, '2');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain('── T3 Add a logout button ── In review 1 Request changes 2 Mark done 3 Cancel a answer'),
+    );
+
+    await press(app, 'a', '1');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Review comments: enter requests changes · esc back'));
+    app.stdin.write('Put it in the header');
+    await eventually(() => expect(app.lastFrame()).toContain('Review comments: Put it in the header'));
+    await press(app, ENTER);
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'requestChanges', taskId: 'T3', comments: 'Put it in the header' }));
+  });
+
+  test('Mark done on an unmerged branch asks “Finish anyway?”: y finishes it, n backs out', async () => {
+    const connection = new FakeConnection();
+    const confirm = { type: 'markDone' as const, taskId: 'T3', anyway: true };
+    connection.replyTo('markDone', { ok: false, reason: 'Not merged into main: factory/T3-add-a-logout-button’s tip isn’t on origin/main. Finish anyway?', confirm });
+    const { app } = await started(factoryState([reviewing], [review]), { connection });
+    await press(app, '2', 'a', '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'markDone', taskId: 'T3' }));
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain('Not merged into main: factory/T3-add-a-logout-button’s tip isn’t on origin/main. Finish anyway? y yes · n no'),
+    );
+
+    await press(app, 'n');
+    await eventually(() => expect(app.lastFrame()).not.toContain('Finish anyway?'));
+    expect(connection.sent).toHaveLength(1);
+
+    await press(app, '2');
+    await eventually(() => expect(app.lastFrame()).toContain('Finish anyway?'));
+    connection.replyTo('markDone', { ok: true });
+    await press(app, 'y');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual(confirm));
+    await eventually(() => expect(app.lastFrame()).not.toContain('Finish anyway?'));
+  });
+
   test('a missing repository takes no digits, and its sheet says how to fix it', async () => {
     const connection = new FakeConnection();
     const missing = { ...failure, taskId: null, requestId: 'A3', attention: 'repo-missing' as const, reason: 'The clone of acme/widgets is no longer at /clones/widgets.' };
@@ -1299,6 +1341,7 @@ describe('answering in the conversation', () => {
     question: null,
     permission: null,
     stage: 'implement',
+    ticket: null,
     proposal: null,
     tier: 'sonnet' as const,
     model: 'claude-sonnet-5-5',

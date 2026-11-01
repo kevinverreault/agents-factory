@@ -9,7 +9,7 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
@@ -98,7 +98,9 @@ export type DaemonStatus = {
   queuedTasks: number;
 };
 
-export type Reply = { ok: true; value?: unknown } | { ok: false; reason: string };
+// A refusal with `confirm` asks the operator whether to go ahead anyway, as
+// Mark done on an unmerged branch does: `confirm` is the command that does.
+export type Reply = { ok: true; value?: unknown } | { ok: false; reason: string; confirm?: Command };
 
 export type ClientMessage =
   | { type: 'auth'; token: string }
