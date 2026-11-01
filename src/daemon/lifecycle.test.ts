@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import { FACTORY_ALLOW_LIST } from '../permissions/permissions.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
+import { openStore } from '../store/store.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -88,6 +89,52 @@ describe('tasks end only Done or Cancelled', () => {
       ok: false,
       reason: 'Only a live AFK task (queued, running or needing you) can be taken over.',
     });
+  });
+
+  test('cancelling a task cascades to its whole subtree: every descendant ends Cancelled, their live runs end and their requests close', async () => {
+    const { factory } = await attached();
+    let operator = await factory.attach();
+    for (const [title, mode] of [['Root', 'AFK'], ['Child', 'AFK'], ['Grandchild', 'HITL'], ['Bystander', 'HITL']] as const) {
+      await operator.send({ type: 'createTask', repo: 'acme/widgets', title, mode, submit: false });
+    }
+    // Children arrive with their own slice: until then, the tree is made in the store.
+    operator.close();
+    await factory.daemon().stop();
+    const store = openStore(factory.paths.storePath);
+    const saved = store.loadLifecycle()!;
+    saved.tasks.T2!.parent = 'T1';
+    saved.tasks.T3!.parent = 'T2';
+    store.saveLifecycle(saved);
+    store.close();
+    await factory.startDaemon();
+    operator = await factory.attach();
+    const tui = watch(operator);
+    for (const taskId of ['T1', 'T2', 'T3', 'T4']) await operator.send({ type: 'submit', taskId });
+    await operator.send({ type: 'open', taskId: 'T3' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R1' && state.tasks.T2?.liveRunId === 'R2' && state.tasks.T3?.liveRunId === 'R3');
+    factory.executor.askPermission('R2', { id: 'toolu_1', tool: 'Bash', input: { command: 'npm publish' } });
+    await tui.until((state) => state.tasks.T2?.label === 'Needs you');
+
+    expect(await operator.send({ type: 'cancel', taskId: 'T1' })).toEqual({ ok: true });
+
+    const state = await tui.until((state) => state.tasks.T3?.label === 'Cancelled');
+    expect(['T1', 'T2', 'T3', 'T4'].map((id) => state.tasks[id]!.label)).toEqual(['Cancelled', 'Cancelled', 'Cancelled', 'Ready for you']);
+    for (const runId of ['R1', 'R2', 'R3']) expect(state.runs[runId]).toMatchObject({ status: 'ended', outcome: 'cancelled' });
+    expect(factory.executor.stopped.sort()).toEqual(['R1', 'R2', 'R3']);
+    expect(state.attentionQueue).toEqual([{ kind: 'ready', taskId: 'T4' }]);
+  });
+
+  test('a cancelled task needing you on a failure ends Cancelled, its failure request closed', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
+    factory.executor.report('R1', { type: 'runFailed', reason: 'The agent hit max turns.' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+
+    expect(await operator.send({ type: 'cancel', taskId: 'T1' })).toEqual({ ok: true });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Cancelled');
+    expect(state.attentionQueue).toEqual([]);
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: false, reason: 'T1 has no open attention request.' });
   });
 
   test('a completed AFK run puts its root task In review, and only the operator marks it Done', async () => {

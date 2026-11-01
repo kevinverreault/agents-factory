@@ -7,7 +7,8 @@ import { Box, Text, type Key } from 'ink';
 import type { AttentionQueueItem, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
-import type { Command, Reply } from '../protocol/protocol.ts';
+import type { Command, Option, Reply } from '../protocol/protocol.ts';
+import { ChoosePrompt, chooseKey } from './choose.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
 
@@ -111,6 +112,10 @@ export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined)
 // answered for, and whether its choice opens that task's conversation.
 export type Answered = { reply: Reply; taskId: string; opens: boolean };
 
+// What a refusal asks back: whether to go ahead anyway (no `options`), or
+// which of its options to go ahead with.
+export type Ask = { reason: string; options: string[] | null };
+
 // The fields the operator is filling in for a choice, as they stand: `at`
 // is the one they are typing into, and `enter` what enter does.
 export type Form = { fields: Field[]; at: number; enter: string };
@@ -121,7 +126,8 @@ export type Form = { fields: Field[]; at: number; enter: string };
 // for a choice, what a refusal asks back, and the items already answered,
 // are kept across renders. `onSend` hears of each answer as it goes out,
 // `onReply` once it is back, unless the reply asks whether to go ahead
-// anyway: the sheet asks that instead, and y sends what it confirms.
+// anyway, or which way to: the sheet asks that instead, and y sends what it
+// confirms, or a digit (enter, the first) the option it picks.
 export function useAnswering(
   connection: FactoryConnection,
   item: AttentionQueueItem | undefined,
@@ -132,7 +138,8 @@ export function useAnswering(
     card: Card;
     cardFor: string | null;
     form: { for: string; choice: number; values: string[]; at: number } | null;
-    confirm: { for: string; reason: string; command: Command } | null;
+    // Options with `yesNo` ask whether to go ahead, with the one command that does.
+    confirm: { for: string; reason: string; options: Option[]; yesNo: boolean } | null;
     sent: Set<string>;
   }>({ card: newCard(), cardFor: null, form: null, confirm: null, sent: new Set() });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
@@ -155,8 +162,11 @@ export function useAnswering(
         sheet.current.sent.delete(sentFor);
         if (sheet.current.cardFor === sentFor) sheet.current.card = newCard();
       }
-      if (!reply.ok && reply.confirm) sheet.current.confirm = { for: sentFor, reason: reply.reason, command: reply.confirm };
-      else onReply({ reply, taskId, opens });
+      if (!reply.ok && reply.confirm) {
+        sheet.current.confirm = { for: sentFor, reason: reply.reason, options: [{ label: 'yes', command: reply.confirm }], yesNo: true };
+      } else if (!reply.ok && reply.choose?.length) {
+        sheet.current.confirm = { for: sentFor, reason: reply.reason, options: reply.choose, yesNo: false };
+      } else onReply({ reply, taskId, opens });
       rerender();
     });
   };
@@ -196,12 +206,13 @@ export function useAnswering(
     }
     rerender();
   };
-  // A key while the sheet asks whether to go ahead anyway: y does, n or esc doesn't.
+  // A key while the sheet asks whether to go ahead anyway (y does, n or esc
+  // doesn't), or which way to (a digit or enter picks, esc backs out).
   const goAhead = (input: string, key: Key) => {
-    if (input === 'y') {
-      sheet.current.confirm = null;
-      send(confirm!.command);
-    } else if (input === 'n' || key.escape) sheet.current.confirm = null;
+    const { options, yesNo } = confirm!;
+    const picked = yesNo ? (input === 'y' ? options[0]! : input === 'n' || key.escape ? 'back' : null) : chooseKey(options, input, key);
+    if (picked) sheet.current.confirm = null;
+    if (picked && picked !== 'back') send(picked.command);
     rerender();
   };
 
@@ -214,7 +225,7 @@ export function useAnswering(
       enter: filling.choice.enter,
     },
     // What a refusal asks back, if anything: while it does, every key is its answer's.
-    confirm: confirm?.reason ?? null,
+    confirm: confirm && { reason: confirm.reason, options: confirm.yesNo ? null : confirm.options.map(({ label }) => label) },
     key: (input: string, key: Key) => (confirm ? goAhead(input, key) : form ? fill(input, key) : answer(input, key)),
   };
 }
@@ -229,7 +240,7 @@ type Props = {
   // The fields the operator is filling in for a choice that takes some, if any.
   form: Form | null;
   // What a refusal asks back, if anything.
-  confirm?: string | null;
+  confirm?: Ask | null;
   // Whether esc gives the digits back to the screens: on Needs you, not in a
   // conversation, whose own hint says what its keys do.
   escBack?: boolean;
@@ -241,7 +252,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
   const question = item.kind === 'attention' ? item.question : null;
   const hint = answerable(item, task)
     ? confirm !== null
-      ? 'y yes · n no'
+      ? confirm.options ? null : 'y yes · n no'
       : form !== null
       ? `${form.fields.length > 1 ? '↑↓ field · ' : ''}enter ${form.enter} · esc back`
       : answering
@@ -264,7 +275,8 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
     ...(form?.fields ?? []).map(({ prompt, value }, i) =>
       h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? '› ' : '  ') : '', h(Text, { bold: true }, `${prompt}: `), value),
     ),
-    confirm !== null ? h(Text, { color: 'yellow' }, confirm) : null,
+    confirm?.options ? h(ChoosePrompt, { reason: confirm.reason, options: confirm.options }) : null,
+    confirm && !confirm.options ? h(Text, { color: 'yellow' }, confirm.reason) : null,
     hint ? h(Text, { dimColor: true }, hint) : null,
   );
 }

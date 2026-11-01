@@ -57,7 +57,7 @@ export type TaskView = {
   handoff: HandoffView | null;
   // The tickets its Ralph loop closed, with their commits.
   closedTickets: ClosedTicket[];
-  // While a Done root's cleanup hasn't finished, and why it last failed.
+  // While its cleanup, once it ended Done or Cancelled, hasn't finished, and why it last failed.
   cleanup: Cleanup | null;
   // Where its transcripts were archived once it ended.
   transcripts: string | null;
