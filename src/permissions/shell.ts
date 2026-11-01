@@ -1,17 +1,25 @@
 // A Bash command line read as the shell splits it, as far as the L1 gate
-// needs: its simple commands, each with its words, the files it writes and
-// whether a heredoc feeds it.
+// and the hard denies need: its simple commands, each with its words, the
+// files it writes, the heredoc that feeds it and the operator after it.
 
 export type SimpleCommand = {
   // Its text as written, without its redirections, for rules to match.
   text: string;
   // Its words, with quotes removed.
   words: string[];
-  // The files its redirections write to, other than the null device.
+  // The files its redirections write to, other than the null device and
+  // the standard streams.
   writes: string[];
-  // Whether a heredoc feeds it.
-  heredoc: boolean;
+  // The body of the heredoc that feeds it, if one does.
+  heredoc: string | null;
+  // The operator after it, a newline read as `;`, or null at the end.
+  then: '&&' | '||' | ';' | '&' | '|' | null;
 };
+
+// The heredocs whose bodies start on the next line, each with the command it
+// feeds, by its index, and whether its delimiter was quoted, so that its body
+// is taken as it is.
+type Body = { delimiter: string; strip: boolean; quoted: boolean; command: number };
 
 // The simple commands of `line`, chained by `&&`, `||`, `;`, `&`, `|` or
 // newlines, or null when it substitutes commands, runs a subshell or can't be
@@ -24,29 +32,27 @@ export function readCommandLine(line: string): SimpleCommand[] | null {
   let cuts: [number, number][] = [];
   let words: string[] = [];
   let writes: string[] = [];
-  let heredoc = false;
   let word: string | null = null;
   let wordStart = 0;
   // What the next word is, after a redirection, and where that began.
-  let target: { kind: 'write' | 'read' | 'heredoc'; from: number; strip: boolean } | null = null;
-  // The heredocs whose bodies start on the next line.
-  const bodies: { delimiter: string; strip: boolean }[] = [];
+  let target: { kind: 'write' | 'read' | 'heredoc'; from: number; strip: boolean; quoted: boolean } | null = null;
+  const bodies: Body[] = [];
   let i = 0;
 
-  const endWord = (at: number) => {
+  const endWord = (end: number) => {
     if (word === null) return;
     if (target === null) words.push(word);
     else {
-      cuts.push([target.from, at]);
-      if (target.kind === 'write' && !/^(\/dev\/null|nul)$/i.test(word)) writes.push(word);
-      if (target.kind === 'heredoc') bodies.push({ delimiter: word, strip: target.strip });
+      cuts.push([target.from, end]);
+      if (target.kind === 'write' && !/^(\/dev\/(null|stdout|stderr)|nul)$/i.test(word)) writes.push(word);
+      if (target.kind === 'heredoc') bodies.push({ delimiter: word, strip: target.strip, quoted: target.quoted, command: commands.length });
       target = null;
     }
     word = null;
   };
   // False when a redirection is left without its target.
-  const endCommand = (at: number): boolean => {
-    endWord(at);
+  const endCommand = (end: number, then: SimpleCommand['then']): boolean => {
+    endWord(end);
     if (target !== null) return false;
     let text = '';
     let from = start;
@@ -54,12 +60,12 @@ export function readCommandLine(line: string): SimpleCommand[] | null {
       text += line.slice(from, cutFrom);
       from = cutTo;
     }
-    text += line.slice(from, at);
-    if (words.length || writes.length) commands.push({ text: text.trim(), words, writes, heredoc });
+    text += line.slice(from, end);
+    if (words.length || writes.length) commands.push({ text: text.trim(), words, writes, heredoc: null, then });
+    else for (const body of bodies) if (body.command === commands.length) body.command = -1;
     cuts = [];
     words = [];
     writes = [];
-    heredoc = false;
     return true;
   };
   const append = (chars: string) => {
@@ -67,10 +73,10 @@ export function readCommandLine(line: string): SimpleCommand[] | null {
     word = (word ?? '') + chars;
   };
   // Where a redirection's span begins: its stream number, and the blanks before.
-  const spanFrom = (at: number) => {
-    let from = word !== null && /^\d+$/.test(word) && wordStart + word.length === at ? wordStart : at;
-    if (from !== at) word = null;
-    endWord(at);
+  const spanFrom = (operatorAt: number) => {
+    let from = word !== null && /^\d+$/.test(word) && wordStart + word.length === operatorAt ? wordStart : operatorAt;
+    if (from !== operatorAt) word = null;
+    endWord(operatorAt);
     while (from > start && /[ \t]/.test(line[from - 1]!)) from--;
     return from;
   };
@@ -113,13 +119,15 @@ export function readCommandLine(line: string): SimpleCommand[] | null {
         continue;
       }
       const kind = operator.startsWith('<<') && operator !== '<<<' ? 'heredoc' : operator === '<' || operator === '<&' || operator === '<<<' ? 'read' : 'write';
-      if (kind === 'heredoc') heredoc = true;
-      target = { kind, from, strip: operator === '<<-' };
       while (line[i] === ' ' || line[i] === '\t') i++;
+      // A delimiter quoted anywhere keeps the shell out of the body.
+      const quoted = /['"\\]/.test(/^[^\s;&|<>()]*/.exec(line.slice(i))![0]);
+      target = { kind, from, strip: operator === '<<-', quoted };
     } else if (/[;&|\n]/.test(char)) {
-      if (!endCommand(i)) return null;
-      i += /^(&&|\|\||\|&|;;)/.test(line.slice(i)) ? 2 : 1;
-      if (char === '\n') i = afterBodies(line, i, bodies);
+      const operator = /^(&&|\|\||\|&|;;|[;&|\n])/.exec(line.slice(i))![1]!;
+      if (!endCommand(i, operator === '\n' || operator === ';;' ? ';' : operator === '|&' ? '|' : (operator as SimpleCommand['then']))) return null;
+      i += operator.length;
+      if (operator === '\n') i = readBodies(line, i, bodies, commands);
       if (i < 0) return null;
       start = i;
     } else if (/\s/.test(char)) {
@@ -130,22 +138,28 @@ export function readCommandLine(line: string): SimpleCommand[] | null {
       i++;
     }
   }
-  if (!endCommand(line.length) || bodies.length) return null;
+  if (!endCommand(line.length, null) || bodies.length) return null;
   return commands;
 }
 
-// Where the line goes on after the bodies of the heredocs started on the
-// line before `from`, or -1 when one never ends.
-function afterBodies(line: string, from: number, bodies: { delimiter: string; strip: boolean }[]): number {
+// Reads the bodies of the heredocs started on the line before `from` onto
+// the commands they feed, and returns where the line goes on after them, or
+// -1 when one never ends, or substitutes commands the shell would run.
+function readBodies(line: string, from: number, bodies: Body[], commands: SimpleCommand[]): number {
   let at = from;
-  for (const { delimiter, strip } of bodies) {
+  for (const { delimiter, strip, quoted, command } of bodies) {
+    const lines: string[] = [];
     for (;;) {
       if (at >= line.length) return -1;
       const end = line.indexOf('\n', at);
       const text = line.slice(at, end < 0 ? line.length : end);
       at = end < 0 ? line.length : end + 1;
       if ((strip ? text.replace(/^\t+/, '') : text) === delimiter) break;
+      lines.push(text);
     }
+    const body = lines.join('\n');
+    if (!quoted && /\$\(|`/.test(body)) return -1;
+    if (command >= 0 && commands[command]) commands[command].heredoc = body;
   }
   bodies.length = 0;
   return at;

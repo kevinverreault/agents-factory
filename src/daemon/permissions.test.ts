@@ -150,8 +150,11 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
       'cd src && git config core.autocrlf > ../autocrlf.txt',
       `cd ${bashPath(worktree)}/src; git config core.autocrlf`,
       'cat > notes.md <<EOF\nan owl > a heron\nEOF',
+      "cat > notes.md <<'EOF'\n$(an owl, not a command)\nEOF",
+      'git config core.autocrlf 2>/dev/stderr',
     ];
-    expect(await gated(commands)).toEqual([true, true, true, true, true, true, true]);
+    const folders = (worktree: string) => mkdirSync(join(worktree, 'src'), { recursive: true });
+    expect(await gated(commands, folders)).toEqual([true, true, true, true, true, true, true, true, true]);
   });
 
   test.each([
@@ -164,6 +167,11 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
     'cd .. && git config core.autocrlf',
     'cd && git status',
     'cd /tmp; ls',
+    'cd - && ls',
+    "cd nowhere; sed -i 's/owl/heron/' ../notes.txt",
+    'cd src & git config core.autocrlf > ../autocrlf.txt',
+    'cd src || git config core.autocrlf > ../autocrlf.txt',
+    'cat > notes.md <<EOF\n$(rm -rf ~)\nEOF',
   ])('redirected or moved out of the worktree, it still asks: `%s`', async (command) => {
     expect(await gated([command])).toEqual([false]);
   });
@@ -173,6 +181,7 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
       'npm ci 2>&1 | tail -5; npx vitest run 2>&1 | tail -30',
       'npm ci --ignore-scripts',
       'pnpm install --frozen-lockfile',
+      'pnpm i --frozen-lockfile',
       'yarn install --immutable',
       'npx prettier --check .',
       'cd packages/web && npx astro build',
@@ -186,7 +195,7 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
         writeFileSync(join(worktree, dir!, 'node_modules', '.bin', bin!), '');
       }
     };
-    expect(await gated(commands, installed)).toEqual([true, true, true, true, true, true]);
+    expect(await gated(commands, installed)).toEqual([true, true, true, true, true, true, true]);
   });
 
   test.each([

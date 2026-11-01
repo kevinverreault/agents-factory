@@ -173,7 +173,7 @@ test('an L1 runâ€™s allow rules are matched by Claude Code itself, and the gateâ
     'npm install of a package': 'asks the operator',
     'pip install': 'asks the operator',
   });
-});
+}, 300_000);
 
 test('without the allow rules, a call only they let through reaches the gate', async () => {
   const { cwd } = repo();
@@ -218,4 +218,4 @@ test('a hard deny is refused without asking, even where an allow rule would let 
     return Array.isArray(content) ? content.filter((block) => block?.type === 'tool_result').map((block) => JSON.stringify(block.content)) : [];
   });
   expect(results).toEqual(denied.map(() => expect.stringContaining('the factory pushes for you')));
-});
+}, 300_000);

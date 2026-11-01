@@ -4,7 +4,8 @@
 // they are best-effort: the cleaned environment makes a push that slips past
 // fail in git itself, and the check after the run catches the rest.
 import { execFile } from 'node:child_process';
-import type { ToolCall } from '../permissions/permissions.ts';
+import { INTERPRETERS, type ToolCall } from '../permissions/permissions.ts';
+import { readCommandLine } from '../permissions/shell.ts';
 
 // What a refusal needs to know of the run's worktree.
 export type RunHistory = {
@@ -79,14 +80,32 @@ async function refusedIn(command: string, history: RunHistory): Promise<string |
     const what = await refusedCommand(words, history);
     if (what) return what;
   }
-  return commands.some((words) => INTERPRETERS.has(programOf(words).program)) ? refusedInCode(command, history) : null;
+  return commands.some((words) => isInterpreter(programOf(words).program)) ? refusedInInterpreters(command, history) : null;
 }
 
 // Prefixes that run the command after them.
 const WRAPPERS = new Set(['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'nice', 'xargs', 'builtin']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash']);
-// The interpreters an L1 run may hand inline code or a heredoc.
-const INTERPRETERS = new Set(['python', 'python3', 'py', 'node']);
+
+const isInterpreter = (program: string) => Object.hasOwn(INTERPRETERS, program);
+
+// What the first command spelled out in the code the line hands Python or
+// Node, inline or in a heredoc, does that is refused. A line the gate can't
+// read, for it substitutes commands, is read whole.
+async function refusedInInterpreters(command: string, history: RunHistory): Promise<string | null> {
+  const commands = readCommandLine(command);
+  if (commands === null) return refusedInCode(command, history);
+  for (const { words, heredoc } of commands) {
+    const { program, args } = programOf(words);
+    if (!isInterpreter(program)) continue;
+    const inline = args.findIndex((arg) => INTERPRETERS[program]!.inline.includes(arg));
+    for (const code of [inline >= 0 ? args[inline + 1] : undefined, heredoc]) {
+      const what = code ? await refusedInCode(code, history) : null;
+      if (what) return what;
+    }
+  }
+  return null;
+}
 
 // The program a simple command runs, past any assignments and wrappers
 // before it, and the words after it.
@@ -105,22 +124,23 @@ const STRING = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/gs;
 
 // What the first command the code's strings spell out does that is refused,
 // or null: each string read as a command line, as `os.system` or `execSync`
-// would run it, and each run of strings separated only by commas and
+// would run it, and each list of strings separated only by commas and
 // brackets as one command's words, as `subprocess.run` or `spawnSync` would.
-// Strings within strings are read too, for code quoted inside a shell's.
+// Strings within strings are read too, for code quoted inside a shell's. A
+// string that only mentions a push, in a message, is refused as well.
 async function refusedInCode(code: string, history: RunHistory): Promise<string | null> {
-  const runs: string[][] = [];
+  const lists: string[][] = [];
   let end = 0;
   for (const match of code.matchAll(STRING)) {
     const text = match[2]!.replace(/\\(.)/gs, '$1');
-    if (runs.length && /^[\s,[\]()]*$/.test(code.slice(end, match.index))) runs.at(-1)!.push(text);
-    else runs.push([text]);
+    if (lists.length && /^[\s,[\]()]*$/.test(code.slice(end, match.index))) lists.at(-1)!.push(text);
+    else lists.push([text]);
     end = match.index + match[0].length;
   }
-  for (const run of runs) {
-    const what = run.length > 1 ? await refusedCommand(run, history) : null;
+  for (const list of lists) {
+    const what = list.length > 1 ? await refusedCommand(list, history) : null;
     if (what) return what;
-    for (const text of run) {
+    for (const text of list) {
       const inner = (await refusedIn(text, history)) ?? (await refusedInCode(text, history));
       if (inner) return inner;
     }

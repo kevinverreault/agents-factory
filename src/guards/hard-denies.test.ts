@@ -72,6 +72,7 @@ describe('pushing', () => {
     'python -c "import subprocess; subprocess.run([\'git\', \'log\', \'--grep\', \'push\'])"',
     "python - <<'EOF'\nimport subprocess\nprint(subprocess.run(['git', 'status'], capture_output=True).stdout)\nEOF",
     "node -e \"console.log(require('./package.json').scripts.push)\"",
+    'python scripts/generate.py && git commit -am "Regenerate; git push comes later"',
   ])('`%s` runs', async (command) => {
     expect(await bash(command)).toBeNull();
   });
