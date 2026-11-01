@@ -10,14 +10,17 @@ import {
   getSessionMessages,
   query,
   type CanUseTool,
+  type HookCallback,
   type Options,
   type Query,
   type SDKResultMessage,
   type SpawnOptions,
 } from '@anthropic-ai/claude-agent-sdk';
+import { HARD_DENY_RULES, refusal, runHistoryIn } from '../guards/hard-denies.ts';
+import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import { processCreatedAt } from '../os/process-info.ts';
-import type { ConversationEvent, CredentialProfile, Executor, RunSink, RunStart, Verdict } from './executor.ts';
+import type { ConversationEvent, CredentialProfile, Executor, RunGuards, RunSink, RunStart, Verdict } from './executor.ts';
 import { hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
 
@@ -78,7 +81,7 @@ export function agentSdkExecutor(): Executor {
       const options: Options = {
         ...(start.mode === 'HITL'
           ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink))
-          : l1Options(start.credential, start.maxTurns, askTheOperator(start.runId, spawning, gateCall(spawning)))),
+          : l1Options(start.credential, start.maxTurns, start.guards!, start.cwd!, askTheOperator(start.runId, spawning, gateCall(spawning)))),
         cwd: start.cwd!,
         model: start.model,
         // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
@@ -205,23 +208,46 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
 // sets none, so the target repo's own rules grant nothing: everything that
 // would prompt reaches `canUseTool`, which turns questions into attention
 // requests and hands every other call to the factory's gate.
-function l1Options(credential: CredentialProfile, maxTurns: number | null, canUseTool: CanUseTool): Options {
+//
+// Every AFK run is guarded (ADR 0007): the hard-deny rules and a PreToolUse
+// hook refuse what would publish or rewrite around the factory, before the
+// gate is asked, and git runs in the cleaned environment, without the
+// operator's credentials. Commits carry the factory's trailers, not Claude
+// Code's attribution (ADR 0004).
+function l1Options(credential: CredentialProfile, maxTurns: number | null, guards: RunGuards, cwd: string, canUseTool: CanUseTool): Options {
+  const env: Record<string, string | undefined> = { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards.env };
+  for (const name of AFK_UNSET) delete env[name];
   return {
-    env: { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+    env,
     permissionMode: 'acceptEdits',
     settingSources: ['project'],
-    managedSettings: { allowManagedPermissionRulesOnly: true },
-    settings: { hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
+    managedSettings: { allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
+    settings: {
+      hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] },
+      attribution: { commit: '', pr: '' },
+    },
+    hooks: { PreToolUse: [{ hooks: [hardDenies(cwd, guards.start)] }] },
     ...(maxTurns !== null && { maxTurns }),
     canUseTool,
   };
 }
 
+// The PreToolUse hook that refuses the hard denies, whatever the gate would say.
+function hardDenies(cwd: string, start: string): HookCallback {
+  const history = runHistoryIn(cwd, start);
+  return async (input) => {
+    if (input.hook_event_name !== 'PreToolUse') return {};
+    const refused = await refusal({ tool: input.tool_name, input: (input.tool_input ?? {}) as Record<string, unknown> }, history);
+    return refused ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: refused } } : {};
+  };
+}
+
 // Why the executor can't start the run, or null.
-function whyUnstartable({ mode, autonomy, cwd, firstMessage }: RunStart): string | null {
+function whyUnstartable({ mode, autonomy, cwd, firstMessage, guards }: RunStart): string | null {
   if (cwd === null) return 'The task has no worktree to run in.';
   if (mode === 'HITL') return null;
   if (autonomy !== 'L1') return 'L2 runs arrive with the sandbox.';
+  if (guards === null) return 'An AFK run never starts without its git guards.';
   // An AFK run takes no chat, so with nothing to start on it would wait forever.
   return firstMessage === null ? 'The AFK run has no first message to work on.' : null;
 }

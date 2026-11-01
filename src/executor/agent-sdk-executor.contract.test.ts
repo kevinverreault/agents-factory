@@ -35,6 +35,7 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     maxTurns: null,
     credential: 'subscription-host',
     plugin: null,
+    guards: null,
   };
   const startedAt = Date.now();
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
@@ -95,6 +96,7 @@ test('the agent proposes advancing through the factory MCP server’s propose_ad
     maxTurns: null,
     credential: 'subscription-host',
     plugin: null,
+    guards: null,
   };
 
   executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
@@ -130,6 +132,7 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
     maxTurns: null,
     credential: 'subscription-host',
     plugin: null,
+    guards: null,
   };
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
   const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
@@ -187,6 +190,8 @@ function afkRun(cwd: string, firstMessage: string, maxTurns: number): RunStart {
     maxTurns,
     credential: 'subscription-host',
     plugin: null,
+    // Not a clone: nothing for the guards' history to keep.
+    guards: { start: '0'.repeat(40), env: {} },
   };
 }
 

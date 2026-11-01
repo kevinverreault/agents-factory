@@ -1,5 +1,5 @@
 import { relative, isAbsolute } from 'node:path';
-import { GitError, type Clone, type DirectoryFile, type Git, type Worktree } from '../git/git.ts';
+import { GitError, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree } from '../git/git.ts';
 
 type CloneSetup = { originUrl?: string | null; defaultBranch?: string | null };
 
@@ -26,6 +26,10 @@ export class FakeGit implements Git {
   // Each commit's files, by path from the top.
   private readonly trees = new Map<string, Map<string, string>>();
   private commits = 0;
+  // What each worktree's AFK run broke, as the check after the run says it.
+  private readonly broken = new Map<string, string[]>();
+  // The worktrees checked after a run, each with the branches it was told to ignore.
+  readonly checked: { worktreePath: string; branches: string[] }[] = [];
 
   addClone(path: string, { originUrl = null, defaultBranch = null }: CloneSetup = {}): void {
     const clone: FakeClone = {
@@ -120,6 +124,29 @@ export class FakeGit implements Git {
 
   async uncommitted(worktreePath: string, paths: string[]): Promise<string[]> {
     return paths.filter((path) => this.changes.get(worktreePath)?.has(path));
+  }
+
+  // The run in the worktree breaks an invariant, which the check after it
+  // reports with `reason`.
+  breakInvariant(worktreePath: string, reason: string): void {
+    this.broken.set(worktreePath, [...(this.broken.get(worktreePath) ?? []), reason]);
+  }
+
+  async snapshot(worktreePath: string): Promise<RunSnapshot> {
+    const worktree = this.worktreeAt(worktreePath);
+    return { branch: worktree.branch, head: worktree.head, refs: [], remotes: [], config: '', hooks: {} };
+  }
+
+  async violations(worktreePath: string, _before: RunSnapshot, branches: string[]): Promise<string[]> {
+    this.worktreeAt(worktreePath);
+    this.checked.push({ worktreePath, branches });
+    return this.broken.get(worktreePath) ?? [];
+  }
+
+  private worktreeAt(path: string): FakeWorktree {
+    const worktree = [...this.clones.values()].flatMap((clone) => clone.worktrees).find((worktree) => worktree.path === path);
+    if (!worktree) throw new GitError(`fatal: not a git repository: ${path}`);
+    return worktree;
   }
 
   private cloneAt(path: string): FakeClone {

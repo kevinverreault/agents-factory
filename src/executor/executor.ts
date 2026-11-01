@@ -23,6 +23,16 @@ export type RunStart = {
   // The directory of the skill set plugin the run loads (ADR 0005), or null
   // for a task that froze none.
   plugin: string | null;
+  // What keeps an AFK run from publishing around the factory (ADR 0007), or
+  // null for a HITL run, which acts as the operator.
+  guards: RunGuards | null;
+};
+
+export type RunGuards = {
+  // The commit the run starts from: history from before it stays as it is.
+  start: string;
+  // The cleaned git environment, over the run's own.
+  env: Record<string, string>;
 };
 
 // How a run authenticates: chosen per run, and only applied by the executor
