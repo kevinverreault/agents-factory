@@ -35,6 +35,7 @@ import {
   openRequest,
   overdueRuns,
   reduce,
+  runReports,
   sessionsOf,
   ticketSources,
   unfinishedTasks,
@@ -1152,6 +1153,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       guards,
       // Claude Code matches them itself, so most calls never reach the gate.
       allowRules: run.mode === 'AFK' ? readAllowRules(options.permissionsPath).rules : [],
+      reports: runReports(task, run),
     };
     executor.start(start, {
       // A session is named for each completed run now, in case the next

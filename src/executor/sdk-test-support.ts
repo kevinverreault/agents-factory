@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { FACTORY_ALLOW_LIST } from '../permissions/permissions.ts';
+import type { Report } from '../lifecycle/lifecycle.ts';
 import type { RunStart } from './executor.ts';
 
 export { streamedInput, type StreamedInput } from './streamed-input.ts';
@@ -21,7 +22,7 @@ export function afkRunOptions(cwd: string) {
 
 // An L1 AFK run on haiku in `cwd`, as the executor starts it, with the
 // factory's allow list unless the test gives other rules.
-export function afkRun(cwd: string, firstMessage: string, maxTurns: number, allowRules: readonly string[] = FACTORY_ALLOW_LIST): RunStart {
+export function afkRun(cwd: string, firstMessage: string, maxTurns: number, allowRules: readonly string[] = FACTORY_ALLOW_LIST, reports: readonly Report[] = []): RunStart {
   return {
     runId: 'R1',
     taskId: 'T1',
@@ -38,5 +39,6 @@ export function afkRun(cwd: string, firstMessage: string, maxTurns: number, allo
     // Its history starts nowhere: there is nothing from before the run to keep.
     guards: { start: '0'.repeat(40), env: {} },
     allowRules,
+    reports,
   };
 }

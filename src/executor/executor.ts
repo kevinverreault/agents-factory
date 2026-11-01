@@ -1,7 +1,7 @@
 // The executor port: starts and stops runs, takes the operator's messages,
 // and reports run events and the conversation. The Agent SDK adapter
 // (`agent-sdk.ts`) is the real one.
-import type { Answers, AutonomyLevel, Mode, RunEvent } from '../lifecycle/lifecycle.ts';
+import type { Answers, AutonomyLevel, Mode, Report, RunEvent } from '../lifecycle/lifecycle.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
 
 export type RunStart = {
@@ -32,6 +32,9 @@ export type RunStart = {
   // run started. A rule the operator removes from the file later still holds
   // for the rest of the run. None for a HITL run, which acts as the operator.
   allowRules: readonly string[];
+  // What an AFK run reports to the factory through its tools, by its stage:
+  // it is given those tools alone (ADR 0009). None for a HITL run.
+  reports: readonly Report[];
 };
 
 export type RunGuards = {

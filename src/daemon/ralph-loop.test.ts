@@ -307,7 +307,7 @@ describe('the end of the stage', () => {
     const reviewing = await tui.until((state) => state.tasks.T1?.liveRunId === 'R3');
     expect(reviewing.tasks.T1).toMatchObject({ stage: 'review', label: 'Running' });
     expect(reviewing.runs.R3).toMatchObject({ stage: 'review', ticket: null });
-    expect(factory.executor.started.at(-1)!.firstMessage).toBe('/factory:code-review');
+    expect(factory.executor.started.at(-1)!.firstMessage).toMatch(/^\/factory:code-review\n\n/);
     expect(reviewing.tasks.T1!.closedTickets.map(({ ref }) => ref)).toEqual(['acme/widgets#11', 'acme/widgets#12']);
     // The ticket not ready for an agent was never worked.
     expect(factory.github.issueState('acme/widgets#13').open).toBe(true);

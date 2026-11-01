@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { query, type CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { expect, test } from 'vitest';
 import type { RunEvent } from '../lifecycle/lifecycle.ts';
-import type { ToolCall } from '../permissions/permissions.ts';
+import { FACTORY_ALLOW_LIST, type ToolCall } from '../permissions/permissions.ts';
 import { isAlive, waitFor } from '../os/test-support.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, RunStart } from './executor.ts';
@@ -37,6 +37,7 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     plugin: null,
     guards: null,
     allowRules: [],
+    reports: [],
   };
   const startedAt = Date.now();
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
@@ -108,6 +109,7 @@ test('the agent proposes advancing through the factory MCP server’s propose_ad
     plugin: null,
     guards: null,
     allowRules: [],
+    reports: [],
   };
 
   executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
@@ -144,6 +146,7 @@ test('the agent writes the handoff brief through write_handoff_brief, and its tu
     plugin: null,
     guards: null,
     allowRules: [],
+    reports: [],
   };
 
   executor.start(run, { report: (event) => reported.push(event), converse: () => {}, askPermission: () => {} });
@@ -184,6 +187,7 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
     plugin: null,
     guards: null,
     allowRules: [],
+    reports: [],
   };
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
   const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
@@ -241,6 +245,29 @@ test('an L1 AFK run edits in its worktree without asking, takes no chat, and com
   expect(live).toContainEqual(expect.objectContaining({ type: 'toolUse', tool: 'Write' }));
   const { pid } = reported[0] as Extract<RunEvent, { type: 'runStarted' }>;
   await waitFor(() => !isAlive(pid), 15_000);
+});
+
+test('an L1 AFK run reports findings and writes the PR body through the factory MCP server, with no permission prompt', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'factory-afk-'));
+  const executor = agentSdkExecutor();
+  const reported: RunEvent[] = [];
+  const asked: ToolCall[] = [];
+  const run = afkRun(
+    cwd,
+    'Call the report_findings tool with findings ["The button has no label."], then call the write_pr_body tool with body ' +
+      '"Adds a logout button.". Then reply with only OK.',
+    10,
+    FACTORY_ALLOW_LIST,
+    ['findings', 'pr-body'],
+  );
+
+  executor.start(run, { report: (event) => reported.push(event), converse: () => {}, askPermission: (call) => asked.push(call) });
+  await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
+
+  expect(asked).toEqual([]);
+  expect(reported).toContainEqual({ type: 'findingsReported', runId: 'R1', findings: ['The button has no label.'] });
+  expect(reported).toContainEqual({ type: 'prBodyWritten', runId: 'R1', body: 'Adds a logout button.' });
+  expect(reported.at(-1)?.type).toBe('runCompleted');
 });
 
 test('an AFK run that hits its max turns ends failed, saying so', async () => {

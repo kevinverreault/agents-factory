@@ -27,7 +27,7 @@ import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
-import { hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
+import { afkFactoryTools, hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
 
 type LiveRun = {
@@ -87,7 +87,7 @@ export function agentSdkExecutor(): Executor {
       const options: Options = {
         ...(start.mode === 'HITL'
           ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink))
-          : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)))),
+          : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)), afkFactoryTools(start.runId, sink, start.reports))),
         cwd: start.cwd!,
         model: start.model,
         // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
@@ -257,20 +257,24 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
 // heredocs and redirects, and lets read-only commands and file commands in
 // the worktree through itself. Whatever would still prompt reaches
 // `canUseTool`, which turns questions into attention requests and hands
-// every other call to the factory's gate.
+// every other call to the factory's gate. The factory's MCP server, with
+// the tools of what the run reports, is the only one it has, so the allow
+// list's `mcp__factory` is its own.
 //
 // Every AFK run is guarded (ADR 0007): the hard-deny rules and a PreToolUse
 // hook refuse what would publish or rewrite around the factory, before the
 // gate is asked and whatever an allow rule says, and git runs in the cleaned
 // environment, without the operator's credentials. Commits carry the
 // factory's trailers, not Claude Code's attribution (ADR 0004).
-function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, canUseTool: CanUseTool): Options {
+function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, canUseTool: CanUseTool, factory: FactoryTools | null): Options {
   const env: Record<string, string | undefined> = { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards!.env };
   for (const name of AFK_UNSET) delete env[name];
   return {
     env,
     permissionMode: 'acceptEdits',
     settingSources: ['project'],
+    ...(factory && { mcpServers: { factory: factory.server } }),
+    strictMcpConfig: true,
     // Claude Code keeps the allow rules of the policy tier a parent process
     // hands it only while the machine has no managed settings of its own.
     // With them, it drops this tier unless their admin opts in, and even then
