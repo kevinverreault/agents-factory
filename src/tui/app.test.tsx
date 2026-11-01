@@ -263,6 +263,22 @@ describe('repositories', () => {
     await eventually(() => expect(app.lastFrame()).toContain('The daemon is stopping.'));
   });
 
+  test('R re-checks the repository’s setup, a failed check included, and the answer replaces the line', async () => {
+    const reason = 'The factory couldn’t check the skill set’s setup in acme/widgets: couldn’t fetch main from origin (fatal: no network).';
+    const failed = { ...widgets, skills: { present: false as const, checkedAt: 1, reason, failed: true } };
+    const connection = new FakeConnection();
+    connection.replyTo('checkSkills', { ok: true, value: { present: true, checkedAt: 2 } });
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': failed } }, { connection });
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(`${reason} R re-check`));
+
+    app.stdin.write('R');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'checkSkills', repo: 'acme/widgets' }));
+    connection.servePatch([{ op: 'set', path: ['repositories', 'acme/widgets'], value: { ...widgets, skills: { present: true, checkedAt: 2 } } }]);
+    await eventually(() => expect(app.lastFrame()).not.toContain('re-check'));
+  });
+
   test('a missing repository shows in Needs you under its name', async () => {
     const { app } = await started(
       factoryState(

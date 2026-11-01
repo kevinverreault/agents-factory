@@ -1,7 +1,8 @@
 // The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
 // a task (`t`), handing one off (`ctrl+h`), Needs you's answer sheet (`a`)
-// and Set up now (`s`) for a repository without the skill set's setup.
+// and Set up now (`s`) or Re-check (`R`) for a repository without the skill
+// set's setup.
 // Plain .ts (no JSX) so Node runs it without a build step.
 import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, useStdin } from 'ink';
@@ -121,6 +122,12 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (reply.ok) setView({ kind: 'conversation', taskId: (reply.value as { taskId: string }).taskId });
     });
   };
+  // Re-check: the daemon fetches the base branch and looks again, and the
+  // repository's state shows the answer.
+  const recheck = () => {
+    if (!missingSetup) return;
+    void connection.send({ type: 'checkSkills', repo: missingSetup.repo }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
+  };
   // Keys need raw mode, which a piped stdin can't give.
   const { isRawModeSupported } = useStdin();
   useInput(
@@ -145,6 +152,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (input === 't') retier();
       if (key.ctrl && input === 'h') handOff();
       if (input === 's') setUp();
+      if (input === 'R') recheck();
       if (input === 'r' && unregistered) {
         void connection.send({ type: 'registerRepo', path: unregistered.path }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
       }
@@ -167,9 +175,14 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     missingSetup
       ? missingSetup.settingUp
         ? h(Text, { key: 'setup', dimColor: true }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
-        : missingSetup.offered
-          ? h(Text, { key: 'setup', color: 'yellow' }, `${missingSetup.reason} `, h(Text, { bold: true }, 's'), ' Set up now')
-          : h(Text, { key: 'setup', dimColor: true }, missingSetup.reason)
+        : h(
+            Text,
+            { key: 'setup', ...(missingSetup.offered ? { color: 'yellow' } : { dimColor: true }) },
+            `${missingSetup.reason} `,
+            ...(missingSetup.offered ? [h(Text, { key: 's', bold: true }, 's'), ' Set up now · '] : []),
+            h(Text, { key: 'R', bold: true }, 'R'),
+            ' re-check',
+          )
       : null,
     refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
     state && view.kind === 'launch'
