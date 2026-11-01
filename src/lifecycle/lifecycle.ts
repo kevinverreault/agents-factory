@@ -48,16 +48,20 @@ export type Question = {
 };
 // The tool call a `permission` request asks about (ADR 0007): `id` is the
 // tool use's, and `rule` the call's own, which Allow once allows. `proposed`
-// holds what Allow for this task proposes for the parts no rule covers.
-// Requests stored before it have none, and propose `rule`.
+// holds what Allow for this task and Allow always propose for the parts no
+// rule covers. Requests stored before it have none, and propose `rule`.
 export type Permission = { id: string; tool: string; summary: string; rule: string; proposed?: ProposedRule[] };
 // A pattern proposed for a part of a call no rule covers, with that part's
 // summary. Parts that get the same pattern share one, under the first.
 export type ProposedRule = { part: string; rule: string };
 // How the operator answers a permission request: allow the call once; allow
-// it, and the calls `rules` cover, for the rest of the task (the request's
-// proposed rules if absent); or deny it with a note the agent reads.
-export type PermissionAnswer = { allow: 'once' } | { allow: 'task'; rules?: string[] } | { deny: string };
+// it, and the calls `rules` cover, for the rest of the task or always (see
+// `RulesAnswer`); or deny it with a note the agent reads.
+export type PermissionAnswer = { allow: 'once' } | RulesAnswer | { deny: string };
+// An answer that allows by rules, the request's proposed ones if `rules` is
+// absent: the task's for the rest of it, or, always, the operator's
+// permissions file's, which the daemon adds them to, for every task.
+export type RulesAnswer = { allow: 'task' | 'always'; rules?: string[] };
 // Each question's text with its answer: an option's label (a multi-select's
 // labels joined by ", "), or the operator's own words.
 export type Answers = Record<string, string>;
@@ -936,11 +940,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       const request = task.state === 'waiting' ? openRequest(state, task) : undefined;
       if (!request) return `${task.id} has no open attention request.`;
       if (request.permission && !validPermissionAnswer(action.permission)) {
-        return 'Allow it once, allow it for this task, or deny it with a note for the agent.';
+        return 'Allow it once, for this task or always, or deny it with a note for the agent.';
       }
-      const rules = forTask(action.permission) ? action.permission.rules : undefined;
+      const rules = byRules(action.permission) ? action.permission.rules : undefined;
       if (rules !== undefined && !(Array.isArray(rules) && rules.length > 0 && rules.every(isRule))) {
-        return 'Allow for this task needs at least one rule, each such as `Bash(sed -i *)`.';
+        const answer = (action.permission as RulesAnswer).allow === 'task' ? 'Allow for this task' : 'Allow always';
+        return `${answer} needs at least one rule, each such as \`Bash(sed -i *)\`.`;
       }
       const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
       return answered ? null : 'Answer every question on the card.';
@@ -1033,15 +1038,15 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   }
 }
 
-// Allow once or for the task, or deny with a note that isn't blank.
+// Allow once, for the task or always, or deny with a note that isn't blank.
 function validPermissionAnswer(answer: PermissionAnswer | undefined): boolean {
   if (!answer) return false;
-  return 'deny' in answer ? typeof answer.deny === 'string' && answer.deny.trim() !== '' : answer.allow === 'once' || answer.allow === 'task';
+  return 'deny' in answer ? typeof answer.deny === 'string' && answer.deny.trim() !== '' : answer.allow === 'once' || byRules(answer);
 }
 
-// Whether the answer allows the call for the rest of the task.
-function forTask(answer: PermissionAnswer | undefined): answer is Extract<PermissionAnswer, { allow: 'task' }> {
-  return !!answer && 'allow' in answer && answer.allow === 'task';
+// Whether the answer allows by rules: for the rest of the task, or always.
+export function byRules(answer: PermissionAnswer | undefined): answer is RulesAnswer {
+  return !!answer && 'allow' in answer && (answer.allow === 'task' || answer.allow === 'always');
 }
 
 // Which of the operator's answers lets the call through, if any: the task's
@@ -1252,15 +1257,15 @@ function openingWithVerdict(permission: Permission, answer: PermissionAnswer): s
       ? `denied ${tool}: ${summary}. Their note: ${answer.deny.trim()}`
       : answer.allow === 'once'
         ? `allowed ${tool} once: ${summary}. Make that call again now.`
-        : `allowed ${tool}: ${summary}, and for the rest of this task the calls these rules cover: ${taskRules(permission, answer).join(', ')}.`;
+        : `allowed ${tool}: ${summary}, and ${answer.allow === 'task' ? 'for the rest of this task' : 'from now on, in every task,'} the calls these rules cover: ${allowedRules(permission, answer).join(', ')}.`;
   return `While this conversation was parked, the operator ${verdict}
 
 ${AFK_RESUME}`;
 }
 
-// The rules Allow for this task adds to the task's: the operator's, or else
-// the ones the request proposed.
-function taskRules(permission: Permission, answer: { allow: 'task'; rules?: string[] }): string[] {
+// The rules an answer by rules allows: the operator's, or else the ones the
+// request proposed.
+export function allowedRules(permission: Permission, answer: RulesAnswer): string[] {
   return answer.rules?.map((rule) => rule.trim()) ?? permission.proposed?.map(({ rule }) => rule) ?? [permission.rule];
 }
 
@@ -1463,9 +1468,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'answer':
       request!.status = 'answered';
-      if (request!.permission && forTask(action.permission)) {
+      // Allow always's rules are the operator's file's, which the daemon added them to.
+      if (request!.permission && byRules(action.permission) && action.permission.allow === 'task') {
         const rules = (task.allowRules ??= []);
-        for (const rule of taskRules(request!.permission, action.permission)) if (!rules.includes(rule)) rules.push(rule);
+        for (const rule of allowedRules(request!.permission, action.permission)) if (!rules.includes(rule)) rules.push(rule);
       }
       if (request!.holdsRun) {
         // Resumes at once, even over the slot cap.

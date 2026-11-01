@@ -21,9 +21,11 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
   - rules from `~/.agent-factory/permissions.yaml`;
   - the task's own rules.
 
-  Anything else reaches `canUseTool` and raises a **permission request**, an **attention request** that suspends the run. The operator answers Allow once, Allow for this task (stored on the task), or Deny with a note.
+  Anything else reaches `canUseTool` and raises a **permission request**, an **attention request** that suspends the run. The operator answers Allow once, Allow for this task (stored on the task), Allow always (added to the user file), or Deny with a note.
 
   A request names only the parts of a chained command that no rule covers. Allow once allows the exact call, once. Allow for this task proposes one pattern per uncovered part, at program-plus-subcommand breadth (`Bash(sed -i *)`, or an interpreter's script, `Bash(node scripts/seed.js *)`), which the operator can widen or narrow before confirming. The task's rules then match like any other rules, so the next similar call runs without asking. A command that can't be split (it substitutes or redirects to a file) gets its exact command as its rule.
+
+  Allow always proposes the same rules, and the factory appends the confirmed ones to `~/.agent-factory/permissions.yaml`, keeping the file's rules and comments and skipping rules it already holds. The file is read for every call, so they cover every run from its next call on, and the factory lets through the other waiting permission requests they now cover. If the file is invalid or can't be written, the answer fails with the reason and the request stays open.
 
 - **No repo scope for permissions.** Allow rules and extra L2 egress hosts come from the built-in list, the user file and the task, never from the target repo. A repo you clone could otherwise grant its own runs permissions. A child task gets a frozen copy of its parent's task rules and egress hosts at spawn, and its level stays ≤ its parent's.
 

@@ -3,9 +3,9 @@
 // the operator's permissions file and the task, never from the target repo.
 // Rules use Claude Code's syntax: `Tool`, or `Tool(specifier)`. Bash rules
 // are best-effort, not a security boundary: L1 guards against accidents.
-import { readFileSync } from 'node:fs';
-import { posix } from 'node:path';
-import { parse } from 'yaml';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, posix } from 'node:path';
+import { Document, isMap, isSeq, parseDocument } from 'yaml';
 
 // A tool call Claude Code asked about. `summary` is what it is pointed at, on one line.
 export type ToolCall = { id: string; tool: string; input: Record<string, unknown>; summary: string };
@@ -66,19 +66,51 @@ export function readAllowRules(path: string): { rules: string[]; error: string |
 // No file grants nothing. `error` says why a file that can't be read or
 // doesn't hold a list of rules grants nothing either.
 function readOperatorRules(path: string): { rules: string[]; error: string | null } {
-  let raw: unknown;
+  const { rules, error } = readOperatorFile(path);
+  return { rules, error };
+}
+
+// Adds the rules to the operator's permissions file for Allow always,
+// creating it if missing and keeping its rules and comments. A rule already
+// in it isn't added again. Why nothing was added, if the file can't be read,
+// doesn't hold a list of rules, or can't be written.
+export function addOperatorRules(path: string, rules: readonly string[]): string | null {
+  const { document = new Document(), rules: present, error } = readOperatorFile(path);
+  if (error) return error;
+  if (document.contents !== null && !isMap(document.contents)) return mustHoldRules(path);
+  const added = [...new Set(rules.map((rule) => rule.trim()))].filter((rule) => !present.includes(rule));
+  if (added.length === 0) return null;
+  const allow = document.get('allow');
+  if (isSeq(allow)) for (const rule of added) allow.add(rule);
+  else document.set('allow', added);
   try {
-    raw = parse(readFileSync(path, 'utf8'));
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, document.toString());
+  } catch (error) {
+    return `${path} couldn’t be written: ${(error as Error).message}`;
+  }
+  return null;
+}
+
+// The operator's permissions file, unless it is missing, with the rules it
+// allows, or why it allows none.
+function readOperatorFile(path: string): { document?: Document; rules: string[]; error: string | null } {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { rules: [], error: null };
     return { rules: [], error: `${path} couldn’t be read: ${(error as Error).message}` };
   }
-  const allow = (raw as { allow?: unknown } | null)?.allow ?? [];
-  if (!Array.isArray(allow) || !allow.every(isRule)) {
-    return { rules: [], error: `${path} must hold \`allow:\`, a list of rules such as \`Bash(make *)\`.` };
-  }
-  return { rules: allow, error: null };
+  const document = parseDocument(text);
+  const [problem] = document.errors;
+  if (problem) return { rules: [], error: `${path} couldn’t be read: ${problem.message}` };
+  const allow = (document.toJS() as { allow?: unknown } | null)?.allow ?? [];
+  if (!Array.isArray(allow) || !allow.every(isRule)) return { rules: [], error: mustHoldRules(path) };
+  return { document, rules: allow, error: null };
 }
+
+const mustHoldRules = (path: string) => `${path} must hold \`allow:\`, a list of rules such as \`Bash(make *)\`.`;
 
 // The parts of the call no rule covers, each a call of its own: the commands
 // of a Bash chain (`&&`, `||`, `;`, `&` or `|`), less what they redirect to
@@ -103,9 +135,9 @@ export function uncovered(rules: readonly string[], call: ToolCall): ToolCall[] 
   return target !== null && parsed.some((rule) => glob(slashed(rule.specifier!)).test(posix.normalize(slashed(target)))) ? [] : [call];
 }
 
-// The rule Allow for this task proposes for a part no rule covers: a Bash
-// command's program and its subcommand or leading option, with any
-// arguments (`Bash(npm install *)`, `Bash(sed -i *)`). An interpreter's
+// The rule Allow for this task and Allow always propose for a part no rule
+// covers: a Bash command's program and its subcommand or leading option,
+// with any arguments (`Bash(npm install *)`, `Bash(sed -i *)`). An interpreter's
 // pattern names the script it runs (`Bash(node scripts/seed.js *)`), and
 // inline code gets its exact command, as does a command that can't be
 // split, and a call to any other tool its own rule.
@@ -141,6 +173,16 @@ export function ruleFor({ tool, input }: Pick<ToolCall, 'tool' | 'input'>): stri
   }
   const target = targetOf(input);
   return target ? `${tool}(${target})` : tool;
+}
+
+// A call whose own rule this is, as `ruleFor` makes one, which rules cover
+// just as they cover that call: a rule tells calls apart only by what it names.
+export function callWithRule(rule: string): Pick<ToolCall, 'tool' | 'input'> {
+  const { tool, specifier } = parseRule(rule) ?? { tool: rule, specifier: null };
+  if (specifier === null) return { tool, input: {} };
+  if (tool === 'Bash') return { tool, input: { command: specifier } };
+  if (tool === 'WebFetch') return { tool, input: { url: `https://${specifier.replace(/^domain:/, '')}/` } };
+  return { tool, input: { file_path: specifier } };
 }
 
 type Rule = { tool: string; specifier: string | null };
