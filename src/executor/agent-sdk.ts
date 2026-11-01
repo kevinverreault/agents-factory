@@ -26,7 +26,7 @@ import { HARD_DENY_RULES, refusal, runHistoryIn } from '../guards/hard-denies.ts
 import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import { processCreatedAt } from '../os/process-info.ts';
-import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunGuards, type RunSink, type RunStart, type Verdict } from './executor.ts';
+import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
 import { hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
 
@@ -87,7 +87,7 @@ export function agentSdkExecutor(): Executor {
       const options: Options = {
         ...(start.mode === 'HITL'
           ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink))
-          : l1Options(start.credential, start.maxTurns, start.guards!, start.cwd!, askTheOperator(start.runId, spawning, gateCall(spawning)))),
+          : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)))),
         cwd: start.cwd!,
         model: start.model,
         // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
@@ -251,29 +251,36 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
 // L1 AFK runs (ADR 0007) execute in the host worktree with edits accepted.
 // They load only project settings, with auto memory off, so they are the
 // same from one run to the next (ADR 0005), and `maxTurns` is their runaway
-// guard (ADR 0008). Only policy-tier permission rules apply, and the factory
-// sets none, so the target repo's own rules grant nothing: everything that
-// would prompt reaches `canUseTool`, which turns questions into attention
-// requests and hands every other call to the factory's gate.
+// guard (ADR 0008). Only policy-tier permission rules apply, so the target
+// repo's own rules grant nothing. The run's allow rules are that tier's, so
+// Claude Code's own engine matches them: it splits chained commands, reads
+// heredocs and redirects, and lets read-only commands and file commands in
+// the worktree through itself. Whatever would still prompt reaches
+// `canUseTool`, which turns questions into attention requests and hands
+// every other call to the factory's gate.
 //
 // Every AFK run is guarded (ADR 0007): the hard-deny rules and a PreToolUse
 // hook refuse what would publish or rewrite around the factory, before the
-// gate is asked, and git runs in the cleaned environment, without the
-// operator's credentials. Commits carry the factory's trailers, not Claude
-// Code's attribution (ADR 0004).
-function l1Options(credential: CredentialProfile, maxTurns: number | null, guards: RunGuards, cwd: string, canUseTool: CanUseTool): Options {
-  const env: Record<string, string | undefined> = { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards.env };
+// gate is asked and whatever an allow rule says, and git runs in the cleaned
+// environment, without the operator's credentials. Commits carry the
+// factory's trailers, not Claude Code's attribution (ADR 0004).
+function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, canUseTool: CanUseTool): Options {
+  const env: Record<string, string | undefined> = { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards!.env };
   for (const name of AFK_UNSET) delete env[name];
   return {
     env,
     permissionMode: 'acceptEdits',
     settingSources: ['project'],
-    managedSettings: { allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
+    // Claude Code keeps the allow rules of the policy tier a parent process
+    // hands it only while the machine has no managed settings of its own.
+    // With them, it drops this tier unless their admin opts in, and even then
+    // keeps no allow rules, so every call that would prompt reaches the gate.
+    managedSettings: { allowManagedPermissionRulesOnly: true, permissions: { allow: [...allowRules], deny: [...HARD_DENY_RULES] } },
     settings: {
       hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] },
       attribution: { commit: '', pr: '' },
     },
-    hooks: { PreToolUse: [{ hooks: [hardDenies(cwd, guards.start)] }] },
+    hooks: { PreToolUse: [{ hooks: [hardDenies(cwd!, guards!.start)] }] },
     ...(maxTurns !== null && { maxTurns }),
     canUseTool,
   };

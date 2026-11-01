@@ -26,6 +26,11 @@ export type RunStart = {
   // What keeps an AFK run from publishing around the factory (ADR 0007), or
   // null for a HITL run, which acts as the operator.
   guards: RunGuards | null;
+  // The rules an AFK run's calls are allowed by without asking, which the
+  // executor hands Claude Code as policy rules (ADR 0007): the factory's
+  // allow list and the operator's permissions file, as they stood when the
+  // run started. None for a HITL run, which acts as the operator.
+  allowRules: readonly string[];
 };
 
 export type RunGuards = {

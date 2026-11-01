@@ -1,10 +1,14 @@
-// Seam 1: the L1 gate (ADR 0007) through the client protocol. A tool call the
-// factory's allow list, the operator's permissions file or the task's rules
-// cover runs without asking; anything else raises a permission request that
-// suspends its run, answered Allow once, Allow for this task, or Deny with a note.
+// Seam 1: the L1 gate (ADR 0007) through the client protocol. An L1 run
+// starts with the factory's allow list and the operator's permissions file as
+// Claude Code's own rules, so Claude Code lets most calls through itself. A
+// call that still reaches the gate is matched again: one the factory's allow
+// list, the operator's permissions file or the task's rules cover runs without
+// asking; anything else raises a permission request that suspends its run,
+// answered Allow once, Allow for this task, or Deny with a note.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
+import { FACTORY_ALLOW_LIST } from '../permissions/permissions.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
@@ -34,6 +38,28 @@ async function settled(connection: FactoryConnection): Promise<void> {
 
 const bash = (id: string, command: string) => ({ id, tool: 'Bash', input: { command } });
 
+describe('the rules an L1 run starts with', () => {
+  test('are the factory’s allow list and the operator’s permissions file, for Claude Code to match itself', async () => {
+    const { factory, operator, tui } = await attached();
+    operatorRules(factory, 'allow:\n  - Bash(make *)\n  - WebFetch(domain:docs.example.com)\n');
+
+    await operator.send(afk('Fix the login bug'));
+    await tui.until((state) => state.tasks.T1?.label === 'Running');
+
+    expect(factory.executor.started[0]?.allowRules).toEqual([...FACTORY_ALLOW_LIST, 'Bash(make *)', 'WebFetch(domain:docs.example.com)']);
+  });
+
+  test('are the factory’s allow list alone when the permissions file is invalid', async () => {
+    const { factory, operator, tui } = await attached();
+    operatorRules(factory, 'allow: Bash(make *)\n');
+
+    await operator.send(afk('Fix the login bug'));
+    await tui.until((state) => state.tasks.T1?.label === 'Running');
+
+    expect(factory.executor.started[0]?.allowRules).toEqual(FACTORY_ALLOW_LIST);
+  });
+});
+
 describe('a tool call the rules cover', () => {
   test('on the factory’s allow list, it runs without asking the operator', async () => {
     const { factory, operator, tui } = await attached();
@@ -61,12 +87,14 @@ describe('a tool call the rules cover', () => {
     await operator.send(afk('Fix the login bug'));
     await tui.until((state) => state.tasks.T1?.label === 'Running');
 
+    // Added while the run is under way, so not among the rules it started with.
     operatorRules(factory, 'allow:\n  - Bash(make *)\n');
     factory.executor.askPermission('R1', bash('toolu_1', 'make lint'));
     operatorRules(factory, 'allow:\n  - Bash(make *)\n  - Bash(docker build *)\n');
     factory.executor.askPermission('R1', bash('toolu_2', 'docker build -t widgets .'));
     await settled(operator);
 
+    expect(factory.executor.started[0]?.allowRules).toEqual(FACTORY_ALLOW_LIST);
     expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_2: { allow: true } });
     expect(tui.state().attentionQueue).toEqual([]);
   });

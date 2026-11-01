@@ -14,7 +14,7 @@ import type { ToolCall } from '../permissions/permissions.ts';
 import { isAlive, waitFor } from '../os/test-support.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, RunStart } from './executor.ts';
-import { afkRunOptions } from './sdk-test-support.ts';
+import { afkRun, afkRunOptions } from './sdk-test-support.ts';
 
 test('a HITL run streams text and tool use, takes the operator’s messages, records its CLI, and replays from the session file', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
@@ -36,6 +36,7 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     credential: 'subscription-host',
     plugin: null,
     guards: null,
+    allowRules: [],
   };
   const startedAt = Date.now();
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
@@ -106,6 +107,7 @@ test('the agent proposes advancing through the factory MCP server’s propose_ad
     credential: 'subscription-host',
     plugin: null,
     guards: null,
+    allowRules: [],
   };
 
   executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
@@ -141,6 +143,7 @@ test('the agent writes the handoff brief through write_handoff_brief, and its tu
     credential: 'subscription-host',
     plugin: null,
     guards: null,
+    allowRules: [],
   };
 
   executor.start(run, { report: (event) => reported.push(event), converse: () => {}, askPermission: () => {} });
@@ -180,6 +183,7 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
     credential: 'subscription-host',
     plugin: null,
     guards: null,
+    allowRules: [],
   };
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
   const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
@@ -222,25 +226,6 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
   expect(stdout).toContain('BLUE');
 });
 
-// An L1 AFK run on haiku, in a fresh directory.
-function afkRun(cwd: string, firstMessage: string, maxTurns: number): RunStart {
-  return {
-    runId: 'R1',
-    taskId: 'T1',
-    mode: 'AFK',
-    autonomy: 'L1',
-    sessionId: randomUUID(),
-    resumesSession: false,
-    cwd,
-    firstMessage,
-    model: 'claude-haiku-5-5',
-    maxTurns,
-    credential: 'subscription-host',
-    plugin: null,
-    // Not a clone: nothing for the guards' history to keep.
-    guards: { start: '0'.repeat(40), env: {} },
-  };
-}
 
 test('an L1 AFK run edits in its worktree without asking, takes no chat, and completes on its own when its turn ends', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'factory-afk-'));
