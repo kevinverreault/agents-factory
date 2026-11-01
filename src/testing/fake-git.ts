@@ -23,6 +23,8 @@ export class FakeGit implements Git {
   private readonly clones = new Map<string, FakeClone>();
   // Each worktree's paths with changes not yet committed.
   private readonly changes = new Map<string, Set<string>>();
+  // What each worktree's uncommitted changes wrote, by path.
+  private readonly edits = new Map<string, Map<string, string>>();
   // Each commit's files, by path from the top.
   private readonly trees = new Map<string, Map<string, string>>();
   // Each commit's parent, if it has one.
@@ -152,17 +154,20 @@ export class FakeGit implements Git {
     worktree.linkedTo = clonePath;
   }
 
-  // Something changes `path` (relative, with `/`) in the worktree, uncommitted.
-  editFile(worktreePath: string, path: string): void {
+  // Something changes `path` (relative, with `/`) in the worktree to
+  // `content`, uncommitted.
+  editFile(worktreePath: string, path: string, content = ''): void {
     const changes = this.changes.get(worktreePath) ?? new Set();
     this.changes.set(worktreePath, changes.add(path));
+    const edits = this.edits.get(worktreePath) ?? new Map<string, string>();
+    this.edits.set(worktreePath, edits.set(path, content));
   }
 
   // Everything changed in the worktree is committed, if anything is.
   commitAll(worktreePath: string): void {
     const changed = this.changes.get(worktreePath);
     this.changes.delete(worktreePath);
-    if (changed?.size) this.advance(this.worktreeAt(worktreePath));
+    if (changed?.size) this.advance(this.worktreeAt(worktreePath), [...changed]);
   }
 
   async uncommitted(worktreePath: string, paths: string[]): Promise<string[]> {
@@ -172,6 +177,7 @@ export class FakeGit implements Git {
   // Something undoes the uncommitted change to `path` in the worktree.
   discard(worktreePath: string, path: string): void {
     this.changes.get(worktreePath)?.delete(path);
+    this.edits.get(worktreePath)?.delete(path);
   }
 
   // Something checks `branch` out in the worktree instead of its own.
@@ -197,14 +203,20 @@ export class FakeGit implements Git {
     const worktree = this.worktreeAt(worktreePath);
     if (!paths.some((path) => this.changes.get(worktreePath)?.has(path))) throw new GitError('nothing to commit');
     for (const path of paths) this.changes.get(worktreePath)?.delete(path);
-    const commit = this.advance(worktree);
+    const commit = this.advance(worktree, paths);
     this.commits.push({ worktreePath, paths, message });
     return commit;
   }
 
-  // A new commit on the worktree's branch.
-  private advance(worktree: FakeWorktree): string {
-    const commit = this.newCommit(new Map(this.trees.get(worktree.head)));
+  // A new commit on the worktree's branch, with what `paths` were edited to.
+  private advance(worktree: FakeWorktree, paths: string[]): string {
+    const edits = this.edits.get(worktree.path);
+    const tree = new Map(this.trees.get(worktree.head));
+    for (const path of paths) {
+      tree.set(path, edits?.get(path) ?? '');
+      edits?.delete(path);
+    }
+    const commit = this.newCommit(tree);
     this.parents.set(commit, worktree.head);
     worktree.head = commit;
     this.cloneAt(worktree.linkedTo).branches.set(worktree.branch, commit);
