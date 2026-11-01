@@ -58,6 +58,8 @@ describe('launching a HITL task', () => {
         credential: 'subscription-host',
         plugin: factory.skillSets.pathOf('a1a1a1a1a1a1a1a1'),
         guards: null,
+        // A HITL run acts as the operator, under their own settings.
+        allowRules: [],
       },
     ]);
   });

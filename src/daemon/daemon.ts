@@ -69,7 +69,7 @@ import {
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import type { Routes } from '../models/routing.ts';
-import { FACTORY_ALLOW_LIST, readOperatorRules, uncovered, type ToolCall } from '../permissions/permissions.ts';
+import { readAllowRules, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
   appStages,
@@ -1028,6 +1028,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       credential: 'subscription-host',
       plugin: run.skillSet ? skillSets.pathOf(run.skillSet) : null,
       guards,
+      // Claude Code matches them itself, so most calls never reach the gate.
+      allowRules: run.mode === 'AFK' ? readAllowRules(options.permissionsPath).rules : [],
     };
     executor.start(start, {
       // A session is named for each completed run now, in case the next
@@ -1112,18 +1114,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     rmSync(join(options.runsRoot, runId), { recursive: true, force: true, maxRetries: 3 });
   }
 
-  // The L1 gate (ADR 0007): a call the factory's allow list or the operator's
-  // permissions file covers runs at once. The file is read for every call, so
-  // a rule the operator adds holds from their next one. The Lifecycle decides
-  // the parts they leave uncovered: by the operator's earlier answers, or
-  // with a permission request. A call asked about while another request
-  // holds its run is held until that one is answered; one the Lifecycle
-  // won't ask about otherwise is refused, with its reason.
+  // The L1 gate (ADR 0007), for the calls Claude Code still asks about once
+  // it has matched the rules the run started with. A call the factory's allow
+  // list or the operator's permissions file covers runs at once. The file is
+  // read afresh for every call, so a rule the operator adds holds from their
+  // next one, even in a run already under way. The Lifecycle decides the
+  // parts they leave uncovered: by the operator's earlier answers, or with a
+  // permission request. A call asked about while another request holds its
+  // run is held until that one is answered; one the Lifecycle won't ask about
+  // otherwise is refused, with its reason.
   function gate(runId: string, call: ToolCall): void {
-    const operatorRules = readOperatorRules(options.permissionsPath);
-    const parts = uncovered([...FACTORY_ALLOW_LIST, ...operatorRules.rules], call);
+    const { rules, error } = readAllowRules(options.permissionsPath);
+    const parts = uncovered(rules, call);
     if (parts.length === 0) return executor.permit(runId, call.id, { allow: true });
-    void dispatch({ type: 'permissionAsked', runId, call, parts, rulesProblem: operatorRules.error }).then((reply) => {
+    void dispatch({ type: 'permissionAsked', runId, call, parts, rulesProblem: error }).then((reply) => {
       if (reply.ok) return;
       if (lifecycle.runs[runId]?.status === 'suspended') held.set(runId, [...(held.get(runId) ?? []), call]);
       else executor.permit(runId, call.id, { allow: false, message: reply.reason });
