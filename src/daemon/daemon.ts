@@ -6,7 +6,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
-import { ArchiveError, type ConversationEvent, type Executor, type RunGuards, type RunStart } from '../executor/executor.ts';
+import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart } from '../executor/executor.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   GitHubError,
@@ -26,10 +26,12 @@ import {
   artifactsOf,
   betweenIterations,
   BRIEF_REQUEST,
+  childrenOf,
   coveredRequests,
   guard,
   initialLifecycle,
   isTerminal,
+  label,
   liveRun,
   nextTaskId,
   openRequest,
@@ -37,9 +39,11 @@ import {
   reduce,
   runReports,
   sessionsOf,
+  spawnedBy,
   ticketSources,
   unfinishedTasks,
   type AppCheck,
+  type ChildSpawned,
   type CleanupEvent,
   type Lifecycle,
   type Readiness,
@@ -87,6 +91,7 @@ import {
   planStart,
   presetChoices,
   presetFiles,
+  CHILD_PRESET,
   REPO_PRESETS,
   resolvePreset,
   userPresets,
@@ -1201,6 +1206,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // Claude Code matches them itself, so most calls never reach the gate.
       allowRules: run.mode === 'AFK' ? readAllowRules(options.permissionsPath).rules : [],
       reports: runReports(task, run),
+      child: !!task.child,
     };
     executor.start(start, {
       // A session is named for each completed run now, in case the next
@@ -1209,6 +1215,80 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         void checkedAfterRun(event).then((checked) => dispatch(checked.type === 'runCompleted' ? { ...checked, sessionId: randomUUID() } : checked)),
       converse: (event) => broadcast(run.id, event),
       askPermission: (call) => gate(run.id, call),
+      delegate: (request) => delegate(run.id, request),
+    });
+  }
+
+  // An agent's delegation tool call (ADR 0009): what it asks about its own
+  // children, answered from the Lifecycle. A refusal is the agent's to read,
+  // and raises no attention request.
+  function delegate(runId: string, request: Delegation): Promise<DelegationReply> {
+    switch (request.type) {
+      case 'spawnChild':
+        return spawnChild(runId, request);
+      case 'listChildren':
+        return serially(async (): Promise<DelegationReply> => {
+          const task = lifecycle.tasks[lifecycle.runs[runId]?.taskId ?? ''];
+          if (!task) return { ok: false, error: `There is no run ${runId}.` };
+          const children = childrenOf(lifecycle, task).map(childListing);
+          return { ok: true, text: children.length ? JSON.stringify(children, null, 2) : 'You have spawned no children.' };
+        });
+      case 'cancelChild':
+        return dispatch({ type: 'childCancelled', runId, childId: request.id }).then((reply) =>
+          reply.ok ? { ok: true, text: `Cancelled ${request.id}, with every task it spawned.` } : { ok: false, error: reply.reason },
+        );
+    }
+  }
+
+  // Spawns a child of the run's task (ADR 0009): checked against the tree
+  // limits first, then its branch `<task-branch>--c<n>` is cut from the
+  // parent's tip into its own worktree, and the child queues for a slot
+  // with the `child` preset frozen. A replay of the same tool call returns
+  // the child it spawned.
+  function spawnChild(runId: string, request: Extract<Delegation, { type: 'spawnChild' }>): Promise<DelegationReply> {
+    return serially(async (): Promise<DelegationReply> => {
+      if (stopping) return { ok: false, error: 'The daemon is stopping.' };
+      const replayed = spawnedBy(lifecycle, runId, request.toolUseId);
+      if (replayed) return { ok: true, text: spawnedText(replayed) };
+      const goal = typeof request.goal === 'string' ? request.goal : '';
+      const action: ChildSpawned = {
+        type: 'childSpawned',
+        runId,
+        toolUseId: request.toolUseId,
+        title: titleFrom(goal),
+        goal,
+        skill: request.skill?.trim() || null,
+        tier: (request.tier ?? null) as ChildSpawned['tier'],
+        autonomy: (request.autonomy ?? null) as ChildSpawned['autonomy'],
+        awaited: request.await ?? false,
+        // Filled once the limits allow it.
+        preset: null!,
+        worktree: { branch: '', path: '' },
+        base: '',
+        sessionId: randomUUID(),
+      };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, error: refused };
+      const parent = lifecycle.tasks[lifecycle.runs[runId]!.taskId]!;
+      const repository = lifecycle.repositories[parent.repo]!;
+      const presets = await presetsOf(repository);
+      if ('error' in presets) return { ok: false, error: presets.error };
+      const resolved = resolvePreset(presets.files, CHILD_PRESET);
+      if ('error' in resolved) return { ok: false, error: resolved.error };
+      action.preset = { ...resolved.preset, repoCommit: presets.commit };
+      const childId = nextTaskId(lifecycle);
+      const n = childrenOf(lifecycle, parent).length + 1;
+      action.worktree = { branch: `${parent.worktree!.branch}--c${n}`, path: join(options.worktreeRoot, repository.id.replace('/', '-'), childId) };
+      try {
+        action.base = (await git.snapshot(parent.worktree!.path)).head;
+        await git.addWorktree(repository.path, { ...action.worktree, startPoint: action.base });
+      } catch (error) {
+        if (!(error instanceof GitError)) throw error;
+        return { ok: false, error: `The factory couldn’t cut ${action.worktree.branch} for the child: ${error.message}` };
+      }
+      const refusal = await settle(action, new Set());
+      if (refusal) return { ok: false, error: refusal };
+      return { ok: true, text: spawnedText(lifecycle.tasks[childId]!) };
     });
   }
 
@@ -1240,7 +1320,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // since its iteration began, by which the Lifecycle judges it (ADR 0006).
   async function withCommits(event: Extract<RunEvent, { type: 'runCompleted' }>, worktree: string): Promise<RunEvent> {
     const run = lifecycle.runs[event.runId];
-    const base = run?.ticket && lifecycle.tasks[run.taskId]!.loop?.base;
+    const task = run && lifecycle.tasks[run.taskId];
+    // A child's are those on its branch since it was cut, for its report.
+    const base = run?.ticket ? task!.loop?.base : task?.child?.base;
     if (!base) return event;
     try {
       return { ...event, commits: await git.commitsSince(worktree, base) };
@@ -1356,6 +1438,25 @@ function reopeningComment(task: Task): string {
     `Reopened: the agents factory’s task ${task.id} (${task.title}) was cancelled, so its work on the task branch ` +
     `\`${task.worktree!.branch}\` wasn’t merged.`
   );
+}
+
+// What `spawn_child` tells the agent about the child it spawned.
+function spawnedText(child: Task): string {
+  const how = child.child?.awaited ? 'Your run waits for its report.' : 'It is fire-and-forget: its code never joins your branch, and list_children shows its report once it ends.';
+  return `Spawned ${child.id} on ${child.worktree?.branch}. ${how}`;
+}
+
+// A child as `list_children` shows it to its parent's agent.
+function childListing(child: Task) {
+  return {
+    id: child.id,
+    title: child.title,
+    state: label(child),
+    status: child.status ?? null,
+    branch: child.worktree?.branch ?? null,
+    awaited: child.child?.awaited ?? false,
+    report: child.child?.report ?? null,
+  };
 }
 
 // An AFK run's read-only token, and the App's bot user it reads as.

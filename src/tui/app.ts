@@ -2,8 +2,8 @@
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
 // a task (`t`), conversing with or taking over one (`c`), handing one off
 // (`ctrl+h`), cancelling one with its subtree (`x`, with the cancel sheet
-// when work would be lost), finishing a loop after its ticket (`f`), Needs
-// you's answer sheet (`a`)
+// when work would be lost), finishing a loop after its ticket (`f`),
+// retrying a failed task from the tree (`y`), Needs you's answer sheet (`a`)
 // and Set up now (`s`) or Re-check (`R`) for a repository without the skill
 // set's setup.
 // Plain .ts (no JSX) so Node runs it without a build step.
@@ -72,7 +72,8 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   }, [connection, cwd]);
   const unregistered = clone && state && !(clone.repo in state.repositories) ? clone : null;
   const missingSetup = state ? withoutSetup(state, clone?.repo ?? null) : null;
-  const tasks = state ? Object.values(state.tasks) : [];
+  // The task tree: each root, then its descendants under it.
+  const tasks = state ? treeOrder(Object.values(state.tasks)) : [];
   const queue = state?.attentionQueue ?? [];
   const rows = tab === 'tasks' ? tasks.map((task) => task.id) : queue.map(rowOf);
   const cursor = at(cursors[tab], rows);
@@ -147,6 +148,13 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     if (!task || !finishable(task)) return;
     void connection.send({ type: 'finishLoop', taskId: task.id }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
   };
+  // Retries the selected task's failed run, as Needs you's Retry does: a
+  // child's included, from the tree.
+  const retry = () => {
+    const task = tab === 'tasks' ? tasks[cursor] : undefined;
+    if (!task || !failedTask(state, task)) return;
+    void connection.send({ type: 'answer', taskId: task.id }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
+  };
   // Set up now: the repository's `setup` task, one HITL run of the setup
   // skill, opened in its conversation.
   const setUp = () => {
@@ -195,6 +203,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       const selected = tab === 'tasks' ? tasks[cursor] : undefined;
       if (input === 'x' && selected) cancel({ type: 'cancel', taskId: selected.id });
       if (input === 'f') finishLoop();
+      if (input === 'y') retry();
       if (key.ctrl && input === 'h') handOff();
       if (input === 's') setUp();
       if (input === 'R') recheck();
@@ -246,7 +255,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     state === null
       ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
       : tab === 'tasks'
-        ? h(TaskList, { tasks, cursor })
+        ? h(TaskList, { tasks, cursor, retries: failedTask(state, tasks[cursor]) })
         : h(NeedsYouList, { state, cursor }),
     state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
@@ -289,13 +298,55 @@ function Row({ id, title, detail, selected = false }: { id: string; title: strin
   );
 }
 
-function TaskList({ tasks, cursor }: { tasks: TaskView[]; cursor: number }) {
+function TaskList({ tasks, cursor, retries }: { tasks: TaskView[]; cursor: number; retries: boolean }) {
   if (tasks.length === 0) return h(Text, { dimColor: true }, 'No tasks yet. N launches one.');
   const finishes = finishable(tasks[cursor]) ? ' · f finish after this ticket' : '';
+  const retry = retries ? ' · y retry' : '';
   return column([
-    ...tasks.map((task, i) => h(Row, { key: task.id, id: task.id, title: task.title, detail: `${task.label} · ${task.tier}${loopDetail(task)}`, selected: i === cursor })),
-    h(Text, { key: 'keys', dimColor: true }, `enter open · c converse or take over · t re-tier · x cancel${finishes} · N launch`),
+    ...tasks.map((task, i) =>
+      h(Row, {
+        key: task.id,
+        id: task.id,
+        title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
+        detail: `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.status ? ` · ${task.status}` : ''}`,
+        selected: i === cursor,
+      }),
+    ),
+    h(Text, { key: 'keys', dimColor: true }, `enter open · c converse or take over · t re-tier · x cancel${finishes}${retry} · N launch`),
   ]);
+}
+
+// The tasks as a tree: each root in order, its descendants under it, depth first.
+function treeOrder(tasks: TaskView[]): TaskView[] {
+  const ids = new Set(tasks.map(({ id }) => id));
+  const ordered: TaskView[] = [];
+  const place = (task: TaskView) => {
+    ordered.push(task);
+    for (const child of tasks) if (child.parent === task.id) place(child);
+  };
+  for (const task of tasks) if (!task.parent || !ids.has(task.parent)) place(task);
+  return ordered;
+}
+
+// A tree row's rollup of its descendants (ADR 0009), and on a root the
+// failures waiting on the operator below it.
+function rollupDetail({ rollup, parent }: TaskView): string {
+  if (!rollup) return '';
+  const counts = (
+    [
+      [rollup.done, 'done'],
+      [rollup.running, 'running'],
+      [rollup.needsYou, 'need you'],
+      [rollup.cancelled, 'cancelled'],
+    ] as const
+  ).flatMap(([count, what]) => (count ? [`${count} ${count === 1 && what === 'need you' ? 'needs you' : what}`] : []));
+  const failed = !parent && rollup.failed.length ? ` · ${rollup.failed.map(({ taskId }) => `${taskId} failed`).join(', ')}` : '';
+  return ` · [${counts.join(', ')}]${failed}`;
+}
+
+// Whether the task's run failed and waits on the operator's Retry.
+function failedTask(state: FactoryState | null, task: TaskView | undefined): boolean {
+  return !!task && !!state?.attentionQueue.some((item) => item.kind === 'attention' && item.taskId === task.id && item.attention === 'failure');
 }
 
 // Whether the task's Ralph loop can still be finished after its ticket.

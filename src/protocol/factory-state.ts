@@ -9,6 +9,9 @@ import {
   liveRun,
   nextTier,
   readyForYou,
+  treeRollup,
+  type ChildReport,
+  type Rollup,
   type AppCheck,
   type AutonomyLevel,
   type Cleanup,
@@ -32,6 +35,16 @@ export type TaskView = {
   id: string;
   title: string;
   repo: string;
+  // The task that spawned it, for a child task, and how deep it is (a root is 0).
+  parent: string | null;
+  depth: number;
+  // A child's place in its tree: whether its parent waits for it, the commit
+  // its branch was cut from, and its report once it ended.
+  child: { awaited: boolean; base: string; report: ChildReport | null } | null;
+  // The one-line status its agent last set through `report_progress`.
+  status: string | null;
+  // Its descendants' counts, and their failures waiting on the operator.
+  rollup: Rollup | null;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   priority: Priority;
@@ -111,6 +124,11 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       id: task.id,
       title: task.title,
       repo: task.repo,
+      parent: task.parent ?? null,
+      depth: task.child?.depth ?? 0,
+      child: task.child ? { awaited: task.child.awaited, base: task.child.base, report: structuredClone(task.child.report) } : null,
+      status: task.status ?? null,
+      rollup: treeRollup(lifecycle, task),
       mode: task.mode,
       autonomy: task.autonomy,
       priority: task.priority ?? 'normal',

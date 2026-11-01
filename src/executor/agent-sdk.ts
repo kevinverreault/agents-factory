@@ -87,7 +87,7 @@ export function agentSdkExecutor(): Executor {
       const options: Options = {
         ...(start.mode === 'HITL'
           ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink))
-          : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)), afkFactoryTools(start.runId, sink, start.reports))),
+          : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)), afkFactoryTools(start.runId, sink, start.reports, start.child ?? false))),
         cwd: start.cwd!,
         model: start.model,
         // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
@@ -169,6 +169,8 @@ export function agentSdkExecutor(): Executor {
     };
     // How full the session is, as the main agent's latest API call left it.
     let latest: { used: number; model: string } | null = null;
+    // An AFK run's final result text: a child's report summary if it reported none.
+    let result: string | undefined;
     try {
       for await (const message of run.query) {
         if (run.stopped) return;
@@ -187,6 +189,7 @@ export function agentSdkExecutor(): Executor {
           // its result ends it, completed once the CLI exits, or failed.
           const failure = afkFailure(message, run.maxTurns);
           if (!failure) {
+            if (message.subtype === 'success') result = message.result;
             run.input.close();
             continue;
           }
@@ -196,7 +199,7 @@ export function agentSdkExecutor(): Executor {
           return;
         }
       }
-      report({ type: 'runCompleted', runId });
+      report({ type: 'runCompleted', runId, ...(result !== undefined && { result }) });
     } catch (error) {
       // The SDK throws once the CLI returns an error result.
       report({ type: 'runFailed', runId, reason: error instanceof Error ? error.message : String(error) });
@@ -266,14 +269,14 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
 // gate is asked and whatever an allow rule says, and git runs in the cleaned
 // environment, without the operator's credentials. Commits carry the
 // factory's trailers, not Claude Code's attribution (ADR 0004).
-function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, canUseTool: CanUseTool, factory: FactoryTools | null): Options {
+function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
   const env: Record<string, string | undefined> = { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards!.env };
   for (const name of AFK_UNSET) delete env[name];
   return {
     env,
     permissionMode: 'acceptEdits',
     settingSources: ['project'],
-    ...(factory && { mcpServers: { factory: factory.server } }),
+    mcpServers: { factory: factory.server },
     strictMcpConfig: true,
     // Claude Code keeps the allow rules of the policy tier a parent process
     // hands it only while the machine has no managed settings of its own.

@@ -1,4 +1,14 @@
-import { ArchiveError, type ConversationEvent, type Executor, type RunSink, type RunStart, type Session, type Verdict } from '../executor/executor.ts';
+import {
+  ArchiveError,
+  type ConversationEvent,
+  type Delegation,
+  type DelegationReply,
+  type Executor,
+  type RunSink,
+  type RunStart,
+  type Session,
+  type Verdict,
+} from '../executor/executor.ts';
 import type { Answers, RunEvent } from '../lifecycle/lifecycle.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
 
@@ -84,6 +94,11 @@ export class FakeExecutor implements Executor {
     const { command, file_path, url } = call.input;
     const summary = call.summary ?? String(command ?? file_path ?? url ?? '');
     this.run(runId).sink.askPermission({ ...call, summary });
+  }
+
+  // The run's agent calls a delegation tool (ADR 0009), and reads the reply.
+  delegate(runId: string, request: Delegation): Promise<DelegationReply> {
+    return this.run(runId).sink.delegate!(request);
   }
 
   // The verdicts the run's tool calls got, by call id.

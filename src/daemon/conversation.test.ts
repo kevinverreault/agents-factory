@@ -61,6 +61,7 @@ describe('launching a HITL task', () => {
         // A HITL run acts as the operator, under their own settings.
         allowRules: [],
         reports: [],
+        child: false,
       },
     ]);
   });

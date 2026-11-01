@@ -119,7 +119,9 @@ export class FakeGit implements Git {
     const clone = this.cloneAt(clonePath);
     if (clone.branches.has(branch)) throw new GitError(`fatal: a branch named '${branch}' already exists`);
     if (clone.worktrees.some((worktree) => worktree.path === path)) throw new GitError(`fatal: '${path}' already exists`);
-    const head = startPoint.startsWith('origin/') ? clone.fetched.get(startPoint.slice('origin/'.length)) : clone.branches.get(startPoint);
+    const head = startPoint.startsWith('origin/')
+      ? clone.fetched.get(startPoint.slice('origin/'.length))
+      : (clone.branches.get(startPoint) ?? (this.trees.has(startPoint) ? startPoint : undefined));
     if (!head) throw new GitError(`fatal: invalid reference: ${startPoint}`);
     clone.branches.set(branch, head);
     clone.worktrees.push({ path, branch, head, linkedTo: clonePath });

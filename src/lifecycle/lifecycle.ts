@@ -9,7 +9,7 @@
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import type { Issue } from '../github/github.ts';
-import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
+import { artifactKindsIn, fillOpening, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 
 export type Mode = 'HITL' | 'AFK';
@@ -144,6 +144,33 @@ export const BRANCH_CHOICES: readonly BranchChoice[] = ['keep', 'discard'];
 // A ticket the task closed, with the commits that did its work.
 export type ClosedTicket = { ref: string; commits: string[] };
 
+// What a child task hands its parent when it ends (ADR 0009): the agent's
+// summary, status and notes through `report_result` (else its final result
+// text as the summary), and the facts the factory holds: its branch, the
+// commits it made there and how its last run ended.
+export type ChildReport = {
+  summary: string;
+  status: string;
+  notes: string;
+  branch: string;
+  commits: string[];
+  outcome: RunOutcome | null;
+};
+
+// A child task's place in its tree (ADR 0009): how deep it is (the root's
+// children are 1), the run that spawned it and that run's tool call, which
+// a replay of the spawn finds it by, whether its parent waits for it, the
+// commit its branch was cut from, and its report, once it has one.
+export type Child = {
+  depth: number;
+  spawnedBy: { runId: string; toolUseId: string };
+  awaited: boolean;
+  base: string;
+  report: ChildReport | null;
+  // What the agent reported through `report_result`, until the child ends.
+  reported?: Pick<ChildReport, 'summary' | 'status' | 'notes'> | null;
+};
+
 // The tickets a cancelled task closed that the factory hasn't reopened yet
 // (ADR 0006), and why it last failed to, if it did. They are tried again
 // once the operator answers the request the failure raised, or the daemon
@@ -171,6 +198,10 @@ export type Task = {
   // The task that spawned it, for a child task: cancelling a task cancels
   // its whole subtree. Roots, and tasks stored before children, have none.
   parent?: string | null;
+  // Its place in its tree, for a child task.
+  child?: Child | null;
+  // The one-line status its agent last set through `report_progress`.
+  status?: string | null;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   groups: string[];
@@ -198,6 +229,9 @@ export type Task = {
   // name). Tasks stored before `operatorTier` keep the operator's launch
   // tier here.
   inputs?: LaunchInputs & { issueKinds: string[]; tier?: Tier | null };
+  // The tier the delegating agent chose for a child, clamped to its own
+  // run's, under the operator's and over the stage's (ADR 0009).
+  delegatedTier?: Tier | null;
   sessionId: string | null;
   // True while its next run starts the session `sessionId` names rather
   // than resuming it, as a fresh-context stage's first run does.
@@ -414,7 +448,9 @@ export type RunEvent =
   // The daemon names a session, for a next AFK stage whose context is fresh.
   // A Ralph loop iteration's run carries the commits on the task branch
   // since its iteration began.
-  | { type: 'runCompleted'; runId: string; sessionId?: string; commits?: string[] }
+  // A child task's run carries the commits on its branch since it was cut,
+  // and the agent's final result text, its report's summary if it reported none.
+  | { type: 'runCompleted'; runId: string; sessionId?: string; commits?: string[]; result?: string }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
   // The agent finished answering: the conversation is the operator's again.
@@ -438,7 +474,36 @@ export type RunEvent =
   // `report_findings`; its fix pass reports those it left unfixed.
   | { type: 'findingsReported'; runId: string; findings: string[] }
   // A PR body stage's AFK run wrote the body through `write_pr_body`.
-  | { type: 'prBodyWritten'; runId: string; body: string };
+  | { type: 'prBodyWritten'; runId: string; body: string }
+  // An AFK run set its task's one-line status through `report_progress`.
+  | { type: 'progressReported'; runId: string; status: string }
+  // A child task's run reported its result through `report_result`.
+  | { type: 'resultReported'; runId: string; summary: string; status: string; notes: string }
+  // The agent cancelled one of its own children through `cancel_child`,
+  // with that child's subtree.
+  | { type: 'childCancelled'; runId: string; childId: string };
+
+// The agent spawned a child task through `spawn_child` (ADR 0009), and the
+// daemon cut its branch from the parent's tip, `base`, into its worktree.
+// `toolUseId` is the call's, by which a replay finds the child. `tier` and
+// `autonomy` are what the agent asked for, if anything: the child never
+// gets more than the spawning run has.
+export type ChildSpawned = {
+  type: 'childSpawned';
+  runId: string;
+  toolUseId: string;
+  title: string;
+  goal: string;
+  skill: string | null;
+  tier: Tier | null;
+  autonomy: AutonomyLevel | null;
+  awaited: boolean;
+  // The `child` preset, frozen for it.
+  preset: FrozenPreset;
+  worktree: TaskWorktree;
+  base: string;
+  sessionId: string;
+};
 
 // What artifact capture found after a tool call of the task's latest run,
 // with whether each of the task's files (old and new) is committed. Hooks
@@ -535,6 +600,7 @@ export type LifecycleAction =
   | RunEvent
   | RepoEvent
   | TaskLaunched
+  | ChildSpawned
   | StageAdvanced
   | HandoffOpened
   | ReadinessRead
@@ -681,7 +747,79 @@ export function betweenIterations(state: Lifecycle, task: Task): boolean {
 // The tier the task's next run starts at: the operator's, then its stage's,
 // then the global default.
 export function nextTier(task: Task): Tier {
-  return task.operatorTier ?? task.inputs?.tier ?? stageOf(task, task.stage)?.model ?? DEFAULT_TIER;
+  return task.operatorTier ?? task.inputs?.tier ?? task.delegatedTier ?? stageOf(task, task.stage)?.model ?? DEFAULT_TIER;
+}
+
+// `tier`, or `ceiling` when `tier` is above it: an agent may only choose its
+// own run's tier or a lower one (ADR 0009).
+export function clampTier(tier: Tier, ceiling: Tier): Tier {
+  return TIERS[Math.max(TIERS.indexOf(tier), TIERS.indexOf(ceiling))]!;
+}
+
+// The root of the task's tree: the task itself, for a root.
+export function rootOf(state: Lifecycle, task: Task): Task {
+  let root = task;
+  while (root.parent && state.tasks[root.parent]) root = state.tasks[root.parent]!;
+  return root;
+}
+
+// The task's children, in the order they were spawned.
+export function childrenOf(state: Lifecycle, task: Task): Task[] {
+  return Object.values(state.tasks).filter((child) => child.parent === task.id);
+}
+
+// The tree limits a task's tree spawns under: the global ones, as its root's
+// preset lowers them.
+export function treeLimits(state: Lifecycle, task: Task): TreeLimits {
+  const lowered = rootOf(state, task).preset?.limits ?? {};
+  return {
+    depth: Math.min(TREE_LIMITS.depth, lowered.depth ?? TREE_LIMITS.depth),
+    children: Math.min(TREE_LIMITS.children, lowered.children ?? TREE_LIMITS.children),
+    descendants: Math.min(TREE_LIMITS.descendants, lowered.descendants ?? TREE_LIMITS.descendants),
+  };
+}
+
+// How deep the task is in its tree: a root is 0.
+export function depthOf(task: Task): number {
+  return task.child?.depth ?? 0;
+}
+
+// The child the run's tool call `toolUseId` spawned, if it did.
+export function spawnedBy(state: Lifecycle, runId: string, toolUseId: string): Task | undefined {
+  return Object.values(state.tasks).find((task) => task.child?.spawnedBy.runId === runId && task.child.spawnedBy.toolUseId === toolUseId);
+}
+
+// Why the run's task can't spawn another child, or null: the tree limits
+// (ADR 0009). The agent reads it, and no attention request is raised.
+export function spawnLimit(state: Lifecycle, task: Task): string | null {
+  const limits = treeLimits(state, task);
+  if (depthOf(task) + 1 > limits.depth) return `${task.id} is at depth ${depthOf(task)}, and its tree goes no deeper than ${limits.depth}: do this work yourself.`;
+  const spawned = childrenOf(state, task).length;
+  if (spawned >= limits.children) return `${task.id} has spawned ${spawned} children, the most a task may: do this work yourself.`;
+  const descendants = subtree(state, rootOf(state, task)).length - 1;
+  if (descendants >= limits.descendants) return `${task.id}’s tree has ${descendants} descendants, the most a tree may: do this work yourself.`;
+  return null;
+}
+
+// What a task's descendants are doing, for its tree row (ADR 0009): how
+// many are done, running (or queued), need the operator, or were cancelled,
+// and each one whose failure waits on the operator, which bubbles up to the
+// root. Null for a task with no descendants.
+export type Rollup = { done: number; running: number; needsYou: number; cancelled: number; failed: { taskId: string; reason: string | null }[] };
+
+export function treeRollup(state: Lifecycle, task: Task): Rollup | null {
+  const descendants = subtree(state, task).slice(1);
+  if (descendants.length === 0) return null;
+  const rollup: Rollup = { done: 0, running: 0, needsYou: 0, cancelled: 0, failed: [] };
+  for (const descendant of descendants) {
+    if (descendant.state === 'done') rollup.done++;
+    else if (descendant.state === 'cancelled') rollup.cancelled++;
+    else if (descendant.state === 'waiting') rollup.needsYou++;
+    else rollup.running++;
+    const request = descendant.state === 'waiting' ? openRequest(state, descendant) : undefined;
+    if (request?.kind === 'failure') rollup.failed.push({ taskId: descendant.id, reason: request.reason });
+  }
+  return rollup;
 }
 
 // The level an AFK stage's runs take: the asked one, held to its ceiling.
@@ -1136,6 +1274,19 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return runReports(task, state.runs[action.runId]!).includes('pr-body') ? null : 'Only a run of a stage whose exit is artifact:pr-body writes the PR body.';
     case 'artifactsSeen':
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
+    case 'childSpawned':
+      return spawnRefusal(state, task, state.runs[action.runId]!, action);
+    case 'progressReported':
+      if (task.mode !== 'AFK') return 'Only an AFK run reports its progress.';
+      return action.status.trim() ? null : 'A status needs text.';
+    case 'resultReported':
+      if (!task.child) return `${task.id} is no child task: it has no parent to report to.`;
+      return action.summary.trim() ? null : 'A result needs a summary.';
+    case 'childCancelled': {
+      const child = state.tasks[action.childId];
+      if (child?.parent !== task.id) return `${action.childId} isn’t a child of ${task.id}: you may cancel only your own children.`;
+      return isTerminal(child) ? `${child.id} is already ${label(child)}.` : null;
+    }
     case 'questionAsked':
       return task.mode === 'HITL' ? null : 'In an AFK run a question is an attention request.';
     case 'advanceProposed':
@@ -1195,6 +1346,105 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'cleanedUp':
     case 'cleanupFailed':
       return task.cleanup ? null : `${task.id} has no cleanup under way.`;
+  }
+}
+
+// Why the run can't spawn this child, or null. Only AFK runs delegate yet,
+// and only fire-and-forget children: awaited ones arrive with waiting on
+// children.
+function spawnRefusal(state: Lifecycle, task: Task, run: Run, spawn: ChildSpawned): string | null {
+  if (run.mode !== 'AFK') return 'Only an AFK run spawns children.';
+  if (!task.worktree) return `${task.id} has no task branch to cut a child’s from.`;
+  if (!spawn.goal.trim()) return 'A child needs a goal that stands on its own: it doesn’t see this conversation.';
+  if (spawn.tier !== null && !isTier(spawn.tier)) return tierRefusal(spawn.tier);
+  if (spawn.autonomy !== null && !AUTONOMY_LEVELS.includes(spawn.autonomy)) return `${spawn.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
+  if (spawn.awaited) return 'Awaited children aren’t supported yet: spawn it with await: false, as a fire-and-forget child whose work never joins your branch.';
+  return spawnLimit(state, task);
+}
+
+// What a child's first run opens on (ADR 0009): its skill on the goal (or the
+// bare goal), then the factory context its fresh session starts from, since
+// it never sees its parent's conversation.
+function childOpening(state: Lifecycle, parent: Task, child: Task, spawn: ChildSpawned): string {
+  const root = rootOf(state, parent);
+  const limits = treeLimits(state, parent);
+  const links = root.inputs?.issues.length ? root.inputs.issues : [];
+  const facts = [
+    `- Root task: ${root.id}, ${root.title}${root.id === parent.id ? '' : `; your parent is ${parent.id}, ${parent.title}`}.`,
+    ...(root.goal ? [`- Root goal: ${oneLine(root.goal)}`] : []),
+    ...(links.length ? [`- Links: ${links.join(', ')}`] : []),
+    `- Your branch: ${child.worktree!.branch}, cut from ${short(spawn.base)} on ${parent.worktree!.branch}. Commit your work there; the factory never pushes it.`,
+    `- Depth ${child.child!.depth} of ${limits.depth}: ${limits.depth - child.child!.depth > 0 ? `you may spawn up to ${limits.children} children of your own` : 'you may spawn no children'}.`,
+  ];
+  const reporting = spawn.awaited
+    ? 'Your parent waits for your report and merges your branch.'
+    : `You are a fire-and-forget child: your parent doesn’t wait for you, and your code never joins ${root.worktree?.branch ?? 'the root’s branch'}. ` +
+      'Your output is what you report, and any issues you open.';
+  const opening = spawn.skill ? `/factory:${spawn.skill} ${spawn.goal.trim()}` : spawn.goal.trim();
+  return [
+    opening,
+    '## Factory context',
+    `This run is child task ${child.id}, delegated by ${parent.id}. ${reporting}`,
+    facts.join('\n'),
+    'Before you end, report to your parent through the factory’s report_result tool: a summary, a status (such as done, partial or blocked) and notes. ' +
+      'Set a one-line status for the operator with report_progress as you go.',
+  ].join('\n\n');
+}
+
+function oneLine(text: string): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > 200 ? `${line.slice(0, 199)}…` : line;
+}
+
+// A child's run completed: the child ends Done with its report (ADR 0009),
+// and the daemon removes its worktree, and the branch of a fire-and-forget
+// child, which can never join the root (ADR 0011).
+function finishChild(task: Task, run: Run, { commits = [], result }: Extract<RunEvent, { type: 'runCompleted' }>): void {
+  const child = task.child!;
+  const reported = child.reported;
+  child.report = {
+    summary: reported?.summary ?? (result?.trim() || 'The child ended without a summary.'),
+    status: reported?.status ?? 'completed',
+    notes: reported?.notes ?? '',
+    branch: task.worktree?.branch ?? '',
+    commits: [...commits],
+    outcome: run.outcome,
+  };
+  child.reported = null;
+  task.state = 'done';
+  if (task.worktree) task.cleanup = { problem: null, keepBranch: child.awaited };
+}
+
+// Cancel means everything stops: the task and its whole subtree end
+// Cancelled. A cancelled child reports `cancelled`. `keepBranch` keeps the
+// task's own branch, as Keep branch does; a descendant's goes with the tree.
+function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: number): void {
+  for (const cancelled of subtree(state, task)) {
+    if (isTerminal(cancelled)) continue;
+    const live = liveRun(state, cancelled);
+    if (live) endRun(live, 'cancelled', at);
+    for (const open of Object.values(state.requests)) if (open.taskId === cancelled.id && open.status === 'open') open.status = 'closed';
+    cancelled.handoff = null;
+    cancelled.loop = null;
+    cancelled.state = 'cancelled';
+    if (cancelled.child) {
+      const { reported } = cancelled.child;
+      cancelled.child.report = {
+        summary: reported?.summary ?? 'Cancelled before it finished.',
+        status: 'cancelled',
+        notes: reported?.notes ?? '',
+        branch: cancelled.worktree?.branch ?? '',
+        commits: [],
+        outcome: 'cancelled',
+      };
+      cancelled.child.reported = null;
+    }
+    // The daemon reopens the tickets it closed: their work wasn't merged (ADR 0006).
+    const closed = cancelled.closedTickets ?? [];
+    if (closed.length) cancelled.reopening = { tickets: closed.map(({ ref }) => ref), problem: null };
+    // The daemon archives its transcripts, then removes its worktree and
+    // branch, unless the operator kept it.
+    if (cancelled.worktree) cancelled.cleanup = { problem: null, keepBranch: cancelled === task && keepBranch };
   }
 }
 
@@ -1737,22 +1987,53 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.cleanup = { ...task.cleanup, problem: action.reason };
       break;
     case 'cancel':
-      // Cancel means everything stops: the whole subtree ends Cancelled.
-      for (const cancelled of subtree(state, task)) {
-        if (isTerminal(cancelled)) continue;
-        const live = liveRun(state, cancelled);
-        if (live) endRun(live, 'cancelled', at);
-        for (const open of Object.values(state.requests)) if (open.taskId === cancelled.id && open.status === 'open') open.status = 'closed';
-        cancelled.handoff = null;
-        cancelled.loop = null;
-        cancelled.state = 'cancelled';
-        // The daemon reopens the tickets it closed: their work wasn't merged (ADR 0006).
-        const closed = cancelled.closedTickets ?? [];
-        if (closed.length) cancelled.reopening = { tickets: closed.map(({ ref }) => ref), problem: null };
-        // The daemon archives its transcripts, then removes its worktree and
-        // branch, unless the operator kept it.
-        if (cancelled.worktree) cancelled.cleanup = { problem: null, keepBranch: cancelled === task && action.branch !== 'discard' };
-      }
+      cancelSubtree(state, task, action.branch !== 'discard', at);
+      break;
+    case 'childCancelled':
+      // An agent's own child: nothing of it is the operator's to keep.
+      cancelSubtree(state, state.tasks[action.childId]!, false, at);
+      break;
+    case 'childSpawned': {
+      const stage = action.preset.stages[0]!;
+      const parentRun = run!;
+      const child: Task = {
+        id: nextId(state, 'task'),
+        title: action.title,
+        repo: task.repo,
+        parent: task.id,
+        child: { depth: depthOf(task) + 1, spawnedBy: { runId: parentRun.id, toolUseId: action.toolUseId }, awaited: action.awaited, base: action.base, report: null },
+        status: null,
+        mode: 'AFK',
+        // Lowered, never raised: the parent's level (L1 under HITL) is its ceiling.
+        autonomy: action.autonomy === 'L1' || (task.autonomy ?? 'L1') === 'L1' ? 'L1' : 'L2',
+        priority: task.priority ?? 'normal',
+        maxTurns: null,
+        groups: [...task.groups],
+        goal: null,
+        operatorTier: null,
+        // The agent's tier, else the stage's, held to the spawning run's.
+        delegatedTier: clampTier(action.tier ?? stage.model ?? DEFAULT_TIER, parentRun.tier ?? nextTier(task)),
+        worktree: { ...action.worktree },
+        skillSet: task.skillSet,
+        preset: structuredClone(action.preset),
+        stage: stage.id,
+        inputs: { prompt: action.goal.trim(), issues: [], issueKinds: [] },
+        sessionId: action.sessionId,
+        runIds: [],
+        state: 'queued',
+        createdAt: at,
+        // A frozen copy of the parent's per-task rules.
+        allowRules: [...(task.allowRules ?? [])],
+      };
+      child.goal = childOpening(state, task, child, action);
+      state.tasks[child.id] = child;
+      break;
+    }
+    case 'progressReported':
+      task.status = oneLine(action.status);
+      break;
+    case 'resultReported':
+      task.child!.reported = { summary: action.summary.trim(), status: action.status.trim() || 'done', notes: action.notes.trim() };
       break;
     case 'retier':
       task.operatorTier = action.tier;
@@ -1838,6 +2119,11 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'runCompleted': {
       endRun(run!, 'completed', at);
+      // A child ends Done and reports up: only the root is reviewed.
+      if (task.child) {
+        finishChild(task, run!, action);
+        break;
+      }
       // A run of an AFK stage moves the task on by itself. Any other (a task
       // with no preset, or one handed off with no AFK stage ahead) is its last.
       const from = stageOf(task, run!.stage);

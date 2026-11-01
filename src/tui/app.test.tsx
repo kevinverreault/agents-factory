@@ -19,7 +19,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, status: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -230,6 +230,76 @@ describe('finishing a loop', () => {
     await eventually(() => expect(connection.sent).toEqual([{ type: 'finishLoop', taskId: 'T1' }]));
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'loop'], value: { ticket: 'acme/widgets#11', finishing: true } }]);
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Running · sonnet · on acme\/widgets#11, finishing after it/));
+  });
+});
+
+describe('the task tree', () => {
+  const failure = (taskId: string): FactoryState['attentionQueue'][number] => ({
+    kind: 'attention',
+    taskId,
+    repo: 'acme/widgets',
+    requestId: 'A1',
+    attention: 'failure',
+    holdsRun: false,
+    reason: 'Boom.',
+    question: null,
+    permission: null,
+  });
+  // T1, a root with children T2 (failed), T3 (running) and grandchild T4, and T5, another root launched after.
+  const tree = () =>
+    factoryState(
+      [
+        {
+          ...task('T1', 'Add a logout button', 'running', 'Running'),
+          status: 'Wiring the header.',
+          rollup: { done: 0, running: 2, needsYou: 1, cancelled: 0, failed: [{ taskId: 'T2', reason: 'Boom.' }] },
+        },
+        task('T5', 'Another root', 'queued', 'Queued'),
+        { ...task('T2', 'Survey sign-out', 'waiting', 'Needs you'), parent: 'T1', depth: 1 },
+        { ...task('T3', 'Write the docs', 'running', 'Running'), parent: 'T1', depth: 1, rollup: { done: 1, running: 0, needsYou: 0, cancelled: 0, failed: [] } },
+        { ...task('T4', 'Check the links', 'done', 'Done'), parent: 'T3', depth: 2 },
+      ],
+      [failure('T2')],
+    );
+
+  test('children show under their parent, rows roll up their descendants, the root shows a failed child, and a status shows on its row', async () => {
+    const { app } = await started(tree());
+
+    await eventually(() => {
+      const rows = app.lastFrame()!.split('\n').filter((line) => /T\d/.test(line));
+      expect(rows.map((row) => /T\d/.exec(row)![0])).toEqual(['T1', 'T2', 'T3', 'T4', 'T5']);
+      expect(unwrapped(app.lastFrame()!)).toMatch(/T1 +Add a logout button +Running · sonnet · \[2 running, 1 needs you\] · T2 failed · Wiring the header\./);
+      expect(unwrapped(app.lastFrame()!)).toMatch(/T2 +└ Survey sign-out +Needs you/);
+      expect(unwrapped(app.lastFrame()!)).toMatch(/T3 +└ Write the docs +Running · sonnet · \[1 done\]/);
+      expect(unwrapped(app.lastFrame()!)).toMatch(/T4 +└ Check the links +Done/);
+    });
+  });
+
+  test('a failed child is retried with y from the tree, re-tiered with t, taken over with c and cancelled with x', async () => {
+    const { app, connection } = await started(tree());
+    await press(app, '\x1b[B');
+    await eventually(() => expect(app.lastFrame()).toContain('y retry'));
+
+    await press(app, 'y', 't', 'x');
+    await eventually(() =>
+      expect(connection.sent).toEqual([
+        { type: 'answer', taskId: 'T2' },
+        { type: 'retier', taskId: 'T2', tier: 'haiku' },
+        { type: 'cancel', taskId: 'T2' },
+      ]),
+    );
+    await press(app, 'c');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'takeOver', taskId: 'T2' }));
+  });
+
+  test('y does nothing on a task that hasn’t failed', async () => {
+    const { app, connection } = await started(tree());
+    await eventually(() => expect(app.lastFrame()).toContain('T1'));
+    expect(app.lastFrame()).not.toContain('y retry');
+
+    await press(app, 'y');
+
+    expect(connection.sent).toEqual([]);
   });
 });
 

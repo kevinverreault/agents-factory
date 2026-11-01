@@ -36,7 +36,9 @@ stages:
     exit: tickets-closed
 ```
 
-Preset fields: `description`, `stages`, and `extends` + `from` (below). Anything else is refused.
+Preset fields: `description`, `stages`, `limits`, and `extends` + `from` (below). Anything else is refused.
+
+`limits` lowers the brakes on the task trees launched with the preset (ADR 0009): `depth` (at most 2: root → child → grandchild), `children` (at most 5 spawned by one task over its life) and `descendants` (at most 12 under one root). Each is optional and can only go down; a preset extending another overrides its limits one by one. A child task runs the built-in `child` preset, and spawns under its root's limits.
 
 Stage fields:
 

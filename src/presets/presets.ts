@@ -52,8 +52,22 @@ const TEMPLATE = /\{\{\s*([^{}]*?)\s*\}\}/g;
 // and the fields it changes.
 type StageDraft = Partial<Stage> & { id: string };
 
+// A task tree's brakes (ADR 0009): how deep it may grow (root → child →
+// grandchild is 2), how many children one task may spawn over its life, and
+// how many descendants a root may have. A preset may lower them, never raise them.
+export type TreeLimits = { depth: number; children: number; descendants: number };
+export const TREE_LIMITS: TreeLimits = { depth: 2, children: 5, descendants: 12 };
+
+const limitsSchema = z.strictObject({
+  depth: z.int().min(0).max(TREE_LIMITS.depth).optional(),
+  children: z.int().min(0).max(TREE_LIMITS.children).optional(),
+  descendants: z.int().min(0).max(TREE_LIMITS.descendants).optional(),
+});
+
 const documentSchema = z.strictObject({
   description: z.string().optional(),
+  // Lower tree limits for the tasks that launch with it.
+  limits: limitsSchema.optional(),
   // A preset extending another takes its stages (from stage `from` onward,
   // when given), overrides single ones by id and inserts its new ones where
   // they stand among those it overrides.
@@ -71,6 +85,8 @@ export type ResolvedPreset = {
   path: string;
   hash: string;
   stages: Stage[];
+  // The tree limits it lowers, if any.
+  limits?: Partial<TreeLimits>;
 };
 
 export function resolvePreset(files: PresetFile[], name: string): { preset: ResolvedPreset } | { error: string } {
@@ -82,7 +98,8 @@ export function resolvePreset(files: PresetFile[], name: string): { preset: Reso
   if ('error' in checked) return { error: `${where(file)}: ${checked.error}` };
   const { stages } = checked;
   const hash = createHash('sha256').update(JSON.stringify(stages)).digest('hex').slice(0, 16);
-  return { preset: { name, description: drafted.description, source: file.scope, path: file.path, hash, stages } };
+  const limits = Object.keys(drafted.limits).length ? { limits: drafted.limits } : {};
+  return { preset: { name, description: drafted.description, source: file.scope, path: file.path, hash, stages, ...limits } };
 }
 
 // What the operator launches a task with: prompt text, issue refs, or both.
@@ -297,7 +314,7 @@ function draftOf(
   files: PresetFile[],
   file: PresetFile,
   chain: PresetFile[],
-): { stages: StageDraft[]; description: string | null } | { error: string } {
+): { stages: StageDraft[]; description: string | null; limits: Partial<TreeLimits> } | { error: string } {
   let raw: unknown;
   try {
     raw = parse(file.content);
@@ -308,7 +325,8 @@ function draftOf(
   if (!checked.success) return { error: `${where(file)}: ${describeDocumentIssue(checked.error.issues[0]!, raw)}` };
   const document = checked.data;
   const description = document.description ?? null;
-  if (document.extends === undefined) return { stages: document.stages, description };
+  const limits = document.limits ?? {};
+  if (document.extends === undefined) return { stages: document.stages, description, limits };
   // Extending its own name extends the preset it shadows.
   const parent = winner(files, document.extends, document.extends === file.name ? file.scope : undefined);
   if (!parent) return { error: `${where(file)}: it extends ${document.extends}, and there is no preset ${document.extends}.` };
@@ -326,7 +344,8 @@ function draftOf(
     }
     stages = stages.slice(start);
   }
-  return { stages: merge(stages, document.stages), description: description ?? inherited.description };
+  // Its own limits override those it extends, one by one.
+  return { stages: merge(stages, document.stages), description: description ?? inherited.description, limits: { ...inherited.limits, ...limits } };
 }
 
 // `own` laid over `inherited`: a stage with an inherited id overrides its
@@ -363,6 +382,9 @@ function describeDocumentIssue(issue: z.core.$ZodIssue, raw: unknown): string {
 function where(file: PresetFile): string {
   return `Preset ${file.name} (${file.scope}, ${file.path})`;
 }
+
+// The preset a delegated child task runs (ADR 0009).
+export const CHILD_PRESET = 'child';
 
 const BUILT_IN = fileURLToPath(new URL('./built-in/', import.meta.url));
 

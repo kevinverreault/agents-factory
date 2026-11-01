@@ -2,12 +2,15 @@
 // agent calls as `mcp__factory__<tool>`. Each reports a run event; the daemon
 // decides what it means. A HITL run gets `propose_advance`, `propose_handoff`
 // and `write_handoff_brief`, and an AFK run `report_findings` or
-// `write_pr_body` when its stage reports through them (ADR 0009); the
-// delegation tools join with their own slices.
+// `write_pr_body` when its stage reports through them, and the delegation
+// tools: `spawn_child`, `list_children`, `cancel_child` and
+// `report_progress`, and `report_result` on a child's run (ADR 0009).
+import { randomUUID } from 'node:crypto';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { Report } from '../lifecycle/lifecycle.ts';
-import type { RunSink } from './executor.ts';
+import { TIERS } from '../models/routing.ts';
+import type { DelegationReply, RunSink } from './executor.ts';
 
 const SERVER = 'factory';
 
@@ -58,8 +61,9 @@ export function hitlFactoryTools(runId: string, sink: RunSink): FactoryTools {
   return factoryTools([proposeAdvance, proposeHandoff, writeHandoffBrief]);
 }
 
-// The tools of what the AFK run reports, or null when it reports nothing.
-export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly Report[]): FactoryTools | null {
+// The tools of what the AFK run reports, and the delegation tools: with
+// the one a child reports to its parent through, when `child`.
+export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly Report[], child = false): FactoryTools {
   const reportFindings = tool(
     'report_findings',
     'Report the findings of this code review to the factory, one finding per item, each a sentence saying what is wrong and where. ' +
@@ -81,8 +85,84 @@ export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly 
       return { content: [{ type: 'text', text: 'The factory has the PR body.' }] };
     },
   );
-  const tools = [...(reports.includes('findings') ? [reportFindings] : []), ...(reports.includes('pr-body') ? [writePrBody] : [])];
-  return tools.length ? factoryTools(tools) : null;
+  const tools = [
+    ...(reports.includes('findings') ? [reportFindings] : []),
+    ...(reports.includes('pr-body') ? [writePrBody] : []),
+    ...delegationTools(runId, sink, child),
+  ];
+  return factoryTools(tools);
+}
+
+// The tools an AFK run delegates with (ADR 0009). Spawning, listing and
+// cancelling are answered by the daemon; progress and results are run events.
+function delegationTools(runId: string, sink: RunSink, child: boolean): SdkTool[] {
+  const spawnChild = tool(
+    'spawn_child',
+    'Hand a self-contained piece of work to a child task: its own AFK run on its own branch, cut from your branch’s tip, which the operator can watch and steer. ' +
+      'The child doesn’t see this conversation, so the goal must stand on its own. A fire-and-forget child’s code never joins your branch: ' +
+      'its output is its report and any issues it opens. Returns the child’s id, or why it can’t be spawned (such as a depth or fan-out limit): then do the work yourself.',
+    {
+      goal: z.string().min(1).describe('What the child must achieve, standing on its own.'),
+      skill: z.string().optional().describe('A skill of the factory’s skill set to invoke on the goal.'),
+      tier: z.enum(TIERS).optional().describe('The model tier: yours or a lower one. A higher one is lowered to yours.'),
+      autonomy: z.enum(['L1', 'L2']).optional().describe('The autonomy level: yours or a lower one.'),
+      await: z.boolean().optional().describe('Whether you wait for its report. Only fire-and-forget children (false) are supported yet.'),
+    },
+    async (args, extra) => answer(await (sink.delegate?.({ type: 'spawnChild', toolUseId: toolUseIdOf(extra), ...args, await: args.await ?? false }) ?? NO_DELEGATION)),
+  );
+  const listChildren = tool(
+    'list_children',
+    'List the child tasks you spawned, with their state, one-line status and, once they ended, their report.',
+    {},
+    async () => answer(await (sink.delegate?.({ type: 'listChildren' }) ?? NO_DELEGATION)),
+  );
+  const cancelChild = tool(
+    'cancel_child',
+    'Cancel one of your own children, with every task it spawned.',
+    { id: z.string().describe('The child task’s id, such as T7.') },
+    async ({ id }) => answer(await (sink.delegate?.({ type: 'cancelChild', id }) ?? NO_DELEGATION)),
+  );
+  const reportProgress = tool(
+    'report_progress',
+    'Set a one-line status the operator sees on your task’s row, such as what you are working on now. It never reaches your parent.',
+    { status: z.string().min(1).describe('What you are doing, in one short line.') },
+    async ({ status }) => {
+      sink.report({ type: 'progressReported', runId, status });
+      return { content: [{ type: 'text', text: 'The operator sees your status.' }] };
+    },
+  );
+  const reportResult = tool(
+    'report_result',
+    'Report your result to the task that spawned you, before you end. The factory adds your branch, commits and how the run ended. ' +
+      'Calling it again replaces what you reported.',
+    {
+      summary: z.string().min(1).describe('What you did and found, for your parent.'),
+      status: z.string().min(1).describe('How it went, in a word or two: done, partial, blocked…'),
+      notes: z.string().describe('Anything else your parent should know, or nothing.'),
+    },
+    async ({ summary, status, notes }) => {
+      sink.report({ type: 'resultReported', runId, summary, status, notes });
+      return { content: [{ type: 'text', text: 'Your parent gets your report once you end.' }] };
+    },
+  );
+  return [spawnChild, listChildren, cancelChild, reportProgress, ...(child ? [reportResult] : [])];
+}
+
+const NO_DELEGATION: DelegationReply = { ok: false, error: 'The factory takes no delegation from this run.' };
+
+// The daemon's reply as the tool's result: an error the agent reads as one.
+function answer(reply: DelegationReply) {
+  return reply.ok
+    ? { content: [{ type: 'text' as const, text: reply.text }] }
+    : { content: [{ type: 'text' as const, text: reply.error }], isError: true };
+}
+
+// The SDK tool use id Claude Code sends with an MCP tool call, which keys a
+// spawn so a replay finds the child it spawned (ADR 0009). Without one, the
+// call is its own.
+function toolUseIdOf(extra: unknown): string {
+  const id = (extra as { _meta?: Record<string, unknown> } | undefined)?._meta?.['claudecode/toolUseId'];
+  return typeof id === 'string' && id ? id : randomUUID();
 }
 
 type SdkTool = NonNullable<Parameters<typeof createSdkMcpServer>[0]['tools']>[number];
