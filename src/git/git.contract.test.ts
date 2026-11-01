@@ -4,6 +4,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import { describeGitContract, type CloneFixture } from './git-contract.ts';
 import { gitCli } from './git.ts';
 
@@ -112,8 +113,11 @@ test('git: a task worktree sets core.longpaths, and its branch tracks nothing', 
 });
 
 describe('git: the check after an AFK run', () => {
-  // A task worktree on factory/T1-a, snapshotted as a run starting in it finds it.
-  async function started(body: (run: { root: string; clone: string; path: string; check(branches?: string[]): Promise<string[]> }) => void) {
+  type Started = { root: string; clone: string; path: string; inRun(...args: string[]): string; check(branches?: string[]): Promise<string[]> };
+
+  // A task worktree on factory/T1-a, snapshotted as a run starting in it
+  // finds it. `inRun` runs git as the run does, in its cleaned environment.
+  async function started(body: (run: Started) => void) {
     const { root, cloneWithOrigin, dispose } = await fixture();
     try {
       const clone = await cloneWithOrigin('widgets', 'main');
@@ -121,26 +125,28 @@ describe('git: the check after an AFK run', () => {
       await gitCli.fetch(clone, 'main');
       await gitCli.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
       const before = await gitCli.snapshot(path);
-      await body({ root, clone, path, check: (branches = []) => gitCli.violations(path, before, branches) });
+      const env = { ...process.env, ...prepareRunGit(join(root, 'run'), FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'sonnet' }) };
+      const inRun = (...args: string[]) => execFileSync('git', args, { cwd: path, env, encoding: 'utf8', windowsHide: true }).trim();
+      await body({ root, clone, path, inRun, check: (branches = []) => gitCli.violations(path, before, branches, FACTORY_IDENTITY.email) });
     } finally {
       await dispose();
     }
   }
 
   test('a run that commits on its branch and fetches keeps every invariant', () =>
-    started(async ({ path, check }) => {
+    started(async ({ path, inRun, check }) => {
       writeFileSync(join(path, 'login.ts'), 'export {};\n');
-      git(path, 'add', '--all');
-      git(path, 'commit', '--quiet', '-m', 'Fix the login bug');
-      git(path, 'fetch', '--quiet', 'origin');
+      inRun('add', '--all');
+      inRun('commit', '--quiet', '-m', 'Fix the login bug');
+      inRun('fetch', '--quiet', 'origin');
 
       expect(await check()).toEqual([]);
     }));
 
-  test.each<[string, (run: { clone: string; path: string }) => void, string[]]>([
+  test.each<[string, (run: Started) => void, string[]]>([
     [
       'switches branch',
-      ({ path }) => git(path, 'checkout', '--quiet', '-b', 'spike'),
+      ({ inRun }) => inRun('checkout', '--quiet', '-b', 'spike'),
       ['The run left branch spike checked out instead of factory/T1-a.', 'The run added refs: refs/heads/spike.'],
     ],
     [
@@ -150,16 +156,22 @@ describe('git: the check after an AFK run', () => {
       },
       ['The run left uncommitted changes: notes.txt.'],
     ],
-    ['tags a commit', ({ path }) => git(path, 'tag', 'v1'), ['The run added refs: refs/tags/v1.']],
+    ['tags a commit', ({ inRun }) => inRun('tag', 'v1'), ['The run added refs: refs/tags/v1.']],
+    ['makes a branch of another commit', ({ inRun }) => inRun('branch', 'spike', 'origin/main'), ['The run added refs: refs/heads/spike.']],
     [
       'adds a remote',
-      ({ path }) => git(path, 'remote', 'add', 'fork', 'https://github.com/me/widgets.git'),
+      ({ inRun }) => inRun('remote', 'add', 'fork', 'https://github.com/me/widgets.git'),
       ['The run added remotes: fork.', 'The run changed the git config.'],
     ],
     [
       'sets a pushurl',
-      ({ path }) => git(path, 'config', 'remote.origin.pushurl', 'https://github.com/me/widgets.git'),
+      ({ inRun }) => inRun('config', 'remote.origin.pushurl', 'https://github.com/me/widgets.git'),
       ['The run changed the git config.', "A remote has a pushurl, which the run's push guard can't cover: remote.origin.pushurl."],
+    ],
+    [
+      'points its branch’s pushes elsewhere',
+      ({ inRun }) => inRun('config', 'branch.factory/T1-a.pushRemote', 'fork'),
+      ['The run changed the git config.'],
     ],
     [
       'adds a hook',
@@ -169,24 +181,37 @@ describe('git: the check after an AFK run', () => {
       ['The run changed git hooks: pre-push.'],
     ],
   ])('a run that %s breaks the invariants, saying how', (_, act, reasons) =>
-    started(async ({ clone, path, check }) => {
-      act({ clone, path });
+    started(async (run) => {
+      act(run);
 
-      expect(await check()).toEqual(reasons);
+      expect(await run.check()).toEqual(reasons);
     }));
 
   test('a run that rewrites the branch below its start breaks the invariants', () =>
-    started(async ({ path, check }) => {
-      git(path, 'commit', '--quiet', '--amend', '--allow-empty', '-m', 'Rewritten');
+    started(async ({ inRun, check }) => {
+      inRun('commit', '--quiet', '--amend', '--allow-empty', '-m', 'Rewritten');
 
       expect(await check()).toEqual([expect.stringMatching(/^The run rewrote factory\/T1-a: [0-9a-f]{7}, its tip before the run, is no longer in its history\.$/)]);
     }));
 
-  test('a branch the factory cut for another task meanwhile is no ref the run added', () =>
+  // Unlogged, the branch could be the run's but for the factory's word.
+  test('a branch the factory cut for another task meanwhile, even unlogged, is no ref the run added', () =>
     started(async ({ root, clone, check }) => {
-      await gitCli.addWorktree(clone, { path: join(root, 'worktrees', 'T2'), branch: 'factory/T2-b', startPoint: 'origin/main' });
+      git(clone, '-c', 'core.logAllRefUpdates=false', 'worktree', 'add', '--quiet', '-b', 'factory/T2-b', join(root, 'worktrees', 'T2'), 'origin/main');
 
       expect(await check(['factory/T2-b'])).toEqual([]);
       expect(await check()).toEqual(['The run added refs: refs/heads/factory/T2-b.']);
+    }));
+
+  // The task worktree shares its clone with the operator's own work (ADR 0010).
+  test('branches the operator makes meanwhile, and their tools’ branch settings, are not the run’s doing', () =>
+    started(async ({ root, clone, check }) => {
+      git(clone, 'worktree', 'add', '--quiet', '-b', 'worktree-agent-a1', join(root, 'agent'), 'origin/main');
+      git(join(root, 'agent'), 'checkout', '--quiet', '-b', 'claude/issue-88');
+      git(clone, 'config', 'branch.claude/issue-88.remote', 'origin');
+      git(clone, 'config', 'branch.claude/issue-88.merge', 'refs/heads/claude/issue-88');
+      git(clone, 'config', 'branch.factory/T1-a.vscode-merge-base', 'origin/main');
+
+      expect(await check()).toEqual([]);
     }));
 });

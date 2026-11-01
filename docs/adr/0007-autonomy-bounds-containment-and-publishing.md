@@ -21,7 +21,11 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
   - rules from `~/.agent-factory/permissions.yaml`;
   - the task's own rules.
 
-  Anything else reaches `canUseTool` and raises a **permission request**, an **attention request** that suspends the run. The operator answers Allow once, Allow for this task (stored on the task), or Deny with a note.
+  Anything else reaches `canUseTool` and raises a **permission request**, an **attention request** that suspends the run. The operator answers Allow once, Allow for this task (stored on the task), Allow always (added to the user file), or Deny with a note.
+
+  A request names only the parts of a chained command that no rule covers. Allow once allows the exact call, once. Allow for this task proposes one pattern per uncovered part, at program-plus-subcommand breadth (`Bash(sed -i *)`, or an interpreter's script, `Bash(node scripts/seed.js *)`), which the operator can widen or narrow before confirming. The task's rules then match like any other rules, so the next similar call runs without asking. A command that can't be split (it substitutes or redirects to a file) gets its exact command as its rule.
+
+  Allow always proposes the same rules, and the factory appends the confirmed ones to `~/.agent-factory/permissions.yaml`, keeping the file's rules and comments and skipping rules it already holds. The file is read for every call, so they cover every run from its next call on, and the factory lets through the other waiting permission requests they now cover. If the file is invalid or can't be written, the answer fails with the reason and the request stays open.
 
 - **No repo scope for permissions.** Allow rules and extra L2 egress hosts come from the built-in list, the user file and the task, never from the target repo. A repo you clone could otherwise grant its own runs permissions. A child task gets a frozen copy of its parent's task rules and egress hosts at spawn, and its level stays ≤ its parent's.
 
@@ -44,14 +48,15 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
   - no refs or remotes were added;
   - `.git/config` and `.git/hooks/` match their snapshot from before the run.
 
-  A violation is a run or iteration failure.
+  A violation is a run or iteration failure. The clone is the operator's too (ADR 0010), and their own sessions and editors change it while a run works, so the check counts only what the run could have done. A run logs every ref it updates under the bot's identity, so an added ref whose reflog names someone else is not the run's. A ref with no reflog still counts, unless the factory cut it for another task. In the config, other branches' `branch.*` settings don't count, and neither do the task branch's settings other than `remote`, `pushRemote` and `merge`. Tools such as `git push -u` and VS Code write those settings for the operator.
 
 - **A cleaned environment makes pushes fail in git itself.** Each AFK run gets:
   - `GIT_CONFIG_NOSYSTEM=1`, because Git for Windows's system config sets `credential.helper=manager`;
   - `GIT_CONFIG_GLOBAL` pointing at a per-run gitconfig, with the bot as author, no credential helper, and `pushInsteadOf` rewriting GitHub push URLs to an unreachable scheme, so fetch still works;
   - the read-only `GH_CONFIG_DIR` from ADR 0004;
   - `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY` and `SSH_AUTH_SOCK` unset;
-  - `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, and an ssh command that fails.
+  - `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, and an ssh command that fails;
+  - `core.logAllRefUpdates=always`, so every ref it makes, tags included, has a reflog naming it.
 
   `pushInsteadOf` is ignored when a remote has an explicit `pushurl`, which is why the handoff sheet and the check after each run look for one.
 

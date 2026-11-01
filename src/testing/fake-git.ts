@@ -23,6 +23,8 @@ export class FakeGit implements Git {
   private readonly clones = new Map<string, FakeClone>();
   // Each worktree's paths with changes not yet committed.
   private readonly changes = new Map<string, Set<string>>();
+  // What each worktree's uncommitted changes wrote, by path.
+  private readonly edits = new Map<string, Map<string, string>>();
   // Each commit's files, by path from the top.
   private readonly trees = new Map<string, Map<string, string>>();
   // Each commit's parent, if it has one.
@@ -30,8 +32,9 @@ export class FakeGit implements Git {
   private commitCount = 0;
   // What each worktree's AFK run broke, as the check after the run says it.
   private readonly broken = new Map<string, string[]>();
-  // The worktrees checked after a run, each with the branches it was told to ignore.
-  readonly checked: { worktreePath: string; branches: string[] }[] = [];
+  // The worktrees checked after a run, each with the branches it was told to
+  // ignore and the run's committer.
+  readonly checked: { worktreePath: string; branches: string[]; committer: string }[] = [];
   // Each worktree's remotes with a `pushurl`, and theirs.
   private readonly pushUrls = new Map<string, Map<string, string>>();
   // The commits made through the port, in order.
@@ -152,17 +155,20 @@ export class FakeGit implements Git {
     worktree.linkedTo = clonePath;
   }
 
-  // Something changes `path` (relative, with `/`) in the worktree, uncommitted.
-  editFile(worktreePath: string, path: string): void {
+  // Something changes `path` (relative, with `/`) in the worktree to
+  // `content`, uncommitted.
+  editFile(worktreePath: string, path: string, content = ''): void {
     const changes = this.changes.get(worktreePath) ?? new Set();
     this.changes.set(worktreePath, changes.add(path));
+    const edits = this.edits.get(worktreePath) ?? new Map<string, string>();
+    this.edits.set(worktreePath, edits.set(path, content));
   }
 
   // Everything changed in the worktree is committed, if anything is.
   commitAll(worktreePath: string): void {
     const changed = this.changes.get(worktreePath);
     this.changes.delete(worktreePath);
-    if (changed?.size) this.advance(this.worktreeAt(worktreePath));
+    if (changed?.size) this.advance(this.worktreeAt(worktreePath), [...changed]);
   }
 
   async uncommitted(worktreePath: string, paths: string[]): Promise<string[]> {
@@ -172,6 +178,7 @@ export class FakeGit implements Git {
   // Something undoes the uncommitted change to `path` in the worktree.
   discard(worktreePath: string, path: string): void {
     this.changes.get(worktreePath)?.delete(path);
+    this.edits.get(worktreePath)?.delete(path);
   }
 
   // Something checks `branch` out in the worktree instead of its own.
@@ -197,14 +204,20 @@ export class FakeGit implements Git {
     const worktree = this.worktreeAt(worktreePath);
     if (!paths.some((path) => this.changes.get(worktreePath)?.has(path))) throw new GitError('nothing to commit');
     for (const path of paths) this.changes.get(worktreePath)?.delete(path);
-    const commit = this.advance(worktree);
+    const commit = this.advance(worktree, paths);
     this.commits.push({ worktreePath, paths, message });
     return commit;
   }
 
-  // A new commit on the worktree's branch.
-  private advance(worktree: FakeWorktree): string {
-    const commit = this.newCommit(new Map(this.trees.get(worktree.head)));
+  // A new commit on the worktree's branch, with what `paths` were edited to.
+  private advance(worktree: FakeWorktree, paths: string[]): string {
+    const edits = this.edits.get(worktree.path);
+    const tree = new Map(this.trees.get(worktree.head));
+    for (const path of paths) {
+      tree.set(path, edits?.get(path) ?? '');
+      edits?.delete(path);
+    }
+    const commit = this.newCommit(tree);
     this.parents.set(commit, worktree.head);
     worktree.head = commit;
     this.cloneAt(worktree.linkedTo).branches.set(worktree.branch, commit);
@@ -227,12 +240,12 @@ export class FakeGit implements Git {
 
   async snapshot(worktreePath: string): Promise<RunSnapshot> {
     const worktree = this.worktreeAt(worktreePath);
-    return { branch: worktree.branch, head: worktree.head, refs: [], remotes: [], config: '', hooks: {} };
+    return { branch: worktree.branch, head: worktree.head, refs: [], remotes: [], config: [], hooks: {} };
   }
 
-  async violations(worktreePath: string, _before: RunSnapshot, branches: string[]): Promise<string[]> {
+  async violations(worktreePath: string, _before: RunSnapshot, branches: string[], committer: string): Promise<string[]> {
     this.worktreeAt(worktreePath);
-    this.checked.push({ worktreePath, branches });
+    this.checked.push({ worktreePath, branches, committer });
     return this.broken.get(worktreePath) ?? [];
   }
 
@@ -249,12 +262,23 @@ export class FakeGit implements Git {
   }
 
   async readDirectory(clonePath: string, ref: string, dir: string): Promise<{ commit: string; files: DirectoryFile[] }> {
+    return this.readTree(clonePath, ref, (path) => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'));
+  }
+
+  async readFiles(clonePath: string, ref: string, paths: string[]): Promise<{ commit: string; files: DirectoryFile[] }> {
+    return this.readTree(clonePath, ref, (path) => paths.includes(path));
+  }
+
+  // The files at `ref` whose paths `wanted`, in path order.
+  private readTree(clonePath: string, ref: string, wanted: (path: string) => boolean): { commit: string; files: DirectoryFile[] } {
     const clone = this.cloneAt(clonePath);
-    // Only origin's branches are read: the factory reads presets nowhere else.
+    // Only origin's branches are read: the factory reads presets and the
+    // skill set's setup nowhere else.
     const commit = ref.startsWith('origin/') ? clone.fetched.get(ref.slice('origin/'.length)) : undefined;
     if (!commit) throw new GitError(`${ref} names no commit.`);
     const files = [...this.trees.get(commit)!]
-      .filter(([path]) => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'))
+      .filter(([path]) => wanted(path))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([path, content]) => ({ path, content }));
     return { commit, files };
   }

@@ -3,9 +3,9 @@
 // the operator's permissions file and the task, never from the target repo.
 // Rules use Claude Code's syntax: `Tool`, or `Tool(specifier)`. Bash rules
 // are best-effort, not a security boundary: L1 guards against accidents.
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { posix } from 'node:path';
-import { parse } from 'yaml';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, posix } from 'node:path';
+import { Document, isMap, isScalar, isSeq, parseDocument } from 'yaml';
 import { readCommandLine, type SimpleCommand } from './shell.ts';
 
 // A tool call Claude Code asked about. `summary` is what it is pointed at, on one line.
@@ -87,7 +87,7 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
 // lets through by reading the command, where no rule's glob can say it.
 // Claude Code asks about these, and the gate answers them. Besides these,
 // `cd` within the worktree and redirects to its files outside `.git` are
-// covered, for the run's Edit tool writes there anyway (see `covers`).
+// covered, for the run's Edit tool writes there anyway (see `uncovered`).
 function factoryCommand({ words, heredoc }: SimpleCommand, at: Place): boolean {
   const [program = '', ...args] = words;
   if (program === 'git' && args[0] === 'config') return readsGitConfig(args.slice(1));
@@ -175,60 +175,108 @@ const CONFIG_VALUED = new Set(['-f', '--file', '--blob', '--type', '--default'])
 // the factory's allow list and the operator's permissions file at `path`, as
 // the file reads now. `error` says why the file grants nothing, when it doesn't.
 export function readAllowRules(path: string): { rules: string[]; error: string | null } {
-  const operator = readOperatorRules(path);
+  const operator = readOperatorFile(path);
   return { rules: [...FACTORY_ALLOW_LIST, ...operator.rules], error: operator.error };
 }
 
-// The operator's own allow rules, from their permissions file:
+// Adds the rules to the operator's permissions file for Allow always,
+// creating it if missing and keeping its rules and comments. A rule already
+// in it isn't added again. Why nothing was added, if the file can't be read,
+// doesn't hold a list of rules, or can't be written.
+export function addOperatorRules(path: string, rules: readonly string[]): string | null {
+  const { document = new Document(), rules: present, error } = readOperatorFile(path);
+  if (error) return error;
+  if (document.contents !== null && !isMap(document.contents)) return mustHoldRules(path);
+  const held = present.map((rule) => rule.trim());
+  const added = [...new Set(rules.map((rule) => rule.trim()))].filter((rule) => !held.includes(rule));
+  if (added.length === 0) return null;
+  const allow = document.get('allow', true);
+  // A list named elsewhere (`allow: *mine`) would lose its rules if replaced.
+  if (!isSeq(allow) && allow !== undefined && !(isScalar(allow) && allow.value === null)) {
+    return `${path} names its \`allow:\` list elsewhere, so the factory can’t add to it: add the rules there by hand.`;
+  }
+  if (isSeq(allow)) for (const rule of added) allow.add(rule);
+  else {
+    // An empty `allow:` keeps its comment.
+    const list = document.createNode(added);
+    list.comment = allow?.comment;
+    document.set('allow', list);
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, document.toString());
+  } catch (error) {
+    return `${path} couldn’t be written: ${(error as Error).message}`;
+  }
+  return null;
+}
+
+// The operator's permissions file, unless it is missing, with its own allow
+// rules:
 //
 //   allow:
 //     - Bash(make *)
 //
 // No file grants nothing. `error` says why a file that can't be read or
 // doesn't hold a list of rules grants nothing either.
-function readOperatorRules(path: string): { rules: string[]; error: string | null } {
-  let raw: unknown;
+function readOperatorFile(path: string): { document?: Document; rules: string[]; error: string | null } {
+  let text: string;
   try {
-    raw = parse(readFileSync(path, 'utf8'));
+    text = readFileSync(path, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { rules: [], error: null };
     return { rules: [], error: `${path} couldn’t be read: ${(error as Error).message}` };
   }
-  const allow = (raw as { allow?: unknown } | null)?.allow ?? [];
-  if (!Array.isArray(allow) || !allow.every((rule) => typeof rule === 'string' && parseRule(rule))) {
-    return { rules: [], error: `${path} must hold \`allow:\`, a list of rules such as \`Bash(make *)\`.` };
-  }
-  return { rules: allow, error: null };
+  const document = parseDocument(text);
+  const [problem] = document.errors;
+  if (problem) return { rules: [], error: `${path} couldn’t be read: ${problem.message}` };
+  const allow = (document.toJS() as { allow?: unknown } | null)?.allow ?? [];
+  if (!Array.isArray(allow) || !allow.every(isRule)) return { rules: [], error: mustHoldRules(path) };
+  return { document, rules: allow, error: null };
 }
 
-// Whether any of the rules covers the call, made in the run's `worktree`. A
-// Bash command chained with `&&`, `||`, `;`, `&` or `|` is covered when every
-// part of it is, by a rule or as one of the factory's commands, each part
-// redirecting only to files in the worktree, and each `cd` staying in it.
-export function covers(rules: readonly string[], call: Pick<ToolCall, 'tool' | 'input'>, worktree: string | null): boolean {
+const mustHoldRules = (path: string) => `${path} must hold \`allow:\`, a list of rules such as \`Bash(make *)\`.`;
+
+// The parts of the call no rule covers, each a call of its own, made in the
+// run's `worktree` when known: the commands of a Bash chain (`&&`, `||`, `;`,
+// `&` or `|`), less their redirections, which a rule or the factory's
+// commands may cover, or else the call itself. A Bash command that can't be
+// read, writes outside the worktree or `cd`s out of it is one part, which
+// only its exact rule covers. None when the rules cover the call.
+export function uncovered(rules: readonly string[], call: ToolCall, worktree: string | null = null): ToolCall[] {
   const parsed = rules.flatMap((rule) => parseRule(rule) ?? []).filter((rule) => toolMatches(rule.tool, call.tool));
-  if (parsed.some((rule) => rule.specifier === null)) return true;
+  if (parsed.some((rule) => rule.specifier === null)) return [];
   if (call.tool === 'Bash') {
-    const commands = readCommandLine(String(call.input.command ?? ''));
-    if (commands === null || commands.length === 0) return false;
-    // Where each command runs, as far as the `cd`s before it in the line say.
-    let dir = worktree === null ? null : slashed(worktree);
-    return commands.every((command) => {
-      const at = place(worktree, dir);
-      if (!command.writes.every((path) => at.inside(path) !== null)) return false;
-      if (command.words[0] === 'cd') {
-        dir = movesTo(command, at);
-        return dir !== null;
-      }
-      return parsed.some((rule) => bashMatches(rule.specifier!, command.text)) || factoryCommand(command, at);
-    });
+    const command = String(call.input.command ?? '');
+    const commands = readCommandLine(command);
+    const parts = partsWithin(commands, worktree);
+    if (parts === null) return parsed.some((rule) => rule.specifier === command.trim()) ? [] : [call];
+    const left = parts.filter((part) => !parsed.some((rule) => bashMatches(rule.specifier!, part.command.text)) && !factoryCommand(part.command, part.at));
+    return left.map(({ command: { text } }) => (commands!.length === 1 ? call : { ...call, input: { ...call.input, command: text }, summary: text }));
   }
   if (call.tool === 'WebFetch') {
     const host = hostOf(call.input.url);
-    return host !== null && parsed.some((rule) => rule.specifier!.startsWith('domain:') && glob(rule.specifier!.slice(7)).test(host));
+    return host !== null && parsed.some((rule) => rule.specifier!.startsWith('domain:') && glob(rule.specifier!.slice(7)).test(host)) ? [] : [call];
   }
   const target = targetOf(call.input);
-  return target !== null && parsed.some((rule) => glob(slashed(rule.specifier!)).test(posix.normalize(slashed(target))));
+  return target !== null && parsed.some((rule) => glob(slashed(rule.specifier!)).test(posix.normalize(slashed(target)))) ? [] : [call];
+}
+
+// The simple commands of a line, but its `cd`s, each with where it runs, or
+// null when the line can't be read, writes outside the worktree, or a `cd`
+// may leave it.
+function partsWithin(commands: SimpleCommand[] | null, worktree: string | null): { command: SimpleCommand; at: Place }[] | null {
+  if (commands === null || commands.length === 0) return null;
+  // Where each command runs, as far as the `cd`s before it in the line say.
+  let dir = worktree === null ? null : slashed(worktree);
+  const parts: { command: SimpleCommand; at: Place }[] = [];
+  for (const command of commands) {
+    const at = place(worktree, dir);
+    if (!command.writes.every((path) => at.inside(path) !== null)) return null;
+    if (command.words[0] !== 'cd') parts.push({ command, at });
+    else if ((dir = movesTo(command, at)) === null) return null;
+  }
+  return parts;
 }
 
 // Where a `cd` leaves the commands after it: a folder in the worktree, or
@@ -242,9 +290,36 @@ function movesTo({ words, then }: SimpleCommand, at: Place): string | null {
   return to !== null && (then !== ';' || statSync(to, { throwIfNoEntry: false })?.isDirectory()) ? to : null;
 }
 
-// The call's own rule, for Allow for this task and Allow once: its exact
-// command, its URL's domain, or its path. Those rules hold for calls with the
-// same rule, never as patterns, so a `*` in a command stays a `*`.
+// The rule Allow for this task and Allow always propose for a part no rule
+// covers: a Bash command's program and its subcommand or leading option,
+// with any arguments (`Bash(npm install *)`, `Bash(sed -i *)`). An interpreter's
+// pattern names the script it runs (`Bash(node scripts/seed.js *)`), and
+// inline code gets its exact command, as does a command that can't be
+// split, redirects or takes a heredoc, and a call to any other tool its own rule.
+export function patternFor(part: Pick<ToolCall, 'tool' | 'input'>): string {
+  const commands = part.tool === 'Bash' ? readCommandLine(String(part.input.command ?? '')) : null;
+  if (commands?.length !== 1 || commands[0]!.writes.length > 0 || commands[0]!.heredoc !== null) return ruleFor(part);
+  const { text, words: [program = '', next] } = commands[0]!;
+  if (SCRIPT_RUNNERS.has(program) && next !== undefined) {
+    if (INLINE_CODE.test(next)) return `Bash(${text})`;
+    if (!next.startsWith('-')) return `Bash(${program} ${next} *)`;
+  }
+  const words = next !== undefined && /^-{0,2}[A-Za-z][\w-]*$/.test(next) ? [program, next] : [program];
+  return `Bash(${words.join(' ')} *)`;
+}
+
+// Programs that run a script or inline code they are given, and the options
+// that give them inline code.
+const SCRIPT_RUNNERS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell', 'cmd', 'node', 'deno', 'python', 'python3', 'ruby', 'perl']);
+const INLINE_CODE = /^(?:-c|-e|--eval|-command|\/c)$/i;
+
+// Whether the text is a rule: `Tool`, or `Tool(specifier)`.
+export function isRule(rule: unknown): rule is string {
+  return typeof rule === 'string' && parseRule(rule) !== null;
+}
+
+// The call's own rule, for Allow once: its exact command, its URL's domain,
+// or its path.
 export function ruleFor({ tool, input }: Pick<ToolCall, 'tool' | 'input'>): string {
   if (tool === 'Bash' && typeof input.command === 'string') return `Bash(${input.command.trim()})`;
   if (tool === 'WebFetch') {
@@ -253,6 +328,16 @@ export function ruleFor({ tool, input }: Pick<ToolCall, 'tool' | 'input'>): stri
   }
   const target = targetOf(input);
   return target ? `${tool}(${target})` : tool;
+}
+
+// A call whose own rule this is, as `ruleFor` makes one, which rules cover
+// just as they cover that call: a rule tells calls apart only by what it names.
+export function callWithRule(rule: string): Pick<ToolCall, 'tool' | 'input'> {
+  const { tool, specifier } = parseRule(rule) ?? { tool: rule, specifier: null };
+  if (specifier === null) return { tool, input: {} };
+  if (tool === 'Bash') return { tool, input: { command: specifier } };
+  if (tool === 'WebFetch') return { tool, input: { url: `https://${specifier.replace(/^domain:/, '')}/` } };
+  return { tool, input: { file_path: specifier } };
 }
 
 type Rule = { tool: string; specifier: string | null };

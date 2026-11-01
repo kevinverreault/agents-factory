@@ -161,7 +161,7 @@ describe('re-tiering', () => {
 });
 
 describe('repositories', () => {
-  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null };
+  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
 
   function inClone() {
     const connection = new FakeConnection();
@@ -208,6 +208,77 @@ describe('repositories', () => {
     await eventually(() => expect(app.lastFrame()).toContain('The clone at /clones/widgets has no GitHub origin.'));
   });
 
+  const unset = {
+    ...widgets,
+    skills: {
+      present: false as const,
+      checkedAt: 1,
+      reason: 'acme/widgets has no setup for the skill set on main (missing docs/agents/issue-tracker.md): its skills won’t find the issue tracker and labels they expect.',
+      failed: false,
+    },
+  };
+
+  test('a repository without the skill set’s setup shows why, and s launches its HITL setup task into the conversation', async () => {
+    const connection = inClone();
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': unset } }, { cwd: widgets.path, connection });
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(`${unset.skills.reason} s Set up now`));
+
+    app.stdin.write('s');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'setup' }));
+    const setup = { ...task('T1', 'setup', 'running', 'In conversation', 'HITL'), preset: { name: 'setup' } as TaskView['preset'] };
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: setup }]);
+    await eventually(() => expect(app.lastFrame()).not.toContain('1 Tasks'));
+  });
+
+  test('once set up, while a setup task is unfinished, or when the check failed, nothing is offered and s does nothing', async () => {
+    const present = { ...widgets, skills: { present: true as const, checkedAt: 1 } };
+    const setUp = await started({ ...factoryState([]), repositories: { 'acme/widgets': present } });
+    const setup = { ...task('T1', 'setup', 'waiting', 'Ready for you', 'HITL'), preset: { name: 'setup' } as TaskView['preset'] };
+    const settingUp = await started({ ...factoryState([setup]), repositories: { 'acme/widgets': unset } });
+    const reason = 'The factory couldn’t check the skill set’s setup in acme/widgets: couldn’t fetch main from origin (fatal: no network).';
+    const failed = { ...widgets, skills: { present: false as const, checkedAt: 1, reason, failed: true } };
+    const unchecked = await started({ ...factoryState([]), repositories: { 'acme/widgets': failed } });
+
+    for (const { app, connection } of [setUp, settingUp, unchecked]) {
+      app.stdin.write('s');
+      await settle();
+      expect(app.lastFrame()).not.toContain('Set up now');
+      expect(connection.sent).toEqual([]);
+    }
+    expect(settingUp.app.lastFrame()).toContain('acme/widgets is being set up for the skill set in T1.');
+    expect(unwrapped(unchecked.app.lastFrame()!)).toContain(reason);
+  });
+
+  test('a refused setup launch shows its reason', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('launchTask', { ok: false, reason: 'The daemon is stopping.' });
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': unset } }, { connection });
+
+    app.stdin.write('s');
+    await settle();
+
+    await eventually(() => expect(app.lastFrame()).toContain('The daemon is stopping.'));
+  });
+
+  test('R re-checks the repository’s setup, a failed check included, and the answer replaces the line', async () => {
+    const reason = 'The factory couldn’t check the skill set’s setup in acme/widgets: couldn’t fetch main from origin (fatal: no network).';
+    const failed = { ...widgets, skills: { present: false as const, checkedAt: 1, reason, failed: true } };
+    const connection = new FakeConnection();
+    connection.replyTo('checkSkills', { ok: true, value: { present: true, checkedAt: 2 } });
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': failed } }, { connection });
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(`${reason} R re-check`));
+
+    app.stdin.write('R');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'checkSkills', repo: 'acme/widgets' }));
+    connection.servePatch([{ op: 'set', path: ['repositories', 'acme/widgets'], value: { ...widgets, skills: { present: true, checkedAt: 2 } } }]);
+    await eventually(() => expect(app.lastFrame()).not.toContain('re-check'));
+  });
+
   test('a missing repository shows in Needs you under its name', async () => {
     const { app } = await started(
       factoryState(
@@ -251,7 +322,7 @@ async function press(app: { stdin: { write(data: string): void } }, ...keys: str
 }
 
 describe('launching and conversing', () => {
-  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null };
+  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
   const gadgets = { ...widgets, id: 'acme/gadgets', path: '/clones/gadgets' };
   const conversing: TaskView = {
     ...task('T1', 'Grill me about the login flow.', 'running', 'In conversation', 'HITL'),
@@ -1230,16 +1301,22 @@ describe('answering from Needs you', () => {
     attention: 'permission' as const,
     holdsRun: true,
     reason: 'Bash: npm publish',
-    permission: { id: 'toolu_1', tool: 'Bash', summary: 'npm publish', rule: 'Bash(npm publish)' },
+    permission: {
+      id: 'toolu_1',
+      tool: 'Bash',
+      summary: 'npm publish',
+      rule: 'Bash(npm publish)',
+      proposed: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
+    },
   };
 
-  test('a permission request is allowed once, or for the task by its rule, with a digit', async () => {
+  test('a permission request is allowed once with a digit, or for the task by the rule it proposes, which enter confirms', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([failing], [permission]), { connection });
     await press(app, '2');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        '── T2 Implement the store ── permission: Bash: npm publish 1 Allow once 2 Allow for this task: Bash(npm publish) 3 Deny with a note a answer',
+        '── T2 Implement the store ── permission: Bash: npm publish 1 Allow once 2 Allow for this task: Bash(npm publish *) 3 Allow always: Bash(npm publish *) 4 Deny with a note a answer',
       ),
     );
 
@@ -1248,19 +1325,87 @@ describe('answering from Needs you', () => {
     connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [{ ...permission, requestId: 'A4' }] }]);
     await settle();
     await press(app, '2');
-    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'task' } }));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *) enter allows for this task · esc back'));
+    expect(connection.sent).toHaveLength(1);
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'task', rules: ['Bash(npm publish *)'] } }),
+    );
+  });
+
+  test('Allow for this task offers a rule for each part no rule covers, which the operator edits before enter confirms', async () => {
+    const connection = new FakeConnection();
+    const chained = {
+      ...permission,
+      reason: "Bash: npm install zod · sed -i 's/a/b/' src/a.ts",
+      permission: {
+        id: 'toolu_1',
+        tool: 'Bash',
+        summary: "npm install zod && sed -i 's/a/b/' src/a.ts && npm test",
+        rule: "Bash(npm install zod && sed -i 's/a/b/' src/a.ts && npm test)",
+        proposed: [
+          { part: 'npm install zod', rule: 'Bash(npm install *)' },
+          { part: "sed -i 's/a/b/' src/a.ts", rule: 'Bash(sed -i *)' },
+        ],
+      },
+    };
+    const { app } = await started(factoryState([failing], [chained]), { connection });
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('2 Allow for this task: Bash(npm install *), Bash(sed -i *)'));
+
+    await press(app, 'a', '2');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain(
+        "› npm install zod: Bash(npm install *) sed -i 's/a/b/' src/a.ts: Bash(sed -i *) ↑↓ field · enter allows for this task · esc back",
+      ),
+    );
+    await press(app, DOWN, ...Array(6).fill('\x7f'));
+    app.stdin.write(' *)');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain("› sed -i 's/a/b/' src/a.ts: Bash(sed *)"));
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'task', rules: ['Bash(npm install *)', 'Bash(sed *)'] } }),
+    );
+  });
+
+  test('Allow for this task sends nothing while every rule is blank, and esc backs out of the rules', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([failing], [permission]), { connection });
+    await press(app, '2', 'a', '2', ...Array('Bash(npm publish *)'.length).fill('\x7f'), ENTER);
+    await settle();
+    expect(connection.sent).toEqual([]);
+
+    await press(app, ESC);
+    await eventually(() => expect(app.lastFrame()).not.toContain('enter allows for this task'));
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *)'));
+  });
+
+  test('Allow always offers the rules Allow for this task does, editable, and enter sends them for every task', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([failing], [permission]), { connection });
+    await press(app, '2', 'a', '3');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *) enter allows always · esc back'));
+
+    await press(app, ...Array(' publish *)'.length).fill('\x7f'));
+    app.stdin.write(' *)');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm *)'));
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'always', rules: ['Bash(npm *)'] } }),
+    );
   });
 
   test('Deny takes a typed note, which enter sends and esc sets aside', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([failing], [permission]), { connection });
-    await press(app, '2', 'a', '3');
+    await press(app, '2', 'a', '4');
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
 
     await press(app, ESC);
-    await eventually(() => expect(app.lastFrame()).toContain('3 Deny with a note'));
+    await eventually(() => expect(app.lastFrame()).toContain('4 Deny with a note'));
     // The digits still answer: esc left only the note.
-    await press(app, '3');
+    await press(app, '4');
     await eventually(() => expect(app.lastFrame()).toContain('Note for the agent:'));
     // An empty note sends nothing.
     await press(app, ENTER);
@@ -1376,13 +1521,18 @@ describe('answering in the conversation', () => {
     const app = await opened(permission, connection);
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain('permission: Bash: gh issue view 12 1 Allow once 2 Allow for this task: Bash(gh issue view 12) 3 Deny with a note');
+      expect(frame).toContain('permission: Bash: gh issue view 12 1 Allow once 2 Allow for this task: Bash(gh issue view 12) 3 Allow always: Bash(gh issue view 12) 4 Deny with a note');
       expect(frame).toContain('digits answer · ctrl+b back');
       expect(frame).not.toContain('esc back');
     });
 
+    // A request stored before rules were proposed per part proposes the call's own.
     await press(app, '2');
-    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task' } }));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('gh issue view 12: Bash(gh issue view 12) enter allows for this task · esc back'));
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: ['Bash(gh issue view 12)'] } }),
+    );
     // Still in the conversation, which follows the run as it resumes.
     expect(app.lastFrame()).toContain('ctrl+b back');
   });
@@ -1390,12 +1540,12 @@ describe('answering in the conversation', () => {
   test('Deny takes a typed note in the conversation, which esc sets aside and enter sends', async () => {
     const connection = new FakeConnection();
     const app = await opened(permission, connection);
-    await press(app, '3');
+    await press(app, '4');
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
     await press(app, ESC);
     await eventually(() => expect(app.lastFrame()).not.toContain('Note for the agent'));
 
-    await press(app, '3');
+    await press(app, '4');
     app.stdin.write('Read it from the brief');
     await settle();
     await press(app, ENTER);

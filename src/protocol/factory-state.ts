@@ -22,6 +22,7 @@ import {
   type Artifact,
   type Repository,
   type Run,
+  type SkillsSetup,
   type TaskState,
 } from '../lifecycle/lifecycle.ts';
 import type { Tier } from '../models/routing.ts';
@@ -69,8 +70,12 @@ export type RunView = Pick<
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
 > & { maxTurns: number | null; tier: Tier | null; ticket: string | null };
 
-// `app` is null until the daemon has checked the App's installation.
-export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'> & { app: AppCheck | null };
+// `app` is null until the daemon has checked the App's installation, and
+// `skills` until it has checked the skill set's setup.
+export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'defaultPreset' | 'missing'> & {
+  app: AppCheck | null;
+  skills: SkillsSetup | null;
+};
 
 // A file or issue linked to its task, in the order captured.
 export type ArtifactView = Artifact;
@@ -168,8 +173,8 @@ function handoffView(sheet: HandoffSheet | null): HandoffView | null {
   return view;
 }
 
-export function repositoryView({ id, path, baseBranch, defaultPreset, missing, app }: Repository): RepositoryView {
-  return { id, path, baseBranch, defaultPreset, missing, app: app ? { ...app } : null };
+export function repositoryView({ id, path, baseBranch, defaultPreset, missing, app, skills }: Repository): RepositoryView {
+  return { id, path, baseBranch, defaultPreset, missing, app: app ? { ...app } : null, skills: skills ? { ...skills } : null };
 }
 
 // A patch sets or deletes the value at a path. The diff goes two levels deep
