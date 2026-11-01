@@ -22,10 +22,11 @@ import { writeRunGh } from '../github/run-gh.ts';
 import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import {
   allowedRules,
+  allowsByRules,
   artifactsOf,
   betweenIterations,
   BRIEF_REQUEST,
-  byRules,
+  coveredRequests,
   guard,
   initialLifecycle,
   isTerminal,
@@ -72,7 +73,7 @@ import {
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import type { Routes } from '../models/routing.ts';
-import { addOperatorRules, callWithRule, readAllowRules, uncovered, type ToolCall } from '../permissions/permissions.ts';
+import { addOperatorRules, readAllowRules, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
   appStages,
@@ -725,8 +726,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   function dispatch(action: LifecycleAction): Promise<Reply> {
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
-      if (action.type === 'answer' && byRules(action.permission) && action.permission.allow === 'always') {
-        return answerAlways({ ...action, permission: action.permission });
+      if (action.type === 'answer' && allowsByRules(action.permission) && action.permission.allow === 'always') {
+        return answerAlways(action.taskId, action.permission);
       }
       const refusal = await settle(action, new Set());
       if (refusal) return { ok: false, reason: refusal };
@@ -736,27 +737,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Allow always (ADR 0007): the answer's rules go into the operator's
-  // permissions file before the request is answered. If they can't, the
-  // answer fails with why, and the request stays open. Once they are in,
-  // every other open permission request the rules now cover is answered
-  // the same way, which lets its call through.
-  async function answerAlways(action: Extract<LifecycleAction, { type: 'answer' }> & { permission: RulesAnswer }): Promise<Reply> {
-    const { refusal } = reduce(lifecycle, action, clock.now(), routes());
+  // permissions file before the request is answered, so the Lifecycle first
+  // checks the answer without applying it. If the rules can't go in, the
+  // answer fails with why, and the request stays open. Once they are in, every
+  // other open permission request they now cover is answered the same way,
+  // and the calls runs hold behind other requests go back to the gate: each
+  // the rules cover is let through.
+  async function answerAlways(taskId: string, permission: RulesAnswer): Promise<Reply> {
+    const answer = { type: 'answer', taskId, permission } as const;
+    const { refusal } = reduce(lifecycle, answer, clock.now(), routes());
     if (refusal) return { ok: false, reason: refusal };
-    const { permission } = openRequest(lifecycle, lifecycle.tasks[action.taskId]!)!;
-    const rules = permission ? allowedRules(permission, action.permission) : [];
+    const rules = allowedRules(openRequest(lifecycle, lifecycle.tasks[taskId]!)!.permission!, permission);
     const problem = addOperatorRules(options.permissionsPath, rules);
     if (problem) return { ok: false, reason: `Allow always added no rules: ${problem}` };
-    const refused = await settle(action, new Set());
+    const refused = await settle(answer, new Set());
     if (refused) return { ok: false, reason: refused };
-    const allowRules = readAllowRules(options.permissionsPath).rules;
-    for (const request of Object.values(lifecycle.requests)) {
-      if (request.status !== 'open' || !request.permission || !request.taskId) continue;
-      const { id, summary, rule } = request.permission;
-      const taskRules = lifecycle.tasks[request.taskId]!.allowRules ?? [];
-      const call = { id, summary, ...callWithRule(rule) };
-      if (uncovered([...allowRules, ...taskRules], call).length > 0) continue;
-      await settle({ type: 'answer', taskId: request.taskId, permission: { allow: 'always', rules } }, new Set());
+    for (const request of coveredRequests(lifecycle, readAllowRules(options.permissionsPath).rules)) {
+      // Covered, each is answered as surely as the operator's own answer was.
+      await settle({ type: 'answer', taskId: request.taskId!, permission: { allow: 'always', rules } }, new Set());
+    }
+    for (const [runId, calls] of [...held]) {
+      held.delete(runId);
+      for (const call of calls) gate(runId, call);
     }
     return { ok: true };
   }

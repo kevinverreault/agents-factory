@@ -10,7 +10,7 @@ import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../m
 import { issueRef } from '../artifacts/capture.ts';
 import type { Issue } from '../github/github.ts';
 import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
-import { isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
+import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -942,10 +942,13 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (request.permission && !validPermissionAnswer(action.permission)) {
         return 'Allow it once, for this task or always, or deny it with a note for the agent.';
       }
-      const rules = byRules(action.permission) ? action.permission.rules : undefined;
-      if (rules !== undefined && !(Array.isArray(rules) && rules.length > 0 && rules.every(isRule))) {
-        const answer = (action.permission as RulesAnswer).allow === 'task' ? 'Allow for this task' : 'Allow always';
-        return `${answer} needs at least one rule, each such as \`Bash(sed -i *)\`.`;
+      if (allowsByRules(action.permission)) {
+        const { allow, rules } = action.permission;
+        if (rules !== undefined && !(Array.isArray(rules) && rules.length > 0 && rules.every(isRule))) {
+          return `${BY_RULES[allow].answer} needs at least one rule, each such as \`Bash(sed -i *)\`.`;
+        }
+        // Requests stored before they named their call have no rule to add.
+        if (allow === 'always' && !request.permission) return 'This request doesn’t name its call: allow it once or for this task.';
       }
       const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
       return answered ? null : 'Answer every question on the card.';
@@ -1041,12 +1044,29 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
 // Allow once, for the task or always, or deny with a note that isn't blank.
 function validPermissionAnswer(answer: PermissionAnswer | undefined): boolean {
   if (!answer) return false;
-  return 'deny' in answer ? typeof answer.deny === 'string' && answer.deny.trim() !== '' : answer.allow === 'once' || byRules(answer);
+  return 'deny' in answer ? typeof answer.deny === 'string' && answer.deny.trim() !== '' : answer.allow === 'once' || allowsByRules(answer);
 }
 
 // Whether the answer allows by rules: for the rest of the task, or always.
-export function byRules(answer: PermissionAnswer | undefined): answer is RulesAnswer {
+export function allowsByRules(answer: PermissionAnswer | undefined): answer is RulesAnswer {
   return !!answer && 'allow' in answer && (answer.allow === 'task' || answer.allow === 'always');
+}
+
+// Each answer by rules: what the operator chose, and how long its rules hold.
+const BY_RULES = {
+  task: { answer: 'Allow for this task', holds: 'for the rest of this task' },
+  always: { answer: 'Allow always', holds: 'from now on, in every task,' },
+} as const;
+
+// The open permission requests whose calls the rules, with their task's own,
+// now cover: those an Allow always whose rules these are lets through.
+export function coveredRequests(state: Lifecycle, rules: readonly string[]): AttentionRequest[] {
+  return Object.values(state.requests).filter((request) => {
+    if (request.status !== 'open' || !request.permission || !request.taskId) return false;
+    const { id, summary, rule } = request.permission;
+    const taskRules = state.tasks[request.taskId]!.allowRules ?? [];
+    return uncovered([...rules, ...taskRules], { id, summary, ...callWithRule(rule) }).length === 0;
+  });
 }
 
 // Which of the operator's answers lets the call through, if any: the task's
@@ -1257,7 +1277,7 @@ function openingWithVerdict(permission: Permission, answer: PermissionAnswer): s
       ? `denied ${tool}: ${summary}. Their note: ${answer.deny.trim()}`
       : answer.allow === 'once'
         ? `allowed ${tool} once: ${summary}. Make that call again now.`
-        : `allowed ${tool}: ${summary}, and ${answer.allow === 'task' ? 'for the rest of this task' : 'from now on, in every task,'} the calls these rules cover: ${allowedRules(permission, answer).join(', ')}.`;
+        : `allowed ${tool}: ${summary}, and ${BY_RULES[answer.allow].holds} the calls these rules cover: ${allowedRules(permission, answer).join(', ')}.`;
   return `While this conversation was parked, the operator ${verdict}
 
 ${AFK_RESUME}`;
@@ -1469,7 +1489,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'answer':
       request!.status = 'answered';
       // Allow always's rules are the operator's file's, which the daemon added them to.
-      if (request!.permission && byRules(action.permission) && action.permission.allow === 'task') {
+      if (request!.permission && allowsByRules(action.permission) && action.permission.allow === 'task') {
         const rules = (task.allowRules ??= []);
         for (const rule of allowedRules(request!.permission, action.permission)) if (!rules.includes(rule)) rules.push(rule);
       }

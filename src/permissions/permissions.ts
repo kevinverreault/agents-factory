@@ -5,7 +5,7 @@
 // are best-effort, not a security boundary: L1 guards against accidents.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, posix } from 'node:path';
-import { Document, isMap, isSeq, parseDocument } from 'yaml';
+import { Document, isMap, isScalar, isSeq, parseDocument } from 'yaml';
 
 // A tool call Claude Code asked about. `summary` is what it is pointed at, on one line.
 export type ToolCall = { id: string; tool: string; input: Record<string, unknown>; summary: string };
@@ -54,20 +54,8 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
 // the factory's allow list and the operator's permissions file at `path`, as
 // the file reads now. `error` says why the file grants nothing, when it doesn't.
 export function readAllowRules(path: string): { rules: string[]; error: string | null } {
-  const operator = readOperatorRules(path);
+  const operator = readOperatorFile(path);
   return { rules: [...FACTORY_ALLOW_LIST, ...operator.rules], error: operator.error };
-}
-
-// The operator's own allow rules, from their permissions file:
-//
-//   allow:
-//     - Bash(make *)
-//
-// No file grants nothing. `error` says why a file that can't be read or
-// doesn't hold a list of rules grants nothing either.
-function readOperatorRules(path: string): { rules: string[]; error: string | null } {
-  const { rules, error } = readOperatorFile(path);
-  return { rules, error };
 }
 
 // Adds the rules to the operator's permissions file for Allow always,
@@ -78,11 +66,21 @@ export function addOperatorRules(path: string, rules: readonly string[]): string
   const { document = new Document(), rules: present, error } = readOperatorFile(path);
   if (error) return error;
   if (document.contents !== null && !isMap(document.contents)) return mustHoldRules(path);
-  const added = [...new Set(rules.map((rule) => rule.trim()))].filter((rule) => !present.includes(rule));
+  const held = present.map((rule) => rule.trim());
+  const added = [...new Set(rules.map((rule) => rule.trim()))].filter((rule) => !held.includes(rule));
   if (added.length === 0) return null;
-  const allow = document.get('allow');
+  const allow = document.get('allow', true);
+  // A list named elsewhere (`allow: *mine`) would lose its rules if replaced.
+  if (!isSeq(allow) && allow !== undefined && !(isScalar(allow) && allow.value === null)) {
+    return `${path} names its \`allow:\` list elsewhere, so the factory can’t add to it: add the rules there by hand.`;
+  }
   if (isSeq(allow)) for (const rule of added) allow.add(rule);
-  else document.set('allow', added);
+  else {
+    // An empty `allow:` keeps its comment.
+    const list = document.createNode(added);
+    list.comment = allow?.comment;
+    document.set('allow', list);
+  }
   try {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, document.toString());
@@ -92,8 +90,14 @@ export function addOperatorRules(path: string, rules: readonly string[]): string
   return null;
 }
 
-// The operator's permissions file, unless it is missing, with the rules it
-// allows, or why it allows none.
+// The operator's permissions file, unless it is missing, with its own allow
+// rules:
+//
+//   allow:
+//     - Bash(make *)
+//
+// No file grants nothing. `error` says why a file that can't be read or
+// doesn't hold a list of rules grants nothing either.
 function readOperatorFile(path: string): { document?: Document; rules: string[]; error: string | null } {
   let text: string;
   try {
