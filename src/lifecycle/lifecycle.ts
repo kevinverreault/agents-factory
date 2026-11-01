@@ -141,6 +141,11 @@ export const BRANCH_CHOICES: readonly BranchChoice[] = ['keep', 'discard'];
 // A ticket the task closed, with the commits that did its work.
 export type ClosedTicket = { ref: string; commits: string[] };
 
+// What a `fix-once` review stage's runs found, whether its one fix pass
+// has begun, and what is left over: everything found, until the fix pass
+// reports what it left unfixed.
+export type Findings = { found: string[]; fixPass: boolean; leftOver: string[] };
+
 // The label of the tickets a Ralph loop works.
 export const READY_FOR_AGENT = 'ready-for-agent';
 
@@ -213,6 +218,12 @@ export type Task = {
   loop?: Loop | null;
   // The tickets it closed: those ADR 0006's cancel cascade is to reopen.
   closedTickets?: ClosedTicket[];
+  // Its review's findings, once a `fix-once` review stage's run reported
+  // some. They live on the task, so a run parked meanwhile loses none.
+  findings?: Findings | null;
+  // The PR body, once its `artifact:pr-body` stage wrote it: the agent's
+  // text with what the factory adds (ADR 0006).
+  prBody?: string | null;
   // True once the operator requested changes on it in review: past its last
   // stage, each of its runs that completes puts it back In review.
   changesRequested?: boolean;
@@ -404,7 +415,12 @@ export type RunEvent =
   // The agent called `propose_handoff`.
   | { type: 'handoffProposed'; runId: string; reason: string }
   // The HITL run wrote the handoff brief the factory asked it for.
-  | { type: 'briefWritten'; runId: string; brief: Brief };
+  | { type: 'briefWritten'; runId: string; brief: Brief }
+  // A review stage's AFK run reported its findings through
+  // `report_findings`; its fix pass reports those it left unfixed.
+  | { type: 'findingsReported'; runId: string; findings: string[] }
+  // A PR body stage's AFK run wrote the body through `write_pr_body`.
+  | { type: 'prBodyWritten'; runId: string; body: string };
 
 // What artifact capture found after a tool call of the task's latest run,
 // with whether each of the task's files (old and new) is committed. Hooks
@@ -660,12 +676,9 @@ function unmetExit(state: Lifecycle, task: Task, stage: Stage): string | null {
   // A loop with no ticket set runs once, and its run completing ends it.
   if (stage.exit === 'tickets-closed' && !ticketSources(state, task)) return null;
   const kind = /^artifact:(.*)$/.exec(stage.exit)?.[1];
-  const why =
-    kind === undefined
-      ? `the factory can’t tell yet whether ${stage.exit} holds`
-      : issuesOfKind(state, task, kind).length === 0
-        ? `${task.id} has no ${kind} yet`
-        : null;
+  // The PR body is the one artifact kind that is no issue.
+  const made = kind === 'pr-body' ? !!task.prBody : !!kind && issuesOfKind(state, task, kind).length > 0;
+  const why = kind === undefined ? `the factory can’t tell yet whether ${stage.exit} holds` : made ? null : `${task.id} has no ${kind} yet`;
   return why && `${stage.id}’s exit, ${stage.exit}, doesn’t hold: ${why}.`;
 }
 
@@ -674,6 +687,7 @@ function unmetExit(state: Lifecycle, task: Task, stage: Stage): string | null {
 // refs that stand for that kind. Null when it has none.
 function argValue(state: Lifecycle, task: Task, variable: string): string | null {
   if (variable === 'prompt') return task.inputs?.prompt.trim() || null;
+  if (variable === 'artifacts.pr-body') return task.prBody ?? null;
   return issuesFor(state, task, variable.slice('artifacts.'.length)).join(' ') || null;
 }
 
@@ -724,8 +738,80 @@ function advanceFrom(state: Lifecycle, task: Task, from: Stage, run: Run | undef
   if ('missing' in filled) return blocked(cantFill(task, to, filled.missing));
   // Queued as work continuing something in flight, for the scheduler.
   enterStage(task, to, sessionId);
-  if (!enterLoop(state, task, to)) task.resumeWith = filled.opening;
+  if (!enterLoop(state, task, to)) task.resumeWith = stageOpening(task, to, filled.opening);
   task.state = 'queued';
+}
+
+// What a stage's runs report to the factory through its tools: a
+// `fix-once` review its findings, and a PR body stage the body. A run is
+// given only the tools its stage reports through (ADR 0009).
+export type Report = 'findings' | 'pr-body';
+
+export function stageReports(stage: Stage | undefined): Report[] {
+  return [...(stage?.on_findings === 'fix-once' ? ['findings' as const] : []), ...(stage?.exit === 'artifact:pr-body' ? ['pr-body' as const] : [])];
+}
+
+// What the AFK run reports through the factory's tools, by its stage.
+export function runReports(task: Task, run: Run): Report[] {
+  return run.mode === 'AFK' ? stageReports(stageOf(task, run.stage)) : [];
+}
+
+// A stage's opening with the factory context its runs need to report
+// through the factory's tools. A review in its fix pass, as after a
+// takeover, is told the findings to fix instead.
+function stageOpening(task: Task, stage: Stage, opening: string): string {
+  const reports = stageReports(stage);
+  const context = reports.includes('findings')
+    ? task.findings?.fixPass
+      ? fixContext(task)
+      : 'Report every finding of this review to the factory through its report_findings tool before you end, one finding per item; ' +
+        'with none, don’t call it. Don’t fix them yourself: the factory runs one fix pass on what you report.'
+    : reports.includes('pr-body')
+      ? 'Write the PR body through the factory’s write_pr_body tool before you end: the factory opens the PR with it. ' +
+        'Leave out the tickets this task closed and the review findings left over: the factory adds those itself.'
+      : null;
+  return context ? `${opening}\n\n## Factory context\n${context}` : opening;
+}
+
+// What a `fix-once` review's one fix pass is told: the findings its review
+// reported. If it reports nothing back, every one is left over.
+function fixContext(task: Task): string {
+  return (
+    `The review found:\n\n${bulleted(task.findings!.found)}\n\n` +
+    `Fix them now, unattended, and commit the fixes to the task branch ${task.worktree?.branch}. This is the review’s only fix pass: ` +
+    'before you end, report the findings you leave unfixed through the factory’s report_findings tool, with none if you fixed them all. ' +
+    'The factory puts those in the PR body.'
+  );
+}
+
+function bulleted(items: string[]): string {
+  return items.map((item) => `- ${item}`).join('\n');
+}
+
+// GitHub's closing keywords, before an issue ref.
+const CLOSING = String.raw`(?<![\w-])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+`;
+
+// The PR body from the agent's `body`: its closing keywords on the tickets
+// the task closed turned to `Implements`, so merging doesn't close them
+// again (ADR 0006), then each closed ticket it doesn't say it implements,
+// and the review findings the fix pass left over.
+function prBody(task: Task, body: string): string {
+  let text = body.trim();
+  const implemented: string[] = [];
+  for (const { ref } of task.closedTickets ?? []) {
+    const [repo, number] = ref.split('#');
+    const cited = repo!.toLowerCase() === task.repo.toLowerCase() ? `#${number}` : ref;
+    const forms = [cited, ref, `https://github.com/${repo}/issues/${number}`].map((form) => form.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'));
+    const any = `(${forms.join('|')})(?!\\d)`;
+    text = text.replace(new RegExp(CLOSING + any, 'gi'), 'Implements $1');
+    if (!new RegExp(String.raw`\bImplements\s+${any}`, 'i').test(text)) implemented.push(`Implements ${cited}`);
+  }
+  const leftOver = task.findings?.leftOver ?? [];
+  return [
+    text,
+    ...(implemented.length ? [`## Tickets\n\n${implemented.join('\n')}`] : []),
+    ...(leftOver.length ? [`## Review findings left over\n\n${bulleted(leftOver)}`] : []),
+  ].join('\n\n');
 }
 
 // What a Ralph loop's iteration on `ticket` opens on (ADR 0006): its stage's
@@ -1013,6 +1099,10 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'runFailed':
     case 'turnEnded':
       return null;
+    case 'findingsReported':
+      return runReports(task, state.runs[action.runId]!).includes('findings') ? null : 'Only a run of a fix-once review stage reports findings.';
+    case 'prBodyWritten':
+      return runReports(task, state.runs[action.runId]!).includes('pr-body') ? null : 'Only a run of a stage whose exit is artifact:pr-body writes the PR body.';
     case 'artifactsSeen':
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
     case 'questionAsked':
@@ -1495,7 +1585,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const loops = !!to && enterLoop(state, task, to);
       if (loops && closing) task.loop = closing;
       const opening = to && fillOpening(to, (variable) => argValue(state, task, variable) ?? '');
-      if (!loops) task.resumeWith = opening && 'opening' in opening && opening.opening ? `${opening.opening}\n\n${task.goal}` : task.goal;
+      if (!loops) task.resumeWith = opening && 'opening' in opening && opening.opening ? `${stageOpening(task, to, opening.opening)}\n\n${task.goal}` : task.goal;
       if (action.continueAs === 'fresh') {
         task.sessionId = action.sessionId;
         task.newSession = true;
@@ -1688,11 +1778,31 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         else raise(state, task, run, 'failure', false, `The iteration on ${run!.ticket} made no new commit on ${task.worktree?.branch}, so the ticket stays open.`, at);
         break;
       }
+      if (task.findings?.found.length && !task.findings.fixPass && stageReports(from).includes('findings')) {
+        // The review's one fix pass, resuming its session on what it found.
+        // Once a run of it completes, the stage moves on whatever is left
+        // over: never a loop.
+        task.findings.fixPass = true;
+        task.resumeWith = fixContext(task);
+        task.state = 'queued';
+        break;
+      }
       const unmet = unmetExit(state, task, from);
       if (unmet) raise(state, task, run, 'stage-blocked', false, unmet, at);
       else advanceFrom(state, task, from, run, action.sessionId, at);
       break;
     }
+    case 'findingsReported': {
+      // The review's report replaces what it reported before; the fix
+      // pass's says what is left over.
+      const findings = action.findings.map((finding) => finding.trim()).filter(Boolean);
+      if (task.findings?.fixPass) task.findings.leftOver = findings;
+      else task.findings = { found: findings, fixPass: false, leftOver: findings };
+      break;
+    }
+    case 'prBodyWritten':
+      task.prBody = prBody(task, action.body);
+      break;
     case 'runFailed':
       // The request a suspended run waited on can't resume it any more.
       if (request?.holdsRun) request.status = 'superseded';

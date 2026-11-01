@@ -29,9 +29,7 @@ export const INTERPRETERS: Readonly<Record<string, { inline: string[]; harmless:
 // accidents, not malice (ADR 0007). It is these rules, which Claude Code
 // matches itself, and the factory's commands below, which no rule's glob
 // can say. Edits in the worktree are accepted by the run's permission mode,
-// and Claude Code runs what it considers read-only without asking. The
-// factory's MCP tools join once L1 runs get the factory server, gated on
-// its provenance.
+// and Claude Code runs what it considers read-only without asking.
 export const FACTORY_ALLOW_LIST: readonly string[] = [
   // Read-only tools, and the agent's own bookkeeping.
   'Read',
@@ -45,6 +43,9 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
   'Skill',
   'WebFetch',
   'WebSearch',
+  // The factory's own MCP tools, which only report to the daemon. An L1 run
+  // has no MCP server but the factory's, so none other answers to the name.
+  'mcp__factory',
   // Read-only and local-commit git.
   ...['status', 'diff', 'log', 'show', 'blame', 'ls-files', 'rev-parse', 'grep', 'add', 'commit'].map((verb) => `Bash(git ${verb} *)`),
   'Bash(git branch --show-current)',

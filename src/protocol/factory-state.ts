@@ -57,6 +57,8 @@ export type TaskView = {
   handoff: HandoffView | null;
   // The tickets its Ralph loop closed, with their commits.
   closedTickets: ClosedTicket[];
+  // Its PR body, once its PR body stage wrote it.
+  prBody: string | null;
   // While its cleanup, once it ended Done or Cancelled, hasn't finished, and why it last failed.
   cleanup: Cleanup | null;
   // Where its transcripts were archived once it ended.
@@ -119,6 +121,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
       closedTickets: structuredClone(task.closedTickets ?? []),
+      prBody: task.prBody ?? null,
       cleanup: task.cleanup ? { ...task.cleanup } : null,
       transcripts: task.transcripts ?? null,
     };
