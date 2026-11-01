@@ -6,7 +6,7 @@
 // asking; anything else raises a permission request that suspends its run,
 // answered Allow once, Allow for this task, Allow always, or Deny with a note.
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { FACTORY_ALLOW_LIST } from '../permissions/permissions.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -100,6 +100,163 @@ describe('a tool call the rules cover', () => {
   });
 });
 
+// What AFK runs reach for (#89): the calls Claude Code still asks about, which
+// the factory's own matcher lets through by what they do.
+describe('a call AFK runs reach for, which Claude Code still asks about', () => {
+  // Whether the gate lets each command through without asking, in the run's
+  // worktree, which `prepare` may fill first.
+  async function gated(
+    commands: readonly string[] | ((worktree: string) => readonly string[]),
+    prepare: (worktree: string) => void = () => {},
+  ): Promise<boolean[]> {
+    const { factory, operator, tui } = await attached();
+    // A launched AFK task runs guarded, in its own worktree.
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', prompt: '#39' });
+    await tui.until((state) => state.tasks.T1?.label === 'Running');
+    const worktree = factory.executor.started[0]!.cwd!;
+    prepare(worktree);
+    const asked = typeof commands === 'function' ? commands(worktree) : commands;
+    asked.forEach((command, index) => factory.executor.askPermission('R1', bash(`toolu_${index}`, command)));
+    await settled(operator);
+    const verdicts = factory.executor.verdicts('R1');
+    return asked.map((_, index) => verdicts[`toolu_${index}`]?.allow === true);
+  }
+
+  // The worktree as Git Bash names it, with `/d/` for `D:\`.
+  const bashPath = (path: string) => path.replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replaceAll('\\', '/');
+
+  test.each([
+    'git config core.autocrlf; cat .gitattributes 2>/dev/null; git diff notes.txt | head -5; ls; cat *.md 2>/dev/null | head -80',
+    'git config --get user.name',
+    'git config --list --show-origin',
+    'git config get core.autocrlf',
+  ])('a git config read runs without asking: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([true]);
+  });
+
+  test.each(['git config core.autocrlf false', 'git config --unset core.autocrlf', 'git config set core.autocrlf false'])(
+    'a git config write still asks: `%s`',
+    async (command) => {
+      expect(await gated([command])).toEqual([false]);
+    },
+  );
+
+  test('redirected into the worktree, or after a `cd` within it, it runs without asking', async () => {
+    const commands = (worktree: string) => [
+      'git config core.autocrlf > autocrlf.txt',
+      'git config core.autocrlf >> logs/config.log 2>&1',
+      `git config core.autocrlf > ${join(worktree, 'autocrlf.txt')}`,
+      `git config core.autocrlf > ${bashPath(worktree)}/autocrlf.txt`,
+      'cd src && git config core.autocrlf > ../autocrlf.txt',
+      `cd ${bashPath(worktree)}/src; git config core.autocrlf`,
+      'cat > notes.md <<EOF\nan owl > a heron\nEOF',
+      "cat > notes.md <<'EOF'\n$(an owl, not a command)\nEOF",
+      'git config core.autocrlf 2>/dev/stderr',
+    ];
+    const folders = (worktree: string) => mkdirSync(join(worktree, 'src'), { recursive: true });
+    expect(await gated(commands, folders)).toEqual([true, true, true, true, true, true, true, true, true]);
+  });
+
+  test.each([
+    'git config core.autocrlf > ../autocrlf.txt',
+    'git config core.autocrlf > /tmp/autocrlf.txt',
+    'git config core.autocrlf > ~/autocrlf.txt',
+    'git config core.autocrlf > $HOME/autocrlf.txt',
+    'git config core.autocrlf > .git/hooks/pre-commit',
+    'cd src && git config core.autocrlf > ../../autocrlf.txt',
+    'cd .. && git config core.autocrlf',
+    'cd && git status',
+    'cd /tmp; ls',
+    'cd - && ls',
+    "cd nowhere; sed -i 's/owl/heron/' ../notes.txt",
+    'cd src & git config core.autocrlf > ../autocrlf.txt',
+    'cd src || git config core.autocrlf > ../autocrlf.txt',
+    'cat > notes.md <<EOF\n$(rm -rf ~)\nEOF',
+  ])('redirected or moved out of the worktree, it still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  test('installs from the lockfile, and npx of a binary the project installed, run without asking', async () => {
+    const commands = [
+      'npm ci 2>&1 | tail -5; npx vitest run 2>&1 | tail -30',
+      'npm ci --ignore-scripts',
+      'pnpm install --frozen-lockfile',
+      'pnpm i --frozen-lockfile',
+      'yarn install --immutable',
+      'npx prettier --check .',
+      'cd packages/web && npx astro build',
+    ];
+    const installed = (worktree: string) => {
+      for (const [dir, bin] of [
+        ['.', 'prettier'],
+        ['packages/web', 'astro'],
+      ]) {
+        mkdirSync(join(worktree, dir!, 'node_modules', '.bin'), { recursive: true });
+        writeFileSync(join(worktree, dir!, 'node_modules', '.bin', bin!), '');
+      }
+    };
+    expect(await gated(commands, installed)).toEqual([true, true, true, true, true, true, true]);
+  });
+
+  test.each([
+    'npm install left-pad',
+    'npm install',
+    'npm i -D left-pad',
+    'pnpm add left-pad',
+    'yarn add left-pad',
+    'pip install requests',
+    'python -m pip install requests',
+    'npx prettier --check .',
+    'npx --yes prettier --check .',
+    'npx -p left-pad prettier',
+  ])('an install the lockfile doesn’t pin still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  test('sed, reading anywhere or editing worktree files in place, runs without asking', async () => {
+    const commands = [
+      'sed -i "s/a heron/a grey heron/" notes.txt && npx tsc --noEmit 2>&1 | head',
+      "sed -i.bak -e 's/owl/heron/' -e 's/cat/dog/' src/a.ts src/b.ts",
+      "sed -ni '/owl/p' notes.txt",
+      "cd src && sed --in-place 's/owl/heron/' login.ts",
+      "sed -n '1,200p' notes.txt",
+      "sed 's/owl/heron/' ../elsewhere/notes.txt",
+    ];
+    expect(await gated(commands)).toEqual([true, true, true, true, true, true]);
+  });
+
+  test.each([
+    "sed -i 's/owl/heron/' ../elsewhere/notes.txt",
+    "sed -i 's/owl/heron/' /etc/hosts",
+    "sed -i 's/owl/heron/' notes.txt .git/config",
+    "sed -ie 's/owl/heron/' ~/notes.txt",
+    "sed -i 's/owl/heron/'",
+  ])('sed editing outside the worktree still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  test('python and node, on a worktree script, inline code or a heredoc, run without asking', async () => {
+    const commands = [
+      "python - <<'EOF'\np='notes.txt'\ns=open(p).read()\nopen(p,'w').write(s.replace('an owl again','an owl, again'))\nEOF",
+      'python3 -c "import json; print(json.load(open(\'package.json\'))[\'name\'])"',
+      'python -u scripts/generate.py --out build',
+      "node -e \"console.log(require('./package.json').name)\"",
+      "node --eval 'console.log(1)' && node -p 1+1",
+      'node scripts/build.mjs > build.log',
+      "node <<'EOF'\nconsole.log('an owl');\nEOF",
+      'cd scripts && py generate.py',
+    ];
+    expect(await gated(commands)).toEqual([true, true, true, true, true, true, true, true]);
+  });
+
+  test.each(['python ../elsewhere/generate.py', 'python /tmp/generate.py', 'node ~/build.js', 'python', 'python -m http.server', 'node --require ./hook.js build.js'])(
+    'an interpreter on anything else still asks: `%s`',
+    async (command) => {
+      expect(await gated([command])).toEqual([false]);
+    },
+  );
+});
+
 describe('a tool call no rule covers', () => {
   test('raises a permission request that suspends its run and frees its slot, saying what the call is', async () => {
     const { factory, operator, tui } = await attached();
@@ -161,14 +318,15 @@ describe('a tool call no rule covers', () => {
     await operator.send(afk('Fix the login bug'));
     await tui.until((state) => state.tasks.T1?.label === 'Running');
 
-    factory.executor.askPermission('R1', bash('toolu_1', 'node scripts/seed.js --fresh; python -c "import this"'));
+    // Ruby and Perl, which the factory's allow list doesn't run.
+    factory.executor.askPermission('R1', bash('toolu_1', 'ruby scripts/seed.rb --fresh; perl -e "print 1"'));
 
     const state = await tui.until((state) => state.attentionQueue.length === 1);
     expect(state.attentionQueue[0]).toMatchObject({
       permission: {
         proposed: [
-          { part: 'node scripts/seed.js --fresh', rule: 'Bash(node scripts/seed.js *)' },
-          { part: 'python -c "import this"', rule: 'Bash(python -c "import this")' },
+          { part: 'ruby scripts/seed.rb --fresh', rule: 'Bash(ruby scripts/seed.rb *)' },
+          { part: 'perl -e "print 1"', rule: 'Bash(perl -e "print 1")' },
         ],
       },
     });
@@ -195,7 +353,7 @@ describe('a tool call no rule covers', () => {
 
     factory.executor.askPermission('R1', bash('toolu_1', 'npm test 2>&1 && git status'));
     factory.executor.askPermission('R1', bash('toolu_2', 'ls & rm -rf build'));
-    factory.executor.askPermission('R1', bash('toolu_3', 'echo rm -rf build >nul.sh'));
+    factory.executor.askPermission('R1', bash('toolu_3', 'echo rm -rf build >../nul.sh'));
     await settled(operator);
 
     expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true } });
@@ -332,16 +490,16 @@ describe('answering a permission request', () => {
   test('Allow for this task covers a command that can’t be split exactly', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(afk('Fix the login bug'));
-    factory.executor.askPermission('R1', bash('toolu_1', 'npm ci && npm run build > build.log'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'npm install && npm run build > build.log'));
     await tui.until((state) => state.runs.R1?.status === 'suspended');
 
     await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task' } });
     await tui.until((state) => state.tasks.T1?.label === 'Running');
-    factory.executor.askPermission('R1', bash('toolu_2', 'npm ci && npm run build > build.log'));
+    factory.executor.askPermission('R1', bash('toolu_2', 'npm install && npm run build > build.log'));
     await settled(operator);
     expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_2: { allow: true } });
 
-    factory.executor.askPermission('R1', bash('toolu_3', 'npm ci && npm run build > /etc/build.log'));
+    factory.executor.askPermission('R1', bash('toolu_3', 'npm install && npm run build > /etc/build.log'));
     await tui.until((state) => state.tasks.T1?.label === 'Needs you');
   });
 
