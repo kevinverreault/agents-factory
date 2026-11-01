@@ -41,6 +41,11 @@ describe('pushing', () => {
     'echo $(git push)',
     'echo `git push`',
     'git send-pack origin main',
+    // The gate lets loops and conditions through when their commands are covered.
+    'for b in main next; do git push origin $b; done',
+    'if git diff --quiet; then git push; fi',
+    'git diff --quiet || { git commit -am wip && git push; }',
+    'while true; do ! git push; done',
   ])('`%s` is refused', async (command) => {
     expect(await bash(command)).toMatch(/the factory pushes for you/);
   });
@@ -64,6 +69,16 @@ describe('pushing', () => {
     "python - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'], check=True)\nEOF",
     "node <<'EOF'\nconst { execSync } = require('node:child_process');\nexecSync(\"git remote add fork https://github.com/me/widgets.git\");\nEOF",
     'npm test && python -c "import os; os.system(\'git push\')"',
+    // Perl's too, and a script the line writes from a heredoc, then runs.
+    'perl -e "system(\'git push origin main\')"',
+    "perl -pi -e 's/a/b/; system(\"git push\")' notes.txt",
+    "perl -ne 'system(\"git\", \"push\") if /x/' notes.txt",
+    "cat > /tmp/fix.py <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'])\nEOF\npython /tmp/fix.py",
+    "cat > /tmp/fix.py <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'])\nEOF\npython /tmp/./fix.py",
+    "cat > /tmp/fix.py <<'EOF'\nimport os\nos.system('git push')\nEOF\npython /tmp/fix.py; cat > /tmp/fix.py <<'EOF'\nprint(1)\nEOF",
+    "perl -e 'system qw(git push origin main)'",
+    "perl -e 'qx{git push}'",
+    'for c in push; do git $c; done',
   ])('`%s` is refused', async (command) => {
     expect(await bash(command)).toMatch(/the factory pushes for you/);
   });

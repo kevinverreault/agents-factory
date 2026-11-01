@@ -6,6 +6,7 @@
 // asking; anything else raises a permission request that suspends its run,
 // answered Allow once, Allow for this task, Allow always, or Deny with a note.
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { FACTORY_ALLOW_LIST } from '../permissions/permissions.ts';
@@ -255,6 +256,157 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
       expect(await gated([command])).toEqual([false]);
     },
   );
+
+  test.each([
+    'git merge-base HEAD origin/main',
+    'git merge-base --is-ancestor 86103d3 HEAD && echo "in HEAD" || echo "not in HEAD"',
+    'git stash list | head -0',
+    'git stash show -p',
+    'git rev-list --count main..HEAD; git cat-file -t HEAD; git ls-tree HEAD src; git describe --tags',
+    'git --version',
+    'git -c core.autocrlf=false diff --stat',
+    'git -c color.ui=never -c core.quotepath=off log --oneline -5',
+    "git branch -a --list '*factory*'",
+    'git branch -vv; git branch -r --contains HEAD',
+  ])('a git read runs without asking: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([true]);
+  });
+
+  test.each([
+    'git stash',
+    'git stash pop',
+    'git -c core.hooksPath=/tmp/hooks commit -m "Fix"',
+    'git -c core.autocrlf=false checkout -- src/a.ts',
+    'git branch feature',
+    'git branch -D feature',
+    'git branch --list feature -m other',
+  ])('a git command that writes still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  test.each([
+    'npx vitest run 2>&1 | grep -E "Error|error" | sort | uniq -c | head',
+    'sed -n 164p src/app.test.tsx | od -c | head -5',
+    'sort -u notes.txt -o sorted.txt',
+    'uniq notes.txt uniq.txt',
+    'cut -d: -f1 notes.txt | tr a-z A-Z | nl',
+    'find src -type f | grep -v node_modules | sort',
+    'find . -maxdepth 2 -iname "*CONTRIBUTING*" -o -maxdepth 2 -iname "*STANDARDS*"',
+  ])('a read-only filter, or one writing into the worktree, runs without asking: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([true]);
+  });
+
+  test.each([
+    'sort notes.txt -o ../sorted.txt',
+    'sort --output=/etc/hosts notes.txt',
+    'sort --compress-program=gzip notes.txt',
+    'sort --outp=../sorted.txt notes.txt',
+    'sort --o ../sorted.txt notes.txt',
+    'sort --compress-prog=sh -S 1 notes.txt',
+    'uniq notes.txt ../uniq.txt',
+    'find . -name "*.orig" -delete',
+    'find . -name "*.ts" -exec rm {} +',
+    'find . -fprint ../files.txt',
+  ])('a filter writing elsewhere, or a find that acts, still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  test.each([
+    `gh api repos/acme/widgets/issues/23/sub_issues --paginate -q '.[] | "\\(.number) \\(.state) \\(.title)"'`,
+    'gh api -X GET search/issues -f q="repo:acme/widgets is:open"',
+    'gh api --method=GET repos/acme/widgets/pulls -F per_page=100',
+  ])('a GitHub API read runs without asking: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([true]);
+  });
+
+  test.each([
+    'gh api repos/acme/widgets/issues -f title="A new issue"',
+    'gh api -X DELETE repos/acme/widgets/git/refs/heads/feature',
+    'gh api --input body.json repos/acme/widgets/issues',
+    "gh api graphql -f query='mutation { closeIssue }'",
+  ])('a GitHub API write still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  test('perl editing worktree files in place, or on inline code, runs without asking', async () => {
+    const commands = [
+      `perl -pi -e "s/\\x1b/\\\\\\\\x1b/g; s/'\\r'/'\\\\\\\\r'/g" src/app.test.tsx && grep -c x src/app.test.tsx`,
+      "perl -i.bak -pe 's/owl/heron/' notes.txt src/a.ts",
+      "perl -0777 -ne 'print $1 if /(owl)/' notes.txt",
+      "perl -lne 'print if /owl/' ../elsewhere/notes.txt",
+      'perl -e "print 1"',
+    ];
+    expect(await gated(commands)).toEqual([true, true, true, true, true]);
+  });
+
+  test.each([
+    "perl -pi -e 's/owl/heron/' ../elsewhere/notes.txt",
+    "perl -pi -e 's/owl/heron/' ~/.bashrc",
+    "perl -e 's/owl/heron/' -pi ../elsewhere/notes.txt",
+    'perl /tmp/fix.pl',
+    "perl -MLWP::Simple -e 'getprint(1)'",
+  ])(
+    'perl editing outside the worktree, or on anything else, still asks: `%s`',
+    async (command) => {
+      expect(await gated([command])).toEqual([false]);
+    },
+  );
+
+  // As run T9 wrote them: a script written to the temp folder, then run.
+  test('running a script the line wrote to the temp folder from a heredoc doesn’t ask', async () => {
+    const commands = [
+      "cat > /tmp/fix.py <<'EOF'\nimport sys\np=sys.argv[1]\ns=open(p).read()\nopen(p,'w').write(s.replace('owl','heron'))\nEOF\npython /tmp/fix.py notes.txt; grep -c heron notes.txt",
+      "cat > /tmp/edit.py <<'EOF'\nprint('an owl')\nEOF\npython /tmp/edit.py && npx tsc --noEmit 2>&1 | head",
+      `cat > ${join(tmpdir(), 'seed.mjs')} <<'EOF'\nconsole.log('an owl')\nEOF\nnode ${join(tmpdir(), 'seed.mjs')}`,
+    ];
+    expect(await gated(commands)).toEqual([true, true, true]);
+  });
+
+  test.each([
+    "cat > ~/.bashrc <<'EOF'\nalias ls=rm\nEOF",
+    "cat > /tmp/../etc/fix.py <<'EOF'\nprint(1)\nEOF\npython /tmp/../etc/fix.py",
+    "echo 'print(1)' > /tmp/fix.py; python /tmp/fix.py",
+    "python /tmp/fix.py; cat > /tmp/fix.py <<'EOF'\nprint(1)\nEOF",
+    "cat > /tmp/fix.py <<'EOF'\nprint(1)\nEOF\nruby /tmp/fix.py",
+    "cat >> /tmp/fix.py <<'EOF'\nprint(1)\nEOF\npython /tmp/fix.py",
+    "if false; then cat > /tmp/fix.py <<'EOF'\nprint(1)\nEOF\nfi; python /tmp/fix.py",
+  ])('a script written elsewhere, or not from the line’s heredoc, still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  // As runs T8 and T9 wrote them: a loop over files, by name or through a variable.
+  test('a loop or a condition whose commands are covered runs without asking', async () => {
+    const commands = [
+      "for f in src/a.ts src/b.ts; do sed -i 's/\\r$//' $f; done; git diff --stat",
+      'FILES="src/a.ts src/b.ts"\nfor f in $FILES; do sed -i \'s/\\r$//\' "$f"; done\ngit diff --stat -- $FILES',
+      'FILES="src/a.ts src/b.ts"\ngit add $FILES && git commit -q -m "Normalize line endings"',
+      'for f in src/*.ts\ndo\n  wc -l "$f"\ndone > counts.txt',
+      'if git diff --quiet; then echo clean; else git status --short; fi',
+      'while git diff --quiet; do git log -1; done',
+      '{ git status; git log -1; } | head',
+    ];
+    expect(await gated(commands)).toEqual([true, true, true, true, true, true, true]);
+  });
+
+  test.each([
+    "for f in src/a.ts ../elsewhere/b.ts; do sed -i 's/owl/heron/' $f; done",
+    "for f in $(git ls-files); do sed -i 's/owl/heron/' $f; done",
+    "while read -r f; do sed -i 's/owl/heron/' \"$f\"; done < files.txt",
+    'for d in src lib; do cd $d && ls; done',
+    'if true; then cd src; fi; sed -i "s/owl/heron/" ../notes.txt',
+    'for f in a.ts; do npm publish; done',
+    'for f in a.ts; do ls $f; done > ../counts.txt',
+    'for f in a.ts; do ls $f',
+    // A variable the line may or may not set as it reads.
+    'D=/c/Windows; true || D=src; echo x > $D/evil',
+    'D=/c/Windows; if test -e nope; then D=src; fi; sed -i s/a/b/ $D/win.ini',
+    'D=/c/Windows; for f in; do D=src; done; echo x > $D/evil',
+    'D=/c/Windows; D=src | true; echo x > $D/evil',
+    'for f in src/a.ts; do f=../evil; sed -i s/a/b/ $f; done',
+    "D=a/b/c; echo x > '$D'/../../evil",
+  ])('a loop or a condition with a command no rule covers still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
 });
 
 describe('a tool call no rule covers', () => {
@@ -318,15 +470,15 @@ describe('a tool call no rule covers', () => {
     await operator.send(afk('Fix the login bug'));
     await tui.until((state) => state.tasks.T1?.label === 'Running');
 
-    // Ruby and Perl, which the factory's allow list doesn't run.
-    factory.executor.askPermission('R1', bash('toolu_1', 'ruby scripts/seed.rb --fresh; perl -e "print 1"'));
+    // Ruby, which the factory's allow list doesn't run.
+    factory.executor.askPermission('R1', bash('toolu_1', 'ruby scripts/seed.rb --fresh; ruby -e "print 1"'));
 
     const state = await tui.until((state) => state.attentionQueue.length === 1);
     expect(state.attentionQueue[0]).toMatchObject({
       permission: {
         proposed: [
           { part: 'ruby scripts/seed.rb --fresh', rule: 'Bash(ruby scripts/seed.rb *)' },
-          { part: 'perl -e "print 1"', rule: 'Bash(perl -e "print 1")' },
+          { part: 'ruby -e "print 1"', rule: 'Bash(ruby -e "print 1")' },
         ],
       },
     });
