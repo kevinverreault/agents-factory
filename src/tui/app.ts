@@ -115,7 +115,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     (input, key) => {
       if (answering && !item) setAnswering(false);
       else if (answering) {
-        if (answers.note !== null || answers.confirm !== null) answers.key(input, key);
+        if (answers.form !== null || answers.confirm !== null) answers.key(input, key);
         else if (key.escape) setAnswering(false);
         else if (key.upArrow) move(-1);
         else if (key.downArrow) move(1);
@@ -167,7 +167,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       : tab === 'tasks'
         ? h(TaskList, { tasks, cursor })
         : h(NeedsYouList, { state, cursor }),
-    state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, note: answers.note, confirm: answers.confirm }) : null,
+    state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
 }

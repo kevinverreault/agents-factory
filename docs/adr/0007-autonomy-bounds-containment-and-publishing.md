@@ -23,6 +23,8 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
 
   Anything else reaches `canUseTool` and raises a **permission request**, an **attention request** that suspends the run. The operator answers Allow once, Allow for this task (stored on the task), or Deny with a note.
 
+  A request names only the parts of a chained command that no rule covers. Allow once allows the exact call, once. Allow for this task proposes one pattern per uncovered part, at program-plus-subcommand breadth (`Bash(sed -i *)`), which the operator can widen or narrow before confirming. The task's rules then match like any other rules, so the next similar call runs without asking. A command that can't be split (it substitutes or redirects to a file) gets its exact command as its rule.
+
 - **No repo scope for permissions.** Allow rules and extra L2 egress hosts come from the built-in list, the user file and the task, never from the target repo. A repo you clone could otherwise grant its own runs permissions. A child task gets a frozen copy of its parent's task rules and egress hosts at spawn, and its level stays ≤ its parent's.
 
 - **L2 asks no permissions.** Questions still reach the operator, because `AskUserQuestion` goes through `canUseTool` in every mode. Egress denials are logged on the run. When a run fails, its failure request lists the denied hosts, with "allow host for this task and retry".

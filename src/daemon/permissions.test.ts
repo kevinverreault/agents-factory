@@ -96,10 +96,36 @@ describe('a tool call no rule covers', () => {
         holdsRun: true,
         reason: 'Bash: npm publish',
         question: null,
-        permission: { id: 'toolu_1', tool: 'Bash', summary: 'npm publish', rule: 'Bash(npm publish)' },
+        permission: {
+          id: 'toolu_1',
+          tool: 'Bash',
+          summary: 'npm publish',
+          rule: 'Bash(npm publish)',
+          uncovered: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
+        },
       },
     ]);
     expect(factory.executor.verdicts('R1')).toEqual({});
+  });
+
+  test('chained, it names only the parts no rule covers, each with the pattern Allow for this task proposes', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    await tui.until((state) => state.tasks.T1?.label === 'Running');
+
+    factory.executor.askPermission('R1', bash('toolu_1', "npm install zod && sed -i 's/a/b/' src/a.ts && npm test && sed -i 's/c/d/' src/b.ts"));
+
+    const state = await tui.until((state) => state.attentionQueue.length === 1);
+    expect(state.attentionQueue[0]).toMatchObject({
+      reason: "Bash: npm install zod · sed -i 's/a/b/' src/a.ts · sed -i 's/c/d/' src/b.ts",
+      permission: {
+        rule: "Bash(npm install zod && sed -i 's/a/b/' src/a.ts && npm test && sed -i 's/c/d/' src/b.ts)",
+        uncovered: [
+          { part: 'npm install zod', rule: 'Bash(npm install *)' },
+          { part: "sed -i 's/a/b/' src/a.ts", rule: 'Bash(sed -i *)' },
+        ],
+      },
+    });
   });
 
   test('a permissions file that can’t be read grants nothing, and the request says why', async () => {
@@ -188,7 +214,7 @@ describe('answering a permission request', () => {
 
     expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task' } })).toEqual({ ok: true });
     await tui.until((state) => state.tasks.T1?.label === 'Running');
-    expect(tui.state().tasks.T1?.allowRules).toEqual(['Bash(npm publish)']);
+    expect(tui.state().tasks.T1?.allowRules).toEqual(['Bash(npm publish *)']);
 
     factory.executor.askPermission('R1', bash('toolu_2', 'npm publish'));
     factory.executor.report('R1', { type: 'runCompleted' });
@@ -204,7 +230,55 @@ describe('answering a permission request', () => {
     expect(rows(tui.state())).toEqual(['T2 permission']);
   });
 
-  test('Allow for this task covers exactly that call, however it is chained', async () => {
+  test('Allow for this task adds the rules the operator confirms, which then cover like calls, alone or chained, in later runs too', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', "npm test && sed -i 's/a/b/' src/a.ts"));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: ['Bash(sed -i *)'] } })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.label === 'Running');
+    expect(tui.state().tasks.T1?.allowRules).toEqual(['Bash(sed -i *)']);
+
+    factory.executor.askPermission('R1', bash('toolu_2', "sed -i 's/x/y/' src/b.ts"));
+    factory.executor.askPermission('R1', bash('toolu_3', "git status && sed -i -e 's/p/q/' src/c.ts 2>&1 | head -5"));
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await operator.send({ type: 'requestChanges', taskId: 'T1', comments: 'Tighten it up.' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    factory.executor.askPermission('R2', bash('toolu_4', "sed -i 's/m/n/' src/d.ts; npm test"));
+    await settled(operator);
+    expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_2: { allow: true }, toolu_3: { allow: true } });
+    expect(factory.executor.verdicts('R2')).toEqual({ toolu_4: { allow: true } });
+
+    factory.executor.askPermission('R2', bash('toolu_5', "sed 's/a/b/' src/a.ts > out.ts"));
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+  });
+
+  test('Allow for this task with no rules adds the ones the request proposes', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'npm install zod && npm run build && docker build -t widgets .'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+
+    await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task' } });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Running');
+    expect(state.tasks.T1?.allowRules).toEqual(['Bash(npm install *)', 'Bash(docker build *)']);
+  });
+
+  test('Allow for this task refuses rules that aren’t rules', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'npm publish'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+
+    const refusal = { ok: false, reason: 'Allow for this task needs at least one rule, each such as `Bash(sed -i *)`.' };
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: [] } })).toEqual(refusal);
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: ['Bash(npm publish *)', ' '] } })).toEqual(refusal);
+    expect(tui.state().tasks.T1?.label).toBe('Needs you');
+  });
+
+  test('Allow for this task covers a command that can’t be split exactly', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(afk('Fix the login bug'));
     factory.executor.askPermission('R1', bash('toolu_1', 'npm ci && npm run build > build.log'));
@@ -264,6 +338,17 @@ describe('answering a permission request whose run parked', () => {
     await tui.until((state) => state.tasks.T1?.label === 'Needs you');
   });
 
+  test('Allow once lets through that exact call only, not a like one', async () => {
+    const { factory, operator, tui } = await parked();
+    await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'once' } });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+
+    factory.executor.askPermission('R2', bash('toolu_2', 'npm publish --tag next'));
+
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(factory.executor.verdicts('R2')).toEqual({});
+  });
+
   test('Allow once is the next run’s only: a later run that makes the call asks again', async () => {
     const { factory, operator, tui } = await parked();
     await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'once' } });
@@ -292,15 +377,15 @@ describe('answering a permission request whose run parked', () => {
     expect(factory.executor.started.find((run) => run.runId === taken.tasks.T1!.liveRunId)).toMatchObject({ mode: 'HITL', firstMessage: null });
   });
 
-  test('Allow for this task opens the next run on it, with the rule on the task', async () => {
+  test('Allow for this task opens the next run on it, with its rules on the task', async () => {
     const { factory, operator, tui } = await parked();
 
-    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task' } })).toEqual({ ok: true });
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: ['Bash(npm *)'] } })).toEqual({ ok: true });
 
     const state = await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
-    expect(state.tasks.T1?.allowRules).toEqual(['Bash(npm publish)']);
+    expect(state.tasks.T1?.allowRules).toEqual(['Bash(npm *)']);
     expect(opening(factory)).toBe(
-      'While this conversation was parked, the operator allowed Bash for the rest of this task: npm publish.\n\n' +
+      'While this conversation was parked, the operator allowed Bash: npm publish, and for the rest of this task the calls these rules cover: Bash(npm *).\n\n' +
         'Carry on, unattended, from where this conversation left off.',
     );
   });
