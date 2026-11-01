@@ -4,6 +4,7 @@
 // Rules use Claude Code's syntax: `Tool`, or `Tool(specifier)`. Bash rules
 // are best-effort, not a security boundary: L1 guards against accidents.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, posix } from 'node:path';
 import { Document, isMap, isScalar, isSeq, parseDocument } from 'yaml';
 import { readCommandLine, type SimpleCommand } from './shell.ts';
@@ -14,15 +15,22 @@ export type ToolCall = { id: string; tool: string; input: Record<string, unknown
 // The options that read git config and never write it.
 const CONFIG_READS = ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '-l', '--list', '--get-color', '--get-colorbool'];
 
-// Python and Node, by the options that run inline code and those harmless
-// before a script. The hard denies read the inline code for a push.
-const PYTHON = { inline: ['-c'], harmless: /^-[uBIEsSqOv]+$/ };
-export const INTERPRETERS: Readonly<Record<string, { inline: string[]; harmless: RegExp }>> = {
+// Python, Node and Perl, by the options that run inline code, those harmless
+// before a script, and Perl's that end in one of them (`-pe`) or edit the
+// files after the code in place (`-pi`). The hard denies read the inline
+// code for a push.
+type Interpreter = { inline: string[]; harmless: RegExp; clustered?: RegExp; inPlace?: RegExp };
+const PYTHON: Interpreter = { inline: ['-c'], harmless: /^-[uBIEsSqOv]+$/ };
+export const INTERPRETERS: Readonly<Record<string, Interpreter>> = {
   python: PYTHON,
   python3: PYTHON,
   py: PYTHON,
   node: { inline: ['-e', '--eval', '-p', '--print'], harmless: /^--(no-warnings|enable-source-maps|experimental-strip-types)$/ },
+  perl: { inline: ['-e', '-E'], harmless: /^-(?!$)(?:[nplaw]|0[0-7]*)*(?:i[\w.~-]*)?$/, clustered: /^-(?:[nplaw]|0[0-7]*)+[eE]$/, inPlace: /^-(?:[nplaw]|0[0-7]*)*i/ },
 };
+
+// Whether the word gives the interpreter inline code, as the next word.
+export const givesCode = ({ inline, clustered }: Interpreter, word: string) => inline.includes(word) || (clustered?.test(word) ?? false);
 
 // The factory's allow list: what it lets every L1 run do without asking,
 // each entry with why that is safe enough for L1, which guards against
@@ -47,8 +55,31 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
   // has no MCP server but the factory's, so none other answers to the name.
   'mcp__factory',
   // Read-only and local-commit git.
-  ...['status', 'diff', 'log', 'show', 'blame', 'ls-files', 'rev-parse', 'grep', 'add', 'commit'].map((verb) => `Bash(git ${verb} *)`),
+  ...[
+    'status',
+    'diff',
+    'log',
+    'show',
+    'blame',
+    'ls-files',
+    'rev-parse',
+    'grep',
+    'add',
+    'commit',
+    'merge-base',
+    'rev-list',
+    'cat-file',
+    'ls-tree',
+    'describe',
+    'shortlog',
+    'for-each-ref',
+    'show-ref',
+    'name-rev',
+    'stash list',
+    'stash show',
+  ].map((verb) => `Bash(git ${verb} *)`),
   'Bash(git branch --show-current)',
+  'Bash(git --version)',
   // Reads of git config, by the options that read and never write. A key
   // alone is a read too, which the factory's matcher tells from a write.
   ...[...CONFIG_READS, 'get', 'list'].map((read) => `Bash(git config ${read} *)`),
@@ -77,11 +108,43 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
   // Python and Node on inline code or on stdin, a heredoc's included: no more
   // than a test script could run, or the run's Edit tool could write as a
   // script. The hard denies read the code, inline or in a heredoc, for a push.
-  ...Object.entries(INTERPRETERS).flatMap(([name, { inline }]) => [...inline, '-'].map((option) => `Bash(${name} ${option} *)`)),
-  // Common read-only shell commands, none with an option that writes.
-  ...['ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'echo', 'pwd', 'which', 'diff', 'file', 'stat', 'du', 'df'].map(
-    (command) => `Bash(${command} *)`,
+  // Perl takes `-i` after its code too, so the gate reads it instead, for
+  // the files it edits in place.
+  ...Object.entries(INTERPRETERS).flatMap(([name, { inline, inPlace }]) =>
+    inPlace ? [] : [...inline, '-'].map((option) => `Bash(${name} ${option} *)`),
   ),
+  // Common read-only shell commands, none with an option that writes.
+  ...[
+    'ls',
+    'cat',
+    'head',
+    'tail',
+    'wc',
+    'grep',
+    'rg',
+    'echo',
+    'printf',
+    'pwd',
+    'which',
+    'diff',
+    'cmp',
+    'comm',
+    'file',
+    'stat',
+    'du',
+    'df',
+    'od',
+    'cut',
+    'tr',
+    'nl',
+    'paste',
+    'column',
+    'basename',
+    'dirname',
+    'realpath',
+    'test',
+    'true',
+  ].map((command) => `Bash(${command} *)`),
 ];
 
 // The factory's commands: the rest of its allow list, which its own matcher
@@ -89,13 +152,129 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
 // Claude Code asks about these, and the gate answers them. Besides these,
 // `cd` within the worktree and redirects to its files outside `.git` are
 // covered, for the run's Edit tool writes there anyway (see `uncovered`).
-function factoryCommand({ words, heredoc }: SimpleCommand, at: Place): boolean {
+// `covered` says whether the rules or these cover another command.
+function factoryCommand(command: SimpleCommand, at: Place, covered: (other: SimpleCommand) => boolean): boolean {
+  const { words, heredoc } = command;
   const [program = '', ...args] = words;
+  if (program === 'git' && args[0] === '-c') return withPlainConfig(command, covered);
   if (program === 'git' && args[0] === 'config') return readsGitConfig(args.slice(1));
+  if (program === 'git' && args[0] === 'branch') return listsBranches(args.slice(1));
+  if (program === 'gh' && args[0] === 'api') return readsApi(args.slice(1));
   if (program === 'npx') return runsInstalled(args, at);
   if (program === 'sed') return editsWithin(args, at);
+  if (program === 'sort') return sortsWithin(args, at);
+  if (program === 'uniq') return dedupesWithin(args, at);
+  if (program === 'find') return findsOnly(args);
   if (Object.hasOwn(INTERPRETERS, program)) return runsCode(INTERPRETERS[program]!, args, heredoc, at);
   return false;
+}
+
+// `git -c name=value`, for settings that change how git shows what it reads
+// or treats line endings, and nothing it runs: covered when the git command
+// without them is. Others, such as `core.hooksPath` or `core.pager`, run programs.
+function withPlainConfig(command: SimpleCommand, covered: (other: SimpleCommand) => boolean): boolean {
+  const [, ...args] = command.words;
+  let i = 0;
+  for (; args[i] === '-c'; i += 2) if (!PLAIN_CONFIG.test(args[i + 1] ?? '')) return false;
+  const words = ['git', ...args.slice(i)];
+  return covered({ ...command, text: words.map(quoted).join(' '), words });
+}
+
+// The settings `withPlainConfig` lets through.
+const PLAIN_CONFIG = /^(core\.(autocrlf|safecrlf|eol|quotepath|filemode|ignorecase|longpaths)|color\.[\w.-]+|advice\.\w+|i18n\.\w+|user\.(name|email))(=|$)/i;
+
+// A word as the shell would read it back.
+const quoted = (word: string) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`);
+
+// `git branch` listing branches: no name, or patterns after `--list`, and
+// no option that creates, deletes, moves or sets upstreams.
+function listsBranches(args: string[]): boolean {
+  let listing = false;
+  let names = 0;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (BRANCH_FILTERS.has(arg)) i++;
+    else if (/^--(contains|no-contains|merged|no-merged|points-at|sort|format|color|column|abbrev)=/.test(arg)) continue;
+    else if (/^-[arvli]+$/.test(arg) || BRANCH_READS.has(arg)) listing ||= /^-[arvi]*l/.test(arg) || arg === '--list';
+    else if (arg.startsWith('-')) return false;
+    else names++;
+  }
+  return names === 0 || listing;
+}
+
+// The options of `git branch` that pick which branches it lists, by a value,
+// and those that only list.
+const BRANCH_FILTERS = new Set(['--contains', '--no-contains', '--merged', '--no-merged', '--points-at', '--sort', '--format']);
+const BRANCH_READS = new Set(['--all', '--remotes', '--verbose', '--list', '--show-current', '--ignore-case', '--no-color', '--no-column', '--omit-empty']);
+
+// `sort`, whose output goes to the standard output, or to a file in the
+// worktree. `--compress-program` runs a program of its choosing.
+function sortsWithin(args: string[], at: Place): boolean {
+  const { options } = optionsOf(args, 'oktST', [
+    '--output',
+    '--compress-program',
+    '--key',
+    '--field-separator',
+    '--buffer-size',
+    '--temporary-directory',
+    '--parallel',
+    '--batch-size',
+    '--files0-from',
+    '--random-source',
+    '--sort',
+  ]);
+  if (options.some(({ name }) => name === '--compress-program')) return false;
+  return options.every(({ name, value }) => !['-o', '--output'].includes(name) || (value !== null && at.inside(value) !== null));
+}
+
+// `uniq`, whose second file, if any, is the one it writes.
+function dedupesWithin(args: string[], at: Place): boolean {
+  const { operands } = optionsOf(args, 'fsw', ['--skip-fields', '--skip-chars', '--check-chars']);
+  return operands.length < 2 || (operands.length === 2 && at.inside(operands[1]!) !== null);
+}
+
+// `find` that only finds, with none of the actions by which it deletes,
+// runs a command or writes a file.
+function findsOnly(args: string[]): boolean {
+  return !args.some((arg) => FIND_ACTIONS.has(arg));
+}
+
+const FIND_ACTIONS = new Set(['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls']);
+
+// An option a command was given, by its name in full, with its value if it takes one.
+type Option = { name: string; value: string | null };
+
+// A command's options and its operands, as getopt reads them: a short option
+// in `valued` takes the rest of its cluster or the next word, and a long one
+// in `longValued`, or the one that its unique prefix names, its `=value` or
+// the next word.
+function optionsOf(args: string[], valued: string, longValued: string[]): { options: Option[]; operands: string[] } {
+  const options: Option[] = [];
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--') {
+      operands.push(...args.slice(i + 1));
+      break;
+    } else if (arg.startsWith('--')) {
+      const equals = arg.indexOf('=');
+      const written = equals < 0 ? arg : arg.slice(0, equals);
+      const named = longValued.filter((option) => option.startsWith(written));
+      const name = named.length === 1 ? named[0]! : written;
+      const value = equals >= 0 ? arg.slice(equals + 1) : longValued.includes(name) ? (args[++i] ?? null) : null;
+      options.push({ name, value });
+    } else if (arg.startsWith('-') && arg !== '-') {
+      for (let j = 1; j < arg.length; j++) {
+        if (!valued.includes(arg[j]!)) {
+          options.push({ name: `-${arg[j]}`, value: null });
+          continue;
+        }
+        options.push({ name: `-${arg[j]}`, value: j < arg.length - 1 ? arg.slice(j + 1) : (args[++i] ?? null) });
+        break;
+      }
+    } else operands.push(arg);
+  }
+  return { options, operands };
 }
 
 // `sed`, which reads like `cat`, or edits in place files in the worktree,
@@ -135,17 +314,41 @@ function editsWithin(args: string[], at: Place): boolean {
   return !inPlace || (files.length > 0 && files.every((file) => at.inside(file) !== null));
 }
 
-// An interpreter on a script in the worktree, on inline code, or on a
-// heredoc or stdin: what a test script would run, and what the run's Edit
-// tool could write anyway. The hard denies read inline code and heredocs
-// for a push, but not scripts: the cleaned environment stops their pushes.
-function runsCode({ inline, harmless }: (typeof INTERPRETERS)[string], args: string[], heredoc: string | null, at: Place): boolean {
+// An interpreter on a script in the worktree, on inline code, on a heredoc
+// or stdin, or on a script the line wrote from a heredoc: what a test script
+// would run, and what the run's Edit tool could write anyway. The hard
+// denies read inline code and heredocs for a push, but not scripts in the
+// worktree: the cleaned environment stops their pushes. Files it edits in
+// place lie in the worktree, as sed's must.
+function runsCode(interpreter: Interpreter, args: string[], heredoc: string | null, at: Place): boolean {
+  const { harmless, inPlace } = interpreter;
   let i = 0;
   while (i < args.length && harmless.test(args[i]!)) i++;
   const first = args[i];
   if (first === undefined) return heredoc !== null;
-  if (inline.includes(first)) return args[i + 1] !== undefined;
-  return first === '-' || (!first.startsWith('-') && at.inside(first) !== null);
+  const edits = inPlace !== undefined && args.some((arg) => inPlace.test(arg));
+  if (givesCode(interpreter, first)) {
+    if (args[i + 1] === undefined) return false;
+    if (!edits) return true;
+    // The files after the code, past more code and harmless options.
+    for (let j = i + 2; j < args.length; j++) {
+      const arg = args[j]!;
+      if (givesCode(interpreter, arg)) j++;
+      else if (arg.startsWith('-') ? !harmless.test(arg) : at.inside(arg) === null) return false;
+    }
+    return true;
+  }
+  if (first !== '-' && (first.startsWith('-') || (at.inside(first) === null && !at.wrote(first)))) return false;
+  return !edits || args.slice(i + 1).every((arg) => arg.startsWith('-') || at.inside(arg) !== null);
+}
+
+// `gh api` reading: GET, as it is unless told a method or given fields or
+// a body to send. A GraphQL query is sent as a POST, mutation or not.
+function readsApi(args: string[]): boolean {
+  const { options, operands } = optionsOf(args, 'XHfFpqt', ['--method', '--header', '--raw-field', '--field', '--preview', '--jq', '--template', '--input', '--hostname', '--cache']);
+  const method = options.filter(({ name }) => name === '-X' || name === '--method').at(-1)?.value?.toUpperCase();
+  const sends = options.some(({ name }) => ['-f', '-F', '--field', '--raw-field', '--input'].includes(name));
+  return operands[0] !== 'graphql' && (method === undefined ? !sends : method === 'GET');
 }
 
 // `npx` of a binary the project installed, which runs what `npm run` would.
@@ -252,8 +455,12 @@ export function uncovered(rules: readonly string[], call: ToolCall, worktree: st
     const commands = readCommandLine(command);
     const parts = partsWithin(commands, worktree);
     if (parts === null) return parsed.some((rule) => rule.specifier === command.trim()) ? [] : [call];
-    const left = parts.filter((part) => !parsed.some((rule) => bashMatches(rule.specifier!, part.command.text)) && !factoryCommand(part.command, part.at));
-    return left.map(({ command: { text } }) => (commands!.length === 1 ? call : { ...call, input: { ...call.input, command: text }, summary: text }));
+    const covered = (simple: SimpleCommand, at: Place): boolean =>
+      parsed.some((rule) => bashMatches(rule.specifier!, simple.text)) || factoryCommand(simple, at, (other) => covered(other, at));
+    const left = parts.filter((part) => !covered(part.command, part.at));
+    // A loop's command, run once for each of its words, is one part.
+    const texts = [...new Set(left.map(({ command: { text } }) => text))];
+    return texts.map((text) => (commands!.length === 1 ? call : { ...call, input: { ...call.input, command: text }, summary: text }));
   }
   if (call.tool === 'WebFetch') {
     const host = hostOf(call.input.url);
@@ -263,19 +470,26 @@ export function uncovered(rules: readonly string[], call: ToolCall, worktree: st
   return target !== null && parsed.some((rule) => glob(slashed(rule.specifier!)).test(posix.normalize(slashed(target)))) ? [] : [call];
 }
 
-// The simple commands of a line, but its `cd`s, each with where it runs, or
-// null when the line can't be read, writes outside the worktree, or a `cd`
-// may leave it.
+// The simple commands of a line, but its `cd`s and bare redirections, each
+// with where it runs, or null when the line can't be read, writes outside
+// the worktree, or a `cd` may leave it. A `cd` in a loop, a condition or a
+// group may run more than once or not at all, so no reading says where it
+// leaves. A heredoc `cat` writes to the temp folder is a script the
+// commands after it may run, as an interpreter would run the heredoc itself.
 function partsWithin(commands: SimpleCommand[] | null, worktree: string | null): { command: SimpleCommand; at: Place }[] | null {
   if (commands === null || commands.length === 0) return null;
   // Where each command runs, as far as the `cd`s before it in the line say.
   let dir = worktree === null ? null : slashed(worktree);
+  const scripts = new Set<string>();
   const parts: { command: SimpleCommand; at: Place }[] = [];
   for (const command of commands) {
-    const at = place(worktree, dir);
-    if (!command.writes.every((path) => at.inside(path) !== null)) return null;
-    if (command.words[0] !== 'cd') parts.push({ command, at });
-    else if ((dir = movesTo(command, at)) === null) return null;
+    const at = place(worktree, dir, new Set(scripts));
+    const [script] = command.writes;
+    if (writesScript(command) && inTemp(script!) !== null) scripts.add(inTemp(script!)!);
+    else if (!command.writes.every((path) => at.inside(path) !== null)) return null;
+    if (command.words[0] === 'cd') {
+      if (command.compound || (dir = movesTo(command, at)) === null) return null;
+    } else if (command.words.length) parts.push({ command, at });
   }
   return parts;
 }
@@ -388,6 +602,9 @@ function targetOf(input: Record<string, unknown>): string | null {
 
 const slashed = (path: string) => path.replaceAll('\\', '/');
 
+// A path with forward slashes, and with a drive Git Bash names `/d/` as `D:\` is.
+const fromBash = (path: string) => slashed(path).replace(/^\/([a-z])(?=\/|$)/i, (_, drive: string) => `${drive}:`);
+
 // Where a command runs: in `dir`, within the run's worktree. Paths resolve
 // from `dir`, as if the call started at the top of the worktree.
 type Place = {
@@ -397,11 +614,33 @@ type Place = {
   inside(path: string): string | null;
   // Whether the project installed `bin`, in `dir` or a folder above it in the worktree.
   installed(bin: string): boolean;
+  // Whether the line wrote the script at `path` from a heredoc before this command.
+  wrote(path: string): boolean;
 };
 
-function place(worktree: string | null, dir: string | null): Place {
+// The temp folder, as Git Bash names it and as the OS does.
+const TEMP_FOLDERS = ['/tmp', posix.normalize(slashed(tmpdir())).replace(/\/$/, '')];
+
+// The path, resolved, when it is absolute and lies in the temp folder.
+export function inTemp(path: string): string | null {
+  if (/[$~]/.test(path)) return null;
+  const resolved = posix.normalize(fromBash(path));
+  return TEMP_FOLDERS.some((folder) => comparable(resolved).startsWith(`${comparable(folder)}/`)) ? resolved : null;
+}
+
+// Whether the command is a `cat` writing a heredoc to one file, which then
+// holds just the heredoc, wherever the line goes: not appending, and not in
+// a loop, a condition or a group that may not run it.
+export const writesScript = ({ words, writes, appends, heredoc, compound }: SimpleCommand) =>
+  heredoc !== null && words.join(' ') === 'cat' && writes.length === 1 && appends.length === 0 && !compound;
+
+function place(worktree: string | null, dir: string | null, scripts: ReadonlySet<string> = new Set()): Place {
   const top = worktree === null ? null : comparable(posix.normalize(slashed(worktree)).replace(/\/$/, ''));
   return {
+    wrote(path) {
+      const resolved = inTemp(path);
+      return resolved !== null && scripts.has(resolved);
+    },
     installed(bin) {
       if (top === null || dir === null || !/^[\w.-]+$/.test(bin)) return false;
       for (let folder = dir; comparable(folder).startsWith(top); folder = posix.dirname(folder)) {
@@ -412,8 +651,7 @@ function place(worktree: string | null, dir: string | null): Place {
     },
     inside(path) {
       if (top === null || dir === null || path === '' || /[$~]/.test(path)) return null;
-      // Git Bash names `D:\` as `/d/`.
-      const written = slashed(path).replace(/^\/([a-z])(?=\/|$)/i, (_, drive: string) => `${drive}:`);
+      const written = fromBash(path);
       const resolved = posix.normalize(/^([a-z]:)?\//i.test(written) ? written : posix.join(dir, written)).replace(/\/$/, '');
       const relative = comparable(resolved);
       if (relative !== top && !relative.startsWith(`${top}/`)) return null;

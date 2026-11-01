@@ -4,8 +4,8 @@
 // they are best-effort: the cleaned environment makes a push that slips past
 // fail in git itself, and the check after the run catches the rest.
 import { execFile } from 'node:child_process';
-import { INTERPRETERS, type ToolCall } from '../permissions/permissions.ts';
-import { readCommandLine } from '../permissions/shell.ts';
+import { givesCode, inTemp, INTERPRETERS, type ToolCall } from '../permissions/permissions.ts';
+import { KEYWORDS, readCommandLine } from '../permissions/shell.ts';
 
 // What a refusal needs to know of the run's worktree.
 export type RunHistory = {
@@ -72,10 +72,12 @@ function refusedTool({ tool, input }: Pick<ToolCall, 'tool' | 'input'>): string 
   return /(^|\/)\.git(\/|$)/.test(path) ? 'Editing files under .git' : null;
 }
 
-// What the first refused part of the command does, or null. A command that
-// runs Python or Node is read for the commands its code spells out too.
+// What the first refused part of the command does, or null, read as it is
+// written and with the variables the line sets expanded, as the gate reads
+// it. A command that runs Python, Node or Perl is read for the commands its
+// code spells out too.
 async function refusedIn(command: string, history: RunHistory): Promise<string | null> {
-  const commands = simpleCommands(command);
+  const commands = [...simpleCommands(command), ...(readCommandLine(command) ?? []).map(({ words }) => words)];
   for (const words of commands) {
     const what = await refusedCommand(words, history);
     if (what) return what;
@@ -89,17 +91,24 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash']);
 
 const isInterpreter = (program: string) => Object.hasOwn(INTERPRETERS, program);
 
-// What the first command spelled out in the code the line hands Python or
-// Node, inline or in a heredoc, does that is refused. A line the gate can't
-// read, for it substitutes commands, is read whole.
+// What the first command spelled out in the code the line hands Python, Node
+// or Perl, inline, in a heredoc, or in a script it wrote from a heredoc,
+// does that is refused. A line the gate can't read, for it substitutes
+// commands, is read whole.
 async function refusedInInterpreters(command: string, history: RunHistory): Promise<string | null> {
   const commands = readCommandLine(command);
   if (commands === null) return refusedInCode(command, history);
+  // Every heredoc the line writes to a file, by the file as the gate resolves it.
+  const written = new Map<string, string[]>();
+  const file = (path: string) => inTemp(path) ?? path;
+  for (const { writes, heredoc } of commands) {
+    for (const path of heredoc === null ? [] : writes) written.set(file(path), [...(written.get(file(path)) ?? []), heredoc!]);
+  }
   for (const { words, heredoc } of commands) {
     const { program, args } = programOf(words);
     if (!isInterpreter(program)) continue;
-    const inline = args.findIndex((arg) => INTERPRETERS[program]!.inline.includes(arg));
-    for (const code of [inline >= 0 ? args[inline + 1] : undefined, heredoc]) {
+    const inline = args.flatMap((arg, i) => (givesCode(INTERPRETERS[program]!, arg) ? [args[i + 1]] : []));
+    for (const code of [...inline, heredoc, ...args.flatMap((arg) => written.get(file(arg)) ?? [])]) {
       const what = code ? await refusedInCode(code, history) : null;
       if (what) return what;
     }
@@ -107,10 +116,11 @@ async function refusedInInterpreters(command: string, history: RunHistory): Prom
   return null;
 }
 
-// The program a simple command runs, past any assignments and wrappers
-// before it, and the words after it.
+// The program a simple command runs, past any keywords, assignments and
+// wrappers before it, and the words after it.
 function programOf(words: string[]): { program: string; args: string[] } {
   let i = 0;
+  while (KEYWORDS.has(words[i] ?? '')) i++;
   // Assignments, wrappers and the wrappers' own options come first.
   while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i]!) || WRAPPERS.has(programName(words[i]!)))) {
     i++;
@@ -122,6 +132,9 @@ function programOf(words: string[]): { program: string; args: string[] } {
 // The strings in code, each with its backslash escapes undone.
 const STRING = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/gs;
 
+// Perl's quotes: `q(…)`, `qq{…}` and `qx[…]` a string, `qw(…)` a list of words.
+const PERL_QUOTE = /\bq([qwx]?)\s*(?:\(([^)]*)\)|\{([^}]*)\}|\[([^\]]*)\]|<([^>]*)>|([^\w\s({[<])(.*?)\6)/gs;
+
 // What the first command the code's strings spell out does that is refused,
 // or null: each string read as a command line, as `os.system` or `execSync`
 // would run it, and each list of strings separated only by commas and
@@ -130,6 +143,11 @@ const STRING = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/gs;
 // string that only mentions a push, in a message, is refused as well.
 async function refusedInCode(code: string, history: RunHistory): Promise<string | null> {
   const lists: string[][] = [];
+  for (const [, kind, ...bodies] of code.matchAll(PERL_QUOTE)) {
+    // The body inside whichever delimiters the quote took; the sixth group is a delimiter.
+    const text = bodies.find((body, i) => body !== undefined && i !== 4) ?? '';
+    lists.push(kind === 'w' ? text.split(/\s+/).filter(Boolean) : [text]);
+  }
   let end = 0;
   for (const match of code.matchAll(STRING)) {
     const text = match[2]!.replace(/\\(.)/gs, '$1');
