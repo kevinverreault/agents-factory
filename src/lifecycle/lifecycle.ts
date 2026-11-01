@@ -1495,6 +1495,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.loop = null;
       // What an AFK run was to open on is the operator's to say now.
       task.resumeWith = null;
+      // A fresh session no run has started yet gives way to the one the
+      // last run used: the operator steps into the conversation they saw.
+      const used = lastRun(state, task)?.sessionId;
+      if (task.newSession && used) {
+        task.sessionId = used;
+        task.newSession = false;
+      }
       startRun(state, task, at);
       break;
     case 'answer':
