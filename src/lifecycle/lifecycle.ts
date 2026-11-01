@@ -129,9 +129,15 @@ export type Loop = {
   commits: string[];
 };
 
-// A Done root's cleanup while it hasn't finished (ADR 0011): why it last
-// failed, if it did.
-export type Cleanup = { problem: string | null };
+// An ended task's cleanup while it hasn't finished (ADR 0011): why it last
+// failed, if it did, and whether its local task branch stays in the
+// operator's clone, as Keep branch leaves it. Cleanups stored before Cancel
+// had them delete the branch.
+export type Cleanup = { problem: string | null; keepBranch?: boolean };
+
+// What Cancel does with a task branch holding commits found nowhere else.
+export type BranchChoice = 'keep' | 'discard';
+export const BRANCH_CHOICES: readonly BranchChoice[] = ['keep', 'discard'];
 
 // A ticket the task closed, with the commits that did its work.
 export type ClosedTicket = { ref: string; commits: string[] };
@@ -149,6 +155,9 @@ export type Task = {
   title: string;
   // The repository the task works in, fixed at launch.
   repo: string;
+  // The task whose run delegated it, for a child task. Roots, and tasks
+  // stored before children, have none.
+  parentId?: string | null;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   groups: string[];
@@ -360,7 +369,10 @@ export type OperatorCommand =
   // Finishes a root In review. Unless `anyway`, the daemon first checks that
   // its task branch is merged into the base branch on origin.
   | { type: 'markDone'; taskId: string; anyway?: boolean }
-  | { type: 'cancel'; taskId: string }
+  // Cancels the task. `branch` is the operator's answer to Keep branch or
+  // Discard work, which the daemon asks only when the task branch holds
+  // commits found nowhere else: without it, the branch goes.
+  | { type: 'cancel'; taskId: string; branch?: BranchChoice }
   // Sets the tier the task's next runs start at; a live run keeps its model.
   | { type: 'retier'; taskId: string; tier: Tier }
   // Sets an AFK task's autonomy level between runs, clamped by its stage's ceiling.
@@ -541,6 +553,12 @@ export function isTerminal(task: Task): boolean {
 // The repository's tasks that are neither Done nor Cancelled.
 export function unfinishedTasks(state: Lifecycle, repo: string): Task[] {
   return Object.values(state.tasks).filter((task) => task.repo === repo && !isTerminal(task));
+}
+
+// The tasks of the task's tree below it: its children, theirs, and so on.
+export function descendants(state: Lifecycle, task: Task): Task[] {
+  const children = Object.values(state.tasks).filter((child) => child.parentId === task.id);
+  return children.flatMap((child) => [child, ...descendants(state, child)]);
 }
 
 export function liveRun(state: Lifecycle, task: Task): Run | undefined {
@@ -969,6 +987,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'markDone':
       return task.state === 'in-review' ? null : `${task.id} is not in review.`;
     case 'cancel':
+      if (action.branch !== undefined && !BRANCH_CHOICES.includes(action.branch)) return 'Keep branch or Discard work.';
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
     case 'retier':
       if (!isTier(action.tier)) return tierRefusal(action.tier);
@@ -1257,6 +1276,19 @@ function park(state: Lifecycle, task: Task, run: Run, at: number): void {
   const request = openRequest(state, task);
   if (request?.holdsRun) request.holdsRun = false;
   else task.state = 'queued';
+}
+
+// Ends the task Cancelled, never failed: its live run ends cancelled and its
+// open request closes. The daemon then archives its transcripts and removes
+// its worktree and, unless `keepBranch`, its branch.
+function cancel(state: Lifecycle, task: Task, keepBranch: boolean, at: number): void {
+  const run = liveRun(state, task);
+  if (run) endRun(run, 'cancelled', at);
+  const request = openRequest(state, task);
+  if (request) request.status = 'closed';
+  task.handoff = null;
+  task.state = 'cancelled';
+  if (task.worktree) task.cleanup = { problem: null, keepBranch };
 }
 
 // What the run that resumes a root on the operator's review comments opens on.
@@ -1549,13 +1581,14 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.transcripts = action.transcripts;
       break;
     case 'cleanupFailed':
-      task.cleanup = { problem: action.reason };
+      // A kept branch stays kept when the cleanup is tried again.
+      task.cleanup = { ...task.cleanup, problem: action.reason };
       break;
     case 'cancel':
-      if (run) endRun(run, 'cancelled', at);
-      if (request) request.status = 'closed';
-      task.handoff = null;
-      task.state = 'cancelled';
+      // Cancel cascades to the subtree: everything in it stops. A
+      // descendant's branch goes with the tree, without asking (ADR 0011).
+      cancel(state, task, action.branch === 'keep', at);
+      for (const descendant of descendants(state, task)) if (!isTerminal(descendant)) cancel(state, descendant, false, at);
       break;
     case 'retier':
       task.operatorTier = action.tier;

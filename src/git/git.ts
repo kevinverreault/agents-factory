@@ -39,6 +39,9 @@ export interface Git {
   // Whether `branch`'s tip is in the history of `into` (such as
   // `origin/main`). Throws a `GitError` when either names no commit.
   isMerged(clonePath: string, branch: string, into: string): Promise<boolean>;
+  // The commits on `branch` that no ref of origin has, as last fetched:
+  // those only the clone holds. None when the clone has no such branch.
+  localCommits(clonePath: string, branch: string): Promise<string[]>;
   // Which of `paths` (relative to the worktree, with `/`) have changes not
   // yet committed there, untracked files included.
   uncommitted(worktreePath: string, paths: string[]): Promise<string[]>;
@@ -171,6 +174,12 @@ export const gitCli: Git = {
       ),
     );
     return (await git(clonePath, 'merge-base', '--is-ancestor', tip!, base!)) !== null;
+  },
+
+  async localCommits(clonePath, branch) {
+    const tip = await git(clonePath, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`);
+    if (tip === null) return [];
+    return lines(await run(clonePath, 'rev-list', tip, '--not', '--remotes=origin'));
   },
 
   async uncommitted(worktreePath, paths) {

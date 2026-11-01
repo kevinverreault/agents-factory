@@ -77,10 +77,12 @@ export class FakeGit implements Git {
     return tip;
   }
 
-  // Pushes the clone's `branch` to origin under the same name.
+  // Pushes the clone's `branch` to origin under the same name, which the
+  // clone's remote-tracking ref then has, as after a fetch.
   push(clonePath: string, branch: string): void {
     const clone = this.cloneAt(clonePath);
     clone.origin.set(branch, clone.branches.get(branch)!);
+    clone.fetched.set(branch, clone.branches.get(branch)!);
   }
 
   // Origin's `base` moves to the clone's `branch`, as merging its PR would.
@@ -147,6 +149,17 @@ export class FakeGit implements Git {
     if (!tip || !base) throw new GitError(`fatal: Not a valid commit name ${tip ? into : branch}`);
     for (let commit: string | undefined = base; commit; commit = this.parents.get(commit)) if (commit === tip) return true;
     return false;
+  }
+
+  async localCommits(clonePath: string, branch: string): Promise<string[]> {
+    const clone = this.cloneAt(clonePath);
+    const onOrigin = new Set<string>();
+    for (const tip of clone.fetched.values()) {
+      for (let commit: string | undefined = tip; commit && !onOrigin.has(commit); commit = this.parents.get(commit)) onOrigin.add(commit);
+    }
+    const local: string[] = [];
+    for (let commit = clone.branches.get(branch); commit && !onOrigin.has(commit); commit = this.parents.get(commit)) local.push(commit);
+    return local;
   }
 
   async repairWorktree(clonePath: string, path: string): Promise<void> {

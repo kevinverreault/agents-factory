@@ -1,7 +1,7 @@
 // The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
 // a task (`t`), conversing with or taking over one (`c`), handing one off
-// (`ctrl+h`), Needs you's answer sheet (`a`)
+// (`ctrl+h`), cancelling one with its subtree (`x`), Needs you's answer sheet (`a`)
 // and Set up now (`s`) or Re-check (`R`) for a repository without the skill
 // set's setup.
 // Plain .ts (no JSX) so Node runs it without a build step.
@@ -12,9 +12,10 @@ import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
-import type { CloneView, Command } from '../protocol/protocol.ts';
+import type { CloneView, Command, Reply } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-sheet.ts';
+import { cancelAsk, CancelSheet, cancelSheetKey, type CancelAsk } from './cancel-sheet.ts';
 import { Conversation } from './conversation.ts';
 import { LaunchCard } from './launch-card.ts';
 
@@ -52,6 +53,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // Whether the digits answer the selected Needs you item instead of
   // switching screens. Once nothing needs the operator they switch again.
   const [answering, setAnswering] = useState(false);
+  // What the cancel sheet asks about a task's cancel, while it is open: every
+  // key is its answer's.
+  const [cancelling, setCancelling] = useState<CancelAsk | null>(null);
   // Each task's last re-tier sent, from the tier it had then, until the
   // daemon's answer shows: a burst of `t` goes on from it.
   const retiers = useRef(new Map<string, { from: Tier; to: Tier }>());
@@ -87,10 +91,21 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const answers = useAnswering(connection, item, itemTask, {
     onSend: () => setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } })),
     onReply: ({ reply, taskId, opens }) => {
-      setRefusal(reply.ok ? null : reply.reason);
+      // A root in review's Cancel may ask Keep branch or Discard work.
+      hear(taskId, reply);
       if (reply.ok && opens) setView({ kind: 'conversation', taskId });
     },
   });
+  // Takes in the daemon's reply about the task: its refusal shows, unless it
+  // asks Keep branch or Discard work, which opens the cancel sheet.
+  const hear = (taskId: string, reply: Reply) => {
+    const ask = cancelAsk(taskId, reply);
+    setCancelling(ask);
+    setRefusal(reply.ok || ask ? null : reply.reason);
+  };
+  // Cancels the task with its subtree, as the command says: from `x`, or
+  // with the operator's choice on the cancel sheet.
+  const cancel = (command: Extract<Command, { type: 'cancel' }>) => void connection.send(command).then((reply) => hear(command.taskId, reply));
   // Moves the selected task's next runs to the tier after its current one.
   const retier = () => {
     const task = tab === 'tasks' ? tasks[cursor] : undefined;
@@ -142,6 +157,12 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const { isRawModeSupported } = useStdin();
   useInput(
     (input, key) => {
+      if (cancelling) {
+        const chosen = cancelSheetKey(cancelling, input, key);
+        if (chosen) setCancelling(null);
+        if (chosen && chosen !== 'back' && chosen.type === 'cancel') cancel(chosen);
+        return;
+      }
       if (answering && !item) setAnswering(false);
       else if (answering) {
         if (answers.form !== null || answers.confirm !== null) answers.key(input, key);
@@ -162,6 +183,10 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
       if (input === 't') retier();
       if (input === 'c') converse();
+      if (input === 'x') {
+        const task = tab === 'tasks' ? tasks[cursor] : itemTask;
+        if (task) cancel({ type: 'cancel', taskId: task.id });
+      }
       if (key.ctrl && input === 'h') handOff();
       if (input === 's') setUp();
       if (input === 'R') recheck();
@@ -213,6 +238,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         ? h(TaskList, { tasks, cursor })
         : h(NeedsYouList, { state, cursor }),
     state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
+    state && cancelling ? h(CancelSheet, { ask: cancelling, task: state.tasks[cancelling.taskId] }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
 }
@@ -257,7 +283,7 @@ function TaskList({ tasks, cursor }: { tasks: TaskView[]; cursor: number }) {
   if (tasks.length === 0) return h(Text, { dimColor: true }, 'No tasks yet. N launches one.');
   return column([
     ...tasks.map((task, i) => h(Row, { key: task.id, id: task.id, title: task.title, detail: `${task.label} · ${task.tier}`, selected: i === cursor })),
-    h(Text, { key: 'keys', dimColor: true }, 'enter open · c converse or take over · t re-tier · N launch'),
+    h(Text, { key: 'keys', dimColor: true }, 'enter open · c converse or take over · t re-tier · x cancel · N launch'),
   ]);
 }
 

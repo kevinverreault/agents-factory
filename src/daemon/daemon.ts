@@ -39,6 +39,7 @@ import {
   ticketSources,
   unfinishedTasks,
   type AppCheck,
+  type BranchChoice,
   type CleanupEvent,
   type Lifecycle,
   type Readiness,
@@ -70,6 +71,7 @@ import {
   type PresetsView,
   type RepoCommand,
   type Reply,
+  type ReplyChoice,
   type SetupView,
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
@@ -271,6 +273,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return dispatch({ type: 'stageAdvanced', taskId: command.taskId, skip: command.skip ?? [], sessionId: randomUUID() });
       case 'markDone':
         return markDone(command);
+      case 'cancel':
+        return cancel(command);
       case 'openHandoff':
         return openHandoff(command.taskId);
       case 'handoff':
@@ -542,6 +546,50 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return `${unchecked} ${error.message}`;
     }
     return `Not merged into ${baseBranch}: ${task.worktree.branch}’s tip isn’t on origin/${baseBranch}.`;
+  }
+
+  // Cancel (ADR 0011): when the task branch holds commits found nowhere
+  // else, the operator is asked once, Keep branch (the default) or Discard
+  // work, and nothing is cancelled until they answer. Otherwise the branch
+  // goes without asking.
+  function cancel({ taskId, branch }: Extract<LifecycleAction, { type: 'cancel' }>): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const action: LifecycleAction = { type: 'cancel', taskId, ...(branch ? { branch } : {}) };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      const losing = branch ? null : await whyWorkWouldBeLost(lifecycle.tasks[taskId]!);
+      if (losing) {
+        const choice = (label: string, branch: BranchChoice): ReplyChoice => ({ label, command: { type: 'cancel', taskId, branch } });
+        return { ok: false, reason: `${losing} Keep branch or Discard work?`, choices: [choice('Keep branch', 'keep'), choice('Discard work', 'discard')] };
+      }
+      const refusal = await settle(action, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
+  }
+
+  // Why cancelling the task would lose commits its task branch holds that
+  // origin, freshly fetched where it can be, has nowhere, or null when it
+  // has none (or the task has no branch). Origin out of reach leaves what
+  // the clone last fetched, which only ever makes for more such commits.
+  async function whyWorkWouldBeLost(task: Task): Promise<string | null> {
+    const repository = lifecycle.repositories[task.repo];
+    if (!task.worktree || !repository) return null;
+    const { branch } = task.worktree;
+    try {
+      await git.fetch(repository.path, repository.baseBranch);
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+    }
+    let local: string[];
+    try {
+      local = await git.localCommits(repository.path, branch);
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return `Couldn’t check whether ${branch} holds commits that aren’t on origin: ${error.message}`;
+    }
+    if (local.length === 0) return null;
+    return `${branch} holds ${local.length === 1 ? '1 commit that isn’t' : `${local.length} commits that aren’t`} on origin.`;
   }
 
   // Opens the handoff sheet on how the task's worktree stands now.
@@ -862,8 +910,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveCleanups();
   }
 
-  // Cleans up after each Done root whose cleanup is pending (ADR 0011), once
-  // per daemon. Its outcome goes through the Lifecycle like any other event.
+  // Cleans up after each Done or Cancelled task whose cleanup is pending
+  // (ADR 0011), once per daemon. Its outcome goes through the Lifecycle like
+  // any other event.
   function driveCleanups(): void {
     for (const task of Object.values(lifecycle.tasks)) {
       if (stopping || !task.cleanup || cleanupsStarted.has(task.id)) continue;
@@ -884,12 +933,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Archives every session transcript of the task, then removes its worktree
-  // and force-deletes its local task branch: a squash merge fails `git branch
-  // -d`, and Mark done either found the branch merged or the operator chose
-  // to finish anyway. Nothing is removed unless every
+  // and force-deletes its local task branch, unless Keep branch keeps it: a
+  // squash merge fails `git branch -d`, Mark done either found the branch
+  // merged or the operator chose to finish anyway, and Cancel asked before
+  // losing commits found nowhere else. Nothing is removed unless every
   // transcript is archived. Each step can be done again.
   async function cleanUp(task: Task): Promise<CleanupEvent> {
     const { path, branch } = task.worktree!;
+    const { keepBranch = false } = task.cleanup!;
     const failed = (reason: string): CleanupEvent => ({ type: 'cleanupFailed', taskId: task.id, reason });
     const transcripts = join(options.transcriptsRoot, task.id);
     try {
@@ -902,10 +953,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (!repository) return failed(`${task.repo} isn’t registered any more, so ${task.id}’s worktree at ${path} stays.`);
     try {
       await git.removeWorktree(repository.path, path);
-      await git.deleteBranch(repository.path, branch);
+      if (!keepBranch) await git.deleteBranch(repository.path, branch);
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
-      return failed(`The factory couldn’t remove ${task.id}’s worktree at ${path} and its branch ${branch}: ${error.message}`);
+      const what = keepBranch ? `${task.id}’s worktree at ${path}` : `${task.id}’s worktree at ${path} and its branch ${branch}`;
+      return failed(`The factory couldn’t remove ${what}: ${error.message}`);
     }
     return { type: 'cleanedUp', taskId: task.id, transcripts };
   }

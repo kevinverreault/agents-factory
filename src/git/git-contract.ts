@@ -261,6 +261,39 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
         await expect(git.isMerged(clone, 'factory/T9-gone', 'origin/main')).rejects.toThrow();
       }));
 
+    test('a task branch’s local commits are those no ref of origin has, as last fetched: none once pushed or merged, or once the branch is gone', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll, push, merge }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        // Cut from origin's tip, with nothing of its own yet.
+        expect(await git.localCommits(clone, 'factory/T1-a')).toEqual([]);
+
+        await editFile(path, 'src/logout.ts');
+        await commitAll(path);
+        await editFile(path, 'src/header.ts');
+        await commitAll(path);
+        const { head } = (await git.worktrees(clone))[0]!;
+        const local = await git.localCommits(clone, 'factory/T1-a');
+        expect(local).toHaveLength(2);
+        expect(local).toContain(head);
+
+        await push(clone, 'factory/T1-a');
+        expect(await git.localCommits(clone, 'factory/T1-a')).toEqual([]);
+
+        await editFile(path, 'src/footer.ts');
+        await commitAll(path);
+        expect(await git.localCommits(clone, 'factory/T1-a')).toHaveLength(1);
+        await merge(clone, 'factory/T1-a', 'main');
+        await git.fetch(clone, 'main');
+        expect(await git.localCommits(clone, 'factory/T1-a')).toEqual([]);
+
+        await git.removeWorktree(clone, path);
+        await git.deleteBranch(clone, 'factory/T1-a');
+        expect(await git.localCommits(clone, 'factory/T1-a')).toEqual([]);
+      }));
+
     test('a task worktree is removed with its uncommitted changes, then its branch, and the branch checks out again from origin', () =>
       withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll, push }) => {
         const clone = await cloneWithOrigin('widgets', 'main');

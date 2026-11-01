@@ -160,6 +160,77 @@ describe('re-tiering', () => {
   });
 });
 
+describe('cancelling', () => {
+  const keep = { type: 'cancel' as const, taskId: 'T2', branch: 'keep' as const };
+  const discard = { type: 'cancel' as const, taskId: 'T2', branch: 'discard' as const };
+  const asks = {
+    ok: false as const,
+    reason: 'factory/T2-implement-the-store holds 2 commits that aren’t on origin. Keep branch or Discard work?',
+    choices: [
+      { label: 'Keep branch', command: keep },
+      { label: 'Discard work', command: discard },
+    ],
+  };
+  const tasks = () => factoryState([task('T1', 'Settle the glossary', 'queued', 'Ready for you', 'HITL'), task('T2', 'Implement the store', 'running', 'Running')]);
+
+  test('x cancels the selected task, its subtree with it, at once when the daemon asks nothing', async () => {
+    const { app, connection } = await started(tasks());
+    await eventually(() => expect(app.lastFrame()).toContain('x cancel'));
+
+    await press(app, '\x1b[B', 'x');
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T2' }]));
+    expect(app.lastFrame()).not.toContain('Keep branch');
+  });
+
+  test('when the branch holds commits found nowhere else, the cancel sheet asks Keep branch, the default on enter, or Discard work', async () => {
+    const { app, connection } = await started(tasks());
+    connection.replyTo('cancel', asks);
+    await press(app, '\x1b[B', 'x');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain(
+        '── Cancel T2 Implement the store ── factory/T2-implement-the-store holds 2 commits that aren’t on origin. Keep branch or Discard work? 1 Keep branch 2 Discard work enter keep branch · esc back',
+      ),
+    );
+
+    connection.replyTo('cancel', { ok: true });
+    await press(app, '\r');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual(keep));
+    await eventually(() => expect(app.lastFrame()).not.toContain('Discard work'));
+  });
+
+  test('on the cancel sheet 2 discards the work, and esc backs out without cancelling', async () => {
+    const { app, connection } = await started(tasks());
+    connection.replyTo('cancel', asks);
+    await press(app, '\x1b[B', 'x');
+    await eventually(() => expect(app.lastFrame()).toContain('Discard work'));
+
+    await press(app, '\x1b');
+    await eventually(() => expect(app.lastFrame()).not.toContain('Discard work'));
+    expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T2' }]);
+    // The cursor keys are the list's again.
+    await press(app, 'x');
+    await eventually(() => expect(app.lastFrame()).toContain('Discard work'));
+    connection.replyTo('cancel', { ok: true });
+    await press(app, '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual(discard));
+  });
+
+  test('a root in review’s Cancel asks the same, and a refused cancel says why', async () => {
+    const reviewing = task('T2', 'Implement the store', 'in-review', 'In review');
+    const { app, connection } = await started(factoryState([reviewing], [{ kind: 'review', taskId: 'T2' }]));
+    connection.replyTo('cancel', asks);
+    await press(app, '2', 'a', '3');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('1 Keep branch 2 Discard work'));
+
+    connection.replyTo('cancel', { ok: false, reason: 'T2 is already Cancelled.' });
+    await press(app, '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual(keep));
+    await eventually(() => expect(app.lastFrame()).toContain('T2 is already Cancelled.'));
+    expect(app.lastFrame()).not.toContain('Discard work');
+  });
+});
+
 describe('repositories', () => {
   const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
 

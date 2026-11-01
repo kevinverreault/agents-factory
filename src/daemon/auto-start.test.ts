@@ -35,7 +35,7 @@ describe('starting the TUI', () => {
     });
 
     expect(starts).toBe(1);
-    expect(tui.protocolVersion).toBe(16);
+    expect(tui.protocolVersion).toBe(17);
     tui.close();
   });
 
@@ -78,7 +78,7 @@ describe('starting the TUI', () => {
 
     try {
       await expect(connectOrStart(endpoint, () => starts++)).rejects.toThrow(
-        'The running daemon speaks protocol 3 and this agents-factory speaks 16. Stop it with `agents-factory daemon stop`, then try again.',
+        'The running daemon speaks protocol 3 and this agents-factory speaks 17. Stop it with `agents-factory daemon stop`, then try again.',
       );
       expect(starts).toBe(0);
     } finally {
