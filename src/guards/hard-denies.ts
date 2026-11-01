@@ -71,30 +71,67 @@ function refusedTool({ tool, input }: Pick<ToolCall, 'tool' | 'input'>): string 
   return /(^|\/)\.git(\/|$)/.test(path) ? 'Editing files under .git' : null;
 }
 
-// What the first refused part of the command does, or null.
+// What the first refused part of the command does, or null. A command that
+// runs Python or Node is read for the commands its code spells out too.
 async function refusedIn(command: string, history: RunHistory): Promise<string | null> {
-  for (const words of simpleCommands(command)) {
+  const commands = simpleCommands(command);
+  for (const words of commands) {
     const what = await refusedCommand(words, history);
     if (what) return what;
   }
-  return null;
+  return commands.some((words) => INTERPRETERS.has(programOf(words).program)) ? refusedInCode(command, history) : null;
 }
 
 // Prefixes that run the command after them.
 const WRAPPERS = new Set(['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'nice', 'xargs', 'builtin']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash']);
+// The interpreters an L1 run may hand inline code or a heredoc.
+const INTERPRETERS = new Set(['python', 'python3', 'py', 'node']);
 
-// What one simple command does that is refused, past any assignments and
-// wrappers before it, and inside a shell's `-c` script.
-async function refusedCommand(words: string[], history: RunHistory): Promise<string | null> {
+// The program a simple command runs, past any assignments and wrappers
+// before it, and the words after it.
+function programOf(words: string[]): { program: string; args: string[] } {
   let i = 0;
   // Assignments, wrappers and the wrappers' own options come first.
   while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i]!) || WRAPPERS.has(programName(words[i]!)))) {
     i++;
     while (i < words.length && /^(-|\d+$)/.test(words[i]!)) i++;
   }
-  const program = words[i] === undefined ? '' : programName(words[i]!);
-  const args = words.slice(i + 1);
+  return { program: words[i] === undefined ? '' : programName(words[i]!), args: words.slice(i + 1) };
+}
+
+// The strings in code, each with its backslash escapes undone.
+const STRING = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/gs;
+
+// What the first command the code's strings spell out does that is refused,
+// or null: each string read as a command line, as `os.system` or `execSync`
+// would run it, and each run of strings separated only by commas and
+// brackets as one command's words, as `subprocess.run` or `spawnSync` would.
+// Strings within strings are read too, for code quoted inside a shell's.
+async function refusedInCode(code: string, history: RunHistory): Promise<string | null> {
+  const runs: string[][] = [];
+  let end = 0;
+  for (const match of code.matchAll(STRING)) {
+    const text = match[2]!.replace(/\\(.)/gs, '$1');
+    if (runs.length && /^[\s,[\]()]*$/.test(code.slice(end, match.index))) runs.at(-1)!.push(text);
+    else runs.push([text]);
+    end = match.index + match[0].length;
+  }
+  for (const run of runs) {
+    const what = run.length > 1 ? await refusedCommand(run, history) : null;
+    if (what) return what;
+    for (const text of run) {
+      const inner = (await refusedIn(text, history)) ?? (await refusedInCode(text, history));
+      if (inner) return inner;
+    }
+  }
+  return null;
+}
+
+// What one simple command does that is refused, past any assignments and
+// wrappers before it, and inside a shell's `-c` script.
+async function refusedCommand(words: string[], history: RunHistory): Promise<string | null> {
+  const { program, args } = programOf(words);
   if (SHELLS.has(program)) {
     const flag = args.findIndex((arg) => /^-[a-z]*c[a-z]*$/.test(arg));
     return flag >= 0 && args[flag + 1] !== undefined ? refusedIn(args[flag + 1]!, history) : null;

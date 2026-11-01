@@ -1125,7 +1125,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // with its reason.
   function gate(runId: string, call: ToolCall): void {
     const { rules, error } = readAllowRules(options.permissionsPath);
-    if (covers(rules, call)) return executor.permit(runId, call.id, { allow: true });
+    if (covers(rules, call, guarded.get(runId)?.worktree ?? null)) return executor.permit(runId, call.id, { allow: true });
     void dispatch({ type: 'permissionAsked', runId, call, rulesProblem: error }).then((reply) => {
       if (reply.ok) return;
       if (lifecycle.runs[runId]?.status === 'suspended') held.set(runId, [...(held.get(runId) ?? []), call]);

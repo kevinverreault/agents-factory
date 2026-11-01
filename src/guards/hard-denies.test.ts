@@ -51,6 +51,30 @@ describe('pushing', () => {
       expect(await bash(command)).toBeNull();
     },
   );
+
+  // L1 lets inline code and heredocs through to python and node (#89), so
+  // the commands their code strings spell out are read too.
+  test.each([
+    'python -c "import os; os.system(\'git push origin main\')"',
+    'python3 -c "import subprocess; subprocess.run([\'git\', \'push\', \'origin\', \'main\'])"',
+    'python -c "import os; os.system(\\"git -C . push\\")"',
+    "node -e \"require('child_process').execSync('git push origin main')\"",
+    "node -e \"require('child_process').spawnSync('git', ['push', 'origin', 'main'])\"",
+    'node --eval "require(\'child_process\').execSync(`gh auth token`)"',
+    "python - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'], check=True)\nEOF",
+    "node <<'EOF'\nconst { execSync } = require('node:child_process');\nexecSync(\"git remote add fork https://github.com/me/widgets.git\");\nEOF",
+    'npm test && python -c "import os; os.system(\'git push\')"',
+  ])('`%s` is refused', async (command) => {
+    expect(await bash(command)).toMatch(/the factory pushes for you/);
+  });
+
+  test.each([
+    'python -c "import subprocess; subprocess.run([\'git\', \'log\', \'--grep\', \'push\'])"',
+    "python - <<'EOF'\nimport subprocess\nprint(subprocess.run(['git', 'status'], capture_output=True).stdout)\nEOF",
+    "node -e \"console.log(require('./package.json').scripts.push)\"",
+  ])('`%s` runs', async (command) => {
+    expect(await bash(command)).toBeNull();
+  });
 });
 
 describe('remotes, config and credentials', () => {
