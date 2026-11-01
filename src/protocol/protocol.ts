@@ -9,7 +9,7 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 14;
 
 export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
 // Repository verbs the daemon answers by reading the clone first. `path` is
@@ -23,6 +23,13 @@ export type RepoCommand =
   | { type: 'inspectClone'; path: string };
 
 export type CloneView = { repo: string; path: string };
+// The factory identity (ADR 0004). `setupGitHub` creates the App from the
+// code GitHub's manifest flow redirected back with, and keeps its key in the
+// credential store; it replies with a `SetupView`. `checkApp` asks GitHub
+// again whether the App is installed on the repository, and replies with the
+// repository's `AppCheck`.
+export type GitHubCommand = { type: 'setupGitHub'; code: string } | { type: 'checkApp'; repo: string };
+export type SetupView = { slug: string; installationSettings: string };
 // Launches a task from the launch card: the preset (by default the
 // repository's) is resolved and frozen, and the task starts at `stage` (by
 // default the first) in a new worktree. Replies with `{ taskId }`.
@@ -74,6 +81,7 @@ export type Command =
   | OperatorCommand
   | DaemonCommand
   | RepoCommand
+  | GitHubCommand
   | LaunchCommand
   | AdvanceCommand
   | HandoffCommand

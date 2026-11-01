@@ -8,6 +8,7 @@ import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
+import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command } from '../protocol/protocol.ts';
 import { AnswerSheet, answerable, choicesFor, waitingFor } from './answer-sheet.ts';
 import { Conversation } from './conversation.ts';
@@ -34,7 +35,9 @@ function rowOf(item: AttentionQueueItem): string {
 
 // `cwd` is the directory the TUI started in: started inside a clone that
 // isn't registered, the TUI offers to register it (ADR 0010).
-export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: string }) {
+// `openUrl` opens a fix in the operator's browser, such as the App's
+// installation settings.
+export function App({ connection, cwd, openUrl = openInBrowser }: { connection: FactoryConnection; cwd?: string; openUrl?: (url: string) => void }) {
   const [state, setState] = useState<FactoryState | null>(null);
   const [closed, setClosed] = useState(false);
   const [tab, setTab] = useState<Tab>('tasks');
@@ -211,6 +214,7 @@ export function App({ connection, cwd }: { connection: FactoryConnection; cwd?: 
           here: clone?.repo ?? null,
           onLaunched: (taskId: string) => setView({ kind: 'conversation', taskId }),
           onCancel: toTabs,
+          openUrl,
         })
       : null,
     state === null

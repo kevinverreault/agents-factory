@@ -8,6 +8,8 @@ import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
 import type { ConversationEvent, Executor, RunGuards, RunStart } from '../executor/executor.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
+import { GitHubError, installationSettings, READ_ONLY, type FactoryApp, type GitHub } from '../github/github.ts';
+import { writeRunGh } from '../github/run-gh.ts';
 import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import {
   artifactsOf,
@@ -21,6 +23,7 @@ import {
   overdueRuns,
   reduce,
   unfinishedTasks,
+  type AppCheck,
   type Lifecycle,
   type Readiness,
   type LifecycleAction,
@@ -40,6 +43,7 @@ import {
   type CloneView,
   type Command,
   type DaemonStatus,
+  type GitHubCommand,
   type HandoffCommand,
   type HookEvent,
   type LaunchCommand,
@@ -47,11 +51,13 @@ import {
   type PresetsView,
   type RepoCommand,
   type Reply,
+  type SetupView,
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import type { Routes } from '../models/routing.ts';
 import { covers, FACTORY_ALLOW_LIST, readOperatorRules, type ToolCall } from '../permissions/permissions.ts';
 import {
+  appBlock,
   builtInPresets,
   issueRefs,
   launchDefault,
@@ -61,9 +67,11 @@ import {
   REPO_PRESETS,
   resolvePreset,
   userPresets,
+  writingStages,
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
+import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { cutWorktree, fetchBase, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
@@ -76,6 +84,10 @@ export type DaemonOptions = {
   clock: Clock;
   executor: Executor;
   git: Git;
+  // GitHub as the factory identity, and the credential store its App's key
+  // lives in (ADR 0004). Only the daemon calls either.
+  github: GitHub;
+  secrets: Secrets;
   skillSets: SkillSets;
   // The routing table each run's tier resolves through when it starts (ADR 0009).
   routingTable: RoutingTableFile;
@@ -91,6 +103,12 @@ export type DaemonOptions = {
 };
 
 export const IDLE_EXIT_MS = 10 * 60_000;
+// The credential the factory identity's App lives under: its id, slug and private key.
+export const GITHUB_APP_SECRET = 'github-app';
+// How long before its expiry an AFK run's bot token is replaced, and how
+// long after a failed replacement it is tried again.
+const TOKEN_REFRESH_MS = 10 * 60_000;
+const TOKEN_RETRY_MS = 60_000;
 // How often the daemon checks whether it is idle and fires overdue deadlines.
 const TICK_MS = 5_000;
 
@@ -111,7 +129,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   mkdirSync(dirname(options.tokenPath), { recursive: true });
   writeFileSync(options.tokenPath, token, { mode: 0o600 });
 
-  const { store, clock, executor, git, skillSets, routingTable } = options;
+  const { store, clock, executor, git, github, secrets, skillSets, routingTable } = options;
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
   let published: FactoryState = toFactoryState(lifecycle);
   const startedAt = clock.now();
@@ -127,6 +145,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const held = new Map<string, ToolCall[]>();
   // Each guarded AFK run's worktree as it found it, checked once it ends (ADR 0007).
   const guarded = new Map<string, { worktree: string; snapshot: RunSnapshot }>();
+  // Each guarded AFK run's read-only bot token (ADR 0004): its gh config
+  // directory, and when it is next replaced.
+  const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
+  // The factory identity's App, once read from the credential store: null
+  // when there is none yet. `setup github` replaces it.
+  let storedApp: Promise<FactoryApp | null> | null = null;
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolve) => (resolveStopped = resolve));
   let stopping: Promise<void> | null = null;
@@ -135,6 +159,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let idleSince: number | null = null;
   const stopTicking = clock.every(TICK_MS, () => {
     fireOverdueDeadlines();
+    refreshBotTokens();
     if (needsAClock()) idleSince = null;
     else if ((idleSince ??= clock.now()) + (options.idleExitMs ?? IDLE_EXIT_MS) <= clock.now()) void stop();
   });
@@ -199,6 +224,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return registerRepo(command);
       case 'moveRepo':
         return moveRepo(command);
+      case 'setupGitHub':
+        return setUpGitHub(command);
+      case 'checkApp':
+        return serially(async (): Promise<Reply> => {
+          if (!lifecycle.repositories[command.repo]) return { ok: false, reason: `${command.repo} is not registered.` };
+          return { ok: true, value: await checkApp(command.repo) };
+        });
       case 'launchTask':
         return launch(command);
       case 'advanceStage':
@@ -236,14 +268,75 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           'Name the base branch, or run `git remote set-head origin --auto` in the clone.',
       };
     }
-    const reply = await dispatch({
-      type: 'repoRegistered',
-      repo: clone.repo,
-      path: clone.path,
-      baseBranch,
-      defaultPreset: defaultPreset ?? DEFAULT_PRESET,
+    const action: RepoEvent = { type: 'repoRegistered', repo: clone.repo, path: clone.path, baseBranch, defaultPreset: defaultPreset ?? DEFAULT_PRESET };
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const refusal = await settle(action, new Set());
+      if (refusal) return { ok: false, reason: refusal };
+      await checkApp(clone.repo);
+      return { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) };
     });
-    return reply.ok ? { ok: true, value: repositoryView(lifecycle.repositories[clone.repo]!) } : reply;
+  }
+
+  // `setup github`: creates the factory identity's App from the manifest
+  // flow's code and writes it, private key and all, straight into the
+  // credential store (ADR 0004). Every repository is then checked again.
+  function setUpGitHub({ code }: Extract<GitHubCommand, { type: 'setupGitHub' }>): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      let created: FactoryApp;
+      try {
+        created = await github.createApp(code);
+        await secrets.write(GITHUB_APP_SECRET, JSON.stringify(created));
+      } catch (error) {
+        if (!(error instanceof GitHubError || error instanceof SecretsError)) throw error;
+        return { ok: false, reason: `The factory’s GitHub App couldn’t be created: ${error.message}` };
+      }
+      storedApp = Promise.resolve(created);
+      await checkEveryApp();
+      const value: SetupView = { slug: created.slug, installationSettings: installationSettings(created.slug) };
+      return { ok: true, value };
+    });
+  }
+
+  // The factory identity's App, read once from the credential store.
+  function factoryApp(): Promise<FactoryApp | null> {
+    if (!storedApp) {
+      const read = secrets.read(GITHUB_APP_SECRET).then((stored) => (stored === null ? null : (JSON.parse(stored) as FactoryApp)));
+      // A store that couldn't be read is read again next time.
+      read.catch(() => storedApp === read && (storedApp = null));
+      storedApp = read;
+    }
+    return storedApp;
+  }
+
+  // Asks GitHub whether the App is installed on the repository, and caches
+  // the answer on it. Called only from inside `serially`.
+  async function checkApp(repo: string): Promise<AppCheck> {
+    const checkedAt = clock.now();
+    let check: AppCheck;
+    try {
+      const found = await factoryApp();
+      if (!found) {
+        check = { installed: false, checkedAt, reason: NO_APP, fixUrl: null };
+      } else if (await github.isInstalled(found, repo)) {
+        check = { installed: true, checkedAt };
+      } else {
+        const reason = `The factory’s GitHub App, ${found.slug}, isn’t installed on ${repo}.`;
+        check = { installed: false, checkedAt, reason, fixUrl: installationSettings(found.slug) };
+      }
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      const reason = `The factory couldn’t check whether its GitHub App is installed on ${repo}: ${error.message}`;
+      check = { installed: false, checkedAt, reason, fixUrl: null };
+    }
+    // The repository may have been removed meanwhile.
+    if (lifecycle.repositories[repo]) await settle({ type: 'appChecked', repo, check }, new Set());
+    return check;
+  }
+
+  async function checkEveryApp(): Promise<void> {
+    for (const repo of Object.keys(lifecycle.repositories)) await checkApp(repo);
   }
 
   // Re-points the repository whose clone now holds `path` there, after
@@ -320,6 +413,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if ('error' in resolved) return { ok: false, reason: resolved.error };
       const start = planStart(resolved.preset, command.stage, action);
       if ('error' in start) return { ok: false, reason: start.error };
+      // No fallback to the operator's account (ADR 0004): a task whose
+      // preset writes to GitHub launches only where the App can write.
+      const writes = writingStages(resolved.preset);
+      if (writes.length) {
+        const check = await checkApp(repo);
+        const blocked = appBlock(resolved.preset.name, writes, check);
+        if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
+      }
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       action.stage = start.stage.id;
       action.opening = start.opening;
@@ -534,6 +635,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (reason) await settle({ type: 'repoMissing', repo: id, reason }, new Set());
       else if (missing) await settle({ type: 'repoFound', repo: id }, new Set([id]));
     }
+    // So is whether the App is installed on each.
+    await checkEveryApp();
   });
 
   // Deadlines are wall-clock times persisted in the store (ADR 0003), never
@@ -703,13 +806,25 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!(error instanceof GitError)) throw error;
         return void dispatch({ type: 'runFailed', runId: run.id, reason: `The factory couldn't read the run's worktree at ${cwd}: ${error.message}` });
       }
+      // The run reads GitHub as the App, never as the operator (ADR 0004).
+      let bot: BotToken;
+      try {
+        bot = await botToken(task.repo);
+      } catch (error) {
+        if (!isGitHubFailure(error)) throw error;
+        return void dispatch({ type: 'runFailed', runId: run.id, reason: `The factory couldn’t give the run its read-only GitHub token: ${error.message}` });
+      }
       if (lifecycle.runs[run.id]?.status !== 'active') return;
-      const env = prepareRunGit(join(options.runsRoot, run.id), FACTORY_IDENTITY, {
+      const dir = join(options.runsRoot, run.id);
+      const env = prepareRunGit(dir, FACTORY_IDENTITY, {
         task: task.id,
         run: run.id,
         model: run.model,
       });
+      const ghConfigDir = join(dir, 'gh');
+      Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
       guarded.set(run.id, { worktree: cwd, snapshot });
+      botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
       guards = { start: snapshot.head, env };
     }
     const start: RunStart = {
@@ -762,8 +877,37 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       : { ...event, reason: `${event.reason} It also ${breach}` };
   }
 
-  // Forgets the run's snapshot, and removes its git config and hooks.
+  // A read-only token of the App's installation on the repository, and the
+  // App's bot user it reads as.
+  async function botToken(repo: string): Promise<BotToken> {
+    const found = await factoryApp();
+    if (!found) throw new GitHubError(NO_APP);
+    return { user: `${found.slug}[bot]`, ...(await github.mintToken(found, repo, READ_ONLY)) };
+  }
+
+  // Replaces each guarded run's bot token that expires soon, in place: `gh`
+  // reads it afresh at the run's next call. One that fails is tried again a
+  // minute later, until the run ends.
+  function refreshBotTokens(): void {
+    for (const [runId, held] of botTokens) {
+      if (held.refreshAt > clock.now()) continue;
+      // None other starts while this one is under way.
+      held.refreshAt = Infinity;
+      void botToken(held.repo).then(
+        (bot) => {
+          if (botTokens.get(runId) !== held) return;
+          writeRunGh(held.dir, bot.user, bot.token);
+          held.refreshAt = bot.expiresAt - TOKEN_REFRESH_MS;
+        },
+        () => (held.refreshAt = clock.now() + TOKEN_RETRY_MS),
+      );
+    }
+  }
+
+  // Forgets the run's snapshot and bot token, and removes its git config,
+  // hooks and gh config.
   function unguard(runId: string): void {
+    botTokens.delete(runId);
     if (!guarded.delete(runId)) return;
     rmSync(join(options.runsRoot, runId), { recursive: true, force: true, maxRetries: 3 });
   }
@@ -815,6 +959,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   return { stopped, stop };
+}
+
+const NO_APP = 'The factory has no GitHub App yet: run `agents-factory setup github` to create it.';
+
+// An AFK run's read-only token, and the App's bot user it reads as.
+type BotToken = { user: string; token: string; expiresAt: number };
+
+// GitHub refused or was unreachable, the credential store couldn't be read,
+// or what it holds isn't the App.
+function isGitHubFailure(error: unknown): error is Error {
+  return error instanceof GitHubError || error instanceof SecretsError || error instanceof SyntaxError;
 }
 
 function tokensMatch(given: unknown, token: string): boolean {

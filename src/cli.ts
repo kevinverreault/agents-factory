@@ -4,16 +4,20 @@
 // `repo add`, `repo move` and `repo remove` register, re-point and unregister
 // the operator's clones; `skills update` and `skills status` move and inspect
 // the skill set pin; `models update` moves each model tier to the model this
-// factory ships. `hook` is run by Claude Code, not the operator: it
-// relays a run's hook events to the daemon.
+// factory ships; `setup github` creates the factory's GitHub App. `hook`
+// is run by Claude Code, not the operator: it relays a run's hook events
+// to the daemon.
+import { userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createElement as h } from 'react';
 import { render } from 'ink';
 import { connectOrStart } from './daemon/auto-start.ts';
 import { factoryPaths } from './daemon/paths.ts';
+import { setUpGitHub } from './github/setup-command.ts';
 import { relayHook } from './hooks/relay.ts';
 import { modelsCommand } from './models/models-command.ts';
+import { openUrl } from './os/open-url.ts';
 import { connect, HandshakeRefused, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
 import type { RepositoryView } from './protocol/factory-state.ts';
 import type { Command, DaemonStatus } from './protocol/protocol.ts';
@@ -28,7 +32,11 @@ const USAGE = [
   '       agents-factory repo remove <owner/name>',
   '       agents-factory skills update | skills status',
   '       agents-factory models update',
+  '       agents-factory setup github [--name <app-name>]',
 ].join('\n');
+
+// The manifest flow's code is valid for an hour.
+const SETUP_TIMEOUT_MS = 60 * 60_000;
 
 async function main(args: string[]): Promise<number> {
   const paths = factoryPaths();
@@ -76,8 +84,9 @@ async function main(args: string[]): Promise<number> {
       return 1;
     }
     if (command.type === 'registerRepo') {
-      const { id, path, baseBranch, defaultPreset } = reply.value as RepositoryView;
+      const { id, path, baseBranch, defaultPreset, app } = reply.value as RepositoryView;
       console.log(`Registered ${id} at ${path} (base branch ${baseBranch}, default preset ${defaultPreset}).`);
+      if (app && !app.installed) console.log(app.fixUrl ? `${app.reason} Install it there: ${app.fixUrl}` : app.reason);
     } else if (command.type === 'moveRepo') {
       const { id, path } = reply.value as RepositoryView;
       console.log(`Moved ${id} to ${path}.`);
@@ -90,6 +99,19 @@ async function main(args: string[]): Promise<number> {
     return skillsCommand(args[1], paths);
   }
   if (args[0] === 'models' && args[1] === 'update' && args.length === 2) return modelsCommand(paths);
+  if (args[0] === 'setup' && args[1] === 'github') {
+    const name = setupName(args.slice(2));
+    if (name === null) {
+      console.error(USAGE);
+      return 2;
+    }
+    const connection = await connectOrStart(paths);
+    try {
+      return await setUpGitHub({ connection, name, openUrl, print: (line) => console.log(line), signal: AbortSignal.timeout(SETUP_TIMEOUT_MS) });
+    } finally {
+      connection.close();
+    }
+  }
   console.error(USAGE);
   return 2;
 }
@@ -123,6 +145,20 @@ function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 
   if (verb === 'move' && operand && Object.keys(values).length === 0) return { type: 'moveRepo', path: resolve(operand) };
   if (verb === 'remove' && operand && Object.keys(values).length === 0) return { type: 'removeRepo', repo: operand };
   return null;
+}
+
+// The App name `setup github [--name <app-name>]` asks GitHub for, by
+// default one for this OS user (a GitHub App's name is unique on GitHub and
+// at most 34 characters), or null when the arguments don't fit.
+function setupName(args: string[]): string | null {
+  let parsed;
+  try {
+    parsed = parseArgs({ args, options: { name: { type: 'string' } } });
+  } catch {
+    return null;
+  }
+  const forThisUser = `agents-factory-${userInfo().username.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.slice(0, 34).replace(/-+$/, '');
+  return parsed.values.name?.trim() || forThisUser;
 }
 
 async function text(stream: NodeJS.ReadableStream): Promise<string> {
