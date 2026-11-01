@@ -8,11 +8,21 @@ import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
 import type { ConversationEvent, Executor, RunGuards, RunStart } from '../executor/executor.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
-import { GitHubError, installationSettings, READ_ONLY, type FactoryApp, type GitHub } from '../github/github.ts';
+import {
+  CLOSE_TICKET,
+  GitHubError,
+  installationSettings,
+  READ_ONLY,
+  type FactoryApp,
+  type GitHub,
+  type InstallationToken,
+  type Permissions,
+} from '../github/github.ts';
 import { writeRunGh } from '../github/run-gh.ts';
 import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import {
   artifactsOf,
+  betweenIterations,
   BRIEF_REQUEST,
   guard,
   initialLifecycle,
@@ -22,11 +32,13 @@ import {
   openRequest,
   overdueRuns,
   reduce,
+  ticketSources,
   unfinishedTasks,
   type AppCheck,
   type Lifecycle,
   type Readiness,
   type LifecycleAction,
+  type LoopEvent,
   type Repository,
   type RepoEvent,
   type Run,
@@ -148,6 +160,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Each guarded AFK run's read-only bot token (ADR 0004): its gh config
   // directory, and when it is next replaced.
   const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
+  // The tasks whose loop's step between iterations is under way on GitHub.
+  const stepsInFlight = new Set<string>();
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
   let storedApp: Promise<FactoryApp | null> | null = null;
@@ -613,9 +627,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // An active or suspended run, a queued task (a HITL one Ready for you
   // included, as ADR 0002 says) or an attached TUI.
+  // A loop between its iterations does too.
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + stepsInFlight.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -637,6 +652,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     // So is whether the App is installed on each.
     await checkEveryApp();
+    // A loop the daemon stopped between iterations carries on.
+    driveLoops();
   });
 
   // Deadlines are wall-clock times persisted in the store (ADR 0003), never
@@ -716,6 +733,74 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     store.saveLifecycle(lifecycle);
     publish();
     driveExecutor(before, action);
+    driveLoops();
+  }
+
+  // Starts the step on GitHub of each loop between its iterations (ADR 0006):
+  // picking the next ticket, or closing the one the last iteration did. Its
+  // outcome goes through the Lifecycle like any other event.
+  function driveLoops(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (stopping || stepsInFlight.has(task.id) || !betweenIterations(lifecycle, task)) continue;
+      stepsInFlight.add(task.id);
+      const step = task.loop!.step === 'pick' ? pickTicket(task) : closeTicket(task);
+      void step.then(
+        (event) =>
+          // The step is over once its event is in: the next one may start from there.
+          serially(async () => {
+            stepsInFlight.delete(task.id);
+            if (!stopping) await settle(event, new Set());
+          }),
+        (error) => {
+          stepsInFlight.delete(task.id);
+          throw error;
+        },
+      );
+    }
+  }
+
+  // Reads the task's ticket set from GitHub with a read-only token, in
+  // order: each source's sub-issues, or a ticket source itself when it has none.
+  async function pickTicket(task: Task): Promise<LoopEvent> {
+    try {
+      const { token } = await appToken(task.repo, READ_ONLY);
+      const { kind, refs: sources } = ticketSources(lifecycle, task)!;
+      const refs: string[] = [];
+      for (const source of sources) {
+        // A spec is never a ticket itself.
+        const subIssues = await github.subIssues(token, source);
+        for (const ref of subIssues.length || kind === 'spec' ? subIssues : [source]) if (!refs.includes(ref)) refs.push(ref);
+      }
+      const tickets = [];
+      for (const ref of refs) tickets.push(await github.readIssue(token, ref));
+      const { head } = await git.snapshot(task.worktree!.path);
+      return { type: 'ticketsRead', taskId: task.id, tickets, base: head, sessionId: randomUUID() };
+    } catch (error) {
+      if (!isGitHubFailure(error) && !(error instanceof GitError)) throw error;
+      return { type: 'ticketsUnread', taskId: task.id, reason: error.message };
+    }
+  }
+
+  // Closes the ticket the last iteration did as completed, as the App, with
+  // a token minted for this write alone (ADR 0004), and a comment saying
+  // where its work is.
+  async function closeTicket(task: Task): Promise<LoopEvent> {
+    const { ticket, commits } = task.loop! as { ticket: string; commits: string[] };
+    try {
+      const { token } = await appToken(task.repo, CLOSE_TICKET);
+      await github.closeIssue(token, ticket, closingComment(task, commits));
+      return { type: 'ticketClosed', taskId: task.id, ticket, commits };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'ticketUnclosed', taskId: task.id, ticket, reason: error.message };
+    }
+  }
+
+  // A token of the App's installation on the repository, with `permissions` alone.
+  async function appToken(repo: string, permissions: Permissions): Promise<InstallationToken> {
+    const found = await factoryApp();
+    if (!found) throw new GitHubError(NO_APP);
+    return github.mintToken(found, repo, permissions);
   }
 
   // Starts the runs the action started, and stops the live runs an operator
@@ -870,11 +955,25 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (!(error instanceof GitError)) throw error;
       broken = [`The factory couldn't check the run's worktree: ${error.message}`];
     }
-    if (broken.length === 0) return event;
+    if (broken.length === 0) return event.type === 'runCompleted' ? withCommits(event, guard.worktree) : event;
     const breach = `broke the factory’s git guards. ${broken.join(' ')}`;
     return event.type === 'runCompleted'
       ? { type: 'runFailed', runId: event.runId, reason: `The run ${breach}` }
       : { ...event, reason: `${event.reason} It also ${breach}` };
+  }
+
+  // A Ralph loop iteration's completion, with the commits on the task branch
+  // since its iteration began, by which the Lifecycle judges it (ADR 0006).
+  async function withCommits(event: Extract<RunEvent, { type: 'runCompleted' }>, worktree: string): Promise<RunEvent> {
+    const run = lifecycle.runs[event.runId];
+    const base = run?.ticket && lifecycle.tasks[run.taskId]!.loop?.base;
+    if (!base) return event;
+    try {
+      return { ...event, commits: await git.commitsSince(worktree, base) };
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return { type: 'runFailed', runId: event.runId, reason: `The factory couldn't read the iteration's commits: ${error.message}` };
+    }
   }
 
   // A read-only token of the App's installation on the repository, and the
@@ -962,6 +1061,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 }
 
 const NO_APP = 'The factory has no GitHub App yet: run `agents-factory setup github` to create it.';
+
+// What closing a ticket says on it (ADR 0006): its work is on the task
+// branch, not yet on the base branch, and at L1 only on the operator's machine.
+function closingComment(task: Task, commits: string[]): string {
+  const where = task.autonomy === 'L2' ? '' : ' Its commits are local to the operator’s machine until the task’s PR.';
+  return (
+    `Done on the task branch \`${task.worktree!.branch}\` by the agents factory’s task ${task.id} (${task.title}), ` +
+    `in ${commits.map((commit) => commit.slice(0, 7)).join(', ')}.${where}`
+  );
+}
 
 // An AFK run's read-only token, and the App's bot user it reads as.
 type BotToken = { user: string; token: string; expiresAt: number };

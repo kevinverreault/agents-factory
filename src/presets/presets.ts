@@ -114,9 +114,8 @@ export function startStages(preset: ResolvedPreset): StartStage[] {
 
 // The first message of a start stage's first run: its skill, from the
 // factory plugin (ADR 0005), invoked on its args filled from the launch
-// inputs. A run with no skill sends its args alone. A loop stage gets one
-// run on all its tickets for now: ADR 0006 has the factory pick one ticket
-// per iteration, which the Ralph loop's own slice (#47) brings.
+// inputs. A run with no skill sends its args alone. A loop stage with a
+// ticket set opens each iteration on one ticket instead (ADR 0006).
 export function openingMessage(stage: Stage, { prompt, issues }: LaunchInputs): string {
   const filled = fillOpening(stage, (variable) => (variable === 'prompt' ? prompt.trim() : issues.join(' ')));
   return 'opening' in filled ? filled.opening : '';

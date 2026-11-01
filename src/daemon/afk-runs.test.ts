@@ -134,6 +134,7 @@ describe('launching at an AFK stage', () => {
 
   test('queues an AFK run at L1 with no HITL step, guarded by the global max turns', async () => {
     const { factory, operator, tui } = await attached();
+    factory.github.addIssue('acme/widgets#12', { labels: ['ready-for-agent'] });
 
     expect(await operator.send(implement)).toEqual({ ok: true, value: { taskId: 'T1' } });
 

@@ -25,6 +25,8 @@ export class FakeGit implements Git {
   private readonly changes = new Map<string, Set<string>>();
   // Each commit's files, by path from the top.
   private readonly trees = new Map<string, Map<string, string>>();
+  // Each commit's parent, if it has one.
+  private readonly parents = new Map<string, string>();
   private commitCount = 0;
   // What each worktree's AFK run broke, as the check after the run says it.
   private readonly broken = new Map<string, string[]>();
@@ -121,9 +123,11 @@ export class FakeGit implements Git {
     this.changes.set(worktreePath, changes.add(path));
   }
 
-  // Everything changed in the worktree is committed.
+  // Everything changed in the worktree is committed, if anything is.
   commitAll(worktreePath: string): void {
+    const changed = this.changes.get(worktreePath);
     this.changes.delete(worktreePath);
+    if (changed?.size) this.advance(this.worktreeAt(worktreePath));
   }
 
   async uncommitted(worktreePath: string, paths: string[]): Promise<string[]> {
@@ -158,11 +162,26 @@ export class FakeGit implements Git {
     const worktree = this.worktreeAt(worktreePath);
     if (!paths.some((path) => this.changes.get(worktreePath)?.has(path))) throw new GitError('nothing to commit');
     for (const path of paths) this.changes.get(worktreePath)?.delete(path);
-    const commit = this.newCommit(new Map(this.trees.get(worktree.head)));
-    worktree.head = commit;
-    this.cloneAt(worktree.linkedTo).branches.set(worktree.branch, commit);
+    const commit = this.advance(worktree);
     this.commits.push({ worktreePath, paths, message });
     return commit;
+  }
+
+  // A new commit on the worktree's branch.
+  private advance(worktree: FakeWorktree): string {
+    const commit = this.newCommit(new Map(this.trees.get(worktree.head)));
+    this.parents.set(commit, worktree.head);
+    worktree.head = commit;
+    this.cloneAt(worktree.linkedTo).branches.set(worktree.branch, commit);
+    return commit;
+  }
+
+  async commitsSince(worktreePath: string, base: string): Promise<string[]> {
+    const since: string[] = [];
+    for (let commit: string | undefined = this.worktreeAt(worktreePath).head; commit && commit !== base; commit = this.parents.get(commit)) {
+      since.unshift(commit);
+    }
+    return since;
   }
 
   // The run in the worktree breaks an invariant, which the check after it

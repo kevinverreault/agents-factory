@@ -7,5 +7,6 @@ describeGitHubContract('the fake GitHub', async () => {
   const github = new FakeGitHub(clock);
   const app = await github.createApp(github.manifestCode());
   github.install('acme/widgets');
-  return { github, app, installedRepo: 'acme/widgets', uninstalledRepo: 'octocat/Hello-World', now: () => clock.now() };
+  github.addIssue('acme/widgets#1');
+  return { github, app, installedRepo: 'acme/widgets', uninstalledRepo: 'octocat/Hello-World', openIssue: 'acme/widgets#1', now: () => clock.now() };
 });
