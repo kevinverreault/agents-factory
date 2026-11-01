@@ -1464,11 +1464,14 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.goal = briefText(tidyBrief(action.brief));
       task.brief = task.goal;
       const to = stageOf(task, sheet.stage);
+      // A loop taken over before it closed its last ticket closes it first.
+      const closing = task.loop?.step === 'close' && to?.id === task.stage ? task.loop : null;
       if (to) task.stage = to.id;
       // A loop with a ticket set starts from its tickets; one without runs
       // once from the brief.
       task.loop = null;
       const loops = !!to && enterLoop(state, task, to);
+      if (loops && closing) task.loop = closing;
       const opening = to && fillOpening(to, (variable) => argValue(state, task, variable) ?? '');
       if (!loops) task.resumeWith = opening && 'opening' in opening && opening.opening ? `${opening.opening}\n\n${task.goal}` : task.goal;
       if (action.continueAs === 'fresh') {
@@ -1491,8 +1494,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (run) endRun(run, 'taken over', at);
       task.mode = 'HITL';
       task.autonomy = null;
-      // The operator works the ticket now: handing back off picks afresh.
-      task.loop = null;
+      // The operator works the ticket now: handing back off picks afresh. A
+      // ticket the loop did but hasn't closed yet still closes on hand-back.
+      if (task.loop?.step !== 'close') task.loop = null;
       // What an AFK run was to open on is the operator's to say now.
       task.resumeWith = null;
       // A fresh session no run has started yet gives way to the one the
