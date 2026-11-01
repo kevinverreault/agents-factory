@@ -369,9 +369,9 @@ export type OperatorCommand =
   // its task branch is merged into the base branch on origin.
   | { type: 'markDone'; taskId: string; anyway?: boolean }
   // Cancels the task and its whole subtree. `branch` says what happens to
-  // the task branch (Keep branch when absent); the daemon asks for it only
-  // when the branch holds commits on no branch of origin. A descendant's
-  // branch is deleted with the tree.
+  // the task branch. Without it, the daemon asks the operator when the
+  // branch holds commits on no branch of origin, and otherwise discards it;
+  // the Lifecycle itself keeps it. A descendant's branch is deleted with the tree.
   | { type: 'cancel'; taskId: string; branch?: BranchChoice }
   // Sets the tier the task's next runs start at; a live run keeps its model.
   | { type: 'retier'; taskId: string; tier: Tier }
@@ -1560,7 +1560,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.transcripts = action.transcripts;
       break;
     case 'cleanupFailed':
-      task.cleanup = { problem: action.reason };
+      // Tried again later, keeping what it keeps.
+      task.cleanup = { ...task.cleanup, problem: action.reason };
       break;
     case 'cancel':
       // Cancel means everything stops: the whole subtree ends Cancelled.

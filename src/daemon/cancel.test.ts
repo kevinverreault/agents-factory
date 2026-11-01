@@ -100,6 +100,22 @@ describe('cancelling a root task', () => {
     expect(await factory.git.unpushed(clone, branch)).toHaveLength(1);
   });
 
+  test('a kept branch stays kept when the cleanup fails and finishes once the daemon starts again', async () => {
+    const { factory, operator, tui, worktree } = await running();
+    committed(factory, worktree);
+    factory.executor.failArchive('EACCES: permission denied');
+
+    await operator.send({ type: 'cancel', taskId: 'T1', branch: 'keep' });
+    await tui.until((state) => !!state.tasks.T1?.cleanup?.problem);
+    factory.executor.failArchive(null);
+    await factory.restart();
+    const later = watch(await factory.attach());
+
+    await later.until((state) => state.tasks.T1?.transcripts !== null && state.tasks.T1?.cleanup === null);
+    expect(await factory.git.worktrees(clone)).toEqual([]);
+    expect(await factory.git.unpushed(clone, branch)).toHaveLength(1);
+  });
+
   test('Discard work ends the task Cancelled and removes its worktree and branch', async () => {
     const { factory, operator, tui, worktree } = await running();
     committed(factory, worktree);

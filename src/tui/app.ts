@@ -124,8 +124,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     if (command.type !== 'cancel') return;
     const { taskId } = command;
     void connection.send(command).then((reply) => {
-      setRefusal(reply.ok || reply.choose?.length ? null : reply.reason);
-      setCancelSheet(!reply.ok && reply.choose?.length ? { taskId, reason: reply.reason, options: reply.choose } : null);
+      const asks = !reply.ok && reply.choose?.length ? { taskId, reason: reply.reason, options: reply.choose } : null;
+      setRefusal(reply.ok || asks ? null : reply.reason);
+      setCancelSheet(asks);
     });
   };
   // Set up now: the repository's `setup` task, one HITL run of the setup

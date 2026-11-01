@@ -953,7 +953,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (!task.cleanup?.keepBranch) await git.deleteBranch(repository.path, branch);
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
-      return failed(`The factory couldn’t remove ${task.id}’s worktree at ${path} and its branch ${branch}: ${error.message}`);
+      const what = task.cleanup?.keepBranch ? `worktree at ${path}` : `worktree at ${path} and its branch ${branch}`;
+      return failed(`The factory couldn’t remove ${task.id}’s ${what}: ${error.message}`);
     }
     return { type: 'cleanedUp', taskId: task.id, transcripts };
   }
