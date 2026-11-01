@@ -1,8 +1,9 @@
 // The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
-// a task (`t`), handing one off (`ctrl+h`), cancelling one with its subtree
-// (`x`, with the cancel sheet when work would be lost), Needs you's answer
-// sheet (`a`) and Set up now (`s`) or Re-check (`R`) for a repository without the skill
+// a task (`t`), conversing with or taking over one (`c`), handing one off
+// (`ctrl+h`), cancelling one with its subtree (`x`, with the cancel sheet
+// when work would be lost), Needs you's answer sheet (`a`)
+// and Set up now (`s`) or Re-check (`R`) for a repository without the skill
 // set's setup.
 // Plain .ts (no JSX) so Node runs it without a build step.
 import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
@@ -12,7 +13,7 @@ import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
-import type { CloneView, Option } from '../protocol/protocol.ts';
+import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-sheet.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
@@ -108,15 +109,24 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (!reply.ok) retiers.current.delete(task.id);
     });
   };
+  // Sends the verb, then opens the task's conversation once the daemon took it.
+  const sendThenOpen = (command: Command & { taskId: string }) =>
+    void connection.send(command).then((reply) => {
+      setRefusal(reply.ok ? null : reply.reason);
+      if (reply.ok) setView({ kind: 'conversation', taskId: command.taskId });
+    });
   // Hands the selected HITL task off from its conversation, where the
   // handoff sheet opens: a parked one first resumes to write the brief.
   const handOff = () => {
     const task = tab === 'tasks' ? tasks[cursor] : undefined;
-    if (task?.mode !== 'HITL') return;
-    void connection.send({ type: 'openHandoff', taskId: task.id }).then((reply) => {
-      setRefusal(reply.ok ? null : reply.reason);
-      if (reply.ok) setView({ kind: 'conversation', taskId: task.id });
-    });
+    if (task?.mode === 'HITL') sendThenOpen({ type: 'openHandoff', taskId: task.id });
+  };
+  // Converses with the selected task: a HITL one in its conversation, an AFK
+  // one taken over into it.
+  const converse = () => {
+    const task = tab === 'tasks' ? tasks[cursor] : itemTask;
+    if (task?.mode === 'HITL') setView({ kind: 'conversation', taskId: task.id });
+    else if (task) sendThenOpen({ type: 'takeOver', taskId: task.id });
   };
   // Cancels the selected task and its subtree, or opens the cancel sheet on
   // what the daemon asks first.
@@ -158,6 +168,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       else if (answering) {
         if (answers.form !== null || answers.confirm !== null) answers.key(input, key);
         else if (key.escape) setAnswering(false);
+        else if (input === 'c') converse();
         else if (key.upArrow) move(-1);
         else if (key.downArrow) move(1);
         else if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
@@ -172,6 +183,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (key.downArrow) move(1);
       if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
       if (input === 't') retier();
+      if (input === 'c') converse();
       const selected = tab === 'tasks' ? tasks[cursor] : undefined;
       if (input === 'x' && selected) cancel({ type: 'cancel', taskId: selected.id });
       if (key.ctrl && input === 'h') handOff();
@@ -272,7 +284,7 @@ function TaskList({ tasks, cursor }: { tasks: TaskView[]; cursor: number }) {
   if (tasks.length === 0) return h(Text, { dimColor: true }, 'No tasks yet. N launches one.');
   return column([
     ...tasks.map((task, i) => h(Row, { key: task.id, id: task.id, title: task.title, detail: `${task.label} · ${task.tier}`, selected: i === cursor })),
-    h(Text, { key: 'keys', dimColor: true }, 'enter open · t re-tier · x cancel · N launch'),
+    h(Text, { key: 'keys', dimColor: true }, 'enter open · c converse or take over · t re-tier · x cancel · N launch'),
   ]);
 }
 

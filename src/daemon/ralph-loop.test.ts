@@ -261,6 +261,38 @@ describe('a failed GitHub write', () => {
   });
 });
 
+describe('taking the loop over', () => {
+  test('mid-iteration, the operator works the ticket: handing back picks afresh from GitHub', async () => {
+    const { factory, operator, tui } = await looping();
+
+    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    await handOff(operator, tui, factory.executor, 'T1');
+
+    await tui.until((state) => state.tasks.T1?.mode === 'AFK' && state.tasks.T1.liveRunId === 'R3');
+    expect(tui.state().runs.R3).toMatchObject({ mode: 'AFK', ticket: 'acme/widgets#11' });
+    expect(factory.github.writes).toEqual([]);
+  });
+
+  test('with its ticket’s close failed, handing back closes the ticket the iteration did before the next pick', async () => {
+    const { factory, operator, tui } = await looping();
+    const commits = await commit(factory, tui.state().tasks.T1!.worktree!, 'src/logout.ts');
+    factory.github.uninstall('acme/widgets');
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+
+    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    factory.github.install('acme/widgets');
+    await handOff(operator, tui, factory.executor, 'T1');
+
+    await tui.until((state) => state.tasks.T1?.mode === 'AFK' && state.tasks.T1.liveRunId === 'R3');
+    expect(factory.github.issueState('acme/widgets#11')).toMatchObject({ open: false, stateReason: 'completed' });
+    expect(tui.state().tasks.T1?.closedTickets).toEqual([{ ref: 'acme/widgets#11', commits }]);
+    expect(tui.state().runs.R3).toMatchObject({ ticket: 'acme/widgets#12' });
+  });
+});
+
 describe('the end of the stage', () => {
   test('comes once every ticket is closed: tickets-closed holds and the next stage starts', async () => {
     const { factory, tui } = await looping();

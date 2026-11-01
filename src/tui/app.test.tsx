@@ -743,7 +743,7 @@ describe('launching and conversing', () => {
     const frame = app.lastFrame()!;
     expect(frame).not.toContain('Use the new API');
     expect(frame).not.toContain('›');
-    expect(frame).toContain('AFK runs take no chat: take it over to talk to it · ctrl+b back');
+    expect(frame).toContain('AFK runs take no chat: c takes it over to talk to it · ctrl+b back');
     expect(connection.sent.filter((command) => command.type === 'sendMessage' || command.type === 'interrupt')).toEqual([]);
   });
 
@@ -1605,7 +1605,7 @@ describe('answering in the conversation', () => {
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
       expect(frame).toContain('permission: Bash: gh issue view 12 1 Allow once 2 Allow for this task: Bash(gh issue view 12) 3 Allow always: Bash(gh issue view 12) 4 Deny with a note');
-      expect(frame).toContain('digits answer · ctrl+b back');
+      expect(frame).toContain('digits answer · c take over · ctrl+b back');
       expect(frame).not.toContain('esc back');
     });
 
@@ -1633,6 +1633,42 @@ describe('answering in the conversation', () => {
     await settle();
     await press(app, ENTER);
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { deny: 'Read it from the brief' } }));
+  });
+
+  test('a long request stays whole on a full screen: the events give way, not the sheet', async () => {
+    const command = 'for f in src/lifecycle/lifecycle.ts src/daemon/daemon.ts src/protocol/protocol.ts src/tui/app.ts; do sed -i s/a/b/ $f; done';
+    const long = {
+      ...permission,
+      reason: `Bash: ${command}`,
+      permission: {
+        id: 'toolu_1',
+        tool: 'Bash',
+        summary: command,
+        rule: `Bash(${command})`,
+        proposed: [
+          { part: 'for f in …', rule: 'Bash(for f *)' },
+          { part: 'sed -i s/a/b/ $f', rule: 'Bash(do sed *)' },
+          { part: 'done', rule: 'Bash(done *)' },
+        ],
+      },
+    };
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([waiting], [long]), runs: { R1: suspended } }, { connection });
+    Object.defineProperty(app.stdout, 'rows', { value: 20 });
+    await press(app, ENTER);
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    connection.serveConversation(
+      'R1',
+      ...Array.from({ length: 30 }, (_, i) => ({ type: 'message' as const, id: `E${i}`, from: 'agent' as const, text: `Step ${i}.` })),
+    );
+    await settle();
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain(`permission: Bash: ${command} 1 Allow once 2 Allow for this task: Bash(for f *), Bash(do sed *), Bash(done *) 3`);
+      expect(frame).toContain('digits answer · c take over · ctrl+b back');
+      expect(frame).toContain('Step 29.');
+      expect(frame).not.toContain('Step 0.');
+    });
   });
 
   test('a question request shows its card in the conversation, and a digit answers it', async () => {
@@ -1667,5 +1703,138 @@ describe('answering in the conversation', () => {
 
     await press(app, '1');
     await eventually(() => expect(connection.sent.filter((command) => command.type === 'answer')).toHaveLength(2));
+  });
+});
+
+describe('taking over with c', () => {
+  const [CTRL_B, ENTER] = ['\x02', '\r'];
+  const running: TaskView = { ...task('T1', 'Implement acme/widgets#12', 'running', 'Running'), liveRunId: 'R1' };
+  const afkRun = {
+    id: 'R1',
+    taskId: 'T1',
+    mode: 'AFK' as const,
+    autonomy: 'L1' as const,
+    status: 'active' as const,
+    outcome: null,
+    turn: 'agent' as const,
+    queued: [] as string[],
+    question: null,
+    permission: null,
+    stage: 'implement',
+    ticket: null,
+    proposal: null,
+    tier: 'sonnet' as const,
+    model: 'claude-sonnet-5-5',
+    maxTurns: 300,
+    cli: { pid: 4242, createdAt: 1 },
+    skillSet: null,
+    startedAt: 1,
+    endedAt: null,
+  };
+  const permission = {
+    kind: 'attention' as const,
+    taskId: 'T2',
+    repo: 'acme/widgets',
+    requestId: 'A1',
+    attention: 'permission' as const,
+    holdsRun: true,
+    reason: 'Bash: npm publish',
+    question: null,
+    permission: { id: 'toolu_1', tool: 'Bash', summary: 'npm publish', rule: 'Bash(npm publish)' },
+  };
+
+  test('c on an AFK task in the list takes it over, into its conversation', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([running]), runs: { R1: afkRun } }, { connection });
+    await eventually(() => expect(app.lastFrame()).toContain('c converse or take over'));
+
+    await press(app, 'c');
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'takeOver', taskId: 'T1' }]));
+    await eventually(() => expect(app.lastFrame()).toContain('ctrl+b back'));
+  });
+
+  test('a refused takeover says why and stays on the list', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('takeOver', { ok: false, reason: 'Only a live AFK task (queued, running or needing you) can be taken over.' });
+    const { app } = await started(factoryState([task('T1', 'Implement the store', 'in-review', 'In review')]), { connection });
+
+    await press(app, 'c');
+
+    await eventually(() => expect(app.lastFrame()).toContain('Only a live AFK task (queued, running or needing you) can be taken over.'));
+    expect(app.lastFrame()).toContain('1 Tasks');
+  });
+
+  test('c on a HITL task converses: it opens the conversation and sends nothing', async () => {
+    const connection = new FakeConnection();
+    const hitl = { ...task('T1', 'Grill me about the login flow.', 'running', 'In conversation', 'HITL'), liveRunId: 'R1' };
+    const { app } = await started({ ...factoryState([hitl]), runs: { R1: { ...afkRun, mode: 'HITL' as const, autonomy: null } } }, { connection });
+
+    await press(app, 'c');
+
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    expect(connection.sent).toEqual([]);
+  });
+
+  test('c on a Needs you item takes its task over, while its answer sheet has the digits too', async () => {
+    const connection = new FakeConnection();
+    const waiting = { ...task('T2', 'Publish the package', 'waiting', 'Needs you'), liveRunId: 'R1' };
+    const { app } = await started({ ...factoryState([waiting], [permission]), runs: { R1: { ...afkRun, taskId: 'T2', status: 'suspended' as const } } }, { connection });
+
+    await press(app, '2', 'a', 'c');
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'takeOver', taskId: 'T2' }]));
+    await eventually(() => expect(app.lastFrame()).toContain('ctrl+b back'));
+  });
+
+  test('c in an AFK task’s conversation takes it over, and the conversation takes chat once the HITL run is live', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([running]), runs: { R1: afkRun } }, { connection });
+    await press(app, ENTER);
+    await eventually(() => expect(app.lastFrame()).toContain('AFK runs take no chat: c takes it over to talk to it · ctrl+b back'));
+
+    await press(app, 'c');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'takeOver', taskId: 'T1' }]));
+    connection.servePatch([
+      { op: 'set', path: ['runs', 'R1'], value: { ...afkRun, status: 'ended', outcome: 'taken over' } },
+      { op: 'set', path: ['runs', 'R2'], value: { ...afkRun, id: 'R2', mode: 'HITL', autonomy: null, turn: 'operator' } },
+      { op: 'set', path: ['tasks', 'T1'], value: { ...running, mode: 'HITL', autonomy: null, label: 'Ready for you', liveRunId: 'R2' } },
+    ]);
+
+    await eventually(() => expect(connection.conversed).toEqual(['R1', 'R2']));
+    await eventually(() => expect(app.lastFrame()).toContain('The agent is waiting on you.'));
+    await press(app, CTRL_B);
+    await eventually(() => expect(app.lastFrame()).toContain('1 Tasks'));
+  });
+
+  test('c in the conversation of an AFK task that needs the operator takes it over from its answer sheet', async () => {
+    const connection = new FakeConnection();
+    const waiting = { ...task('T2', 'Publish the package', 'waiting', 'Needs you'), liveRunId: 'R1' };
+    const { app } = await started({ ...factoryState([waiting], [permission]), runs: { R1: { ...afkRun, taskId: 'T2', status: 'suspended' as const } } }, { connection });
+    await press(app, ENTER);
+    await eventually(() => expect(app.lastFrame()).toContain('digits answer · c take over · ctrl+b back'));
+
+    await press(app, 'c');
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'takeOver', taskId: 'T2' }]));
+  });
+});
+
+describe('the conversation of an AFK task that is no longer live', () => {
+  test('offers no takeover: an In review task’s view says only that it takes no chat', async () => {
+    const connection = new FakeConnection();
+    const reviewed = task('T1', 'Implement acme/widgets#12', 'in-review', 'In review');
+    const ended = {
+      id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const,
+      turn: 'agent' as const, queued: [] as string[], question: null, permission: null, stage: 'implement', ticket: null, proposal: null,
+      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2,
+    };
+    const { app } = await started({ ...factoryState([reviewed]), runs: { R1: ended } }, { connection });
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('AFK runs take no chat · ctrl+b back'));
+
+    await press(app, 'c');
+
+    expect(connection.sent).toEqual([]);
   });
 });

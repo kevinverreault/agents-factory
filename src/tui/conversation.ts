@@ -2,8 +2,8 @@
 // session file and then live, with a side rail of the task's artifacts. A HITL
 // run's has a line for the operator's next message, and the advance and
 // handoff sheets over it; an AFK run never takes chat, so its view only
-// follows it. A task that needs the operator shows its request's answer
-// sheet, whose digits answer it here as on Needs you.
+// follows it until `c` takes the task over. A task that needs the operator
+// shows its request's answer sheet, whose digits answer it here as on Needs you.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
@@ -65,10 +65,16 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const request = state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId);
   const answers = useAnswering(connection, request, task, { onReply: ({ reply }) => tell(reply) });
   const answering = answerable(request, task);
+  // A live AFK task is talked to only once taken over, which `c` does from
+  // here too, unless the answer sheet is taking what the operator types.
+  const canTakeOver =
+    task?.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state) && answers.form === null && answers.confirm === null;
+  const takeOver = () => void connection.send({ type: 'takeOver', taskId }).then(tell);
 
   useInput((input, key) => {
     const typed = typing.current;
     if (key.ctrl && input === 'b') return onLeave();
+    if (canTakeOver && input === 'c') return takeOver();
     if (answering) return answers.key(input, key);
     if (!takesChat) return;
     // At any moment: mid-turn and over an open card too.
@@ -111,9 +117,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   }, { isActive: !advancing && !sheet });
   const { draft } = typing.current;
   const keys = answering
-    ? 'digits answer'
+    ? `digits answer${canTakeOver ? ' · c take over' : ''}`
     : !takesChat
-      ? 'AFK runs take no chat: take it over to talk to it'
+      ? `AFK runs take no chat${canTakeOver ? ': c takes it over to talk to it' : ''}`
       : question
         ? 'esc interrupt'
         : midTurn
@@ -125,12 +131,18 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   return h(
     Box,
     { flexDirection: 'column', height: (stdout as NodeJS.WriteStream).rows || undefined },
-    h(Box, { gap: 2 }, h(Text, { bold: true }, taskId), h(Text, { wrap: 'truncate' }, task?.title ?? '')),
-    h(Text, { dimColor: true }, [task?.branch, task?.stage, run?.model, task?.label].filter(Boolean).join(' · ')),
-    // The escape hatch: the same session in the operator's own terminal.
-    task?.sessionId
-      ? h(Text, { dimColor: true, wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
-      : null,
+    // On a full screen only the events give way: squeezed, wrapped text
+    // would draw its lines over the next ones.
+    h(
+      Box,
+      { flexDirection: 'column', flexShrink: 0 },
+      h(Box, { gap: 2 }, h(Text, { bold: true }, taskId), h(Text, { wrap: 'truncate' }, task?.title ?? '')),
+      h(Text, { dimColor: true }, [task?.branch, task?.stage, run?.model, task?.label].filter(Boolean).join(' · ')),
+      // The escape hatch: the same session in the operator's own terminal.
+      task?.sessionId
+        ? h(Text, { dimColor: true, wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
+        : null,
+    ),
     h(
       Box,
       { flexGrow: 1, marginY: 1, gap: 2 },
@@ -145,22 +157,26 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       ),
       h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
     ),
-    question ? h(QuestionCard, { question, card }) : null,
-    live && run.proposal?.kind === 'advance'
-      ? h(Text, { color: 'yellow' }, `◇ The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
-      : null,
-    live && run.proposal?.kind === 'handoff' && !sheet
-      ? h(Text, { color: 'yellow' }, `◇ The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
-      : null,
-    sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run }) : null,
-    advancing && canAdvance(task)
-      ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
-      : null,
-    request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
-    live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
-    refusal ? h(Text, { color: 'red' }, refusal) : null,
-    chat ? h(Text, null, `› ${draft}▏`) : null,
-    h(Text, { dimColor: true }, hint),
+    h(
+      Box,
+      { flexDirection: 'column', flexShrink: 0 },
+      question ? h(QuestionCard, { question, card }) : null,
+      live && run.proposal?.kind === 'advance'
+        ? h(Text, { color: 'yellow' }, `◇ The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
+        : null,
+      live && run.proposal?.kind === 'handoff' && !sheet
+        ? h(Text, { color: 'yellow' }, `◇ The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
+        : null,
+      sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run }) : null,
+      advancing && canAdvance(task)
+        ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
+        : null,
+      request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
+      live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
+      refusal ? h(Text, { color: 'red' }, refusal) : null,
+      chat ? h(Text, null, `› ${draft}▏`) : null,
+      h(Text, { dimColor: true }, hint),
+    ),
   );
 }
 
