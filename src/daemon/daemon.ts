@@ -1198,7 +1198,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // otherwise is refused, with its reason.
   function gate(runId: string, call: ToolCall): void {
     const { rules, error } = readAllowRules(options.permissionsPath);
-    const parts = uncovered(rules, call);
+    const parts = uncovered(rules, call, guarded.get(runId)?.worktree ?? null);
     if (parts.length === 0) return executor.permit(runId, call.id, { allow: true });
     void dispatch({ type: 'permissionAsked', runId, call, parts, rulesProblem: error }).then((reply) => {
       if (reply.ok) return;
