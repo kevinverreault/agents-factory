@@ -93,3 +93,12 @@ The launch card's start stage picker offers the stages whose `args` the launch i
 - otherwise ends the stage's run `completed` and starts a run of the next stage, its skill invoked on its filled `args`. It resumes the session, or starts a new one with `context: fresh`, at the tier the operator picked at launch, else the stage's model tier (the task's when the stage names none).
 - raises a `stage-blocked` attention request instead, naming what's missing, when the next stage's `args` can't be filled. The run still ends, and the task stays at the stage it was leaving, to advance from again once the request is answered.
 - past the last stage, puts the root task in review.
+
+**AFK → AFK.** No one confirms: when an AFK stage's run completes, the factory checks the boundary itself.
+
+- When the stage's exit holds, the task moves to the next stage and queues its run, the skill invoked on its filled `args`, resuming the session or starting a new one with `context: fresh`. It queues as work continuing something in flight, so the scheduler gives it a slot after urgent work and before work not yet started.
+- A stage that `requires: L2` is skipped below L2, so at L1 `open-pr` is.
+- A `stage-blocked` attention request is raised instead, naming what's missing, when the exit doesn't hold (the factory can't evaluate `tickets-closed` or `map-cleared` yet, so those never hold), the next stage's `args` can't be filled, the next stage is HITL (take the task over to start it), or it is a factory action (none runs yet). The task stays at its stage. Answering the request sends its run on at that stage, told what was missing, and the boundary is checked again when that run completes.
+- Past the last stage, the root task goes In review and shows in Needs you.
+
+An AFK task's autonomy level changes only between runs, never under a live one, and is clamped to its stage's `autonomy` ceiling. Each run also takes its stage's ceiling.
