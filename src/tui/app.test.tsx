@@ -1688,7 +1688,7 @@ describe('taking over with c', () => {
     await eventually(() => expect(app.lastFrame()).toContain('1 Tasks'));
   });
 
-  test('c in the conversation of an AFK task that needs the operator takes it over over its answer sheet', async () => {
+  test('c in the conversation of an AFK task that needs the operator takes it over from its answer sheet', async () => {
     const connection = new FakeConnection();
     const waiting = { ...task('T2', 'Publish the package', 'waiting', 'Needs you'), liveRunId: 'R1' };
     const { app } = await started({ ...factoryState([waiting], [permission]), runs: { R1: { ...afkRun, taskId: 'T2', status: 'suspended' as const } } }, { connection });
@@ -1698,5 +1698,24 @@ describe('taking over with c', () => {
     await press(app, 'c');
 
     await eventually(() => expect(connection.sent).toEqual([{ type: 'takeOver', taskId: 'T2' }]));
+  });
+});
+
+describe('the conversation of an AFK task that is no longer live', () => {
+  test('offers no takeover: an In review task’s view says only that it takes no chat', async () => {
+    const connection = new FakeConnection();
+    const reviewed = task('T1', 'Implement acme/widgets#12', 'in-review', 'In review');
+    const ended = {
+      id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const,
+      turn: 'agent' as const, queued: [] as string[], question: null, permission: null, stage: 'implement', ticket: null, proposal: null,
+      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2,
+    };
+    const { app } = await started({ ...factoryState([reviewed]), runs: { R1: ended } }, { connection });
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('AFK runs take no chat · ctrl+b back'));
+
+    await press(app, 'c');
+
+    expect(connection.sent).toEqual([]);
   });
 });

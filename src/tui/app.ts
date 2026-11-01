@@ -12,7 +12,7 @@ import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
-import type { CloneView } from '../protocol/protocol.ts';
+import type { CloneView, Command } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-sheet.ts';
 import { Conversation } from './conversation.ts';
@@ -104,26 +104,24 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (!reply.ok) retiers.current.delete(task.id);
     });
   };
+  // Sends the verb, then opens the task's conversation once the daemon took it.
+  const sendThenOpen = (command: Command & { taskId: string }) =>
+    void connection.send(command).then((reply) => {
+      setRefusal(reply.ok ? null : reply.reason);
+      if (reply.ok) setView({ kind: 'conversation', taskId: command.taskId });
+    });
   // Hands the selected HITL task off from its conversation, where the
   // handoff sheet opens: a parked one first resumes to write the brief.
   const handOff = () => {
     const task = tab === 'tasks' ? tasks[cursor] : undefined;
-    if (task?.mode !== 'HITL') return;
-    void connection.send({ type: 'openHandoff', taskId: task.id }).then((reply) => {
-      setRefusal(reply.ok ? null : reply.reason);
-      if (reply.ok) setView({ kind: 'conversation', taskId: task.id });
-    });
+    if (task?.mode === 'HITL') sendThenOpen({ type: 'openHandoff', taskId: task.id });
   };
   // Converses with the selected task: a HITL one in its conversation, an AFK
   // one taken over into it.
   const converse = () => {
     const task = tab === 'tasks' ? tasks[cursor] : itemTask;
-    if (!task) return;
-    if (task.mode === 'HITL') return setView({ kind: 'conversation', taskId: task.id });
-    void connection.send({ type: 'takeOver', taskId: task.id }).then((reply) => {
-      setRefusal(reply.ok ? null : reply.reason);
-      if (reply.ok) setView({ kind: 'conversation', taskId: task.id });
-    });
+    if (task?.mode === 'HITL') setView({ kind: 'conversation', taskId: task.id });
+    else if (task) sendThenOpen({ type: 'takeOver', taskId: task.id });
   };
   // Set up now: the repository's `setup` task, one HITL run of the setup
   // skill, opened in its conversation.

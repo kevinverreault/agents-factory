@@ -1497,9 +1497,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.resumeWith = null;
       // A fresh session no run has started yet gives way to the one the
       // last run used: the operator steps into the conversation they saw.
-      const used = lastRun(state, task)?.sessionId;
-      if (task.newSession && used) {
-        task.sessionId = used;
+      const lastSession = lastRun(state, task)?.sessionId;
+      if (task.newSession && lastSession) {
+        task.sessionId = lastSession;
         task.newSession = false;
       }
       startRun(state, task, at);
