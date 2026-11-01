@@ -31,6 +31,8 @@ function noted(label: string, prompt: string, enter: string, command: (text: str
 // reads, what enter does, and the answer the confirmed rules make.
 type ByRules = { label: string; enter: string; answer: (rules: string[]) => PermissionAnswer };
 const FOR_THIS_TASK: ByRules = { label: 'Allow for this task', enter: 'allows for this task', answer: (rules) => ({ allow: 'task', rules }) };
+// Adds the rules to the operator's permissions file, for every task.
+const ALWAYS: ByRules = { label: 'Allow always', enter: 'allows always', answer: (rules) => ({ allow: 'always', rules }) };
 
 // A choice that allows the call by rules the operator can widen or narrow
 // first: one field per part no rule covers, under that part, holding the
@@ -69,13 +71,14 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
       return [{ label: 'Retry', command: answer }, ...(task?.mode === 'AFK' ? [takeOver] : [])];
     }
     case 'permission': {
-      // Requests stored before they named their call allow it for the task as it is.
-      const forTask: Choice = item.permission
-        ? byRules(taskId, item.permission, FOR_THIS_TASK)
-        : { label: 'Allow for this task: this call', command: { type: 'answer', taskId, permission: { allow: 'task' } } };
+      // Requests stored before they named their call allow it for the task
+      // as it is, and never always: they have no rule to add.
+      const byRulesChoices: Choice[] = item.permission
+        ? [byRules(taskId, item.permission, FOR_THIS_TASK), byRules(taskId, item.permission, ALWAYS)]
+        : [{ label: 'Allow for this task: this call', command: { type: 'answer', taskId, permission: { allow: 'task' } } }];
       return [
         { label: 'Allow once', command: { type: 'answer', taskId, permission: { allow: 'once' } } },
-        forTask,
+        ...byRulesChoices,
         noted('Deny with a note', 'Note for the agent', 'denies', (text) => ({ type: 'answer', taskId, permission: { deny: text } })),
       ];
     }

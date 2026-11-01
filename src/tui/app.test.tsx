@@ -1245,7 +1245,7 @@ describe('answering from Needs you', () => {
     await press(app, '2');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        '── T2 Implement the store ── permission: Bash: npm publish 1 Allow once 2 Allow for this task: Bash(npm publish *) 3 Deny with a note a answer',
+        '── T2 Implement the store ── permission: Bash: npm publish 1 Allow once 2 Allow for this task: Bash(npm publish *) 3 Allow always: Bash(npm publish *) 4 Deny with a note a answer',
       ),
     );
 
@@ -1310,16 +1310,31 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *)'));
   });
 
-  test('Deny takes a typed note, which enter sends and esc sets aside', async () => {
+  test('Allow always offers the rules Allow for this task does, editable, and enter sends them for every task', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([failing], [permission]), { connection });
     await press(app, '2', 'a', '3');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *) enter allows always · esc back'));
+
+    await press(app, ...Array(' publish *)'.length).fill('\x7f'));
+    app.stdin.write(' *)');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm *)'));
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', permission: { allow: 'always', rules: ['Bash(npm *)'] } }),
+    );
+  });
+
+  test('Deny takes a typed note, which enter sends and esc sets aside', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([failing], [permission]), { connection });
+    await press(app, '2', 'a', '4');
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
 
     await press(app, ESC);
-    await eventually(() => expect(app.lastFrame()).toContain('3 Deny with a note'));
+    await eventually(() => expect(app.lastFrame()).toContain('4 Deny with a note'));
     // The digits still answer: esc left only the note.
-    await press(app, '3');
+    await press(app, '4');
     await eventually(() => expect(app.lastFrame()).toContain('Note for the agent:'));
     // An empty note sends nothing.
     await press(app, ENTER);
@@ -1435,7 +1450,7 @@ describe('answering in the conversation', () => {
     const app = await opened(permission, connection);
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain('permission: Bash: gh issue view 12 1 Allow once 2 Allow for this task: Bash(gh issue view 12) 3 Deny with a note');
+      expect(frame).toContain('permission: Bash: gh issue view 12 1 Allow once 2 Allow for this task: Bash(gh issue view 12) 3 Allow always: Bash(gh issue view 12) 4 Deny with a note');
       expect(frame).toContain('digits answer · ctrl+b back');
       expect(frame).not.toContain('esc back');
     });
@@ -1454,12 +1469,12 @@ describe('answering in the conversation', () => {
   test('Deny takes a typed note in the conversation, which esc sets aside and enter sends', async () => {
     const connection = new FakeConnection();
     const app = await opened(permission, connection);
-    await press(app, '3');
+    await press(app, '4');
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
     await press(app, ESC);
     await eventually(() => expect(app.lastFrame()).not.toContain('Note for the agent'));
 
-    await press(app, '3');
+    await press(app, '4');
     app.stdin.write('Read it from the brief');
     await settle();
     await press(app, ENTER);

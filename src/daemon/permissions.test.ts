@@ -4,8 +4,8 @@
 // call that still reaches the gate is matched again: one the factory's allow
 // list, the operator's permissions file or the task's rules cover runs without
 // asking; anything else raises a permission request that suspends its run,
-// answered Allow once, Allow for this task, or Deny with a note.
-import { mkdirSync, writeFileSync } from 'node:fs';
+// answered Allow once, Allow for this task, Allow always, or Deny with a note.
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { FACTORY_ALLOW_LIST } from '../permissions/permissions.ts';
@@ -234,7 +234,7 @@ describe('answering a permission request', () => {
 
   test('needs an allow or a deny with a note', async () => {
     const { operator } = await asked();
-    const refusal = 'Allow it once, allow it for this task, or deny it with a note for the agent.';
+    const refusal = 'Allow it once, for this task or always, or deny it with a note for the agent.';
     expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: false, reason: refusal });
     expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { deny: '  ' } })).toEqual({ ok: false, reason: refusal });
   });
@@ -312,7 +312,7 @@ describe('answering a permission request', () => {
     expect(state.tasks.T1?.allowRules).toEqual(['Bash(npm install *)', 'Bash(docker build *)']);
   });
 
-  test('Allow for this task refuses rules that aren’t rules', async () => {
+  test('Allow for this task and Allow always refuse rules that aren’t rules', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(afk('Fix the login bug'));
     factory.executor.askPermission('R1', bash('toolu_1', 'npm publish'));
@@ -321,7 +321,12 @@ describe('answering a permission request', () => {
     const refusal = { ok: false, reason: 'Allow for this task needs at least one rule, each such as `Bash(sed -i *)`.' };
     expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: [] } })).toEqual(refusal);
     expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: ['Bash(npm publish *)', ' '] } })).toEqual(refusal);
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'always', rules: ['Bash(npm publish *)', ' '] } })).toEqual({
+      ok: false,
+      reason: 'Allow always needs at least one rule, each such as `Bash(sed -i *)`.',
+    });
     expect(tui.state().tasks.T1?.label).toBe('Needs you');
+    expect(existsSync(factory.paths.permissionsPath)).toBe(false);
   });
 
   test('Allow for this task covers a command that can’t be split exactly', async () => {
@@ -350,6 +355,144 @@ describe('answering a permission request', () => {
       toolu_1: { allow: false, message: 'The operator denied this: Publishing is the release job’s.' },
     });
     expect(tui.state().tasks.T1?.allowRules).toEqual([]);
+  });
+});
+
+describe('Allow always', () => {
+  test('adds the confirmed rules to the operator’s permissions file, creating it, so like calls run in every task from then on', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', "npm install zod && sed -i 's/a/b/' src/a.ts"));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+    expect(existsSync(factory.paths.permissionsPath)).toBe(false);
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'always', rules: ['Bash(npm install *)', 'Bash(sed *)'] } })).toEqual({
+      ok: true,
+    });
+
+    await tui.until((state) => state.tasks.T1?.label === 'Running');
+    expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true } });
+    expect(readFileSync(factory.paths.permissionsPath, 'utf8')).toBe('allow:\n  - Bash(npm install *)\n  - Bash(sed *)\n');
+    expect(tui.state().tasks.T1?.allowRules).toEqual([]);
+
+    await operator.send(afk('Add dark mode'));
+    await tui.until((state) => state.tasks.T2?.label === 'Running');
+    factory.executor.askPermission('R1', bash('toolu_2', 'sed -n 1,5p src/b.ts'));
+    factory.executor.askPermission('R2', bash('toolu_3', 'npm install react && npm test'));
+    await settled(operator);
+    expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_2: { allow: true } });
+    expect(factory.executor.verdicts('R2')).toEqual({ toolu_3: { allow: true } });
+    expect(tui.state().attentionQueue).toEqual([]);
+  });
+
+  test('keeps the file’s rules and comments, and adds no rule it already holds', async () => {
+    const { factory, operator, tui } = await attached();
+    operatorRules(factory, '# Mine, for every task.\nallow:\n  - Bash(make *) # builds\n');
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'make lint && docker build -t widgets . && npm publish'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+
+    const answer = { allow: 'always' as const, rules: ['Bash(make *)', 'Bash(docker build *)', 'Bash(docker build *)'] };
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: answer })).toEqual({ ok: true });
+
+    expect(readFileSync(factory.paths.permissionsPath, 'utf8')).toBe('# Mine, for every task.\nallow:\n  - Bash(make *) # builds\n  - Bash(docker build *)\n');
+  });
+
+  test('lets through the other runs waiting on a permission request the rules now cover, parked or not, and only those', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    await operator.send(afk('Add dark mode'));
+    await operator.send(afk('Ship the docs'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'docker build -t login .'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended' && state.runs.R3?.status === 'active');
+    factory.clock.advance(61 * 60_000);
+    await tui.until((state) => state.runs.R1?.outcome === 'parked');
+    factory.executor.askPermission('R2', bash('toolu_2', 'docker build -t dark . && npm test'));
+    factory.executor.askPermission('R3', bash('toolu_3', 'docker push docs'));
+    await tui.until((state) => state.runs.R2?.status === 'suspended' && state.runs.R3?.status === 'suspended');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T2', permission: { allow: 'always', rules: ['Bash(docker build *)'] } })).toEqual({ ok: true });
+
+    const state = await tui.until((state) => state.tasks.T1?.liveRunId === 'R4');
+    expect(factory.executor.verdicts('R2')).toEqual({ toolu_2: { allow: true } });
+    expect(factory.executor.started.at(-1)?.firstMessage).toBe(
+      'While this conversation was parked, the operator allowed Bash: docker build -t login ., and from now on, in every task, the calls these rules cover: Bash(docker build *).\n\n' +
+        'Carry on, unattended, from where this conversation left off.',
+    );
+    expect(state.tasks.T2?.label).toBe('Running');
+    expect(rows(state)).toEqual(['T3 permission']);
+    expect(factory.executor.verdicts('R3')).toEqual({});
+  });
+
+  test('lets through the calls a run holds behind another request the rules cover, while that request stays open', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    await operator.send(afk('Add dark mode'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'npm publish'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+    factory.executor.askPermission('R1', bash('toolu_2', 'docker build -t login .'));
+    factory.executor.askPermission('R2', bash('toolu_3', 'docker build -t dark .'));
+    await tui.until((state) => state.runs.R2?.status === 'suspended');
+
+    await operator.send({ type: 'answer', taskId: 'T2', permission: { allow: 'always', rules: ['Bash(docker build *)'] } });
+
+    await tui.until((state) => state.tasks.T2?.label === 'Running');
+    await settled(operator);
+    expect(factory.executor.verdicts('R1')).toEqual({ toolu_2: { allow: true } });
+    expect(rows(tui.state())).toEqual(['T1 permission']);
+  });
+
+  test('fills an empty `allow:`, keeping its comment, and won’t replace a list it names elsewhere', async () => {
+    const { factory, operator, tui } = await attached();
+    operatorRules(factory, 'allow: # none yet\n');
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'make lint'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'always' } })).toEqual({ ok: true });
+    expect(readFileSync(factory.paths.permissionsPath, 'utf8')).toBe('allow:\n  - Bash(make lint *)\n  # none yet\n');
+
+    const aliased = 'mine: &mine\n  - Bash(make *)\nallow: *mine\n';
+    operatorRules(factory, aliased);
+    factory.executor.askPermission('R1', bash('toolu_2', 'docker build .'));
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'always' } })).toEqual({
+      ok: false,
+      reason: `Allow always added no rules: ${factory.paths.permissionsPath} names its \`allow:\` list elsewhere, so the factory can’t add to it: add the rules there by hand.`,
+    });
+    expect(readFileSync(factory.paths.permissionsPath, 'utf8')).toBe(aliased);
+  });
+
+  test('fails, leaving the request open and the file as it was, when the file doesn’t hold a list of rules', async () => {
+    const { factory, operator, tui } = await attached();
+    operatorRules(factory, 'allow: Bash(make *)\n');
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'npm publish'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'always' } })).toEqual({
+      ok: false,
+      reason: `Allow always added no rules: ${factory.paths.permissionsPath} must hold \`allow:\`, a list of rules such as \`Bash(make *)\`.`,
+    });
+    expect(readFileSync(factory.paths.permissionsPath, 'utf8')).toBe('allow: Bash(make *)\n');
+    expect(rows(tui.state())).toEqual(['T1 permission']);
+    expect(factory.executor.verdicts('R1')).toEqual({});
+  });
+
+  test('fails, leaving the request open, when the file can’t be written', async () => {
+    const { factory, operator, tui } = await attached();
+    operatorRules(factory, 'allow:\n  - Bash(make *)\n');
+    chmodSync(factory.paths.permissionsPath, 0o444);
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'npm publish'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+
+    const reply = await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'always' } });
+    chmodSync(factory.paths.permissionsPath, 0o644);
+
+    expect(reply).toMatchObject({ ok: false, reason: expect.stringMatching(/^Allow always added no rules: .*permissions\.yaml couldn’t be written: /) });
+    expect(rows(tui.state())).toEqual(['T1 permission']);
+    expect(factory.executor.verdicts('R1')).toEqual({});
   });
 });
 
