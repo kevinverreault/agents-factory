@@ -69,6 +69,7 @@ import {
   type PresetCommand,
   type PresetsView,
   type RepoCommand,
+  type Option,
   type Reply,
   type SetupView,
 } from '../protocol/protocol.ts';
@@ -271,6 +272,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return dispatch({ type: 'stageAdvanced', taskId: command.taskId, skip: command.skip ?? [], sessionId: randomUUID() });
       case 'markDone':
         return markDone(command);
+      case 'cancel':
+        return cancel(command);
       case 'openHandoff':
         return openHandoff(command.taskId);
       case 'handoff':
@@ -520,6 +523,49 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await checkSkills(lifecycle.tasks[taskId]!.repo, { fetch: anyway });
       return { ok: true };
     });
+  }
+
+  // Cancel (ADR 0011): the task and its subtree end at once. Unless the
+  // operator already chose, a root task branch holding commits on no branch
+  // of origin first has the operator choose Keep branch (the default) or
+  // Discard work; with none, the branch goes without asking.
+  function cancel({ taskId, branch }: Extract<LifecycleAction, { type: 'cancel' }>): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const action: LifecycleAction = { type: 'cancel', taskId, ...(branch && { branch }) };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      if (!branch) {
+        const unique = await workAtStake(lifecycle.tasks[taskId]!);
+        if (unique) {
+          const choose: Option[] = [
+            { label: 'Keep branch', command: { type: 'cancel', taskId, branch: 'keep' } },
+            { label: 'Discard work', command: { type: 'cancel', taskId, branch: 'discard' } },
+          ];
+          return { ok: false, reason: unique, choose };
+        }
+        action.branch = 'discard';
+      }
+      const refusal = await settle(action, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
+  }
+
+  // What deleting the root task's branch would lose, or null when nothing
+  // would: commits on no branch of origin, as the clone last saw it. When
+  // that can't be read, the branch is treated as holding work.
+  async function workAtStake(task: Task): Promise<string | null> {
+    const repository = lifecycle.repositories[task.repo];
+    if (!task.worktree || task.parent || !repository) return null;
+    const { branch } = task.worktree;
+    try {
+      const commits = await git.unpushed(repository.path, branch);
+      if (commits.length === 0) return null;
+      return `${branch} has ${commits.length === 1 ? '1 commit that exists' : `${commits.length} commits that exist`} nowhere else.`;
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return `Couldn’t check whether ${branch} holds work that exists nowhere else: ${error.message}`;
+    }
   }
 
   // Why the task's branch isn't known to be merged into its base branch on
@@ -862,7 +908,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveCleanups();
   }
 
-  // Cleans up after each Done root whose cleanup is pending (ADR 0011), once
+  // Cleans up after each ended task whose cleanup is pending (ADR 0011), once
   // per daemon. Its outcome goes through the Lifecycle like any other event.
   function driveCleanups(): void {
     for (const task of Object.values(lifecycle.tasks)) {
@@ -884,10 +930,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Archives every session transcript of the task, then removes its worktree
-  // and force-deletes its local task branch: a squash merge fails `git branch
-  // -d`, and Mark done either found the branch merged or the operator chose
-  // to finish anyway. Nothing is removed unless every
-  // transcript is archived. Each step can be done again.
+  // and, unless Keep branch kept it, force-deletes its local task branch: a
+  // squash merge fails `git branch -d`, and Mark done either found the branch
+  // merged or the operator chose to finish anyway, while Cancel deletes it
+  // only when no work would be lost or the operator chose Discard work.
+  // Nothing is removed unless every transcript is archived. Each step can be
+  // done again.
   async function cleanUp(task: Task): Promise<CleanupEvent> {
     const { path, branch } = task.worktree!;
     const failed = (reason: string): CleanupEvent => ({ type: 'cleanupFailed', taskId: task.id, reason });
@@ -902,10 +950,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (!repository) return failed(`${task.repo} isn’t registered any more, so ${task.id}’s worktree at ${path} stays.`);
     try {
       await git.removeWorktree(repository.path, path);
-      await git.deleteBranch(repository.path, branch);
+      if (!task.cleanup?.keepBranch) await git.deleteBranch(repository.path, branch);
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
-      return failed(`The factory couldn’t remove ${task.id}’s worktree at ${path} and its branch ${branch}: ${error.message}`);
+      const what = task.cleanup?.keepBranch ? `worktree at ${path}` : `worktree at ${path} and its branch ${branch}`;
+      return failed(`The factory couldn’t remove ${task.id}’s ${what}: ${error.message}`);
     }
     return { type: 'cleanedUp', taskId: task.id, transcripts };
   }

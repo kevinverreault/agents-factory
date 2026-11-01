@@ -286,6 +286,28 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
         expect(await git.worktrees(clone)).toEqual([{ path, branch: 'factory/T1-a', head }]);
       }));
 
+    test('a task branch’s unpushed commits are those on no branch of origin, newest first, and a branch that is gone has none', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll, push }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        const base = (await git.worktrees(clone))[0]!.head;
+        // Cut from origin's tip, with nothing of its own yet.
+        expect(await git.unpushed(clone, 'factory/T1-a')).toEqual([]);
+
+        await editFile(path, 'src/logout.ts');
+        await commitAll(path);
+        await editFile(path, 'src/session.ts');
+        await commitAll(path);
+        const [first, second] = await git.commitsSince(path, base);
+        expect(await git.unpushed(clone, 'factory/T1-a')).toEqual([second, first]);
+
+        await push(clone, 'factory/T1-a');
+        expect(await git.unpushed(clone, 'factory/T1-a')).toEqual([]);
+        expect(await git.unpushed(clone, 'factory/T9-gone')).toEqual([]);
+      }));
+
     test('repairing a path that is no worktree of the clone fails', () =>
       withFixture(async ({ git, root, cloneWithOrigin }) => {
         const clone = await cloneWithOrigin('widgets', 'main');

@@ -95,7 +95,7 @@ class Connection implements FactoryConnection {
         resolve?.(
           message.ok
             ? { ok: true, value: message.value }
-            : { ok: false, reason: message.reason, ...(message.confirm ? { confirm: message.confirm } : {}) },
+            : { ok: false, reason: message.reason, ...(message.confirm ? { confirm: message.confirm } : {}), ...(message.choose ? { choose: message.choose } : {}) },
         );
         break;
       }

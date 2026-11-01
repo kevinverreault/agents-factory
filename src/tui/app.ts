@@ -1,7 +1,8 @@
 // The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
 // a task (`t`), conversing with or taking over one (`c`), handing one off
-// (`ctrl+h`), Needs you's answer sheet (`a`)
+// (`ctrl+h`), cancelling one with its subtree (`x`, with the cancel sheet
+// when work would be lost), Needs you's answer sheet (`a`)
 // and Set up now (`s`) or Re-check (`R`) for a repository without the skill
 // set's setup.
 // Plain .ts (no JSX) so Node runs it without a build step.
@@ -12,9 +13,10 @@ import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
-import type { CloneView, Command } from '../protocol/protocol.ts';
+import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-sheet.ts';
+import { ChoosePrompt, chooseKey } from './choose.ts';
 import { Conversation } from './conversation.ts';
 import { LaunchCard } from './launch-card.ts';
 
@@ -55,6 +57,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // Each task's last re-tier sent, from the tier it had then, until the
   // daemon's answer shows: a burst of `t` goes on from it.
   const retiers = useRef(new Map<string, { from: Tier; to: Tier }>());
+  // The cancel sheet, open while the daemon asks what a cancel does with
+  // work that would be lost: Keep branch or Discard work.
+  const [cancelSheet, setCancelSheet] = useState<{ taskId: string; reason: string; options: Option[] } | null>(null);
 
   useEffect(() => connection.subscribe((next) => setState(next)), [connection]);
   useEffect(() => connection.onClose(() => setClosed(true)), [connection]);
@@ -123,6 +128,17 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     if (task?.mode === 'HITL') setView({ kind: 'conversation', taskId: task.id });
     else if (task) sendThenOpen({ type: 'takeOver', taskId: task.id });
   };
+  // Cancels the selected task and its subtree, or opens the cancel sheet on
+  // what the daemon asks first.
+  const cancel = (command: Option['command']) => {
+    if (command.type !== 'cancel') return;
+    const { taskId } = command;
+    void connection.send(command).then((reply) => {
+      const asks = !reply.ok && reply.choose?.length ? { taskId, reason: reply.reason, options: reply.choose } : null;
+      setRefusal(reply.ok || asks ? null : reply.reason);
+      setCancelSheet(asks);
+    });
+  };
   // Set up now: the repository's `setup` task, one HITL run of the setup
   // skill, opened in its conversation.
   const setUp = () => {
@@ -142,6 +158,12 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const { isRawModeSupported } = useStdin();
   useInput(
     (input, key) => {
+      if (cancelSheet) {
+        const picked = chooseKey(cancelSheet.options, input, key);
+        if (picked) setCancelSheet(null);
+        if (picked && picked !== 'back') cancel(picked.command);
+        return;
+      }
       if (answering && !item) setAnswering(false);
       else if (answering) {
         if (answers.form !== null || answers.confirm !== null) answers.key(input, key);
@@ -162,6 +184,8 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
       if (input === 't') retier();
       if (input === 'c') converse();
+      const selected = tab === 'tasks' ? tasks[cursor] : undefined;
+      if (input === 'x' && selected) cancel({ type: 'cancel', taskId: selected.id });
       if (key.ctrl && input === 'h') handOff();
       if (input === 's') setUp();
       if (input === 'R') recheck();
@@ -197,6 +221,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
           )
       : null,
     refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
+    cancelSheet
+      ? h(ChoosePrompt, { key: 'cancel', reason: `Cancel ${cancelSheet.taskId}: ${cancelSheet.reason}`, options: cancelSheet.options.map(({ label }) => label) })
+      : null,
     state && view.kind === 'launch'
       ? h(LaunchCard, {
           connection,
@@ -257,7 +284,7 @@ function TaskList({ tasks, cursor }: { tasks: TaskView[]; cursor: number }) {
   if (tasks.length === 0) return h(Text, { dimColor: true }, 'No tasks yet. N launches one.');
   return column([
     ...tasks.map((task, i) => h(Row, { key: task.id, id: task.id, title: task.title, detail: `${task.label} · ${task.tier}`, selected: i === cursor })),
-    h(Text, { key: 'keys', dimColor: true }, 'enter open · c converse or take over · t re-tier · N launch'),
+    h(Text, { key: 'keys', dimColor: true }, 'enter open · c converse or take over · t re-tier · x cancel · N launch'),
   ]);
 }
 
