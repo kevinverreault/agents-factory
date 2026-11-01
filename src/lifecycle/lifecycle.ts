@@ -2,9 +2,9 @@
 // reducer with guards and selectors. Every operator command and every run event goes
 // through `reduce`. Ported from the task-lifecycle prototype, amended by
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
-// A launched task freezes its workflow preset, starts at one of its stages
-// and advances across HITL boundaries on the operator's confirm; child tasks,
-// handoffs and AFK boundaries arrive with their own slices.
+// A launched task freezes its workflow preset, starts at one of its stages,
+// advances across HITL boundaries on the operator's confirm and across AFK
+// ones on its own; child tasks and handoffs arrive with their own slices.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
@@ -109,6 +109,9 @@ export type Task = {
   // tier here.
   inputs?: LaunchInputs & { issueKinds: string[]; tier?: Tier | null };
   sessionId: string | null;
+  // True while its next run starts the session `sessionId` names rather
+  // than resuming it, as a fresh-context stage's first run does.
+  newSession?: boolean;
   runIds: string[];
   state: TaskState;
   createdAt: number;
@@ -247,12 +250,15 @@ export type OperatorCommand =
   | { type: 'cancel'; taskId: string }
   // Sets the tier the task's next runs start at; a live run keeps its model.
   | { type: 'retier'; taskId: string; tier: Tier }
+  // Sets an AFK task's autonomy level between runs, clamped by its stage's ceiling.
+  | { type: 'setAutonomy'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'setSlotCap'; cap: number }
   | { type: 'removeRepo'; repo: string };
 
 // What the executor reports about a run.
 export type RunEvent =
-  | { type: 'runCompleted'; runId: string }
+  // The daemon names a session, for a next AFK stage whose context is fresh.
+  | { type: 'runCompleted'; runId: string; sessionId?: string }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   | { type: 'runFailed'; runId: string; reason: string }
   // The agent finished answering: the conversation is the operator's again.
@@ -329,6 +335,7 @@ export const DEFAULT_MAX_TURNS = 300;
 // start its turn.
 const AFK_RESUME = 'Carry on, unattended, from where this conversation left off.';
 export const PRIORITIES: readonly Priority[] = ['normal', 'urgent'];
+export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ['L1', 'L2'];
 // How long a HITL run may wait on the operator's turn before it is parked.
 export const IDLE_PARK_MS = 30 * 60_000;
 // How long an attention request may keep its run suspended before the run is parked.
@@ -402,12 +409,18 @@ export function nextTier(task: Task): Tier {
   return task.operatorTier ?? task.inputs?.tier ?? stageOf(task, task.stage)?.model ?? DEFAULT_TIER;
 }
 
+// The level an AFK stage's runs take: the asked one, held to its ceiling.
+function clampAutonomy(level: AutonomyLevel, stage: Stage | undefined): AutonomyLevel {
+  return stage?.autonomy === 'L1' ? 'L1' : level;
+}
+
 function stageOf(task: Task, id: string | null | undefined): Stage | undefined {
   return task.preset?.stages.find((stage) => stage.id === id);
 }
 
-// Why the stage's exit doesn't hold yet, or null. On a HITL boundary the
-// operator's confirm ends the run completed, so `run-completed` holds.
+// Why the stage's exit doesn't hold yet, or null. Its run ends completed
+// on either boundary (on a HITL one by the operator's confirm), so
+// `run-completed` holds.
 function unmetExit(state: Lifecycle, task: Task, stage: Stage): string | null {
   if (stage.exit === undefined || stage.exit === 'run-completed') return null;
   const kind = /^artifact:(.*)$/.exec(stage.exit)?.[1];
@@ -429,6 +442,20 @@ function argValue(state: Lifecycle, task: Task, variable: string): string | null
   const issues = issuesOfKind(state, task, kind);
   if (issues.length) return issues.join(' ');
   return task.inputs?.issueKinds.includes(kind) && task.inputs.issues.length ? task.inputs.issues.join(' ') : null;
+}
+
+// Why a stage can't start: the args variables the task has no value for.
+function cantFill(task: Task, stage: Stage, missing: string[]): string {
+  const placeholders = missing.map((variable) => `{{${variable}}}`).join(' and ');
+  const kinds = missing.map((variable) => variable.replace(/^artifacts\./, '')).join(' or ');
+  return `${stage.id} can’t start: its args need ${placeholders}, and ${task.id} has no ${kinds}.`;
+}
+
+// The stage an AFK stage leads to, or null past the last: a stage that
+// requires L2 (such as open-pr) is skipped below it.
+function nextAfkStage(task: Task, from: Stage): Stage | null {
+  const { stages } = task.preset!;
+  return stages.slice(stages.indexOf(from) + 1).find((stage) => stage.requires !== 'L2' || task.autonomy === 'L2') ?? null;
 }
 
 // Where the advance sheet's confirm takes the task: past its stage and the
@@ -643,6 +670,17 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'retier':
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
+    case 'setAutonomy': {
+      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
+      if (task.mode !== 'AFK') return `${task.id} is HITL, so it has no autonomy level.`;
+      if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
+      // A run's containment never shifts under it.
+      const run = liveRun(state, task);
+      if (run) return `${task.id}’s autonomy level changes only between runs, and its run ${run.id} is live.`;
+      return clampAutonomy(action.autonomy, stageOf(task, task.stage)) === 'L2'
+        ? 'L2 runs in a sandbox, which the factory doesn’t have yet: stay at L1.'
+        : null;
+    }
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';
     case 'runStarted':
@@ -727,10 +765,11 @@ function startRun(
   at: number,
   {
     opening = task.runIds.length === 0 ? task.goal : task.mode === 'AFK' ? (task.resumeWith ?? AFK_RESUME) : null,
-    resumesSession = task.runIds.length > 0,
+    resumesSession = task.runIds.length > 0 && !task.newSession,
   } = {},
 ): void {
   task.resumeWith = null;
+  task.newSession = false;
   const tier = nextTier(task);
   const allowOnce = task.allowOnce ?? [];
   task.allowOnce = [];
@@ -738,7 +777,7 @@ function startRun(
     id: nextId(state, 'run'),
     taskId: task.id,
     mode: task.mode,
-    autonomy: task.mode === 'AFK' ? task.autonomy : null,
+    autonomy: task.mode === 'AFK' ? clampAutonomy(task.autonomy!, stageOf(task, task.stage)) : null,
     status: 'active',
     outcome: null,
     interruption: null,
@@ -980,6 +1019,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
           if ('allow' in answer && answer.allow === 'once') (task.allowOnce ??= []).push(request!.permission.rule);
           task.resumeWith = openingWithVerdict(request!.permission, answer);
         }
+        // An AFK stage that couldn't move on carries on, told why.
+        if (request!.kind === 'stage-blocked' && task.mode === 'AFK') {
+          task.resumeWith = `The factory couldn’t move this task on: ${request!.reason}\n\n${AFK_RESUME}`;
+        }
         task.state = 'queued';
       }
       break;
@@ -996,6 +1039,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'retier':
       task.operatorTier = action.tier;
+      break;
+    case 'setAutonomy':
+      task.autonomy = clampAutonomy(action.autonomy, stageOf(task, task.stage));
       break;
     case 'setSlotCap':
       state.slotCap = action.cap;
@@ -1024,10 +1070,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if ('missing' in filled) {
         // The stage raises an attention request instead of starting. The
         // task stays at the stage it was leaving, to advance again from.
-        const placeholders = filled.missing.map((variable) => `{{${variable}}}`).join(' and ');
-        const kinds = filled.missing.map((variable) => variable.replace(/^artifacts\./, '')).join(' or ');
-        const reason = `${to.id} can’t start: its args need ${placeholders}, and ${task.id} has no ${kinds}.`;
-        raise(state, task, state.runs[task.runIds.at(-1)!]!, 'stage-blocked', false, reason, at);
+        raise(state, task, state.runs[task.runIds.at(-1)!]!, 'stage-blocked', false, cantFill(task, to, filled.missing), at);
         break;
       }
       task.stage = to.id;
@@ -1042,11 +1085,51 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (run!.queued.length) run!.queued = [];
       else run!.turn = 'operator';
       break;
-    case 'runCompleted':
-      // With no stages yet, a task's run completing is its last stage.
+    case 'runCompleted': {
       endRun(run!, 'completed', at);
-      task.state = 'in-review';
+      // A run of an AFK stage moves the task on by itself. Any other (a task
+      // with no preset, or one handed off from a HITL stage) is its last.
+      const from = stageOf(task, run!.stage);
+      if (from?.mode !== 'AFK') {
+        task.state = 'in-review';
+        break;
+      }
+      const blocked = (reason: string) => raise(state, task, run!, 'stage-blocked', false, reason, at);
+      const unmet = unmetExit(state, task, from);
+      if (unmet) {
+        blocked(unmet);
+        break;
+      }
+      // Past the last stage, the root task is the operator's to review.
+      const to = nextAfkStage(task, from);
+      if (!to) {
+        task.state = 'in-review';
+        break;
+      }
+      if (to.mode === 'HITL') {
+        blocked(`The next stage, ${to.id}, is HITL: take ${task.id} over to start it.`);
+        break;
+      }
+      if (to.kind === 'action') {
+        blocked(`The next stage, ${to.id}, is a factory action, which the factory can’t run yet.`);
+        break;
+      }
+      const filled = fillOpening(to, (variable) => argValue(state, task, variable));
+      if ('missing' in filled) {
+        blocked(cantFill(task, to, filled.missing));
+        break;
+      }
+      // Queued as work continuing something in flight, it takes the slot its
+      // stage's run just freed unless urgent work is waiting.
+      task.stage = to.id;
+      if (to.context === 'fresh' && action.sessionId) {
+        task.sessionId = action.sessionId;
+        task.newSession = true;
+      }
+      task.resumeWith = filled.opening;
+      task.state = 'queued';
       break;
+    }
     case 'runFailed':
       // The request a suspended run waited on can't resume it any more.
       if (request?.holdsRun) request.status = 'superseded';

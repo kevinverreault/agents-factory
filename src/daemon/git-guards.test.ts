@@ -101,7 +101,7 @@ describe('after an AFK run', () => {
     ]);
   });
 
-  test('a run that kept them reaches review, with the branches cut for other tasks meanwhile not counted against it', async () => {
+  test('a run that kept them completes and its task moves on, with the branches cut for other tasks meanwhile not counted against it', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(implement('#39'));
     await tui.until((state) => state.tasks.T1?.label === 'Running');
@@ -111,8 +111,9 @@ describe('after an AFK run', () => {
 
     factory.executor.report('R1', { type: 'runCompleted' });
 
-    const state = await tui.until((state) => state.tasks.T1?.label === 'In review');
-    expect(state.attentionQueue).toMatchObject([{ kind: 'review', taskId: 'T1' }]);
+    const state = await tui.until((state) => state.tasks.T1?.stage === 'review');
+    expect(state.runs.R1).toMatchObject({ status: 'ended', outcome: 'completed' });
+    expect(state.attentionQueue).toEqual([]);
     expect(factory.git.checked).toEqual([{ worktreePath: worktrees[0]!.path, branches: [worktrees[1]!.branch] }]);
   });
 });
