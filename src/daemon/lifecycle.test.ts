@@ -46,7 +46,7 @@ describe('runs', () => {
     const state = await tui.until((state) => state.tasks.T1?.label === 'Running');
     expect(state.slots).toEqual({ active: 1, cap: 2 });
     expect(factory.executor.started).toEqual([
-      { runId: 'R1', taskId: 'T1', mode: 'AFK', autonomy: 'L1', sessionId: 'S1', resumesSession: false, cwd: null, firstMessage: null, model: 'claude-sonnet-5-5', maxTurns: 300, credential: 'subscription-host', plugin: null, guards: null, allowRules: FACTORY_ALLOW_LIST, reports: [], child: false },
+      { runId: 'R1', taskId: 'T1', mode: 'AFK', autonomy: 'L1', sessionId: 'S1', resumesSession: false, cwd: null, firstMessage: null, model: 'claude-sonnet-5-5', maxTurns: 300, credential: 'subscription-host', plugin: null, guards: null, allowRules: FACTORY_ALLOW_LIST, reports: [], child: false, spawns: true },
     ]);
   });
 });

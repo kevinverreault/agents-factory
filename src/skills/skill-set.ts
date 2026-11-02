@@ -19,6 +19,8 @@ export interface SkillSets {
   // Builds the skill set the lock pins now, unless it is built already.
   current(): Promise<BuiltSkillSet>;
   pathOf(version: string): string;
+  // The names of the skills the built version holds, as `/factory:<skill>` invokes them.
+  skills(version: string): Promise<string[]>;
   // Removes every built version not in `keep`.
   prune(keep: Iterable<string>): Promise<void>;
 }
@@ -158,6 +160,8 @@ export function skillSetManager({
     },
 
     pathOf: (version) => join(root, version),
+
+    skills: async (version) => [...readSkillsDir(join(root, version, 'skills')).keys()],
 
     async prune(keep) {
       const kept = new Set(keep);

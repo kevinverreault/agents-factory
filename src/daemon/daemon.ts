@@ -39,7 +39,8 @@ import {
   reduce,
   runReports,
   sessionsOf,
-  spawnedBy,
+  childSpawnedBy,
+  spawnsWithinDepth,
   ticketSources,
   unfinishedTasks,
   type AppCheck,
@@ -1207,6 +1208,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       allowRules: run.mode === 'AFK' ? readAllowRules(options.permissionsPath).rules : [],
       reports: runReports(task, run),
       child: !!task.child,
+      spawns: run.mode === 'AFK' && spawnsWithinDepth(lifecycle, task),
     };
     executor.start(start, {
       // A session is named for each completed run now, in case the next
@@ -1248,7 +1250,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   function spawnChild(runId: string, request: Extract<Delegation, { type: 'spawnChild' }>): Promise<DelegationReply> {
     return serially(async (): Promise<DelegationReply> => {
       if (stopping) return { ok: false, error: 'The daemon is stopping.' };
-      const replayed = spawnedBy(lifecycle, runId, request.toolUseId);
+      const replayed = childSpawnedBy(lifecycle, runId, request.toolUseId);
       if (replayed) return { ok: true, text: spawnedText(replayed) };
       const goal = typeof request.goal === 'string' ? request.goal : '';
       const action: ChildSpawned = {
@@ -1271,6 +1273,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (refused) return { ok: false, error: refused };
       const parent = lifecycle.tasks[lifecycle.runs[runId]!.taskId]!;
       const repository = lifecycle.repositories[parent.repo]!;
+      // A skill the parent's skill set lacks is the agent's to fix now, not the child's to fail on.
+      if (action.skill && parent.skillSet && !(await skillSets.skills(parent.skillSet)).includes(action.skill)) {
+        return { ok: false, error: `The skill set has no skill ${action.skill}: name one it has, or none to send the goal as it is.` };
+      }
       const presets = await presetsOf(repository);
       if ('error' in presets) return { ok: false, error: presets.error };
       const resolved = resolvePreset(presets.files, CHILD_PRESET);
@@ -1456,7 +1462,7 @@ function childListing(child: Task) {
     id: child.id,
     title: child.title,
     state: label(child),
-    status: child.status ?? null,
+    progress: child.progress ?? null,
     branch: child.worktree?.branch ?? null,
     awaited: child.child?.awaited ?? false,
     report: child.child?.report ?? null,

@@ -87,6 +87,44 @@ describe('spawning a child', () => {
     expect(state.tasks.T3!.branch).toBe(`${branch}--c2`);
   });
 
+  test('a skill the skill set lacks is an error to the agent, and nothing is spawned', async () => {
+    const { factory, tui } = await running();
+
+    expect(await spawn(factory, 'R1', 'Survey sign-out.', { skill: 'no-such-skill' })).toEqual({
+      ok: false,
+      error: 'The skill set has no skill no-such-skill: name one it has, or none to send the goal as it is.',
+    });
+    expect(Object.keys(tui.state().tasks)).toEqual(['T1']);
+  });
+
+  test('a child is told the depth and fan-out it has left: a grandchild may spawn none, and spawn_child isn’t registered on its run', async () => {
+    const { factory, operator, tui } = await running('limits: { descendants: 3 }\n');
+    await operator.send({ type: 'setSlotCap', cap: 10 });
+    expect(factory.executor.started.find((run) => run.runId === 'R1')).toMatchObject({ child: false, spawns: true });
+    await spawn(factory, 'R1', 'First.');
+    await spawn(factory, 'R1', 'Second.');
+    await tui.until((state) => !!state.tasks.T3?.liveRunId);
+
+    // With the root's two children, its tree has room for one more descendant.
+    const second = factory.executor.started.find((run) => run.taskId === 'T3')!;
+    expect(second.firstMessage).toContain('- Depth 1 of 2: you may spawn up to 1 child of your own.');
+    expect(second).toMatchObject({ child: true, spawns: true });
+    await spawn(factory, second.runId, 'Grandchild.');
+    await tui.until((state) => !!state.tasks.T4?.liveRunId);
+
+    const grandchild = factory.executor.started.find((run) => run.taskId === 'T4')!;
+    expect(grandchild.firstMessage).toContain('- Depth 2 of 2: you may spawn no children.');
+    expect(grandchild).toMatchObject({ child: true, spawns: false });
+  });
+
+  test('a child spawned into a full tree is told it has no room for children of its own', async () => {
+    const { factory, tui } = await running('limits: { descendants: 1 }\n');
+    await spawn(factory, 'R1', 'Only child.');
+    await tui.until((state) => !!state.tasks.T2?.liveRunId);
+
+    expect(factory.executor.started.find((run) => run.taskId === 'T2')!.firstMessage).toContain('your tree has no room for children of your own');
+  });
+
   test('an awaited child is refused for now, and so is a goal that is blank', async () => {
     const { factory } = await running();
 
@@ -176,7 +214,7 @@ describe('progress and results', () => {
 
     factory.executor.report('R1', { type: 'progressReported', status: 'Wiring the button\ninto the header.' });
 
-    expect((await tui.until((state) => state.tasks.T1?.status !== null)).tasks.T1!.status).toBe('Wiring the button into the header.');
+    expect((await tui.until((state) => state.tasks.T1?.progress !== null)).tasks.T1!.progress).toBe('Wiring the button into the header.');
   });
 
   test('a child ends Done with its report, its commits and outcome added, which list_children shows its parent', async () => {
@@ -209,12 +247,25 @@ describe('progress and results', () => {
     expect(done.tasks.T2!.child!.report).toMatchObject({ summary: 'Sign-out is in auth.ts.', status: 'completed', commits: [] });
   });
 
-  test('only a child reports a result', async () => {
+  test('a task’s progress line is cleared once it ends', async () => {
+    const { factory, tui } = await running();
+    await spawn(factory, 'R1', 'Survey sign-out.');
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    factory.executor.report('R2', { type: 'progressReported', status: 'Reading auth.ts.' });
+    await tui.until((state) => state.tasks.T2?.progress === 'Reading auth.ts.');
+
+    factory.executor.report('R2', { type: 'runCompleted', result: 'Done.' });
+
+    const done = await tui.until((state) => state.tasks.T2?.label === 'Done');
+    expect(done.tasks.T2!.progress).toBeNull();
+  });
+
+  test('only a child task sends a child report', async () => {
     const { factory, tui } = await running();
     factory.executor.report('R1', { type: 'resultReported', summary: 'Done.', status: 'done', notes: '' });
     factory.executor.report('R1', { type: 'progressReported', status: 'Still here.' });
 
-    await tui.until((state) => state.tasks.T1?.status === 'Still here.');
+    await tui.until((state) => state.tasks.T1?.progress === 'Still here.');
     expect(tui.state().tasks.T1!.child).toBeNull();
   });
 });
@@ -296,6 +347,23 @@ describe('the tree', () => {
 
     const done = await tui.until((state) => state.tasks.T2?.label === 'Done');
     expect(done.tasks.T2!.child!.report).toMatchObject({ summary: 'Sign-out is in auth.ts.', outcome: 'completed' });
+  });
+
+  test('a child taken over and finished in conversation, never handed back, ends Done saying so', async () => {
+    const { factory, operator, tui } = await running();
+    await spawn(factory, 'R1', 'Survey sign-out.');
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    await operator.send({ type: 'takeOver', taskId: 'T2' });
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R3');
+
+    factory.executor.report('R3', { type: 'runCompleted' });
+
+    const done = await tui.until((state) => state.tasks.T2?.label === 'Done');
+    expect(done.tasks.T2!.child!.report).toMatchObject({
+      summary: 'The operator took this child over and finished it in conversation.',
+      status: 'completed',
+      outcome: 'completed',
+    });
   });
 
   test('cancel_child cancels the agent’s own child with its subtree, and no other task', async () => {

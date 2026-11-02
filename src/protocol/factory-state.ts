@@ -42,8 +42,8 @@ export type TaskView = {
   // A child's place in its tree: whether its parent waits for it, the commit
   // its branch was cut from, and its report once it ended.
   child: { awaited: boolean; base: string; report: ChildReport | null } | null;
-  // The one-line status its agent last set through `report_progress`.
-  status: string | null;
+  // The one-line progress its agent last set through `report_progress`, while it is unfinished.
+  progress: string | null;
   // Its descendants' counts, and their failures waiting on the operator.
   rollup: Rollup | null;
   mode: Mode;
@@ -128,7 +128,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       parent: task.parent ?? null,
       depth: depthOf(task),
       child: task.child ? { awaited: task.child.awaited, base: task.child.base, report: structuredClone(task.child.report) } : null,
-      status: task.status ?? null,
+      progress: task.progress ?? null,
       rollup: treeRollup(lifecycle, task),
       mode: task.mode,
       autonomy: task.autonomy,

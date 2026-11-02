@@ -62,6 +62,7 @@ describe('launching a HITL task', () => {
         allowRules: [],
         reports: [],
         child: false,
+        spawns: false,
       },
     ]);
   });

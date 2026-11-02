@@ -30,6 +30,7 @@ export function childWorktree(root: string, repository: Repository, parent: Task
   return { branch: `${parent.branch}--c${n}`, path: worktreePath(root, repository, childId) };
 }
 
+// Where task `taskId` of `repository` has its worktree: `<root>/<owner>-<name>/<id>`.
 function worktreePath(root: string, repository: Repository, taskId: string): string {
   return join(root, repository.id.replace('/', '-'), taskId);
 }

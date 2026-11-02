@@ -5,6 +5,8 @@ import type { SkillSets, BuiltSkillSet } from '../skills/skill-set.ts';
 // `skills update` would, and reads which versions are still built.
 export class FakeSkillSets implements SkillSets {
   readonly built = new Set<string>();
+  // The skills every version holds.
+  readonly names = new Set(['implement', 'research', 'code-review', 'pr', 'grill-with-docs', 'to-spec', 'to-tickets', 'quick-grill']);
   private pinned = 'a1a1a1a1a1a1a1a1';
   private failure: string | null = null;
 
@@ -26,6 +28,10 @@ export class FakeSkillSets implements SkillSets {
 
   pathOf(version: string): string {
     return resolve('/skill-sets', version);
+  }
+
+  async skills(_version: string): Promise<string[]> {
+    return [...this.names];
   }
 
   async prune(keep: Iterable<string>): Promise<void> {

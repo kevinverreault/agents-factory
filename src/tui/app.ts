@@ -308,7 +308,7 @@ function TaskList({ tasks, cursor, retries }: { tasks: TaskView[]; cursor: numbe
         key: task.id,
         id: task.id,
         title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
-        detail: `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.status ? ` · ${task.status}` : ''}`,
+        detail: `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.progress ? ` · ${task.progress}` : ''}`,
         selected: i === cursor,
       }),
     ),
@@ -334,12 +334,12 @@ function rollupDetail({ rollup, parent }: TaskView): string {
   if (!rollup) return '';
   const counts = (
     [
-      [rollup.done, 'done'],
-      [rollup.running, 'running'],
-      [rollup.needsYou, 'need you'],
-      [rollup.cancelled, 'cancelled'],
+      [rollup.done, 'done', 'done'],
+      [rollup.running, 'running', 'running'],
+      [rollup.needsYou, 'needs you', 'need you'],
+      [rollup.cancelled, 'cancelled', 'cancelled'],
     ] as const
-  ).flatMap(([count, what]) => (count ? [`${count} ${count === 1 && what === 'need you' ? 'needs you' : what}`] : []));
+  ).flatMap(([count, one, many]) => (count ? [`${count} ${count === 1 ? one : many}`] : []));
   const failed = !parent && rollup.failed.length ? ` · ${rollup.failed.map(({ taskId }) => `${taskId} failed`).join(', ')}` : '';
   return ` · [${counts.join(', ')}]${failed}`;
 }

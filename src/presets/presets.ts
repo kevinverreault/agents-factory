@@ -58,11 +58,13 @@ type StageDraft = Partial<Stage> & { id: string };
 export type TreeLimits = { depth: number; children: number; descendants: number };
 export const TREE_LIMITS: TreeLimits = { depth: 2, children: 5, descendants: 12 };
 
-const limitsSchema = z.strictObject({
-  depth: z.int().min(0).max(TREE_LIMITS.depth).optional(),
-  children: z.int().min(0).max(TREE_LIMITS.children).optional(),
-  descendants: z.int().min(0).max(TREE_LIMITS.descendants).optional(),
-});
+// A preset's limits: each optional, and none above the global one.
+const limitsSchema = z.strictObject(
+  Object.fromEntries(Object.entries(TREE_LIMITS).map(([limit, most]) => [limit, z.int().min(0).max(most).optional()])) as Record<
+    keyof TreeLimits,
+    z.ZodOptional<z.ZodInt>
+  >,
+);
 
 const documentSchema = z.strictObject({
   description: z.string().optional(),

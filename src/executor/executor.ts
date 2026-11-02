@@ -37,8 +37,10 @@ export type RunStart = {
   // it is given those tools alone (ADR 0009). None for a HITL run.
   reports: readonly Report[];
   // Whether the run's task is a child task, which reports to its parent
-  // through `report_result` (ADR 0009). Absent, it isn't.
-  child?: boolean;
+  // through `report_result`, and whether its tree lets it spawn children of
+  // its own: `spawn_child` is registered only within depth (ADR 0009).
+  child: boolean;
+  spawns: boolean;
 };
 
 export type RunGuards = {

@@ -38,6 +38,8 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     guards: null,
     allowRules: [],
     reports: [],
+    child: false,
+    spawns: false,
   };
   const startedAt = Date.now();
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
@@ -110,6 +112,8 @@ test('the agent proposes advancing through the factory MCP server’s propose_ad
     guards: null,
     allowRules: [],
     reports: [],
+    child: false,
+    spawns: false,
   };
 
   executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
@@ -147,6 +151,8 @@ test('the agent writes the handoff brief through write_handoff_brief, and its tu
     guards: null,
     allowRules: [],
     reports: [],
+    child: false,
+    spawns: false,
   };
 
   executor.start(run, { report: (event) => reported.push(event), converse: () => {}, askPermission: () => {} });
@@ -188,6 +194,8 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
     guards: null,
     allowRules: [],
     reports: [],
+    child: false,
+    spawns: false,
   };
   const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
   const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;

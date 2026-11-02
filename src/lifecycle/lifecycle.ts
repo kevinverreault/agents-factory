@@ -167,8 +167,9 @@ export type Child = {
   awaited: boolean;
   base: string;
   report: ChildReport | null;
-  // What the agent reported through `report_result`, until the child ends.
-  reported?: Pick<ChildReport, 'summary' | 'status' | 'notes'> | null;
+  // What the agent reported through `report_result`, until the child ends
+  // and it becomes part of `report`.
+  agentReport?: Pick<ChildReport, 'summary' | 'status' | 'notes'> | null;
 };
 
 // The tickets a cancelled task closed that the factory hasn't reopened yet
@@ -200,8 +201,9 @@ export type Task = {
   parent?: string | null;
   // Its place in its tree, for a child task.
   child?: Child | null;
-  // The one-line status its agent last set through `report_progress`.
-  status?: string | null;
+  // The one-line progress its agent last set through `report_progress`,
+  // while the task is unfinished.
+  progress?: string | null;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   groups: string[];
@@ -772,11 +774,23 @@ export function childrenOf(state: Lifecycle, task: Task): Task[] {
 // preset lowers them.
 export function treeLimits(state: Lifecycle, task: Task): TreeLimits {
   const lowered = rootOf(state, task).preset?.limits ?? {};
-  return {
-    depth: Math.min(TREE_LIMITS.depth, lowered.depth ?? TREE_LIMITS.depth),
-    children: Math.min(TREE_LIMITS.children, lowered.children ?? TREE_LIMITS.children),
-    descendants: Math.min(TREE_LIMITS.descendants, lowered.descendants ?? TREE_LIMITS.descendants),
-  };
+  const limits = { ...TREE_LIMITS };
+  for (const limit of Object.keys(limits) as (keyof TreeLimits)[]) limits[limit] = Math.min(limits[limit], lowered[limit] ?? limits[limit]);
+  return limits;
+}
+
+// Whether the task's runs may spawn children at all: its tree goes deeper.
+export function spawnsWithinDepth(state: Lifecycle, task: Task): boolean {
+  return depthOf(task) < treeLimits(state, task).depth;
+}
+
+// How many children a task may still spawn: the fewer of its own
+// children left and its tree's descendants left (ADR 0009). Zero past the depth.
+export function fanOutLeft(state: Lifecycle, task: Task): number {
+  if (!spawnsWithinDepth(state, task)) return 0;
+  const limits = treeLimits(state, task);
+  const descendants = subtree(state, rootOf(state, task)).length - 1;
+  return Math.max(0, Math.min(limits.children - childrenOf(state, task).length, limits.descendants - descendants));
 }
 
 // How deep the task is in its tree: a root is 0.
@@ -785,7 +799,7 @@ export function depthOf(task: Task): number {
 }
 
 // The child the run's tool call `toolUseId` spawned, if it did.
-export function spawnedBy(state: Lifecycle, runId: string, toolUseId: string): Task | undefined {
+export function childSpawnedBy(state: Lifecycle, runId: string, toolUseId: string): Task | undefined {
   return Object.values(state.tasks).find((task) => task.child?.spawnedBy.runId === runId && task.child.spawnedBy.toolUseId === toolUseId);
 }
 
@@ -793,7 +807,7 @@ export function spawnedBy(state: Lifecycle, runId: string, toolUseId: string): T
 // (ADR 0009). The agent reads it, and no attention request is raised.
 export function spawnLimit(state: Lifecycle, task: Task): string | null {
   const limits = treeLimits(state, task);
-  if (depthOf(task) + 1 > limits.depth) return `${task.id} is at depth ${depthOf(task)}, and its tree goes no deeper than ${limits.depth}: do this work yourself.`;
+  if (!spawnsWithinDepth(state, task)) return `${task.id} is at depth ${depthOf(task)}, and its tree goes no deeper than ${limits.depth}: do this work yourself.`;
   const spawned = childrenOf(state, task).length;
   if (spawned >= limits.children) return `${task.id} has spawned ${spawned} children, the most a task may: do this work yourself.`;
   const descendants = subtree(state, rootOf(state, task)).length - 1;
@@ -1350,9 +1364,11 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   }
 }
 
-// Why the run can't spawn this child, or null. Only AFK runs delegate yet,
-// and only fire-and-forget children: awaited ones arrive with waiting on
-// children.
+// Why the run can't spawn this child, or null. Two of ADR 0009's decisions
+// are staged: its tool table gives HITL runs fire-and-forget spawning, which
+// arrives with #57, and its `await` default (true from AFK runs) needs
+// waiting on children, which arrives with #55. Until then only AFK runs
+// spawn, and only fire-and-forget children.
 function spawnRefusal(state: Lifecycle, task: Task, run: Run, spawn: ChildSpawned): string | null {
   if (run.mode !== 'AFK') return 'Only an AFK run spawns children.';
   if (!task.worktree) return `${task.id} has no task branch to cut a child’s from.`;
@@ -1375,7 +1391,7 @@ function childOpening(state: Lifecycle, parent: Task, child: Task, spawn: ChildS
     ...(root.goal ? [`- Root goal: ${oneLine(root.goal)}`] : []),
     ...(links.length ? [`- Links: ${links.join(', ')}`] : []),
     `- Your branch: ${child.worktree!.branch}, cut from ${short(spawn.base)} on ${parent.worktree!.branch}. Commit your work there; the factory never pushes it.`,
-    `- Depth ${child.child!.depth} of ${limits.depth}: ${limits.depth - child.child!.depth > 0 ? `you may spawn up to ${limits.children} children of your own` : 'you may spawn no children'}.`,
+    `- Depth ${child.child!.depth} of ${limits.depth}: ${spawnable(state, child, limits)}.`,
   ];
   const reporting = spawn.awaited
     ? 'Your parent waits for your report and merges your branch.'
@@ -1398,11 +1414,24 @@ function oneLine(text: string): string {
   return line.length > 200 ? `${line.slice(0, 199)}…` : line;
 }
 
+// How many children the new child may spawn, as its tree stands with it in
+// it: none at the depth limit, else the fewer of a task's children and the
+// tree's descendants left.
+function spawnable(state: Lifecycle, child: Task, limits: TreeLimits): string {
+  if (child.child!.depth >= limits.depth) return 'you may spawn no children';
+  // The child isn't in the tree yet, but counts against it.
+  const left = Math.min(limits.children, limits.descendants - subtree(state, rootOf(state, state.tasks[child.parent!]!)).length);
+  return left > 0 ? `you may spawn up to ${left} ${left === 1 ? 'child' : 'children'} of your own` : 'your tree has no room for children of your own';
+}
+
 // A child's run completed: the child ends Done with its report (ADR 0009),
 // and the daemon removes its worktree, and the branch of a fire-and-forget
 // child, which can never join the root (ADR 0011).
 function finishChild(task: Task, run: Run, { commits = [], result }: Extract<RunEvent, { type: 'runCompleted' }>): void {
-  closeReport(task, { summary: result?.trim() || 'The child ended without a summary.', status: 'completed', commits, outcome: run.outcome });
+  // A child the operator took over and finished in conversation, never handing it back, reports so.
+  const fallback = run.mode === 'HITL' ? 'The operator took this child over and finished it in conversation.' : 'The child ended without a summary.';
+  closeReport(task, { summary: result?.trim() || fallback, status: 'completed', commits, outcome: run.outcome });
+  task.progress = null;
   task.state = 'done';
   if (task.worktree) task.cleanup = { problem: null, keepBranch: task.child!.awaited };
 }
@@ -1416,7 +1445,7 @@ function closeReport(
   { forced = false } = {},
 ): void {
   const child = task.child!;
-  const { reported } = child;
+  const reported = child.agentReport;
   child.report = {
     summary: reported?.summary ?? fallback.summary,
     status: forced ? fallback.status : (reported?.status ?? fallback.status),
@@ -1425,7 +1454,7 @@ function closeReport(
     commits: [...fallback.commits],
     outcome: fallback.outcome,
   };
-  child.reported = null;
+  child.agentReport = null;
 }
 
 // Cancel means everything stops: the task and its whole subtree end
@@ -1439,6 +1468,7 @@ function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: nu
     for (const open of Object.values(state.requests)) if (open.taskId === cancelled.id && open.status === 'open') open.status = 'closed';
     cancelled.handoff = null;
     cancelled.loop = null;
+    cancelled.progress = null;
     cancelled.state = 'cancelled';
     if (cancelled.child) closeReport(cancelled, { summary: 'Cancelled before it finished.', status: 'cancelled', commits: [], outcome: 'cancelled' }, { forced: true });
     // The daemon reopens the tickets it closed: their work wasn't merged (ADR 0006).
@@ -1977,6 +2007,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'markDone':
       task.state = 'done';
+      task.progress = null;
       // The daemon archives its transcripts, then removes its worktree and branch.
       if (task.worktree) task.cleanup = { problem: null };
       break;
@@ -2004,7 +2035,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         repo: task.repo,
         parent: task.id,
         child: { depth: depthOf(task) + 1, spawnedBy: { runId: parentRun.id, toolUseId: action.toolUseId }, awaited: action.awaited, base: action.base, report: null },
-        status: null,
+        progress: null,
         mode: 'AFK',
         // Lowered, never raised: the parent's level (L1 under HITL) is its ceiling.
         autonomy: action.autonomy === 'L1' || (task.autonomy ?? 'L1') === 'L1' ? 'L1' : 'L2',
@@ -2032,10 +2063,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     }
     case 'progressReported':
-      task.status = oneLine(action.status);
+      task.progress = oneLine(action.status);
       break;
     case 'resultReported':
-      task.child!.reported = { summary: action.summary.trim(), status: action.status.trim() || 'done', notes: action.notes.trim() };
+      task.child!.agentReport = { summary: action.summary.trim(), status: action.status.trim() || 'done', notes: action.notes.trim() };
       break;
     case 'retier':
       task.operatorTier = action.tier;

@@ -10,7 +10,7 @@ import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@
 import { z } from 'zod';
 import type { Report } from '../lifecycle/lifecycle.ts';
 import { TIERS } from '../models/routing.ts';
-import type { DelegationReply, RunSink } from './executor.ts';
+import type { Delegation, DelegationReply, RunSink } from './executor.ts';
 
 const SERVER = 'factory';
 
@@ -62,8 +62,9 @@ export function hitlFactoryTools(runId: string, sink: RunSink): FactoryTools {
 }
 
 // The tools of what the AFK run reports, and the delegation tools: with
-// the one a child reports to its parent through, when `child`.
-export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly Report[], child = false): FactoryTools {
+// the one a child reports to its parent through, when `child`, and
+// `spawn_child` only while the run's tree `spawns` deeper.
+export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly Report[], { child, spawns }: { child: boolean; spawns: boolean }): FactoryTools {
   const reportFindings = tool(
     'report_findings',
     'Report the findings of this code review to the factory, one finding per item, each a sentence saying what is wrong and where. ' +
@@ -88,14 +89,14 @@ export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly 
   const tools = [
     ...(reports.includes('findings') ? [reportFindings] : []),
     ...(reports.includes('pr-body') ? [writePrBody] : []),
-    ...delegationTools(runId, sink, child),
+    ...delegationTools(runId, sink, child, spawns),
   ];
   return factoryTools(tools);
 }
 
 // The tools an AFK run delegates with (ADR 0009). Spawning, listing and
 // cancelling are answered by the daemon; progress and results are run events.
-function delegationTools(runId: string, sink: RunSink, child: boolean): SdkTool[] {
+function delegationTools(runId: string, sink: RunSink, child: boolean, spawns: boolean): SdkTool[] {
   const spawnChild = tool(
     'spawn_child',
     'Hand a self-contained piece of work to a child task: its own AFK run on its own branch, cut from your branch’s tip, which the operator can watch and steer. ' +
@@ -108,19 +109,19 @@ function delegationTools(runId: string, sink: RunSink, child: boolean): SdkTool[
       autonomy: z.enum(['L1', 'L2']).optional().describe('The autonomy level: yours or a lower one.'),
       await: z.boolean().optional().describe('Whether you wait for its report. Only fire-and-forget children (false) are supported yet.'),
     },
-    async (args, extra) => answer(await (sink.delegate?.({ type: 'spawnChild', toolUseId: toolUseIdOf(extra), ...args, await: args.await ?? false }) ?? NO_DELEGATION)),
+    async (args, extra) => ask(sink, { type: 'spawnChild', toolUseId: toolUseIdOf(extra), ...args, await: args.await ?? false }),
   );
   const listChildren = tool(
     'list_children',
     'List the child tasks you spawned, with their state, one-line status and, once they ended, their report.',
     {},
-    async () => answer(await (sink.delegate?.({ type: 'listChildren' }) ?? NO_DELEGATION)),
+    async () => ask(sink, { type: 'listChildren' }),
   );
   const cancelChild = tool(
     'cancel_child',
     'Cancel one of your own children, with every task it spawned.',
     { id: z.string().describe('The child task’s id, such as T7.') },
-    async ({ id }) => answer(await (sink.delegate?.({ type: 'cancelChild', id }) ?? NO_DELEGATION)),
+    async ({ id }) => ask(sink, { type: 'cancelChild', id }),
   );
   const reportProgress = tool(
     'report_progress',
@@ -145,10 +146,16 @@ function delegationTools(runId: string, sink: RunSink, child: boolean): SdkTool[
       return { content: [{ type: 'text', text: 'Your parent gets your report once you end.' }] };
     },
   );
-  return [spawnChild, listChildren, cancelChild, reportProgress, ...(child ? [reportResult] : [])];
+  return [...(spawns ? [spawnChild] : []), listChildren, cancelChild, reportProgress, ...(child ? [reportResult] : [])];
 }
 
+// What the agent reads when its run's sink takes no delegation.
 const NO_DELEGATION: DelegationReply = { ok: false, error: 'The factory takes no delegation from this run.' };
+
+// Asks the daemon through the run's sink, and gives the agent its reply.
+async function ask(sink: RunSink, request: Delegation) {
+  return answer((await sink.delegate?.(request)) ?? NO_DELEGATION);
+}
 
 // The daemon's reply as the tool's result: an error the agent reads as one.
 function answer(reply: DelegationReply) {
