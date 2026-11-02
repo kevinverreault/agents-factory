@@ -18,6 +18,9 @@ export interface FactoryConnection {
   subscribe(listener: StateListener): () => void;
   // Gets the run's conversation so far, then each live event.
   converse(runId: string, listener: ConversationListener): () => void;
+  // The same, without opening the conversation: the run still waits for the
+  // operator while only followers listen.
+  follow(runId: string, listener: ConversationListener): () => void;
   onClose(listener: () => void): void;
   close(): void;
 }
@@ -72,7 +75,9 @@ class Connection implements FactoryConnection {
   private nextId = 1;
   private readonly pending = new Map<number, (reply: Reply) => void>();
   private readonly listeners = new Set<StateListener>();
-  private readonly conversations = new Map<string, Set<ConversationListener>>();
+  // Each run's listeners, each with whether it only follows the run and the
+  // events it has had.
+  private readonly conversations = new Map<string, Map<ConversationListener, { follows: boolean; seen: Set<string> }>>();
   private state: FactoryState | null = null;
   private subscribed = false;
   private readonly socket: Socket;
@@ -109,7 +114,12 @@ class Connection implements FactoryConnection {
         for (const listener of this.listeners) listener(this.state, message.ops);
         break;
       case 'conversation':
-        for (const listener of this.conversations.get(message.runId) ?? []) listener(message.event);
+        // Asking again replays the history: each listener gets an event once.
+        for (const [listener, { seen }] of this.conversations.get(message.runId) ?? []) {
+          if (seen.has(message.event.id)) continue;
+          seen.add(message.event.id);
+          listener(message.event);
+        }
         break;
     }
   }
@@ -134,18 +144,34 @@ class Connection implements FactoryConnection {
   }
 
   converse(runId: string, listener: ConversationListener): () => void {
+    return this.listen(runId, listener, false);
+  }
+
+  follow(runId: string, listener: ConversationListener): () => void {
+    return this.listen(runId, listener, true);
+  }
+
+  // The daemon holds one subscription per run: it is in the conversation
+  // while any listener is, and asked again whenever that changes.
+  private listen(runId: string, listener: ConversationListener, follows: boolean): () => void {
     let listeners = this.conversations.get(runId);
-    if (!listeners) {
-      this.conversations.set(runId, (listeners = new Set()));
-      send(this.socket, { type: 'converse', runId });
-    }
-    listeners.add(listener);
+    if (!listeners) this.conversations.set(runId, (listeners = new Map()));
+    const following = (all: typeof listeners) => [...all.values()].every((entry) => entry.follows);
+    const before = listeners.size ? following(listeners) : null;
+    listeners.set(listener, { follows, seen: new Set() });
+    if (following(listeners) !== before) this.ask(runId, following(listeners));
     return () => {
-      listeners.delete(listener);
-      if (listeners.size || this.conversations.get(runId) !== listeners) return;
-      this.conversations.delete(runId);
-      send(this.socket, { type: 'leaveConversation', runId });
+      const was = following(listeners);
+      if (!listeners.delete(listener) || this.conversations.get(runId) !== listeners) return;
+      if (listeners.size === 0) {
+        this.conversations.delete(runId);
+        send(this.socket, { type: 'leaveConversation', runId });
+      } else if (following(listeners) !== was) this.ask(runId, following(listeners));
     };
+  }
+
+  private ask(runId: string, follows: boolean): void {
+    send(this.socket, { type: 'converse', runId, ...(follows ? { follow: true as const } : {}) });
   }
 
   onClose(listener: () => void): void {

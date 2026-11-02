@@ -1,6 +1,7 @@
 // Seam 2: the TUI against an in-memory fake protocol client.
+import chalk from 'chalk';
 import { render } from 'ink-testing-library';
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { PresetsView } from '../protocol/protocol.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
@@ -266,7 +267,8 @@ describe('the task tree', () => {
     const { app } = await started(tree());
 
     await eventually(() => {
-      const rows = app.lastFrame()!.split('\n').filter((line) => /T\d/.test(line));
+      // The tree's rows, which start with their task's id.
+      const rows = app.lastFrame()!.split('\n').filter((line) => /^[›\s]+T\d/.test(line));
       expect(rows.map((row) => /T\d/.exec(row)![0])).toEqual(['T1', 'T2', 'T3', 'T4', 'T5']);
       expect(unwrapped(app.lastFrame()!)).toMatch(/T1 +Add a logout button +Running · sonnet · \[2 running, 1 needs you\] · T2 failed · Wiring the header\./);
       expect(unwrapped(app.lastFrame()!)).toMatch(/T2 +└ Survey sign-out +Needs you/);
@@ -784,7 +786,7 @@ describe('launching and conversing', () => {
   test('the conversation view renders streamed text and tool use, and enter sends the operator’s message', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
 
@@ -814,7 +816,7 @@ describe('launching and conversing', () => {
     const working: TaskView = { ...task('T1', 'Implement acme/widgets#12', 'running', 'Running'), liveRunId: 'R1' };
     const afkRun = { ...run, mode: 'AFK' as const, autonomy: 'L1' as const, maxTurns: 300 };
     const { app } = await started({ ...factoryState([working]), runs: { R1: afkRun } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
     connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Reading the ticket.' });
@@ -836,7 +838,7 @@ describe('launching and conversing', () => {
   test('mid-turn the view shows queued messages and esc interrupts; on the operator’s turn it says it is waiting on you', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     expect(app.lastFrame()).not.toContain('waiting on you');
 
@@ -880,7 +882,7 @@ describe('launching and conversing', () => {
     const connection = new FakeConnection();
     const asking = { ...run, question: { id: 'toolu_01', questions: [idp, browsers] } };
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: asking } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     await eventually(() => expect(app.lastFrame()).toMatch(/IdP[\s\S]*Which identity provider times out\?[\s\S]*1\s+Okta\s+The workforce SSO[\s\S]*2\s+Auth0\s+The customer login/));
 
@@ -912,7 +914,7 @@ describe('launching and conversing', () => {
     const connection = new FakeConnection();
     const asking = { ...run, question: { id: 'toolu_01', questions: [idp] } };
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: asking } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
 
     await type(app, 'Neither, a SAML IdP on 2 tenants');
@@ -931,7 +933,7 @@ describe('launching and conversing', () => {
     connection.replyTo('answerQuestion', { ok: false, reason: 'That question is no longer open.' });
     const asking = { ...run, question: { id: 'toolu_01', questions: [idp] } };
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: asking } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
 
     app.stdin.write('2');
@@ -944,7 +946,7 @@ describe('launching and conversing', () => {
 
   test('the conversation view shows the session id, to resume in the operator’s own terminal', async () => {
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
 
     await eventually(() => expect(app.lastFrame()).toContain('claude --resume 5f0c2a8e-3b1d-4c6e-9a7f-2d8b4e1c0a93'));
@@ -1021,18 +1023,18 @@ describe('launching and conversing', () => {
     await eventually(() => expect(app.lastFrame()).toContain('2 Needs you (2)'));
   });
 
-  test('ctrl+b leaves the conversation for the task list, and reopening it replays the conversation afresh', async () => {
+  test('ctrl+b leaves the conversation for the task’s detail it was opened from, and reopening it replays the conversation afresh', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
-    await settle();
+    await press(app, '\r', '\r');
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
     connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Which identity provider times out?' });
     await settle();
 
     app.stdin.write('\x02');
     await settle();
     await eventually(() => expect(connection.left).toEqual(['R1']));
-    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.\s+In conversation/));
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T1 Grill me about the login flow.'));
     await eventually(() => expect(app.lastFrame()).not.toContain('Which identity provider'));
 
     app.stdin.write('\r');
@@ -1048,7 +1050,7 @@ describe('launching and conversing', () => {
       X2: { id: 'X2', taskId: 'T2', runId: 'R2', kind: 'file', path: 'docs/adr/0009-elsewhere.md', committed: false },
     };
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run }, artifacts }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await eventually(() => {
       expect(app.lastFrame()).toContain('Artifacts');
       expect(app.lastFrame()).toMatch(/uncommitted\s+GLOSSARY\.md/);
@@ -1093,7 +1095,7 @@ describe('launching and conversing', () => {
   test('the agent’s proposal to advance shows as a banner with its reason, and ctrl+n opens the advance sheet on it', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     await eventually(() => expect(app.lastFrame()).toContain('ctrl+n advance'));
     expect(app.lastFrame()).not.toContain('proposes');
@@ -1112,7 +1114,7 @@ describe('launching and conversing', () => {
   test('enter on the advance sheet advances the task, and the conversation carries on with the next stage’s run', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     app.stdin.write(CTRL_N);
     await eventually(() => expect(app.lastFrame()).toContain('Advance T1 from grill'));
@@ -1134,7 +1136,7 @@ describe('launching and conversing', () => {
     const connection = new FakeConnection();
     connection.replyTo('advanceStage', { ok: false, reason: 'tickets can’t start: its args need {{artifacts.spec}}, and T1 has no spec.' });
     const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     app.stdin.write(CTRL_N);
     await settle();
@@ -1160,7 +1162,7 @@ describe('launching and conversing', () => {
     const connection = new FakeConnection();
     const atTickets = { ...onLean, stage: 'tickets' };
     const { app } = await started({ ...factoryState([atTickets]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     app.stdin.write(CTRL_N);
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('The next stage, implement, is AFK: hand T1 off to start it.'));
@@ -1206,7 +1208,7 @@ describe('launching and conversing', () => {
   test('the agent’s proposal to hand off shows as a banner, and ctrl+h or /handoff opens the handoff sheet, even over an open card', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await settle();
     await eventually(() => expect(app.lastFrame()).toContain('/handoff hand off'));
 
@@ -1230,7 +1232,7 @@ describe('launching and conversing', () => {
   test('the sheet waits on the agent’s brief, then the operator edits it, changes continue-as and max turns, and enter hands off', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([{ ...onLean, handoff: sheet }]), runs: { R1: run } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
       expect(frame).toContain('Hand off T1 to implement (AFK)');
@@ -1296,7 +1298,7 @@ describe('launching and conversing', () => {
     connection.replyTo('handoff', { ok: false, reason: 'The handoff is blocked. spike is checked out.' });
     const blocked = { ...sheet, brief, readiness: { blockers: ['factory/T1 isn’t checked out in T1’s worktree: spike is.'], toCommit: [] } };
     const { app } = await started({ ...factoryState([{ ...onLean, handoff: blocked }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
-    app.stdin.write('\r');
+    await press(app, '\r', '\r');
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
       expect(frame).toContain('✗ factory/T1 isn’t checked out in T1’s worktree: spike is.');
@@ -1748,7 +1750,7 @@ describe('answering in the conversation', () => {
   // Opens the task's conversation from the Tasks tab.
   async function opened(item: FactoryState['attentionQueue'][number], connection = new FakeConnection()) {
     const { app } = await started({ ...factoryState([waiting], [item]), runs: { R1: suspended } }, { connection });
-    await press(app, ENTER);
+    await press(app, ENTER, ENTER);
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
     return app;
   }
@@ -1809,7 +1811,7 @@ describe('answering in the conversation', () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([waiting], [long]), runs: { R1: suspended } }, { connection });
     Object.defineProperty(app.stdout, 'rows', { value: 20 });
-    await press(app, ENTER);
+    await press(app, ENTER, ENTER);
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
     connection.serveConversation(
       'R1',
@@ -1945,7 +1947,7 @@ describe('taking over with c', () => {
   test('c in an AFK task’s conversation takes it over, and the conversation takes chat once the HITL run is live', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([running]), runs: { R1: afkRun } }, { connection });
-    await press(app, ENTER);
+    await press(app, ENTER, ENTER);
     await eventually(() => expect(app.lastFrame()).toContain('AFK runs take no chat: c takes it over to talk to it · ctrl+b back'));
 
     await press(app, 'c');
@@ -1966,7 +1968,7 @@ describe('taking over with c', () => {
     const connection = new FakeConnection();
     const waiting = { ...task('T2', 'Publish the package', 'waiting', 'Needs you'), liveRunId: 'R1' };
     const { app } = await started({ ...factoryState([waiting], [permission]), runs: { R1: { ...afkRun, taskId: 'T2', status: 'suspended' as const } } }, { connection });
-    await press(app, ENTER);
+    await press(app, ENTER, ENTER);
     await eventually(() => expect(app.lastFrame()).toContain('digits answer · c take over · ctrl+b back'));
 
     await press(app, 'c');
@@ -1985,7 +1987,7 @@ describe('the conversation of an AFK task that is no longer live', () => {
       tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {},
     };
     const { app } = await started({ ...factoryState([reviewed]), runs: { R1: ended } }, { connection });
-    await press(app, '\r');
+    await press(app, '\r', '\r');
     await eventually(() => expect(app.lastFrame()).toContain('AFK runs take no chat · ctrl+b back'));
 
     await press(app, 'c');
@@ -2056,5 +2058,208 @@ describe('usage', () => {
       expect(frame).toMatch(/claude-sonnet-5-5\s+2\.1M\s+\$1\.75/);
       expect(frame).toMatch(/task tree\s+2\.1M\s+\$1\.88/);
     });
+  });
+});
+
+describe('the screens view', () => {
+  const SONNET = 'claude-sonnet-5-5';
+  function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
+    return {
+      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', turn: 'agent', queued: [], question: null, stage: 'implement',
+      ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, ...fields,
+    };
+  }
+  const grilling = task('T1', 'Grill me about the docs', 'queued', 'Ready for you', 'HITL');
+  const implementing = { ...task('T2', 'Implement the store', 'running', 'Running'), liveRunId: 'R3', stage: 'implement' };
+  const screens = () => factoryState([grilling, implementing]);
+
+  test('the tabs are 1 Tasks, 2 Needs you, 3 Runs and 4 Usage; enter drills into a task’s detail and esc pops back to where it was', async () => {
+    const { app } = await started(screens());
+    await eventually(() => expect(app.lastFrame()).toMatch(/1 Tasks\s+2 Needs you \(0\)\s+3 Runs\s+4 Usage/));
+
+    await press(app, '\x1b[B', '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Tasks › T2 Implement the store');
+      expect(frame).not.toContain('Grill me about the docs');
+    });
+
+    await press(app, '\x1b');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).not.toContain('Tasks ›');
+      expect(frame).toMatch(/›\s+T2\s+Implement the store/);
+    });
+
+    // From a task's detail a number key goes to that screen, leaving the detail behind.
+    await press(app, '\r', '3');
+    await eventually(() => expect(app.lastFrame()).not.toContain('Tasks ›'));
+    await press(app, '1');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T2\s+Implement the store/));
+    expect(app.lastFrame()).not.toContain('Tasks ›');
+  });
+
+  test('a task’s detail lists its runs with mode, stage, model, outcome and usage, then its artifacts', async () => {
+    const usage = (input: number, output: number, cost: number) => ({ input, output, cacheRead: 0, cacheWrite: 0, cost });
+    const runs = {
+      R1: ran('R1', 'T2', 1, { outcome: 'failed', usage: { [SONNET]: usage(1_000, 100, 0.5) } }),
+      R2: ran('R2', 'T2', 3, { stage: 'review', model: 'claude-opus-5-5', outcome: 'interrupted', usage: { 'claude-opus-5-5': usage(20_000, 2_000, 1.25) } }),
+      R3: ran('R3', 'T2', 5, { status: 'active', outcome: null, endedAt: null }),
+      R4: ran('R4', 'T1', 2, { mode: 'HITL', stage: 'grill' }),
+    };
+    const artifacts = {
+      F1: { id: 'F1', taskId: 'T2', runId: 'R1', kind: 'file' as const, path: 'src/store/store.ts', committed: true },
+      F2: { id: 'F2', taskId: 'T1', runId: 'R4', kind: 'file' as const, path: 'docs/glossary.md', committed: false },
+      I1: { id: 'I1', taskId: 'T2', runId: 'R2', kind: 'issue' as const, url: 'https://github.com/acme/widgets/issues/14' },
+    };
+    const { app } = await started({ ...screens(), runs, artifacts });
+
+    await press(app, '\x1b[B', '\r');
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/AFK L1 · Running · implement/);
+      expect(frame).toMatch(/R1\s+AFK\s+implement\s+claude-sonnet-5-5\s+failed\s+1\.1k\s+\$0\.50\n[^\n]*R2\s+AFK\s+review\s+claude-opus-5-5\s+interrupted\s+22\.0k\s+\$1\.25\n[^\n]*R3\s+AFK\s+implement\s+claude-sonnet-5-5\s+live\s+0\s+\$0\.00/);
+      expect(frame).not.toContain('R4');
+      expect(frame).toMatch(/committed\s+src\/store\/store\.ts/);
+      expect(frame).toMatch(/issue\s+acme\/widgets#14/);
+      expect(frame).not.toContain('docs/glossary.md');
+    });
+  });
+
+  test('the output pane under the task tree follows the selected task’s run, without opening its conversation', async () => {
+    const conversing = { ...grilling, liveRunId: 'R1' };
+    const runs = { R1: ran('R1', 'T1', 1, { mode: 'HITL', stage: 'grill', status: 'active', outcome: null, turn: 'operator' }), R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
+    const { app, connection } = await started({ ...factoryState([conversing, implementing]), runs });
+    await eventually(() => expect(connection.followed).toEqual(['R1']));
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Which identity provider times out?' });
+    await eventually(() => expect(app.lastFrame()).toMatch(/Output · T1 · R1 live[\s\S]*agent\s+Which identity provider times out\?/));
+
+    await press(app, '\x1b[B');
+    await eventually(() => expect(connection.followed).toEqual(['R1', 'R3']));
+    connection.serveConversation('R3', { type: 'toolUse', id: 'E2', tool: 'Edit', summary: 'src/store/store.ts' });
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/Output · T2 · R3 live[\s\S]*● Edit\s+src\/store\/store\.ts/);
+      expect(frame).not.toContain('Which identity provider');
+    });
+
+    // The detail follows it too.
+    await press(app, '\r');
+    await eventually(() => expect(connection.followed).toEqual(['R1', 'R3', 'R3']));
+    connection.serveConversation('R3', { type: 'message', id: 'E3', from: 'agent', text: 'The store keeps its schema private.' });
+    await eventually(() => expect(app.lastFrame()).toMatch(/Tasks › T2[\s\S]*Output · T2 · R3 live[\s\S]*agent\s+The store keeps its schema private\./));
+    expect(connection.conversed).toEqual([]);
+  });
+
+  test('3 opens the Runs screen: every run, live ones first and then newest first; enter drills into its task and esc comes back to it', async () => {
+    const runs = {
+      R1: ran('R1', 'T2', 1, { outcome: 'failed' }),
+      R2: ran('R2', 'T1', 2, { mode: 'HITL', stage: 'grill', outcome: 'parked' }),
+      R3: ran('R3', 'T2', 5, { status: 'active', outcome: null, endedAt: null }),
+      R5: ran('R5', 'T1', 3, { mode: 'HITL', stage: 'grill', status: 'suspended', outcome: null, endedAt: null }),
+    };
+    const { app } = await started({ ...screens(), runs });
+
+    await press(app, '3');
+    await eventually(() => {
+      const rows = app.lastFrame()!.split('\n').filter((line) => /^[›\s]+R\d/.test(line));
+      expect(rows).toHaveLength(4);
+      expect(rows[0]).toMatch(/R3\s+T2\s+Implement the store\s+AFK\s+implement\s+claude-sonnet-5-5\s+live/);
+      expect(rows[1]).toMatch(/R5\s+T1\s+Grill me about the docs\s+HITL\s+grill\s+claude-sonnet-5-5\s+suspended/);
+      expect(rows[2]).toMatch(/R2\s+T1\s+Grill me about the docs\s+HITL\s+grill\s+claude-sonnet-5-5\s+parked/);
+      expect(rows[3]).toMatch(/R1\s+T2\s+Implement the store\s+AFK\s+implement\s+claude-sonnet-5-5\s+failed/);
+    });
+
+    await press(app, '\x1b[B', '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Runs › T1 Grill me about the docs'));
+    await press(app, '\x1b');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+R5\s+T1/));
+  });
+
+  test('Done and Cancelled tasks show dimmed, and H hides them, keeping a finished task whose subtree still has work', async () => {
+    const DIM = '\x1b[2m';
+    // Styles show in the frame only with colour on, which a test's stdout doesn't detect.
+    const level = chalk.level;
+    chalk.level = 1;
+    onTestFinished(() => void (chalk.level = level));
+    const { app } = await started(
+      factoryState([
+        task('T1', 'Implement the store', 'running', 'Running'),
+        task('T2', 'Settle the glossary', 'done', 'Done'),
+        { ...task('T5', 'Check the links', 'done', 'Done'), parent: 'T2', depth: 1 },
+        task('T3', 'Write the spec', 'cancelled', 'Cancelled'),
+        task('T4', 'Ship the release', 'done', 'Done'),
+        { ...task('T6', 'Tag the release', 'running', 'Running'), parent: 'T4', depth: 1 },
+      ]),
+    );
+    const row = (id: string) => app.lastFrame()!.split('\n').find((line) => new RegExp(`^[›\\s]+${id}\\b`).test(line.replace(/\x1b\[\d+m/g, '')));
+
+    await eventually(() => {
+      expect(row('T1')).not.toContain(DIM);
+      for (const id of ['T2', 'T5', 'T3', 'T4']) expect(row(id)).toContain(DIM);
+    });
+
+    await press(app, 'H');
+    await eventually(() => {
+      for (const id of ['T1', 'T4', 'T6']) expect(row(id)).toBeDefined();
+      for (const id of ['T2', 'T5', 'T3']) expect(row(id)).toBeUndefined();
+      expect(app.lastFrame()).toContain('3 finished hidden · H shows them');
+    });
+
+    await press(app, 'H');
+    await eventually(() => expect(row('T3')).toBeDefined());
+  });
+
+  test('a answers the selected task’s request: from the Tasks screen or a task’s detail it goes to Needs you, the digits on that request', async () => {
+    const failure = (taskId: string, requestId: string): FactoryState['attentionQueue'][number] => ({
+      kind: 'attention', taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+    });
+    const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
+    const { app, connection } = await started(factoryState([{ ...grilling, state: 'waiting', label: 'Needs you' }, failing], [failure('T1', 'A1'), failure('T2', 'A2')]));
+
+    await press(app, '\x1b[B', 'a');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› T2 Implement the store failure/));
+    await press(app, '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
+
+    await press(app, '\x1b', '1', '\x1b[A', '\r', 'a');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› T1 Grill me about the docs failure/));
+    await press(app, '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1' }));
+  });
+
+  test('c and x act on the task drilled into, on the Runs screen on the run’s task, and on Needs you on the item’s task', async () => {
+    const { app, connection } = await started({
+      ...factoryState([grilling, implementing], [{ kind: 'ready', taskId: 'T1' }]),
+      runs: { R3: ran('R3', 'T2', 5, { status: 'active', outcome: null, endedAt: null }) },
+    });
+
+    await press(app, '2', 'x');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T1' }]));
+    connection.sent.length = 0;
+
+    await press(app, '3', 'x');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'cancel', taskId: 'T2' }));
+    await press(app, '\r', 'x');
+    await eventually(() => expect(connection.sent).toHaveLength(2));
+    expect(connection.sent.at(-1)).toEqual({ type: 'cancel', taskId: 'T2' });
+    await press(app, 'c');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'takeOver', taskId: 'T2' }));
+  });
+
+  test('? shows every key until ? or esc closes it, and meanwhile the keys do nothing else', async () => {
+    const { app } = await started(screens());
+
+    await press(app, '?');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', '\\?']) expect(frame).toMatch(new RegExp(`^\\s*${key}\\s{2,}\\S`, 'm'));
+    });
+    await press(app, '3', '\x1b');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me about the docs/));
+
+    await press(app, '?', '?');
+    await eventually(() => expect(app.lastFrame()).not.toMatch(/^\s*enter\s{2,}/m));
   });
 });
