@@ -277,7 +277,7 @@ function gitWithToken(cwd: string, token: string, args: string[]): Promise<strin
       },
       (error, stdout, stderr) => {
         if (!error) return resolve(stdout.trim());
-        const said = `${stderr}`.split(token).join('***').trim() || error.message;
+        const said = [token, basic].reduce((text, secret) => text.split(secret).join('***'), `${stderr}`).trim() || error.message;
         reject(new GitHubError(`git ${args[0]} failed: ${said}`));
       },
     );

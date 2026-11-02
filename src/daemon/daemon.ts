@@ -962,11 +962,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // Pushes the root's task branch as the App, with a token minted for this
   // write alone and narrowed to Contents (ADR 0004), under the fixed refspec
-  // the GitHub port holds to.
+  // the GitHub port holds to. The base branch is fetched first, so what the
+  // base already has on GitHub doesn't count as this push's workflow changes.
   async function pushBranch(task: Task): Promise<PublishEvent> {
     const failed = (reason: string): PublishEvent => ({ type: 'publishFailed', taskId: task.id, step: 'push', reason });
     const repository = lifecycle.repositories[task.repo];
     if (!repository) return failed(`${task.repo} isn’t registered any more.`);
+    const unfetched = await fetchBase(git, repository);
+    if (unfetched) return failed(unfetched);
     try {
       const { token } = await appToken(task.repo, PUSH);
       const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch });
@@ -985,10 +988,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const repository = lifecycle.repositories[task.repo];
     if (!repository) return failed(`${task.repo} isn’t registered any more.`);
     try {
-      const app = await factoryApp();
-      if (!app) throw new GitHubError(NO_APP);
-      const assignee = await github.appOwner(app);
-      const { token } = await github.mintToken(app, task.repo, OPEN_PR);
+      const { token } = await appToken(task.repo, OPEN_PR);
+      // `appToken` found the App.
+      const assignee = await github.appOwner((await factoryApp())!);
       const { title, body } = pullRequestOf(lifecycle, task);
       const pr = await github.openDraftPr(token, { repo: task.repo, head: task.worktree!.branch, base: repository.baseBranch, title, body, assignee });
       return { type: 'prOpened', taskId: task.id, pr };

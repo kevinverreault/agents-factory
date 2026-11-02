@@ -60,7 +60,7 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
     // An L1 root publishes as the factory's App on the operator's say (ADR
     // 0007): once it has its draft PR, a push updates it.
     const publish: Choice[] =
-      task && task.autonomy !== 'L2' && !task.publishing
+      task?.autonomy === 'L1' && !task.publishing
         ? [{ label: task.pr ? `Push to draft PR #${task.pr.number}` : 'Push & open draft PR', command: { type: 'pushAndOpenPr', taskId } }]
         : [];
     return [

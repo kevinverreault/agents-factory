@@ -145,7 +145,7 @@ describe('a failed GitHub write', () => {
 
   test('of the draft PR comes after the push, and answering opens the PR without pushing again', async () => {
     const { factory, operator, tui } = await inReview();
-    factory.github.unreachableFor('openDraftPr', 'GitHub couldn’t be reached: ECONNRESET');
+    factory.github.failPullRequests('GitHub couldn’t be reached: ECONNRESET');
 
     await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' });
 
@@ -156,7 +156,7 @@ describe('a failed GitHub write', () => {
     });
     expect(factory.github.pushes).toHaveLength(1);
 
-    factory.github.unreachableFor('openDraftPr', null);
+    factory.github.failPullRequests(null);
     await operator.send({ type: 'answer', taskId: 'T1' });
 
     await tui.until((state) => state.tasks.T1?.pr !== null);
@@ -183,6 +183,26 @@ describe('Push & open draft PR', () => {
     await operator.send({ type: 'requestChanges', taskId: 'T1', comments: 'Bold it.' });
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R3');
     expect(await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' })).toEqual({ ok: false, reason: 'T1 is not in review.' });
+  });
+
+  test('is the L1 root’s alone: a HITL root’s work stays the operator’s to publish (ADR 0004)', async () => {
+    const factory = await startTestFactory();
+    factories.push(factory);
+    mkdirSync(factory.paths.presetsDir, { recursive: true });
+    writeFileSync(join(factory.paths.presetsDir, 'talk.preset.yaml'), 'stages:\n  - { id: talk, kind: run, mode: HITL, skill: grill-me, args: "{{prompt}}" }\n');
+    await factory.registerRepo();
+    const operator = await factory.attach();
+    const tui = watch(operator);
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'talk', prompt: 'Add a logout button.' });
+    await tui.until((state) => state.runs.R1?.status === 'active');
+    expect(await operator.send({ type: 'advanceStage', taskId: 'T1' })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.label === 'In review');
+
+    expect(await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' })).toEqual({
+      ok: false,
+      reason: 'T1 is HITL work, which stays yours: push its branch and open its PR yourself.',
+    });
+    expect(factory.github.pushes).toEqual([]);
   });
 
   test('again once the root has its draft PR pushes the new commits to it, opening no other', async () => {

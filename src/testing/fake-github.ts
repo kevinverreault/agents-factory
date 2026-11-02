@@ -47,13 +47,13 @@ export class FakeGitHub implements GitHub {
   private readonly installed = new Set<string>();
   private readonly issues = new Map<string, FakeIssue>();
   private failure: string | null = null;
-  private readonly failures = new Map<'openDraftPr', string>();
+  private prFailure: string | null = null;
   private hold: { arrived(): void; released: Promise<void> } | null = null;
 
   // `git` holds the clones pushes come from, whose origin is this GitHub.
   constructor(
     private readonly clock: FakeClock,
-    private readonly git?: FakeGit,
+    private readonly git: FakeGit,
   ) {}
 
   // The code GitHub's redirect carries back once the operator creates an App
@@ -80,9 +80,8 @@ export class FakeGitHub implements GitHub {
   }
 
   // Opening PRs fails with `reason` from now on, or works again with null.
-  unreachableFor(call: 'openDraftPr', reason: string | null): void {
-    if (reason === null) this.failures.delete(call);
-    else this.failures.set(call, reason);
+  failPullRequests(reason: string | null): void {
+    this.prFailure = reason;
   }
 
   // The writes from now on wait, unmade, until `release`: `held` settles
@@ -188,7 +187,7 @@ export class FakeGitHub implements GitHub {
     if (refusal) throw new GitHubError(refusal);
     await this.held();
     const minted = this.scoped(token, repo, 'contents', 'write');
-    const git = this.clones();
+    const { git } = this;
     const tip = git.branchTip(clonePath, branch);
     if (!tip) throw new GitHubError(`error: src refspec ${branch} does not match any`);
     const remoteTip = git.originTip(clonePath, branch);
@@ -202,8 +201,7 @@ export class FakeGitHub implements GitHub {
 
   async openDraftPr(token: string, { repo, head, base, title, body, assignee }: DraftPr): Promise<PullRequest> {
     await this.held();
-    const failure = this.failures.get('openDraftPr');
-    if (failure) throw new GitHubError(failure);
+    if (this.prFailure) throw new GitHubError(this.prFailure);
     const minted = this.scoped(token, repo, 'pull_requests', 'write');
     const open = this.pullRequests.find((pr) => pr.repo === repo && pr.head === head);
     if (open) return { number: open.number, url: open.url };
@@ -212,11 +210,6 @@ export class FakeGitHub implements GitHub {
     const opener = { ...minted, permissions: { ...minted.permissions } };
     this.pullRequests.push({ number, url, repo, draft: true, head, base, title, body, assignees: [assignee], token: opener });
     return { number, url };
-  }
-
-  private clones(): FakeGit {
-    if (!this.git) throw new Error('This fake GitHub has no clones to push from.');
-    return this.git;
   }
 
   // Waits while writes are held.

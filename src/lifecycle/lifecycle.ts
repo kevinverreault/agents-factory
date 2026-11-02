@@ -1190,6 +1190,13 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = nu
   permission,
 });
 
+// Whether the task's open request, if any, waits on the operator: a task
+// Needs you's, a cancelled task's (its cancel cascade's), and a root in
+// review's (its Push & open draft PR's).
+function showsRequest(task: Task): boolean {
+  return task.state === 'waiting' || task.state === 'cancelled' || task.state === 'in-review';
+}
+
 // Everything waiting on the operator, the most urgent first: failures, then
 // the other requests (those about repositories included), each oldest first,
 // then HITL tasks ready for the operator, then root tasks in review.
@@ -1203,9 +1210,7 @@ export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = 
   }
   for (const task of Object.values(state.tasks)) {
     const request = openRequest(state, task);
-    // A cancelled task's open request is its cancel cascade's, and a root in
-    // review's its Push & open draft PR's.
-    if (['waiting', 'cancelled', 'in-review'].includes(task.state) && request) requests.push(request);
+    if (showsRequest(task) && request) requests.push(request);
     if (readyForYou(state, task, watched)) ready.push({ kind: 'ready', taskId: task.id });
     if (task.state === 'in-review') reviews.push({ kind: 'review', taskId: task.id });
   }
@@ -1308,9 +1313,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (isTerminal(task) || task.mode !== 'AFK' || !task.loop) return `${task.id} isn’t working through a Ralph loop.`;
       return task.loop.finishing ? `${task.id} already finishes after this ticket.` : null;
     case 'answer': {
-      // A cancelled task's only open request is its cascade's, and a root
-      // in review's its Push & open draft PR's.
-      const request = ['waiting', 'cancelled', 'in-review'].includes(task.state) ? openRequest(state, task) : undefined;
+      const request = showsRequest(task) ? openRequest(state, task) : undefined;
       if (!request) return `${task.id} has no open attention request.`;
       if (request.permission && !validPermissionAnswer(action.permission)) {
         return 'Allow it once, for this task or always, or deny it with a note for the agent.';
@@ -1329,13 +1332,17 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'requestChanges':
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
-      if (publishingNow(task)) return publishingNow(task);
-      return typeof action.comments === 'string' && action.comments.trim() ? null : 'Request changes needs your review comments: say what to change.';
+      return (
+        publishingRefusal(task) ??
+        (typeof action.comments === 'string' && action.comments.trim() ? null : 'Request changes needs your review comments: say what to change.')
+      );
     case 'markDone':
-      return task.state === 'in-review' ? publishingNow(task) : `${task.id} is not in review.`;
+      return task.state === 'in-review' ? publishingRefusal(task) : `${task.id} is not in review.`;
     case 'pushAndOpenPr':
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
       if (task.autonomy === 'L2') return `${task.id} is at L2, where the factory opens its draft PR itself.`;
+      // HITL work acts as the operator (ADR 0004): the App publishes only L1 work.
+      if (task.autonomy !== 'L1') return `${task.id} is HITL work, which stays yours: push its branch and open its PR yourself.`;
       return task.publishing ? `${task.id} is already pushing and opening its draft PR.` : null;
     case 'cancel':
       if (action.branch !== undefined && !BRANCH_CHOICES.includes(action.branch)) return 'Keep the branch, or discard the work.';
@@ -1468,7 +1475,7 @@ function stopPublishing(task: Task, request: AttentionRequest | undefined): void
 
 // Why the root can't be reviewed while its Push & open draft PR is under
 // way, or null: a step that failed waits on the operator, so it isn't.
-function publishingNow(task: Task): string | null {
+function publishingRefusal(task: Task): string | null {
   return task.publishing && !task.publishing.problem ? `${task.id} is pushing and opening its draft PR: wait for it to finish.` : null;
 }
 
