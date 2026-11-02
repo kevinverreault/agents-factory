@@ -4,7 +4,8 @@
 // they are best-effort: the cleaned environment makes a push that slips past
 // fail in git itself, and the check after the run catches the rest.
 import { execFile } from 'node:child_process';
-import { givesCode, inTemp, INTERPRETERS, type ToolCall } from '../permissions/permissions.ts';
+import { readFile } from 'node:fs/promises';
+import { FILE_TOOLS, givesCode, inTemp, INTERPRETERS, type ToolCall } from '../permissions/permissions.ts';
 import { KEYWORDS, readCommandLine } from '../permissions/shell.ts';
 
 // What a refusal needs to know of the run's worktree.
@@ -61,7 +62,6 @@ export function runHistoryIn(cwd: string, start: string): RunHistory {
 
 // Git invocations read alike in either shell, as far as the denies go.
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
-const FILE_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 
 // Claude Code's own worktrees, and edits in the git directory, which holds
 // the config and hooks the run must leave alone.
@@ -92,9 +92,9 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash']);
 const isInterpreter = (program: string) => Object.hasOwn(INTERPRETERS, program);
 
 // What the first command spelled out in the code the line hands Python, Node
-// or Perl, inline, in a heredoc, or in a script it wrote from a heredoc,
-// does that is refused. A line the gate can't read, for it substitutes
-// commands, is read whole.
+// or Perl, inline, in a heredoc, in a script it wrote from a heredoc, or in
+// one already in the temp folder, does that is refused. A line the gate
+// can't read, for it substitutes commands, is read whole.
 async function refusedInInterpreters(command: string, history: RunHistory): Promise<string | null> {
   const commands = readCommandLine(command);
   if (commands === null) return refusedInCode(command, history);
@@ -108,12 +108,21 @@ async function refusedInInterpreters(command: string, history: RunHistory): Prom
     const { program, args } = programOf(words);
     if (!isInterpreter(program)) continue;
     const inline = args.flatMap((arg, i) => (givesCode(INTERPRETERS[program]!, arg) ? [args[i + 1]] : []));
-    for (const code of [...inline, heredoc, ...args.flatMap((arg) => written.get(file(arg)) ?? [])]) {
+    const scripts = await Promise.all(args.map(async (arg) => written.get(file(arg)) ?? [await tempScriptCode(arg)]));
+    for (const code of [...inline, heredoc, ...scripts.flat()]) {
       const what = code ? await refusedInCode(code, history) : null;
       if (what) return what;
     }
   }
   return null;
+}
+
+// What the file at `path` holds when it lies in the temp folder, where the
+// gate lets a run run the scripts it wrote (T10); null otherwise, or when
+// it can't be read.
+async function tempScriptCode(path: string): Promise<string | null> {
+  const script = inTemp(path);
+  return script === null ? null : readFile(script, 'utf8').catch(() => null);
 }
 
 // The program a simple command runs, past any keywords, assignments and

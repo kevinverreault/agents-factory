@@ -39,6 +39,9 @@ async function settled(connection: FactoryConnection): Promise<void> {
 
 const bash = (id: string, command: string) => ({ id, tool: 'Bash', input: { command } });
 
+// A Bash command, or a call to another tool.
+type Asked = string | { tool: string; input: Record<string, unknown> };
+
 describe('the rules an L1 run starts with', () => {
   test('are the factory’s allow list and the operator’s permissions file, for Claude Code to match itself', async () => {
     const { factory, operator, tui } = await attached();
@@ -104,10 +107,10 @@ describe('a tool call the rules cover', () => {
 // What AFK runs reach for (#89): the calls Claude Code still asks about, which
 // the factory's own matcher lets through by what they do.
 describe('a call AFK runs reach for, which Claude Code still asks about', () => {
-  // Whether the gate lets each command through without asking, in the run's
-  // worktree, which `prepare` may fill first.
+  // Whether the gate lets each command, or other call, through without
+  // asking, in the run's worktree, which `prepare` may fill first.
   async function gated(
-    commands: readonly string[] | ((worktree: string) => readonly string[]),
+    commands: readonly Asked[] | ((worktree: string) => readonly Asked[]),
     prepare: (worktree: string) => void = () => {},
   ): Promise<boolean[]> {
     const { factory, operator, tui } = await attached();
@@ -117,11 +120,16 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
     const worktree = factory.executor.started[0]!.cwd!;
     prepare(worktree);
     const asked = typeof commands === 'function' ? commands(worktree) : commands;
-    asked.forEach((command, index) => factory.executor.askPermission('R1', bash(`toolu_${index}`, command)));
+    asked.forEach((call, index) =>
+      factory.executor.askPermission('R1', typeof call === 'string' ? bash(`toolu_${index}`, call) : { id: `toolu_${index}`, ...call }),
+    );
     await settled(operator);
     const verdicts = factory.executor.verdicts('R1');
     return asked.map((_, index) => verdicts[`toolu_${index}`]?.allow === true);
   }
+
+  // A path as a Bash line may name it, where a backslash escapes.
+  const slashed = (path: string) => path.replaceAll('\\', '/');
 
   // The worktree as Git Bash names it, with `/d/` for `D:\`.
   const bashPath = (path: string) => path.replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replaceAll('\\', '/');
@@ -372,6 +380,50 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
     "if false; then cat > /tmp/fix.py <<'EOF'\nprint(1)\nEOF\nfi; python /tmp/fix.py",
   ])('a script written elsewhere, or not from the line’s heredoc, still asks: `%s`', async (command) => {
     expect(await gated([command])).toEqual([false]);
+  });
+
+  // As run T10 wrote them: a script written to the temp folder with Write,
+  // then run by a later call.
+  test('writing a script to the temp folder, then running it, doesn’t ask', async () => {
+    const script = join(tmpdir(), 'fixre.py');
+    const calls: Asked[] = [
+      { tool: 'Write', input: { file_path: script, content: "print('an owl')\n" } },
+      `python "${slashed(script)}" && npx tsc --noEmit -p . 2>&1 | head -20`,
+      { tool: 'Edit', input: { file_path: script, old_string: 'owl', new_string: 'heron' } },
+      `python -u ${slashed(script)}`,
+    ];
+    expect(await gated(calls)).toEqual([true, true, true, true]);
+  });
+
+  test('a script a line wrote to the temp folder from a heredoc, run by a later call, doesn’t ask', async () => {
+    const calls = ["cat > /tmp/edit.py <<'EOF'\nprint('an owl')\nEOF", 'python /tmp/edit.py notes.txt', 'python /tmp/other.py'];
+    expect(await gated(calls)).toEqual([true, true, false]);
+  });
+
+  // Git Bash names the temp folder `/tmp` too, and Windows paths compare
+  // whatever their case. The file tools take Windows paths, where `/tmp` is not it.
+  test.runIf(process.platform === 'win32')('a script written to the temp folder runs by any of its names', async () => {
+    const calls: Asked[] = [
+      { tool: 'Write', input: { file_path: join(tmpdir(), 'Fix.py'), content: 'print(1)\n' } },
+      'python /tmp/fix.py',
+      `python ${slashed(join(tmpdir(), 'FIX.py')).toLowerCase()}`,
+      { tool: 'Write', input: { file_path: '/tmp/seed.py', content: 'print(1)\n' } },
+    ];
+    expect(await gated(calls)).toEqual([true, true, true, false]);
+  });
+
+  test('a temp script the run didn’t write whole, or a file written outside the temp folder, still asks', async () => {
+    const calls: Asked[] = [
+      { tool: 'Write', input: { file_path: join(tmpdir(), 'fix.py'), content: 'print(1)\n' } },
+      `python ${slashed(join(tmpdir(), 'other.py'))}`,
+      { tool: 'Edit', input: { file_path: join(tmpdir(), 'seed.py'), old_string: 'owl', new_string: 'heron' } },
+      `python ${slashed(join(tmpdir(), 'seed.py'))}`,
+      `ruby ${slashed(join(tmpdir(), 'fix.py'))}`,
+      { tool: 'Write', input: { file_path: '../elsewhere/fix.py', content: 'print(1)\n' } },
+      { tool: 'Write', input: { file_path: '/tmp/../etc/fix.py', content: 'print(1)\n' } },
+      'python /tmp/../etc/fix.py',
+    ];
+    expect(await gated(calls)).toEqual([true, false, true, false, false, false, false, false]);
   });
 
   // As runs T8 and T9 wrote them: a loop over files, by name or through a variable.
