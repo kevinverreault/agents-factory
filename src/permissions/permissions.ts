@@ -37,7 +37,8 @@ export const givesCode = ({ inline, clustered }: Interpreter, word: string) => i
 // accidents, not malice (ADR 0007). It is these rules, which Claude Code
 // matches itself, and the factory's commands below, which no rule's glob
 // can say. Edits in the worktree are accepted by the run's permission mode,
-// and Claude Code runs what it considers read-only without asking.
+// edits in the temp folder by the factory's matcher (see `uncovered`), and
+// Claude Code runs what it considers read-only without asking.
 export const FACTORY_ALLOW_LIST: readonly string[] = [
   // Read-only tools, and the agent's own bookkeeping.
   'Read',
@@ -315,11 +316,12 @@ function editsWithin(args: string[], at: Place): boolean {
 }
 
 // An interpreter on a script in the worktree, on inline code, on a heredoc
-// or stdin, or on a script the line wrote from a heredoc: what a test script
-// would run, and what the run's Edit tool could write anyway. The hard
-// denies read inline code and heredocs for a push, but not scripts in the
-// worktree: the cleaned environment stops their pushes. Files it edits in
-// place lie in the worktree, as sed's must.
+// or stdin, or on a script the run wrote to the temp folder, with Write or
+// from a heredoc: what a test script would run, and what the run's Edit tool
+// could write anyway. The hard denies read inline code, heredocs and scripts
+// in the temp folder for a push, but not scripts in the worktree: the
+// cleaned environment stops their pushes. Files it edits in place lie in
+// the worktree, as sed's must.
 function runsCode(interpreter: Interpreter, args: string[], heredoc: string | null, at: Place): boolean {
   const { harmless, inPlace } = interpreter;
   let i = 0;
@@ -446,14 +448,18 @@ const mustHoldRules = (path: string) => `${path} must hold \`allow:\`, a list of
 // `&` or `|`), less their redirections, which a rule or the factory's
 // commands may cover, or else the call itself. A Bash command that can't be
 // read, writes outside the worktree or `cd`s out of it is one part, which
-// only its exact rule covers. None when the rules cover the call.
-export function uncovered(rules: readonly string[], call: ToolCall, worktree: string | null = null): ToolCall[] {
+// only its exact rule covers. None when the rules cover the call. `scripts`
+// are those the run wrote to the temp folder in its earlier calls, as
+// `scriptsWritten` names them, which it may run as it would its line's own.
+// The temp folder is the run's scratch space too: its file tools may write
+// there, as they may in the worktree.
+export function uncovered(rules: readonly string[], call: ToolCall, worktree: string | null = null, scripts: ReadonlySet<string> = new Set()): ToolCall[] {
   const parsed = rules.flatMap((rule) => parseRule(rule) ?? []).filter((rule) => toolMatches(rule.tool, call.tool));
   if (parsed.some((rule) => rule.specifier === null)) return [];
   if (call.tool === 'Bash') {
     const command = String(call.input.command ?? '');
     const commands = readCommandLine(command);
-    const parts = partsWithin(commands, worktree);
+    const parts = partsWithin(commands, worktree, scripts);
     if (parts === null) return parsed.some((rule) => rule.specifier === command.trim()) ? [] : [call];
     const covered = (simple: SimpleCommand, at: Place): boolean =>
       parsed.some((rule) => bashMatches(rule.specifier!, simple.text)) || factoryCommand(simple, at, (other) => covered(other, at));
@@ -467,7 +473,30 @@ export function uncovered(rules: readonly string[], call: ToolCall, worktree: st
     return host !== null && parsed.some((rule) => rule.specifier!.startsWith('domain:') && glob(rule.specifier!.slice(7)).test(host)) ? [] : [call];
   }
   const target = targetOf(call.input);
+  if (target !== null && FILE_TOOLS.has(call.tool) && fileInTemp(target) !== null) return [];
   return target !== null && parsed.some((rule) => glob(slashed(rule.specifier!)).test(posix.normalize(slashed(target)))) ? [] : [call];
+}
+
+// The tools that write files.
+export const FILE_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+
+// The file a file tool writes, resolved, when it lies in the temp folder.
+// The tools take Windows paths on Windows, where `/tmp` doesn't name it.
+function fileInTemp(path: string): string | null {
+  return process.platform === 'win32' && !/^[a-z]:[\\/]/i.test(path) ? null : inTemp(path);
+}
+
+// The scripts in the temp folder the call writes whole, which the run's
+// later calls may run: the file Write writes, or those a line's heredoc
+// `cat`s write.
+export function scriptsWritten(call: Pick<ToolCall, 'tool' | 'input'>): string[] {
+  if (call.tool === 'Write') {
+    const script = typeof call.input.file_path === 'string' ? fileInTemp(call.input.file_path) : null;
+    return script === null ? [] : [script];
+  }
+  if (call.tool !== 'Bash') return [];
+  const commands = readCommandLine(String(call.input.command ?? '')) ?? [];
+  return commands.flatMap((command) => heredocScript(command) ?? []);
 }
 
 // The simple commands of a line, but its `cd`s and bare redirections, each
@@ -475,17 +504,18 @@ export function uncovered(rules: readonly string[], call: ToolCall, worktree: st
 // the worktree, or a `cd` may leave it. A `cd` in a loop, a condition or a
 // group may run more than once or not at all, so no reading says where it
 // leaves. A heredoc `cat` writes to the temp folder is a script the
-// commands after it may run, as an interpreter would run the heredoc itself.
-function partsWithin(commands: SimpleCommand[] | null, worktree: string | null): { command: SimpleCommand; at: Place }[] | null {
+// commands after it may run, as an interpreter would run the heredoc itself,
+// and so are the run's earlier `written` scripts.
+function partsWithin(commands: SimpleCommand[] | null, worktree: string | null, written: ReadonlySet<string>): { command: SimpleCommand; at: Place }[] | null {
   if (commands === null || commands.length === 0) return null;
   // Where each command runs, as far as the `cd`s before it in the line say.
   let dir = worktree === null ? null : slashed(worktree);
-  const scripts = new Set<string>();
+  const scripts = new Set(written);
   const parts: { command: SimpleCommand; at: Place }[] = [];
   for (const command of commands) {
     const at = place(worktree, dir, new Set(scripts));
-    const [script] = command.writes;
-    if (writesScript(command) && inTemp(script!) !== null) scripts.add(inTemp(script!)!);
+    const script = heredocScript(command);
+    if (script !== null) scripts.add(script);
     else if (!command.writes.every((path) => at.inside(path) !== null)) return null;
     if (command.words[0] === 'cd') {
       if (command.compound || (dir = movesTo(command, at)) === null) return null;
@@ -614,32 +644,40 @@ type Place = {
   inside(path: string): string | null;
   // Whether the project installed `bin`, in `dir` or a folder above it in the worktree.
   installed(bin: string): boolean;
-  // Whether the line wrote the script at `path` from a heredoc before this command.
+  // Whether the run wrote the script at `path` to the temp folder whole: in
+  // an earlier call, or from a heredoc earlier in the line.
   wrote(path: string): boolean;
 };
 
-// The temp folder, as Git Bash names it and as the OS does.
-const TEMP_FOLDERS = ['/tmp', posix.normalize(slashed(tmpdir())).replace(/\/$/, '')];
+// The temp folder, as the OS names it, and as Git Bash does: `/tmp`, which
+// on Windows is the OS's own.
+const OS_TEMP = posix.normalize(slashed(tmpdir())).replace(/\/$/, '');
+const TEMP_FOLDERS = ['/tmp', OS_TEMP];
 
-// The path, resolved, when it is absolute and lies in the temp folder.
+// The path, resolved, when it is absolute and lies in the temp folder. On
+// Windows, by the OS's name for it, which Node reads `/tmp` paths by too.
 export function inTemp(path: string): string | null {
   if (/[$~]/.test(path)) return null;
-  const resolved = posix.normalize(fromBash(path));
+  const written = posix.normalize(fromBash(path));
+  const resolved = process.platform === 'win32' ? written.replace(/^\/tmp(?=\/|$)/, OS_TEMP) : written;
   return TEMP_FOLDERS.some((folder) => comparable(resolved).startsWith(`${comparable(folder)}/`)) ? resolved : null;
 }
 
-// Whether the command is a `cat` writing a heredoc to one file, which then
-// holds just the heredoc, wherever the line goes: not appending, and not in
-// a loop, a condition or a group that may not run it.
-export const writesScript = ({ words, writes, appends, heredoc, compound }: SimpleCommand) =>
-  heredoc !== null && words.join(' ') === 'cat' && writes.length === 1 && appends.length === 0 && !compound;
+// The script the command writes to the temp folder, resolved, when it is a
+// `cat` writing a heredoc to one file there, which then holds just the
+// heredoc, wherever the line goes: not appending, and not in a loop, a
+// condition or a group that may not run it.
+function heredocScript({ words, writes, appends, heredoc, compound }: SimpleCommand): string | null {
+  const writesScript = heredoc !== null && words.join(' ') === 'cat' && writes.length === 1 && appends.length === 0 && !compound;
+  return writesScript ? inTemp(writes[0]!) : null;
+}
 
 function place(worktree: string | null, dir: string | null, scripts: ReadonlySet<string> = new Set()): Place {
   const top = worktree === null ? null : comparable(posix.normalize(slashed(worktree)).replace(/\/$/, ''));
   return {
     wrote(path) {
       const resolved = inTemp(path);
-      return resolved !== null && scripts.has(resolved);
+      return resolved !== null && [...scripts].some((script) => comparable(script) === comparable(resolved));
     },
     installed(bin) {
       if (top === null || dir === null || !/^[\w.-]+$/.test(bin)) return false;

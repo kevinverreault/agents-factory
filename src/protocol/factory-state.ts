@@ -31,6 +31,7 @@ import {
   type TaskState,
 } from '../lifecycle/lifecycle.ts';
 import type { Tier } from '../models/routing.ts';
+import type { ModelUsage } from '../usage/usage.ts';
 
 export type TaskView = {
   id: string;
@@ -92,7 +93,7 @@ export type HandoffView = Omit<HandoffSheet, 'asked'>;
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
-> & { maxTurns: number | null; tier: Tier | null; ticket: string | null };
+> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage };
 
 // `app` is null until the daemon has checked the App's installation, and
 // `skills` until it has checked the skill set's setup.
@@ -181,6 +182,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       model,
       maxTurns,
       ticket: run.ticket ?? null,
+      usage: structuredClone(run.usage ?? {}),
       cli,
       skillSet: skillSet ?? null,
       startedAt,

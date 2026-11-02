@@ -495,6 +495,7 @@ describe('launching and conversing', () => {
     skillSet: null,
     startedAt: 1,
     endedAt: null,
+    usage: {},
   };
   const repositories = { 'acme/gadgets': gadgets, 'acme/widgets': widgets };
 
@@ -1730,6 +1731,7 @@ describe('answering in the conversation', () => {
     skillSet: null,
     startedAt: 1,
     endedAt: null,
+    usage: {},
   };
   const permission = {
     kind: 'attention' as const,
@@ -1882,6 +1884,7 @@ describe('taking over with c', () => {
     skillSet: null,
     startedAt: 1,
     endedAt: null,
+    usage: {},
   };
   const permission = {
     kind: 'attention' as const,
@@ -1979,7 +1982,7 @@ describe('the conversation of an AFK task that is no longer live', () => {
     const ended = {
       id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const,
       turn: 'agent' as const, queued: [] as string[], question: null, permission: null, stage: 'implement', ticket: null, proposal: null,
-      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2,
+      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {},
     };
     const { app } = await started({ ...factoryState([reviewed]), runs: { R1: ended } }, { connection });
     await press(app, '\r');
@@ -1988,5 +1991,70 @@ describe('the conversation of an AFK task that is no longer live', () => {
     await press(app, 'c');
 
     expect(connection.sent).toEqual([]);
+  });
+});
+
+describe('usage', () => {
+  const SONNET = 'claude-sonnet-5-5';
+  const HAIKU = 'claude-haiku-5-5';
+  const usage = (input: number, output: number, cacheRead = 0, cacheWrite = 0, cost = 0) => ({ input, output, cacheRead, cacheWrite, cost });
+  function metered(id: string, taskId: string, stage: string | null, ticket: string | null, used: RunView['usage']): RunView {
+    return {
+      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', turn: 'agent', queued: [], question: null, stage, ticket,
+      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used,
+    };
+  }
+  const implementing = { ...task('T1', 'Implement the login flow', 'running', 'Running'), groups: ['login'] };
+  const child = { ...task('T2', 'Write the logout test', 'done', 'Done'), parent: 'T1', groups: ['login'] };
+  const grilling = { ...task('T3', 'Grill me about the docs', 'queued', 'Ready for you', 'HITL'), groups: ['docs'] };
+  const runs = {
+    R1: metered('R1', 'T1', 'implement', 'acme/widgets#11', { [SONNET]: usage(1_000, 100, 2_000_000, 50_000, 1.25) }),
+    R2: metered('R2', 'T1', 'implement', 'acme/widgets#12', { [SONNET]: usage(2_000, 200, 0, 0, 0.5) }),
+    R3: metered('R3', 'T2', null, null, { [HAIKU]: usage(300, 30, 0, 0, 0.125) }),
+    R4: metered('R4', 'T3', 'grill', null, {}),
+  };
+  const metering = () => ({ ...factoryState([implementing, child, grilling]), runs });
+
+  test('4 opens the Usage tab: each model’s tokens by kind and API-equivalent cost, then each task tree, group, stage and ticket', async () => {
+    const { app } = await started(metering());
+    await eventually(() => expect(app.lastFrame()).toContain('4 Usage'));
+
+    await press(app, '4');
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/claude-sonnet-5-5\s+3\.0k\s+300\s+2\.0M\s+50\.0k\s+\$1\.75/);
+      expect(frame).toMatch(/claude-haiku-5-5\s+300\s+30\s+0\s+0\s+\$0\.13/);
+      expect(frame).toMatch(/Total\s+3\.3k\s+330\s+2\.0M\s+50\.0k\s+\$1\.88/);
+      // T1's tree takes in its child T2: trees are listed by their root.
+      expect(frame).toMatch(/T1\s+Implement the login flow\s+2\.1M tokens\s+\$1\.88/);
+      expect(frame).not.toMatch(/T2\s+Write the logout test/);
+      expect(frame).toMatch(/login\s+2\.1M tokens\s+\$1\.88/);
+      expect(frame).toMatch(/implement\s+2\.1M tokens\s+\$1\.75/);
+      expect(frame).toMatch(/acme\/widgets#11\s+2\.1M tokens\s+\$1\.25/);
+      expect(frame).toMatch(/acme\/widgets#12\s+2\.2k tokens\s+\$0\.50/);
+    });
+    // A task, group or stage that spent nothing has no row.
+    expect(app.lastFrame()).not.toMatch(/docs\s+/);
+    expect(app.lastFrame()).not.toMatch(/grill\s+/);
+  });
+
+  test('the Usage tab of a factory that spent nothing says so', async () => {
+    const { app } = await started(factoryState([grilling]));
+    await press(app, '4');
+
+    await eventually(() => expect(app.lastFrame()).toContain('No usage yet.'));
+  });
+
+  test('a task’s detail shows its usage per model with API-equivalent cost, and its tree’s once it has children', async () => {
+    const { app } = await started(metering());
+    await press(app, '\r');
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Usage');
+      expect(frame).toMatch(/claude-sonnet-5-5\s+2\.1M\s+\$1\.75/);
+      expect(frame).toMatch(/task tree\s+2\.1M\s+\$1\.88/);
+    });
   });
 });

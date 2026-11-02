@@ -18,6 +18,7 @@ const COLLECTIONS = {
   runs: 'runs',
   requests: 'attention_requests',
   artifacts: 'artifacts',
+  samples: 'usage_samples',
 } as const;
 type Collection = keyof typeof COLLECTIONS;
 
@@ -32,6 +33,7 @@ export function openStore(path: string): Store {
     CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS attention_requests (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS usage_samples (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, data TEXT NOT NULL);
   `);
 
   // What each row held when last written, so a save writes only changed rows.

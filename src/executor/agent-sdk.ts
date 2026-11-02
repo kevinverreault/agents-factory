@@ -25,6 +25,7 @@ import {
 import { HARD_DENY_RULES, refusal, runHistoryIn } from '../guards/hard-denies.ts';
 import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
+import type { ModelUsage, Usage } from '../usage/usage.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
 import { afkFactoryTools, hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
@@ -177,16 +178,22 @@ export function agentSdkExecutor(): Executor {
         if (message.type === 'system' && message.subtype === 'init' && !run.reportedStart && run.cli) {
           run.reportedStart = true;
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
-        } else if (message.type === 'assistant' && !message.parent_tool_use_id) {
+        } else if (message.type === 'assistant') {
+          // In-run subagents' messages count in the run's usage, never in its conversation.
+          const sampled = sampleOf(message.message);
+          if (sampled) report({ type: 'usageSampled', runId, ...sampled });
+          if (message.parent_tool_use_id) continue;
           latest = contextOf(message.message) ?? latest;
           for (const event of eventsOf('assistant', message.uuid, message.message)) run.sink.converse(event);
         } else if (message.type === 'result' && run.mode === 'HITL') {
           // Every turn ends with a result, an interrupted one included.
+          report(totalOf(runId, message));
           const window = latest && message.modelUsage[latest.model]?.contextWindow;
           report({ type: 'turnEnded', runId, ...(latest && window && { context: { used: latest.used, window } }) });
         } else if (message.type === 'result') {
           // An AFK run is one turn on its first message, and takes no chat:
           // its result ends it, completed once the CLI exits, or failed.
+          report(totalOf(runId, message));
           const failure = afkFailure(message, run.maxTurns);
           if (!failure) {
             if (message.subtype === 'success') result = message.result;
@@ -420,6 +427,36 @@ function contextOf(message: unknown): { used: number; model: string } | null {
   if (typeof model !== 'string' || !usage) return null;
   const tokens = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'];
   return { used: tokens.reduce((sum, field) => sum + (typeof usage[field] === 'number' ? (usage[field] as number) : 0), 0), model };
+}
+
+// One API message's usage as it streamed, by the message's id. Streamed
+// usage carries no cost: the session's totals bring it.
+function sampleOf(message: unknown): { messageId: string; model: string; usage: Usage } | null {
+  const { id, model, usage } = (message ?? {}) as { id?: unknown; model?: unknown; usage?: Record<string, unknown> | null };
+  if (typeof id !== 'string' || typeof model !== 'string' || !usage) return null;
+  const count = (field: string) => (typeof usage[field] === 'number' ? (usage[field] as number) : 0);
+  return {
+    messageId: id,
+    model,
+    usage: {
+      input: count('input_tokens'),
+      output: count('output_tokens'),
+      cacheRead: count('cache_read_input_tokens'),
+      cacheWrite: count('cache_creation_input_tokens'),
+      cost: 0,
+    },
+  };
+}
+
+// The session's usage so far, per model, with the client's API-equivalent cost.
+function totalOf(runId: string, result: SDKResultMessage): RunEvent {
+  const models: ModelUsage = Object.fromEntries(
+    Object.entries(result.modelUsage ?? {}).map(([model, used]) => [
+      model,
+      { input: used.inputTokens, output: used.outputTokens, cacheRead: used.cacheReadInputTokens, cacheWrite: used.cacheCreationInputTokens, cost: used.costUSD },
+    ]),
+  );
+  return { type: 'usageTotaled', runId, models };
 }
 
 // What a tool call was pointed at, on one line.

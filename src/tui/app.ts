@@ -1,4 +1,4 @@
-// The TUI: Tasks and Needs you tabs fed by the factory-state subscription,
+// The TUI: Tasks, Needs you and Usage tabs fed by the factory-state subscription,
 // the launch card (`N`), the conversation view (`enter` on a task), re-tiering
 // a task (`t`), conversing with or taking over one (`c`), handing one off
 // (`ctrl+h`), cancelling one with its subtree (`x`, with the cancel sheet
@@ -20,8 +20,10 @@ import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-shee
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { Conversation } from './conversation.ts';
 import { LaunchCard } from './launch-card.ts';
+import { UsageTab } from './usage.ts';
 
-type Tab = 'tasks' | 'needs-you';
+// Tab 3 is the Runs screen's, still to come.
+type Tab = 'tasks' | 'needs-you' | 'usage';
 // What fills the screen: the tabs, the launch card over them, or one task's
 // conversation.
 type View = { kind: 'tabs' } | { kind: 'launch' } | { kind: 'conversation'; taskId: string };
@@ -51,7 +53,11 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const [view, setView] = useState<View>({ kind: 'tabs' });
   // Each pane's cursor. It stays on the row it was on while the rows move,
   // so leaving a conversation comes back to exactly where the operator was.
-  const [cursors, setCursors] = useState<Record<Tab, Cursor>>({ tasks: { row: null, index: 0 }, 'needs-you': { row: null, index: 0 } });
+  const [cursors, setCursors] = useState<Record<Tab, Cursor>>({
+    tasks: { row: null, index: 0 },
+    'needs-you': { row: null, index: 0 },
+    usage: { row: null, index: 0 },
+  });
   // Whether the digits answer the selected Needs you item instead of
   // switching screens. Once nothing needs the operator they switch again.
   const [answering, setAnswering] = useState(false);
@@ -75,7 +81,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // The task tree: each root, then its descendants under it.
   const tasks = state ? treeOrder(Object.values(state.tasks)) : [];
   const queue = state?.attentionQueue ?? [];
-  const rows = tab === 'tasks' ? tasks.map((task) => task.id) : queue.map(rowOf);
+  const rows = tab === 'tasks' ? tasks.map((task) => task.id) : tab === 'needs-you' ? queue.map(rowOf) : [];
   const cursor = at(cursors[tab], rows);
   // By a step from where the cursor is now: keys typed in one burst arrive
   // before a re-render.
@@ -194,6 +200,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (tab === 'needs-you' && (input === 'a' || (key.return && answerable(item, itemTask)))) return setAnswering(true);
       if (input === '1') setTab('tasks');
       if (input === '2') setTab('needs-you');
+      if (input === '4') setTab('usage');
       if (input === 'N' && state) setView({ kind: 'launch' });
       if (key.upArrow) move(-1);
       if (key.downArrow) move(1);
@@ -256,7 +263,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
       : tab === 'tasks'
         ? h(TaskList, { tasks, cursor, retries: failedTask(state, tasks[cursor]) })
-        : h(NeedsYouList, { state, cursor }),
+        : tab === 'needs-you'
+          ? h(NeedsYouList, { state, cursor })
+          : h(UsageTab, { state }),
     state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
@@ -284,7 +293,13 @@ function withoutSetup(
 function Tabs({ tab, needsYou }: { tab: Tab; needsYou: number }) {
   const label = (key: Tab, text: string) =>
     h(Text, { key, bold: tab === key, inverse: tab === key }, ` ${text} `);
-  return h(Box, { gap: 1, marginBottom: 1 }, label('tasks', '1 Tasks'), label('needs-you', `2 Needs you (${needsYou})`));
+  return h(
+    Box,
+    { gap: 1, marginBottom: 1 },
+    label('tasks', '1 Tasks'),
+    label('needs-you', `2 Needs you (${needsYou})`),
+    label('usage', '4 Usage'),
+  );
 }
 
 function Row({ id, title, detail, selected = false }: { id: string; title: string; detail: string; selected?: boolean }) {

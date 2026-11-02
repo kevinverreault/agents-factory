@@ -14,7 +14,7 @@ import { FACTORY_ALLOW_LIST, type ToolCall } from '../permissions/permissions.ts
 import { isAlive, waitFor } from '../os/test-support.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, RunStart } from './executor.ts';
-import { afkRun, afkRunOptions } from './sdk-test-support.ts';
+import { afkRun, afkRunOptions, typesOf } from './sdk-test-support.ts';
 
 test('a HITL run streams text and tool use, takes the operator’s messages, records its CLI, and replays from the session file', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
@@ -66,7 +66,16 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
     expect.objectContaining({ type: 'message', from: 'agent', text: expect.stringContaining('PONG') }),
   ]);
   // A HITL run lives on between turns: only the operator ends it.
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
+  // Each API message's usage streams by its id, and each turn's result
+  // totals the session so far, with its API-equivalent cost.
+  const sampled = reported.filter((event) => event.type === 'usageSampled');
+  expect(sampled[0]).toMatchObject({ messageId: expect.any(String), model: expect.stringMatching(/haiku/), usage: { input: expect.any(Number), cost: 0 } });
+  const totals = reported.flatMap((event) => (event.type === 'usageTotaled' ? [event.models] : []));
+  expect(totals).toHaveLength(2);
+  const [first, second] = totals.map((models) => Object.values(models).reduce((sum, usage) => sum + usage.output, 0));
+  expect(second).toBeGreaterThan(first!);
+  expect(Object.values(totals[1]!).some((usage) => usage.cost > 0)).toBe(true);
 
   // Live and replayed, an event has the same id, so a replay can skip what it
   // already sent. The CLI writes the session file a moment after it streams.
@@ -88,7 +97,7 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
 
   executor.stop('R1');
   await waitFor(() => !isAlive(pid), 15_000);
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
 });
 
 test('the agent proposes advancing through the factory MCP server’s propose_advance, with no permission prompt', async () => {
@@ -223,7 +232,7 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
   expect(Date.now() - interruptedAt).toBeLessThan(15_000);
   expect(agentSaid('DONE-SLEEPING')).toBe(false);
   // The run lives on after an interrupt: only the operator ends it.
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'questionAsked', 'turnEnded', 'turnEnded']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'questionAsked', 'turnEnded', 'turnEnded']);
   const { pid } = reported[0] as Extract<RunEvent, { type: 'runStarted' }>;
   executor.stop('R1');
   await waitFor(() => !isAlive(pid), 15_000);
@@ -248,7 +257,7 @@ test('an L1 AFK run edits in its worktree without asking, takes no chat, and com
   executor.start(run, { report: (event) => reported.push(event), converse: (event) => live.push(event), askPermission: () => {} });
   await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
 
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runCompleted']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'runCompleted']);
   expect(readFileSync(join(cwd, 'done.txt'), 'utf8').trim()).toBe('FINISHED');
   expect(live).toContainEqual(expect.objectContaining({ type: 'toolUse', tool: 'Write' }));
   const { pid } = reported[0] as Extract<RunEvent, { type: 'runStarted' }>;
@@ -290,7 +299,7 @@ test('an AFK run that hits its max turns ends failed, saying so', async () => {
   // Nothing more is reported once the run has ended.
   await new Promise((resolve) => setTimeout(resolve, 2_000));
 
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runFailed']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'runFailed']);
   expect(reported[1]).toMatchObject({ reason: 'The run hit its max turns (1) before it finished.' });
 });
 
@@ -315,11 +324,11 @@ test('an AFK run’s AskUserQuestion becomes a question attention request that h
   ]);
   // The request holds the run open.
   await new Promise((resolve) => setTimeout(resolve, 2_000));
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'attentionRaised']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'attentionRaised']);
 
   executor.answer('R1', question.id, { [question.questions[0]!.question]: 'Blue' });
   await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'attentionRaised', 'runCompleted']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'attentionRaised', 'runCompleted']);
   expect(live.some((event) => event.type === 'message' && event.from === 'agent' && /blue/i.test(event.text))).toBe(true);
 });
 
@@ -377,5 +386,5 @@ test('an L1 run asks the factory’s gate about calls the target repo’s own ru
   );
   expect(JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'))).toMatchObject({ description: 'owls', version: '1.0.0' });
   expect(live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes('NOTE-OWL-17'))).toBe(true);
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runCompleted']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'runCompleted']);
 });

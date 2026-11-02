@@ -12,7 +12,7 @@ import { FACTORY_ALLOW_LIST, uncovered, type ToolCall } from '../permissions/per
 import { waitFor } from '../os/test-support.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, RunStart } from './executor.ts';
-import { afkRun } from './sdk-test-support.ts';
+import { afkRun, typesOf } from './sdk-test-support.ts';
 
 // A git repo with one commit, a few files to read and edit, a script, a
 // binary the project installed, and a bare `origin` a push would land in.
@@ -129,7 +129,7 @@ test('an L1 runâ€™s allow rules are matched by Claude Code itself, and the gateâ
 
   const { asked, ran, reported } = await replay(afkRun(cwd, runEach(Object.values(SHAPES)), 60));
 
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runCompleted']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'runCompleted']);
   // The agent ran every command as given, so each outcome below is the rules'.
   expect(ran).toEqual(shapes.map(([, command]) => oneLine(command)));
   const outcomes = Object.fromEntries(
@@ -205,7 +205,7 @@ test('a hard deny is refused without asking, even where an allow rule would let 
   const start = afkRun(cwd, runEach(denied), 22, rules);
   const { asked, ran, reported } = await replay(start);
 
-  expect(reported.map((event) => event.type)).toEqual(['runStarted', 'runCompleted']);
+  expect(typesOf(reported)).toEqual(['runStarted', 'runCompleted']);
   expect(ran).toEqual(denied);
   expect(asked).toEqual([]);
   // Nothing reached the remote, and the branch stayed.
