@@ -11,6 +11,7 @@ import { issueRef } from '../artifacts/capture.ts';
 import type { Issue } from '../github/github.ts';
 import { artifactKindsIn, fillOpening, type LaunchInputs, type ResolvedPreset, type Stage } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
+import { correction, grown, merged, NO_USAGE, plus, type ModelUsage, type Usage } from '../usage/usage.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -293,9 +294,20 @@ export type Run = {
   // The rules the operator allowed once for it: each lets one call with that
   // rule through. Runs stored before them have none.
   allowOnce?: string[];
+  // What it used, per model (ADR 0008): its API messages as they streamed,
+  // brought into line by its session's totals. Runs stored before metering
+  // have none.
+  usage?: ModelUsage;
+  // While it is live, what each of its API messages since its session's
+  // last total was counted at, by message id; null once it ended.
+  countedMessages?: Record<string, Usage> | null;
   startedAt: number;
   endedAt: number | null;
 };
+
+// One minute of a run's usage (ADR 0008), from `minute` (its start, in ms):
+// its records' growth in that minute, corrections included.
+export type UsageSample = { id: string; runId: string; minute: number; models: ModelUsage };
 
 export type AttentionRequest = {
   id: string;
@@ -361,6 +373,7 @@ export type Lifecycle = {
   runs: Record<string, Run>;
   requests: Record<string, AttentionRequest>;
   artifacts: Record<string, Artifact>;
+  samples: Record<string, UsageSample>;
   slotCap: number;
 };
 
@@ -438,7 +451,13 @@ export type RunEvent =
   // `report_findings`; its fix pass reports those it left unfixed.
   | { type: 'findingsReported'; runId: string; findings: string[] }
   // A PR body stage's AFK run wrote the body through `write_pr_body`.
-  | { type: 'prBodyWritten'; runId: string; body: string };
+  | { type: 'prBodyWritten'; runId: string; body: string }
+  // One API message's usage, as the run streamed it: a message streams once
+  // per content block, so the same `messageId` may come more than once.
+  | { type: 'usageSampled'; runId: string; messageId: string; model: string; usage: Usage }
+  // The run's session's usage so far, per model, as a result reports it: a
+  // resumed session's counts the runs before.
+  | { type: 'usageTotaled'; runId: string; models: ModelUsage };
 
 // What artifact capture found after a tool call of the task's latest run,
 // with whether each of the task's files (old and new) is committed. Hooks
@@ -576,6 +595,7 @@ export function initialLifecycle(): Lifecycle {
     runs: {},
     requests: {},
     artifacts: {},
+    samples: {},
     slotCap: DEFAULT_SLOT_CAP,
   };
 }
@@ -1010,8 +1030,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     if (run.status === 'suspended' && action.type === 'permissionAsked') {
       // The task's rules still decide a suspended run's other calls.
       if (!grantFor(state.tasks[run.taskId]!, run, action)) return 'Another request of this run is waiting on the operator.';
-    } else if (run.status !== 'active' && !(run.status === 'suspended' && action.type === 'runFailed')) {
-      // A suspended run can still fail: its CLI may exit while it waits on the operator.
+    } else if (run.status !== 'active' && !(run.status === 'suspended' && action.type === 'runFailed') && !isMetering(action)) {
+      // A suspended run can still fail: its CLI may exit while it waits on
+      // the operator. What a run spent is metered whenever it says.
       return `Run ${run.id} is not active.`;
     }
   }
@@ -1129,6 +1150,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'runCompleted':
     case 'runFailed':
     case 'turnEnded':
+    case 'usageSampled':
+    case 'usageTotaled':
       return null;
     case 'findingsReported':
       return runReports(task, state.runs[action.runId]!).includes('findings') ? null : 'Only a run of a fix-once review stage reports findings.';
@@ -1399,6 +1422,29 @@ function endRun(run: Run, outcome: RunOutcome, at: number): void {
   run.outcome = outcome;
   run.parksAt = null;
   run.endedAt = at;
+  run.countedMessages = null;
+}
+
+export function isMetering(action: { type: string }): action is Extract<RunEvent, { type: 'usageSampled' | 'usageTotaled' }> {
+  return action.type === 'usageSampled' || action.type === 'usageTotaled';
+}
+
+const MINUTE_MS = 60_000;
+
+// Adds `change` to the run's record, and to its sample for the minute `at` is in.
+function meter(state: Lifecycle, run: Run, change: ModelUsage, at: number): void {
+  run.usage = merged(run.usage ?? {}, change);
+  const minute = at - (at % MINUTE_MS);
+  const id = `${run.id}@${minute}`;
+  const sample = state.samples[id] ?? { id, runId: run.id, minute, models: {} };
+  state.samples[id] = { ...sample, models: merged(sample.models, change) };
+}
+
+// What the runs of the run's session other than it recorded.
+function othersInSession(state: Lifecycle, run: Run): ModelUsage {
+  const sessionOf = (other: Run) => other.sessionId ?? state.tasks[other.taskId]!.sessionId;
+  const session = sessionOf(run);
+  return merged(...Object.values(state.runs).flatMap((other) => (other !== run && sessionOf(other) === session ? [other.usage ?? {}] : [])));
 }
 
 // Ends a run that waited on the operator too long. Reopening the task, or
@@ -1873,6 +1919,25 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const findings = action.findings.map((finding) => finding.trim()).filter(Boolean);
       if (task.findings?.fixPass) task.findings.leftOver = findings;
       else task.findings = { found: findings, fixPass: false, leftOver: findings };
+      break;
+    }
+    // Metered on the run that used it, live or not.
+    case 'usageSampled': {
+      const metered = state.runs[action.runId]!;
+      // An ended run no longer knows what its messages were counted at, so
+      // a message still streaming adds nothing: a late total corrects it.
+      if (metered.status === 'ended') break;
+      const counted = metered.countedMessages?.[action.messageId] ?? NO_USAGE;
+      const added = grown(counted, action.usage);
+      metered.countedMessages = { ...metered.countedMessages, [action.messageId]: plus(counted, added) };
+      meter(state, metered, { [action.model]: added }, at);
+      break;
+    }
+    case 'usageTotaled': {
+      const metered = state.runs[action.runId]!;
+      meter(state, metered, correction(action.models, othersInSession(state, metered), metered.usage ?? {}), at);
+      // The total covers every message so far: none is counted again.
+      if (metered.status !== 'ended') metered.countedMessages = {};
       break;
     }
     case 'prBodyWritten':
