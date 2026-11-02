@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { FACTORY_ALLOW_LIST } from '../permissions/permissions.ts';
-import type { Report } from '../lifecycle/lifecycle.ts';
+import { isMetering, type Report, type RunEvent } from '../lifecycle/lifecycle.ts';
 import type { RunStart } from './executor.ts';
 
 export { streamedInput, type StreamedInput } from './streamed-input.ts';
@@ -41,4 +41,10 @@ export function afkRun(cwd: string, firstMessage: string, maxTurns: number, allo
     allowRules,
     reports,
   };
+}
+
+// The types of the run events reported, in order, without usage metering's,
+// which come with every API message and result.
+export function typesOf(reported: RunEvent[]): RunEvent['type'][] {
+  return reported.flatMap((event) => (isMetering(event) ? [] : [event.type]));
 }

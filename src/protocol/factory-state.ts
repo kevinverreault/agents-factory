@@ -27,11 +27,14 @@ import {
   type TaskState,
 } from '../lifecycle/lifecycle.ts';
 import type { Tier } from '../models/routing.ts';
+import type { ModelUsage } from '../usage/usage.ts';
 
 export type TaskView = {
   id: string;
   title: string;
   repo: string;
+  // The task it was delegated from, for a child task.
+  parent: string | null;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   priority: Priority;
@@ -78,7 +81,7 @@ export type HandoffView = Omit<HandoffSheet, 'asked'>;
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
-> & { maxTurns: number | null; tier: Tier | null; ticket: string | null };
+> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage };
 
 // `app` is null until the daemon has checked the App's installation, and
 // `skills` until it has checked the skill set's setup.
@@ -111,6 +114,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       id: task.id,
       title: task.title,
       repo: task.repo,
+      parent: task.parent ?? null,
       mode: task.mode,
       autonomy: task.autonomy,
       priority: task.priority ?? 'normal',
@@ -162,6 +166,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       model,
       maxTurns,
       ticket: run.ticket ?? null,
+      usage: structuredClone(run.usage ?? {}),
       cli,
       skillSet: skillSet ?? null,
       startedAt,

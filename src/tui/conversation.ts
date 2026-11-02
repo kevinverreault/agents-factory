@@ -1,5 +1,6 @@
 // The full-screen conversation view: a run's conversation, replayed from the
-// session file and then live, with a side rail of the task's artifacts. A HITL
+// session file and then live, with a side rail of the task's usage and
+// artifacts, its detail until the task detail screen comes. A HITL
 // run's has a line for the operator's next message, and the advance and
 // handoff sheets over it; an AFK run never takes chat, so its view only
 // follows it until `c` takes the task over. A task that needs the operator
@@ -16,6 +17,7 @@ import { AnswerSheet, answerable, useAnswering } from './answer-sheet.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
+import { TaskUsage } from './usage.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -155,7 +157,12 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
           h(Box, { key: `queued-${i}`, gap: 1, flexShrink: 0 }, h(Box, { width: 6, flexShrink: 0 }, h(Text, { dimColor: true }, 'queued')), h(Text, { dimColor: true }, text)),
         ),
       ),
-      h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
+      h(
+        Box,
+        { flexDirection: 'column', width: RAIL_WIDTH, flexShrink: 0, overflow: 'hidden' },
+        h(TaskUsage, { state, taskId }),
+        h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
+      ),
     ),
     h(
       Box,
@@ -187,7 +194,7 @@ const RAIL_WIDTH = 40;
 function ArtifactRail({ artifacts }: { artifacts: ArtifactView[] }) {
   return h(
     Box,
-    { flexDirection: 'column', width: RAIL_WIDTH, flexShrink: 0, overflow: 'hidden' },
+    { flexDirection: 'column', overflow: 'hidden' },
     h(Text, { bold: true }, 'Artifacts'),
     artifacts.length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
     ...artifacts.toReversed().map((artifact) =>
