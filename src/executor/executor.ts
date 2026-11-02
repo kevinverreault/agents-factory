@@ -2,6 +2,7 @@
 // and reports run events and the conversation. The Agent SDK adapter
 // (`agent-sdk.ts`) is the real one.
 import type { Answers, AutonomyLevel, Mode, Report, RunEvent } from '../lifecycle/lifecycle.ts';
+import type { Tier } from '../models/routing.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
 
 export type RunStart = {
@@ -35,6 +36,11 @@ export type RunStart = {
   // What an AFK run reports to the factory through its tools, by its stage:
   // it is given those tools alone (ADR 0009). None for a HITL run.
   reports: readonly Report[];
+  // Whether the run's task is a child task, which reports to its parent
+  // through `report_result`, and whether its tree lets it spawn children of
+  // its own: `spawn_child` is registered only within depth (ADR 0009).
+  child: boolean;
+  spawns: boolean;
 };
 
 export type RunGuards = {
@@ -64,7 +70,19 @@ export type RunSink = {
   // An AFK run's tool call that Claude Code asked about: the factory's gate
   // decides it (ADR 0007), and the call waits for `permit`.
   askPermission(call: ToolCall): void;
+  // An AFK run's delegation tool call (ADR 0009), which the daemon answers:
+  // the agent reads the reply's text, or its error. A sink without it
+  // delegates nothing.
+  delegate?(request: Delegation): Promise<DelegationReply>;
 };
+
+// What an agent asks of the factory about its children. `toolUseId` is the
+// spawning call's, so a replay finds the child it spawned.
+export type Delegation =
+  | { type: 'spawnChild'; toolUseId: string; goal: string; skill?: string; tier?: Tier; autonomy?: AutonomyLevel; await?: boolean }
+  | { type: 'listChildren' }
+  | { type: 'cancelChild'; id: string };
+export type DelegationReply = { ok: true; text: string } | { ok: false; error: string };
 
 // What a tool call is allowed to do: run, or be refused with a message the
 // agent reads.

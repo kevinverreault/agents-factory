@@ -40,6 +40,8 @@ export function afkRun(cwd: string, firstMessage: string, maxTurns: number, allo
     guards: { start: '0'.repeat(40), env: {} },
     allowRules,
     reports,
+    child: false,
+    spawns: false,
   };
 }
 

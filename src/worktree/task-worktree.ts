@@ -20,8 +20,19 @@ export function taskWorktree(root: string, repository: Repository, taskId: strin
   const slug = slugOf(title);
   return {
     branch: `factory/${taskId}${slug ? `-${slug}` : ''}`,
-    path: join(root, repository.id.replace('/', '-'), taskId),
+    path: worktreePath(root, repository, taskId),
   };
+}
+
+// Where child `childId`, its parent's `n`th, works (ADR 0009): its branch
+// `<parent branch>--c<n>`, in its own worktree beside the task worktrees.
+export function childWorktree(root: string, repository: Repository, parent: TaskWorktree, childId: string, n: number): TaskWorktree {
+  return { branch: `${parent.branch}--c${n}`, path: worktreePath(root, repository, childId) };
+}
+
+// Where task `taskId` of `repository` has its worktree: `<root>/<owner>-<name>/<id>`.
+function worktreePath(root: string, repository: Repository, taskId: string): string {
+  return join(root, repository.id.replace('/', '-'), taskId);
 }
 
 // Brings `origin/<base_branch>` up to date, or says why it couldn't.
