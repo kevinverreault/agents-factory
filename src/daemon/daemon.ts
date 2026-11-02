@@ -77,7 +77,7 @@ import {
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import type { Routes } from '../models/routing.ts';
-import { addOperatorRules, readAllowRules, uncovered, type ToolCall } from '../permissions/permissions.ts';
+import { addOperatorRules, readAllowRules, scriptsWritten, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
   appStages,
@@ -168,8 +168,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const streamed = new Map<string, ConversationEvent[]>();
   // Each suspended run's tool calls waiting on the gate until its request is answered.
   const held = new Map<string, ToolCall[]>();
-  // Each guarded AFK run's worktree as it found it, checked once it ends (ADR 0007).
-  const guarded = new Map<string, { worktree: string; snapshot: RunSnapshot }>();
+  // Each guarded AFK run's worktree as it found it, checked once it ends
+  // (ADR 0007), and the scripts the gate let it write to the temp folder.
+  const guarded = new Map<string, { worktree: string; snapshot: RunSnapshot; scripts: Set<string> }>();
   // Each guarded AFK run's read-only bot token (ADR 0004): its gh config
   // directory, and when it is next replaced.
   const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
@@ -1179,7 +1180,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       });
       const ghConfigDir = join(dir, 'gh');
       Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
-      guarded.set(run.id, { worktree: cwd, snapshot });
+      guarded.set(run.id, { worktree: cwd, snapshot, scripts: new Set() });
       botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
       guards = { start: snapshot.head, env };
     }
@@ -1293,11 +1294,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // parts they leave uncovered: by the operator's earlier answers, or with a
   // permission request. A call asked about while another request holds its
   // run is held until that one is answered; one the Lifecycle won't ask about
-  // otherwise is refused, with its reason.
+  // otherwise is refused, with its reason. The run's later calls may run the
+  // temp scripts a call the rules cover writes.
   function gate(runId: string, call: ToolCall): void {
     const { rules, error } = readAllowRules(options.permissionsPath);
-    const parts = uncovered(rules, call, guarded.get(runId)?.worktree ?? null);
-    if (parts.length === 0) return executor.permit(runId, call.id, { allow: true });
+    const guard = guarded.get(runId);
+    const parts = uncovered(rules, call, guard?.worktree ?? null, guard?.scripts);
+    if (parts.length === 0) {
+      for (const script of scriptsWritten(call)) guard?.scripts.add(script);
+      return executor.permit(runId, call.id, { allow: true });
+    }
     void dispatch({ type: 'permissionAsked', runId, call, parts, rulesProblem: error }).then((reply) => {
       if (reply.ok) return;
       if (lifecycle.runs[runId]?.status === 'suspended') held.set(runId, [...(held.get(runId) ?? []), call]);

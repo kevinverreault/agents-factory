@@ -1,6 +1,9 @@
 // The hard denies (ADR 0007): what an AFK run's PreToolUse hook refuses at
 // every level, with a message saying the factory pushes. The run's history is
 // a fake: a chain of commits, the run having started at `S`.
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { refusal, type RunHistory } from './hard-denies.ts';
 
@@ -81,6 +84,28 @@ describe('pushing', () => {
     'for c in push; do git $c; done',
   ])('`%s` is refused', async (command) => {
     expect(await bash(command)).toMatch(/the factory pushes for you/);
+  });
+
+  // The gate lets a run run the scripts it wrote to the temp folder with
+  // Write (T10), so those are read too, as they stand.
+  test('a script in the temp folder is read for a push', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'factory-hard-denies-'));
+    const pushes = join(dir, 'fixre.py').replaceAll('\\', '/');
+    const prints = join(dir, 'tools.py').replaceAll('\\', '/');
+    writeFileSync(pushes, "import subprocess\nsubprocess.run(['git', 'push'])\n");
+    writeFileSync(prints, "print('git status')\n");
+
+    expect(await bash(`python "${pushes}" && npx tsc --noEmit`)).toMatch(/the factory pushes for you/);
+    expect(await bash(`node ${prints}`)).toBeNull();
+    expect(await bash(`python ${join(dir, 'missing.py').replaceAll('\\', '/')}`)).toBeNull();
+  });
+
+  // Git Bash names the temp folder `/tmp` too.
+  test.runIf(process.platform === 'win32')('a script in the temp folder is read for a push by its `/tmp` name', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'factory-hard-denies-'));
+    writeFileSync(join(dir, 'fix.py'), "import os\nos.system('git push')\n");
+
+    expect(await bash(`python /tmp/${basename(dir)}/fix.py`)).toMatch(/the factory pushes for you/);
   });
 
   test.each([
