@@ -1,10 +1,27 @@
-import { GitHubError, type FactoryApp, type GitHub, type InstallationToken, type Issue, type Permissions } from '../github/github.ts';
+import {
+  GitHubError,
+  pushRefusal,
+  workflowFiles,
+  type BranchPush,
+  type FactoryApp,
+  type GitHub,
+  type InstallationToken,
+  type Issue,
+  type Permissions,
+  type Pushed,
+  type DraftPr,
+  type PullRequest,
+} from '../github/github.ts';
 import type { FakeClock } from './fake-clock.ts';
+import type { FakeGit } from './fake-git.ts';
 
 // Installation tokens live an hour, as GitHub's do.
 const TOKEN_LIFETIME_MS = 60 * 60_000;
 
 type Minted = { repo: string; permissions: Permissions } & InstallationToken;
+
+// A PR as GitHub has it, with the token that opened it.
+type FakePullRequest = PullRequest & { repo: string; draft: boolean; head: string; base: string; title: string; body: string; assignees: string[]; token: Minted };
 
 // Why an issue is in its state, as GitHub says: closed as completed, or reopened.
 type StateReason = 'completed' | 'reopened' | null;
@@ -19,14 +36,25 @@ type FakeIssue = { open: boolean; stateReason: StateReason; labels: string[]; bl
 export class FakeGitHub implements GitHub {
   readonly minted: Minted[] = [];
   readonly writes: { action: 'close' | 'reopen'; ref: string; comment: string; token: Minted }[] = [];
+  // Each push that reached GitHub, with the tip it sent and its token.
+  readonly pushes: { repo: string; branch: string; tip: string; token: Minted }[] = [];
+  // Every PR opened, in order.
+  readonly pullRequests: FakePullRequest[] = [];
+  // The login of the account that owns every App: the operator's.
+  readonly operator = 'octo-operator';
   private readonly codes = new Map<string, string>();
   private readonly apps = new Map<number, FactoryApp>();
   private readonly installed = new Set<string>();
   private readonly issues = new Map<string, FakeIssue>();
   private failure: string | null = null;
+  private readonly failures = new Map<'openDraftPr', string>();
   private hold: { arrived(): void; released: Promise<void> } | null = null;
 
-  constructor(private readonly clock: FakeClock) {}
+  // `git` holds the clones pushes come from, whose origin is this GitHub.
+  constructor(
+    private readonly clock: FakeClock,
+    private readonly git?: FakeGit,
+  ) {}
 
   // The code GitHub's redirect carries back once the operator creates an App
   // named `slug` from the manifest.
@@ -49,6 +77,12 @@ export class FakeGitHub implements GitHub {
   // Every call fails with `reason` from now on, or works again with null.
   unreachable(reason: string | null): void {
     this.failure = reason;
+  }
+
+  // Opening PRs fails with `reason` from now on, or works again with null.
+  unreachableFor(call: 'openDraftPr', reason: string | null): void {
+    if (reason === null) this.failures.delete(call);
+    else this.failures.set(call, reason);
   }
 
   // The writes from now on wait, unmade, until `release`: `held` settles
@@ -100,6 +134,11 @@ export class FakeGitHub implements GitHub {
     return { ...app };
   }
 
+  async appOwner(app: FactoryApp): Promise<string> {
+    this.authenticate(app);
+    return this.operator;
+  }
+
   async isInstalled(app: FactoryApp, repo: string): Promise<boolean> {
     this.authenticate(app);
     return this.installed.has(repo);
@@ -144,6 +183,42 @@ export class FakeGitHub implements GitHub {
     this.writes.push({ action: 'reopen', ref, comment, token: { ...minted, permissions: { ...minted.permissions } } });
   }
 
+  async push(token: string, { clonePath, repo, branch }: BranchPush): Promise<Pushed> {
+    const refusal = pushRefusal(branch);
+    if (refusal) throw new GitHubError(refusal);
+    await this.held();
+    const minted = this.scoped(token, repo, 'contents', 'write');
+    const git = this.clones();
+    const tip = git.branchTip(clonePath, branch);
+    if (!tip) throw new GitHubError(`error: src refspec ${branch} does not match any`);
+    const remoteTip = git.originTip(clonePath, branch);
+    if (remoteTip === tip) return { pushed: tip };
+    const workflows = workflowFiles(git.outgoingChanges(clonePath, branch, remoteTip));
+    if (workflows.length) return { workflowFiles: workflows };
+    git.push(clonePath, branch);
+    this.pushes.push({ repo, branch, tip, token: { ...minted, permissions: { ...minted.permissions } } });
+    return { pushed: tip };
+  }
+
+  async openDraftPr(token: string, { repo, head, base, title, body, assignee }: DraftPr): Promise<PullRequest> {
+    await this.held();
+    const failure = this.failures.get('openDraftPr');
+    if (failure) throw new GitHubError(failure);
+    const minted = this.scoped(token, repo, 'pull_requests', 'write');
+    const open = this.pullRequests.find((pr) => pr.repo === repo && pr.head === head);
+    if (open) return { number: open.number, url: open.url };
+    const number = 100 + this.pullRequests.length + 1;
+    const url = `https://github.com/${repo}/pull/${number}`;
+    const opener = { ...minted, permissions: { ...minted.permissions } };
+    this.pullRequests.push({ number, url, repo, draft: true, head, base, title, body, assignees: [assignee], token: opener });
+    return { number, url };
+  }
+
+  private clones(): FakeGit {
+    if (!this.git) throw new Error('This fake GitHub has no clones to push from.');
+    return this.git;
+  }
+
   // Waits while writes are held.
   private async held(): Promise<void> {
     if (!this.hold) return;
@@ -161,8 +236,8 @@ export class FakeGitHub implements GitHub {
     if (this.apps.get(app.id)?.privateKey !== app.privateKey) throw new GitHubError('GitHub refused the App’s JWT (HTTP 401: Bad credentials).');
   }
 
-  // The live token minted as `token`, which must cover the issue's
-  // repository with `level` on `permission`.
+  // The live token minted as `token`, which must cover the repository (or
+  // the issue's, for an issue ref) with `level` on `permission`.
   private scoped(token: string, ref: string, permission: keyof Permissions, level: 'read' | 'write'): Minted {
     this.reach();
     const minted = this.minted.find((minted) => minted.token === token);

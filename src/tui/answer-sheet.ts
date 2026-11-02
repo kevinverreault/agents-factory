@@ -57,10 +57,17 @@ function byRules(taskId: string, permission: Permission, { label, enter, answer 
 export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined): Choice[] {
   if (item.kind === 'review') {
     const { taskId } = item;
+    // An L1 root publishes as the factory's App on the operator's say (ADR
+    // 0007): once it has its draft PR, a push updates it.
+    const publish: Choice[] =
+      task && task.autonomy !== 'L2' && !task.publishing
+        ? [{ label: task.pr ? `Push to draft PR #${task.pr.number}` : 'Push & open draft PR', command: { type: 'pushAndOpenPr', taskId } }]
+        : [];
     return [
       noted('Request changes', 'Review comments', 'requests changes', (comments) => ({ type: 'requestChanges', taskId, comments })),
       { label: 'Mark done', command: { type: 'markDone', taskId } },
       { label: 'Cancel', command: { type: 'cancel', taskId } },
+      ...publish,
     ];
   }
   if (item.kind !== 'attention' || item.taskId === null || item.question) return [];

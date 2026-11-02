@@ -11,6 +11,8 @@ import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git
 import {
   GitHubError,
   installationSettings,
+  OPEN_PR,
+  PUSH,
   READ_ONLY,
   TICKET_WRITE,
   type FactoryApp,
@@ -36,6 +38,7 @@ import {
   nextTaskId,
   openRequest,
   overdueRuns,
+  pullRequestOf,
   reduce,
   runReports,
   sessionsOf,
@@ -50,6 +53,7 @@ import {
   type Readiness,
   type LifecycleAction,
   type LoopEvent,
+  type PublishEvent,
   type ReopenEvent,
   type Repository,
   type RepoEvent,
@@ -191,6 +195,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // is tried again once the operator answers, or by the next daemon.
   const reopensStarted = new Set<string>();
   const reopensInFlight = new Set<string>();
+  // The roots' Push & open draft PR steps, as `<task> <step>`, this daemon
+  // has started, and those of them still under way. One that failed is
+  // tried again once the operator answers, or by the next daemon.
+  const publishesStarted = new Set<string>();
+  const publishesInFlight = new Set<string>();
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
   let storedApp: Promise<FactoryApp | null> | null = null;
@@ -805,11 +814,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // So is whether the App is installed on each, and the skill set set up.
     await checkEveryApp();
     await checkEverySetup();
-    // A loop the daemon stopped between iterations carries on, and so do
-    // a cleanup and a cancelled task's reopening it didn't finish.
+    // A loop the daemon stopped between iterations carries on, and so do a
+    // cleanup, a cancelled task's reopening and a Push & open draft PR it
+    // didn't finish.
     driveLoops();
     driveCleanups();
     driveReopens();
+    drivePublishes();
   });
 
   // Deadlines are wall-clock times persisted in the store (ADR 0003), never
@@ -922,6 +933,69 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveLoops();
     driveCleanups();
     driveReopens();
+    drivePublishes();
+  }
+
+  // Takes each root's Push & open draft PR its next step (ADR 0007): once per
+  // daemon, and again once the operator answers the request a failure
+  // raised. Its outcome goes through the Lifecycle like any other event.
+  function drivePublishes(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (!task.publishing) continue;
+      const key = `${task.id} ${task.publishing.step}`;
+      if (stopping || publishesInFlight.has(key) || (publishesStarted.has(key) && task.publishing.problem)) continue;
+      publishesStarted.add(key);
+      publishesInFlight.add(key);
+      void (task.publishing.step === 'push' ? pushBranch(task) : openPr(task)).then(
+        (event) =>
+          serially(async () => {
+            publishesInFlight.delete(key);
+            if (!stopping) await settle(event, new Set());
+          }),
+        (error) => {
+          publishesInFlight.delete(key);
+          throw error;
+        },
+      );
+    }
+  }
+
+  // Pushes the root's task branch as the App, with a token minted for this
+  // write alone and narrowed to Contents (ADR 0004), under the fixed refspec
+  // the GitHub port holds to.
+  async function pushBranch(task: Task): Promise<PublishEvent> {
+    const failed = (reason: string): PublishEvent => ({ type: 'publishFailed', taskId: task.id, step: 'push', reason });
+    const repository = lifecycle.repositories[task.repo];
+    if (!repository) return failed(`${task.repo} isn’t registered any more.`);
+    try {
+      const { token } = await appToken(task.repo, PUSH);
+      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch });
+      if ('workflowFiles' in pushed) return { type: 'pushRefused', taskId: task.id, workflowFiles: pushed.workflowFiles };
+      return { type: 'branchPushed', taskId: task.id, commit: pushed.pushed };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return failed(error.message);
+    }
+  }
+
+  // Opens the root's draft PR as the App, with a token minted for this write
+  // alone, assigned to the operator, the App's owner (ADR 0004).
+  async function openPr(task: Task): Promise<PublishEvent> {
+    const failed = (reason: string): PublishEvent => ({ type: 'publishFailed', taskId: task.id, step: 'open-pr', reason });
+    const repository = lifecycle.repositories[task.repo];
+    if (!repository) return failed(`${task.repo} isn’t registered any more.`);
+    try {
+      const app = await factoryApp();
+      if (!app) throw new GitHubError(NO_APP);
+      const assignee = await github.appOwner(app);
+      const { token } = await github.mintToken(app, task.repo, OPEN_PR);
+      const { title, body } = pullRequestOf(lifecycle, task);
+      const pr = await github.openDraftPr(token, { repo: task.repo, head: task.worktree!.branch, base: repository.baseBranch, title, body, assignee });
+      return { type: 'prOpened', taskId: task.id, pr };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return failed(error.message);
+    }
   }
 
   // Reopens each ticket a cancelled task closed (ADR 0006): once per daemon,
