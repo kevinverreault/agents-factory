@@ -1,11 +1,15 @@
-// The TUI: Tasks, Needs you and Usage tabs fed by the factory-state subscription,
-// the launch card (`N`), the conversation view (`enter` on a task), re-tiering
-// a task (`t`), conversing with or taking over one (`c`), handing one off
-// (`ctrl+h`), cancelling one with its subtree (`x`, with the cancel sheet
-// when work would be lost), finishing a loop after its ticket (`f`),
-// retrying a failed task from the tree (`y`), Needs you's answer sheet (`a`)
-// and Set up now (`s`) or Re-check (`R`) for a repository without the skill
-// set's setup.
+// The TUI: the screens view, its Tasks, Needs you, Runs and Usage screens
+// (`1`–`4`) fed by the factory-state subscription, with a task's detail
+// drilled into (`enter`) and popped back out of (`esc`); the task tree with
+// the selected task's output under it, and its Done and Cancelled tasks
+// dimmed or hidden (`H`); the launch card (`N`), the conversation view
+// (`enter` in a task's detail), re-tiering a task (`t`), conversing with or
+// taking over one (`c`), handing one off (`ctrl+h`), cancelling one with its
+// subtree (`x`, with the cancel sheet when work would be lost), finishing a
+// loop after its ticket (`f`), retrying a failed task from the tree (`y`),
+// answering its request on Needs you's answer sheet (`a`), `?` help, and Set
+// up now (`s`) or Re-check (`R`) for a repository without the skill set's
+// setup.
 // Plain .ts (no JSX) so Node runs it without a build step.
 import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, useStdin } from 'ink';
@@ -19,14 +23,22 @@ import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-sheet.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { Conversation } from './conversation.ts';
+import { Help } from './help.ts';
 import { LaunchCard } from './launch-card.ts';
+import { Output } from './output.ts';
+import { liveFirst, RunsList } from './runs.ts';
+import { TaskDetail } from './task-detail.ts';
 import { UsageTab } from './usage.ts';
 
-// Tab 3 is the Runs screen's, still to come.
-type Tab = 'tasks' | 'needs-you' | 'usage';
-// What fills the screen: the tabs, the launch card over them, or one task's
-// conversation.
+// The screens, in the order of the number keys that switch to them.
+const TABS = ['tasks', 'needs-you', 'runs', 'usage'] as const;
+type Tab = (typeof TABS)[number];
+const TAB_NAMES: Record<Tab, string> = { tasks: 'Tasks', 'needs-you': 'Needs you', runs: 'Runs', usage: 'Usage' };
+// What fills the screen: the screens, the launch card over them, or one
+// task's conversation.
 type View = { kind: 'tabs' } | { kind: 'launch' } | { kind: 'conversation'; taskId: string };
+// How many of the selected task's latest events the pane under the task tree shows.
+const OUTPUT_PANE_LINES = 6;
 // The row a pane's cursor is on, and where it was, for when that row is gone.
 type Cursor = { row: string | null; index: number };
 
@@ -48,6 +60,13 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const [state, setState] = useState<FactoryState | null>(null);
   const [closed, setClosed] = useState(false);
   const [tab, setTab] = useState<Tab>('tasks');
+  // The task whose detail `enter` drilled into over the screen, until `esc`
+  // pops back to it.
+  const [detail, setDetail] = useState<string | null>(null);
+  // Whether the task tree hides Done and Cancelled tasks.
+  const [hideFinished, setHideFinished] = useState(false);
+  // Whether `?` help is open.
+  const [help, setHelp] = useState(false);
   const [clone, setClone] = useState<CloneView | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [view, setView] = useState<View>({ kind: 'tabs' });
@@ -56,6 +75,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const [cursors, setCursors] = useState<Record<Tab, Cursor>>({
     tasks: { row: null, index: 0 },
     'needs-you': { row: null, index: 0 },
+    runs: { row: null, index: 0 },
     usage: { row: null, index: 0 },
   });
   // Whether the digits answer the selected Needs you item instead of
@@ -79,9 +99,11 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const unregistered = clone && state && !(clone.repo in state.repositories) ? clone : null;
   const missingSetup = state ? withoutSetup(state, clone?.repo ?? null) : null;
   // The task tree: each root, then its descendants under it.
-  const tasks = state ? treeOrder(Object.values(state.tasks)) : [];
+  const tree = state ? treeOrder(Object.values(state.tasks)) : [];
+  const tasks = hideFinished ? withoutFinished(tree) : tree;
   const queue = state?.attentionQueue ?? [];
-  const rows = tab === 'tasks' ? tasks.map((task) => task.id) : tab === 'needs-you' ? queue.map(rowOf) : [];
+  const runs = state ? liveFirst(state) : [];
+  const rows = tab === 'tasks' ? tasks.map((task) => task.id) : tab === 'needs-you' ? queue.map(rowOf) : tab === 'runs' ? runs.map((run) => run.id) : [];
   const cursor = at(cursors[tab], rows);
   // By a step from where the cursor is now: keys typed in one burst arrive
   // before a re-render.
@@ -90,11 +112,24 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       const index = Math.min(Math.max(at(cursors[tab], rows) + by, 0), Math.max(rows.length - 1, 0));
       return { ...cursors, [tab]: { row: rows[index] ?? null, index } };
     });
-  // What enter opens: any task's conversation, or a live one Ready for you.
-  const item = tab === 'needs-you' ? queue[cursor] : undefined;
+  // The task drilled into, while the daemon still has it.
+  const drilled = detail ? state?.tasks[detail] : undefined;
+  // The task the verbs act on: the one drilled into, or the one under the
+  // cursor on the Tasks screen, or whose run it is on the Runs screen.
+  const onRun = tab === 'runs' ? runs[cursor] : undefined;
+  const selected = drilled ?? (tab === 'tasks' ? tasks[cursor] : onRun && state?.tasks[onRun.taskId]);
+  const item = tab === 'needs-you' && !drilled ? queue[cursor] : undefined;
   const itemTask = item?.taskId ? state?.tasks[item.taskId] : undefined;
   const ready = item?.kind === 'ready' ? itemTask : undefined;
-  const opens = tab === 'tasks' ? tasks[cursor]?.id : ready?.liveRunId ? ready.id : undefined;
+  // What enter opens: a drilled-into task's conversation, or a live one
+  // Ready for you. On the Tasks and Runs screens it drills in instead.
+  const opens = drilled ? drilled.id : ready?.liveRunId ? ready.id : undefined;
+  const drills = drilled || tab === 'needs-you' ? undefined : selected?.id;
+  // A number key switches to its screen, leaving any detail behind.
+  const show = (next: Tab) => {
+    setTab(next);
+    setDetail(null);
+  };
   // The selected request's answer. The cursor stays where it is, so once the
   // request leaves Needs you the next item slides under it.
   const answers = useAnswering(connection, item, itemTask, {
@@ -104,9 +139,18 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (reply.ok && opens) setView({ kind: 'conversation', taskId });
     },
   });
+  // Answers the selected task's request: Needs you, its cursor and the
+  // digits on it.
+  const answer = () => {
+    const index = selected ? queue.findIndex((item) => item.taskId === selected.id) : -1;
+    if (index < 0) return;
+    setCursors((cursors) => ({ ...cursors, 'needs-you': { row: rowOf(queue[index]!), index } }));
+    show('needs-you');
+    setAnswering(true);
+  };
   // Moves the selected task's next runs to the tier after its current one.
   const retier = () => {
-    const task = tab === 'tasks' ? tasks[cursor] : undefined;
+    const task = selected;
     if (!task) return;
     const pending = retiers.current.get(task.id);
     const from = pending?.from === task.tier ? pending.to : task.tier;
@@ -126,13 +170,13 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // Hands the selected HITL task off from its conversation, where the
   // handoff sheet opens: a parked one first resumes to write the brief.
   const handOff = () => {
-    const task = tab === 'tasks' ? tasks[cursor] : undefined;
+    const task = selected;
     if (task?.mode === 'HITL') sendThenOpen({ type: 'openHandoff', taskId: task.id });
   };
   // Converses with the selected task: a HITL one in its conversation, an AFK
   // one taken over into it.
   const converse = () => {
-    const task = tab === 'tasks' ? tasks[cursor] : itemTask;
+    const task = selected ?? itemTask;
     if (task?.mode === 'HITL') setView({ kind: 'conversation', taskId: task.id });
     else if (task) sendThenOpen({ type: 'takeOver', taskId: task.id });
   };
@@ -150,14 +194,14 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // Finish after this ticket: the selected task's loop ends once its live
   // iteration is done.
   const finishLoop = () => {
-    const task = tab === 'tasks' ? tasks[cursor] : undefined;
+    const task = selected;
     if (!task || !finishable(task)) return;
     void connection.send({ type: 'finishLoop', taskId: task.id }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
   };
   // Retries the selected task's failed run, as Needs you's Retry does: a
   // child's included, from the tree.
   const retry = () => {
-    const task = tab === 'tasks' ? tasks[cursor] : undefined;
+    const task = selected;
     if (!task || !failedTask(state, task)) return;
     void connection.send({ type: 'answer', taskId: task.id }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
   };
@@ -186,6 +230,10 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         if (picked && picked !== 'back') cancel(picked.command);
         return;
       }
+      if (help) {
+        if (input === '?' || key.escape) setHelp(false);
+        return;
+      }
       if (answering && !item) setAnswering(false);
       else if (answering) {
         if (answers.form !== null || answers.confirm !== null) answers.key(input, key);
@@ -197,18 +245,22 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         else answers.key(input, key);
         return;
       }
-      if (tab === 'needs-you' && (input === 'a' || (key.return && answerable(item, itemTask)))) return setAnswering(true);
-      if (input === '1') setTab('tasks');
-      if (input === '2') setTab('needs-you');
-      if (input === '4') setTab('usage');
+      if (item && (input === 'a' || (key.return && answerable(item, itemTask)))) return setAnswering(true);
+      if (input === 'a') return answer();
+      if (input === '?') return setHelp(true);
+      const screen = TABS[Number(input) - 1];
+      if (screen) show(screen);
+      if (key.escape && drilled) setDetail(null);
       if (input === 'N' && state) setView({ kind: 'launch' });
-      if (key.upArrow) move(-1);
-      if (key.downArrow) move(1);
+      if (input === 'H' && tab === 'tasks' && !drilled) setHideFinished((hide) => !hide);
+      if (key.upArrow && !drilled) move(-1);
+      if (key.downArrow && !drilled) move(1);
       if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
+      if (key.return && drills) setDetail(drills);
       if (input === 't') retier();
       if (input === 'c') converse();
-      const selected = tab === 'tasks' ? tasks[cursor] : undefined;
-      if (input === 'x' && selected) cancel({ type: 'cancel', taskId: selected.id });
+      const cancels = selected ?? itemTask;
+      if (input === 'x' && cancels) cancel({ type: 'cancel', taskId: cancels.id });
       if (input === 'f') finishLoop();
       if (input === 'y') retry();
       if (key.ctrl && input === 'h') handOff();
@@ -261,11 +313,17 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       : null,
     state === null
       ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
+      : help
+        ? h(Help)
+      : drilled
+        ? h(TaskDetail, { connection, state, task: drilled, from: TAB_NAMES[tab] })
       : tab === 'tasks'
-        ? h(TaskList, { tasks, cursor, retries: failedTask(state, tasks[cursor]) })
+        ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor, retries: failedTask(state, tasks[cursor]) })
         : tab === 'needs-you'
           ? h(NeedsYouList, { state, cursor })
-          : h(UsageTab, { state }),
+          : tab === 'runs'
+            ? h(RunsList, { state, runs, cursor })
+            : h(UsageTab, { state }),
     state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
     closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
   );
@@ -296,25 +354,40 @@ function Tabs({ tab, needsYou }: { tab: Tab; needsYou: number }) {
   return h(
     Box,
     { gap: 1, marginBottom: 1 },
-    label('tasks', '1 Tasks'),
-    label('needs-you', `2 Needs you (${needsYou})`),
-    label('usage', '4 Usage'),
+    ...TABS.map((key, i) => label(key, `${i + 1} ${TAB_NAMES[key]}${key === 'needs-you' ? ` (${needsYou})` : ''}`)),
   );
 }
 
-function Row({ id, title, detail, selected = false }: { id: string; title: string; detail: string; selected?: boolean }) {
+function Row({ id, title, detail, selected = false, dim = false }: { id: string; title: string; detail: string; selected?: boolean; dim?: boolean }) {
   return h(
     Box,
     { gap: 1 },
     h(Text, { color: 'cyan' }, selected ? '›' : ' '),
-    h(Text, { bold: true }, id.padEnd(4)),
-    h(Box, { width: 40 }, h(Text, { wrap: 'truncate' }, title)),
-    h(Text, null, detail),
+    h(Text, { bold: true, dimColor: dim }, id.padEnd(4)),
+    h(Box, { width: 40 }, h(Text, { wrap: 'truncate', dimColor: dim }, title)),
+    h(Text, { dimColor: dim }, detail),
   );
 }
 
-function TaskList({ tasks, cursor, retries }: { tasks: TaskView[]; cursor: number; retries: boolean }) {
-  if (tasks.length === 0) return h(Text, { dimColor: true }, 'No tasks yet. N launches one.');
+// The task tree, Done and Cancelled tasks dimmed, and the selected task's
+// output under it. `hidden` counts the finished tasks it hides, while it
+// hides them.
+function TaskList({
+  connection,
+  state,
+  tasks,
+  hidden,
+  cursor,
+  retries,
+}: {
+  connection: FactoryConnection;
+  state: FactoryState;
+  tasks: TaskView[];
+  hidden: number | null;
+  cursor: number;
+  retries: boolean;
+}) {
+  if (tasks.length === 0) return h(Text, { dimColor: true }, hidden ? `Every task is finished. H shows the ${hidden}.` : 'No tasks yet. N launches one.');
   const finishes = finishable(tasks[cursor]) ? ' · f finish after this ticket' : '';
   const retry = retries ? ' · y retry' : '';
   return column([
@@ -325,9 +398,12 @@ function TaskList({ tasks, cursor, retries }: { tasks: TaskView[]; cursor: numbe
         title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
         detail: `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.progress ? ` · ${task.progress}` : ''}`,
         selected: i === cursor,
+        dim: finished(task),
       }),
     ),
-    h(Text, { key: 'keys', dimColor: true }, `enter open · c converse or take over · t re-tier · x cancel${finishes}${retry} · N launch`),
+    h(Text, { key: 'keys', dimColor: true }, `enter detail · c converse or take over · t re-tier · x cancel${finishes}${retry} · N launch · ? keys`),
+    hidden === null ? null : h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`),
+    h(Output, { key: 'output', connection, state, taskId: tasks[cursor]!.id, lines: OUTPUT_PANE_LINES }),
   ]);
 }
 
@@ -341,6 +417,22 @@ function treeOrder(tasks: TaskView[]): TaskView[] {
   };
   for (const task of tasks) if (!task.parent || !ids.has(task.parent)) place(task);
   return ordered;
+}
+
+function finished(task: TaskView): boolean {
+  return task.state === 'done' || task.state === 'cancelled';
+}
+
+// The tree without its finished tasks, but for those above unfinished ones,
+// which keep the tree whole.
+function withoutFinished(tree: TaskView[]): TaskView[] {
+  const byId = new Map(tree.map((task) => [task.id, task]));
+  const kept = new Set<string>();
+  for (const task of tree) {
+    if (finished(task)) continue;
+    for (let at: TaskView | undefined = task; at && !kept.has(at.id); at = at.parent ? byId.get(at.parent) : undefined) kept.add(at.id);
+  }
+  return tree.filter((task) => kept.has(task.id));
 }
 
 // A tree row's rollup of its descendants (ADR 0009), and on a root the

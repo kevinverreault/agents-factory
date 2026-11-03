@@ -5,13 +5,13 @@ import { Box, Text } from 'ink';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { overall, tokensOf, usageViews, type ModelUsage, type Usage } from '../usage/usage.ts';
 
-function tokens(count: number): string {
+export function tokens(count: number): string {
   if (count < 1_000) return String(count);
   if (count < 1_000_000) return `${(count / 1_000).toFixed(1)}k`;
   return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
-function dollars(cost: number): string {
+export function dollars(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
 

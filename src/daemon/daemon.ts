@@ -167,8 +167,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const sockets = new Set<Socket>();
   const subscribers = new Set<Socket>();
   // Each run's conversation subscribers, each with its replay while the
-  // history is being read (live events wait), or null once it is live.
-  const conversations = new Map<string, Map<Socket, object | null>>();
+  // history is being read (live events wait), or null once it is live, and
+  // whether it only follows the run's output.
+  const conversations = new Map<string, Map<Socket, { replay: object | null; follows: boolean }>>();
   // What each live run streamed since this daemon started it: the CLI writes
   // the session file a moment after it streams.
   const streamed = new Map<string, ConversationEvent[]>();
@@ -235,7 +236,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           send(socket, { type: 'snapshot', state: published });
           break;
         case 'converse':
-          void converse(socket, message.runId);
+          void converse(socket, message.runId, message.follow ?? false);
           break;
         case 'leaveConversation':
           conversations.get(message.runId)?.delete(socket);
@@ -732,15 +733,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // Replays the run's conversation from the Claude session file, then what
   // the run streamed that the file doesn't hold yet, then streams it live.
-  async function converse(socket: Socket, runId: string): Promise<void> {
+  async function converse(socket: Socket, runId: string, follows: boolean): Promise<void> {
     const run = lifecycle.runs[runId];
     const task = run && lifecycle.tasks[run.taskId];
     if (!task) return;
     let watchers = conversations.get(runId);
     if (!watchers) conversations.set(runId, (watchers = new Map()));
     const replay = {};
-    watchers.set(socket, replay);
-    // The operator is in the conversation from now: it no longer waits for them.
+    watchers.set(socket, { replay, follows });
+    // Unless only following it, the operator is in the conversation from
+    // now: it no longer waits for them.
     publish();
     // Taken now, so a run that ends during the read still has it.
     const live = streamed.get(runId) ?? [];
@@ -749,17 +751,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const history =
       sessionId && task.worktree ? await executor.history({ sessionId, cwd: task.worktree.path, archive: task.transcripts ?? null }) : [];
     // The client left, or asked again, while the file was read.
-    if (watchers.get(socket) !== replay) return;
+    if (watchers.get(socket)?.replay !== replay) return;
     const replayed = new Set(history.map((event) => event.id));
     for (const event of [...history, ...live.filter((event) => !replayed.has(event.id))]) {
       send(socket, { type: 'conversation', runId, event });
     }
-    watchers.set(socket, null);
+    watchers.set(socket, { replay: null, follows });
   }
 
   function broadcast(runId: string, event: ConversationEvent): void {
     streamed.get(runId)?.push(event);
-    for (const [socket, replay] of conversations.get(runId) ?? []) {
+    for (const [socket, { replay }] of conversations.get(runId) ?? []) {
       if (!replay) send(socket, { type: 'conversation', runId, event });
     }
   }
@@ -1403,9 +1405,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
   }
 
-  // The runs whose conversations some TUI has open.
+  // The runs whose conversations some TUI has open, not only following their output.
   function watched(): Set<string> {
-    return new Set([...conversations].filter(([, watchers]) => watchers.size > 0).map(([runId]) => runId));
+    return new Set([...conversations].filter(([, watchers]) => [...watchers.values()].some(({ follows }) => !follows)).map(([runId]) => runId));
   }
 
   function publish(): void {
