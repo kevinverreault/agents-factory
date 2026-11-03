@@ -20,7 +20,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -1634,12 +1634,14 @@ describe('answering from Needs you', () => {
   const reviewing = task('T3', 'Add a logout button', 'in-review', 'In review');
   const review = { kind: 'review' as const, taskId: 'T3' };
 
-  test('a root in review offers Request changes, Mark done and Cancel, and Request changes sends the typed review comments', async () => {
+  test('a root in review offers Request changes, Mark done, Cancel and Push & open draft PR, and Request changes sends the typed review comments', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([reviewing], [review]), { connection });
     await press(app, '2');
     await eventually(() =>
-      expect(unwrapped(app.lastFrame()!)).toContain('── T3 Add a logout button ── In review 1 Request changes 2 Mark done 3 Cancel a answer'),
+      expect(unwrapped(app.lastFrame()!)).toContain(
+        '── T3 Add a logout button ── In review 1 Request changes 2 Mark done 3 Cancel 4 Push & open draft PR a answer',
+      ),
     );
 
     await press(app, 'a', '1');
@@ -1648,6 +1650,27 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(app.lastFrame()).toContain('Review comments: Put it in the header'));
     await press(app, ENTER);
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'requestChanges', taskId: 'T3', comments: 'Put it in the header' }));
+  });
+
+  test('Push & open draft PR publishes the L1 root; once it has its PR the choice pushes to it, and none shows while it is under way', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([reviewing], [review]), { connection });
+    await press(app, '2', 'a', '4');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'pushAndOpenPr', taskId: 'T3' }));
+
+    const opened = { ...reviewing, pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: true } };
+    const withPr = await started(factoryState([opened], [review]));
+    await press(withPr.app, '2');
+    await eventually(() => expect(unwrapped(withPr.app.lastFrame()!)).toContain('3 Cancel 4 Push to draft PR #101 a answer'));
+
+    // Where GitHub offers no draft PRs, the factory opened a regular one.
+    const regular = await started(factoryState([{ ...opened, pr: { ...opened.pr, draft: false } }], [review]));
+    await press(regular.app, '2');
+    await eventually(() => expect(unwrapped(regular.app.lastFrame()!)).toContain('3 Cancel 4 Push to PR #101 a answer'));
+
+    const underWay = await started(factoryState([{ ...reviewing, publishing: { step: 'push' as const, problem: null } }], [review]));
+    await press(underWay.app, '2');
+    await eventually(() => expect(unwrapped(underWay.app.lastFrame()!)).toContain('3 Cancel a answer'));
   });
 
   test('Mark done on an unmerged branch asks “Finish anyway?”: y finishes it, n backs out', async () => {

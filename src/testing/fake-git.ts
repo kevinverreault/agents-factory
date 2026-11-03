@@ -85,6 +85,33 @@ export class FakeGit implements Git {
     clone.fetched.set(branch, clone.branches.get(branch)!);
   }
 
+  // The branch's tip on origin, or null when origin has no such branch.
+  originTip(clonePath: string, branch: string): string | null {
+    return this.cloneAt(clonePath).origin.get(branch) ?? null;
+  }
+
+  // The local branch's tip, or null when the clone has no such branch.
+  branchTip(clonePath: string, branch: string): string | null {
+    return this.cloneAt(clonePath).branches.get(branch) ?? null;
+  }
+
+  // The paths changed by the commits on the local `branch` that origin has
+  // on no branch, as the clone last fetched them, nor at `remoteTip`.
+  outgoingChanges(clonePath: string, branch: string, remoteTip: string | null): string[] {
+    const clone = this.cloneAt(clonePath);
+    const onOrigin = new Set<string>();
+    for (const tip of [...clone.fetched.values(), ...(remoteTip ? [remoteTip] : [])]) {
+      for (let commit: string | undefined = tip; commit && !onOrigin.has(commit); commit = this.parents.get(commit)) onOrigin.add(commit);
+    }
+    const changed = new Set<string>();
+    for (let commit = clone.branches.get(branch); commit && !onOrigin.has(commit); commit = this.parents.get(commit)) {
+      const tree = this.trees.get(commit)!;
+      const parent = this.trees.get(this.parents.get(commit) ?? '') ?? new Map<string, string>();
+      for (const path of new Set([...tree.keys(), ...parent.keys()])) if (tree.get(path) !== parent.get(path)) changed.add(path);
+    }
+    return [...changed].sort();
+  }
+
   // Origin's `base` moves to the clone's `branch`, as merging its PR would.
   merge(clonePath: string, branch: string, base: string): void {
     const clone = this.cloneAt(clonePath);

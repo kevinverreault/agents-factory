@@ -50,7 +50,7 @@ export async function startTestFactory({
   const executor = new FakeExecutor();
   const git = new FakeGit();
   const skillSets = new FakeSkillSets();
-  const github = new FakeGitHub(clock);
+  const github = new FakeGitHub(clock, git);
   const secrets = new FakeSecrets();
   if (!withoutApp) await secrets.write(GITHUB_APP_SECRET, JSON.stringify(await github.createApp(github.manifestCode())));
   const connections: FactoryConnection[] = [];

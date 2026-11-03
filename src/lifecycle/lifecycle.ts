@@ -8,10 +8,10 @@
 // (ADR 0006); child tasks arrive with their own slice.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
-import type { Issue } from '../github/github.ts';
+import type { Issue, PullRequest } from '../github/github.ts';
 import { artifactKindsIn, fillOpening, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
-import { correction, grown, merged, NO_USAGE, plus, type ModelUsage, type Usage } from '../usage/usage.ts';
+import { correction, grown, merged, NO_USAGE, overall, plus, tokensOf, type ModelUsage, type Usage } from '../usage/usage.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -179,6 +179,12 @@ export type Child = {
 // next starts.
 export type Reopening = { tickets: string[]; problem: string | null };
 
+// A root's Push & open draft PR while it hasn't finished (ADR 0007): the
+// step the factory is on, pushing the task branch or opening its draft PR
+// (skipped once it has one), and why that step last failed, if it did. A
+// failed step is tried again once the operator answers the request it raised.
+export type Publishing = { step: 'push' | 'open-pr'; problem: string | null };
+
 // What a `fix-once` review stage's runs found, whether its one fix pass
 // has begun, and what is left over: everything found, until the fix pass
 // reports what it left unfixed.
@@ -278,6 +284,9 @@ export type Task = {
   // True once the operator requested changes on it in review: past its last
   // stage, each of its runs that completes puts it back In review.
   changesRequested?: boolean;
+  // Its Push & open draft PR while under way, and the draft PR it opened.
+  publishing?: Publishing | null;
+  pr?: PullRequest | null;
   // While its cleanup (ADR 0011), once it ended Done or Cancelled, hasn't
   // finished. It is tried again when the daemon next starts.
   cleanup?: Cleanup | null;
@@ -443,6 +452,10 @@ export type OperatorCommand =
   | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; skip?: boolean }
   // Resumes the root's session on the operator's review comments.
   | { type: 'requestChanges'; taskId: string; comments: string }
+  // Publishes an L1 root in review as the factory's App, without raising its
+  // level (ADR 0007): the daemon pushes its task branch, then opens its
+  // draft PR, unless it has one already, which the push updates.
+  | { type: 'pushAndOpenPr'; taskId: string }
   // Finishes a root In review. Unless `anyway`, the daemon first checks that
   // its task branch is merged into the base branch on origin.
   | { type: 'markDone'; taskId: string; anyway?: boolean }
@@ -616,6 +629,15 @@ export type ReopenEvent =
   | { type: 'ticketReopened'; taskId: string; ticket: string }
   | { type: 'ticketUnreopened'; taskId: string; ticket: string; reason: string };
 
+// What the daemon did on GitHub for a root's Push & open draft PR: it pushed
+// the task branch's tip `commit`, found it changes workflow files it may
+// not push, opened the draft PR, or failed a step, saying why.
+export type PublishEvent =
+  | { type: 'branchPushed'; taskId: string; commit: string }
+  | { type: 'pushRefused'; taskId: string; workflowFiles: string[] }
+  | { type: 'prOpened'; taskId: string; pr: PullRequest }
+  | { type: 'publishFailed'; taskId: string; step: Publishing['step']; reason: string };
+
 export type LifecycleAction =
   | OperatorCommand
   | RunEvent
@@ -629,6 +651,7 @@ export type LifecycleAction =
   | ClockEvent
   | LoopEvent
   | ReopenEvent
+  | PublishEvent
   | CleanupEvent
   | ArtifactsSeen;
 
@@ -1012,6 +1035,33 @@ function prBody(task: Task, body: string): string {
   ].join('\n\n');
 }
 
+// The draft PR the root opens (ADR 0004): its title, and its PR body (or,
+// without one, its brief or title, with the tickets it closed) above the
+// factory's footer, which names the task, each stage's models in preset
+// order, and the tokens its whole tree took.
+export function pullRequestOf(state: Lifecycle, task: Task): { title: string; body: string } {
+  const runs = task.runIds.map((id) => state.runs[id]!);
+  const models = new Map<string, string[]>();
+  for (const stage of task.preset?.stages ?? []) {
+    const used = [...new Set(runs.filter((run) => run.stage === stage.id).map((run) => run.model))];
+    if (used.length) models.set(stage.id, used);
+  }
+  const tree = subtree(state, task).flatMap((member) => member.runIds.map((id) => state.runs[id]!));
+  const tokens = tree.reduce((sum, run) => sum + tokensOf(overall(run.usage ?? {})), 0);
+  const footer = [
+    '---',
+    `Opened by the agents factory for task ${task.id}.`,
+    '',
+    '| Stage | Model |',
+    '| --- | --- |',
+    ...[...models].map(([stage, used]) => `| ${stage} | ${used.join(', ')} |`),
+    '',
+    `Total tokens: ${tokens.toLocaleString('en-US')}`,
+  ];
+  const body = task.prBody ?? prBody(task, task.brief?.trim() || task.title);
+  return { title: task.title, body: `${body}\n\n${footer.join('\n')}` };
+}
+
 // What a Ralph loop's iteration on `ticket` opens on (ADR 0006): its stage's
 // skill on the ticket alone, and the factory context its fresh session
 // starts from. `tickets` is the ticket set as just read.
@@ -1140,6 +1190,13 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = nu
   permission,
 });
 
+// Whether the task's open request, if any, waits on the operator: a task
+// Needs you's, a cancelled task's (its cancel cascade's), and a root in
+// review's (its Push & open draft PR's).
+function showsRequest(task: Task): boolean {
+  return task.state === 'waiting' || task.state === 'cancelled' || task.state === 'in-review';
+}
+
 // Everything waiting on the operator, the most urgent first: failures, then
 // the other requests (those about repositories included), each oldest first,
 // then HITL tasks ready for the operator, then root tasks in review.
@@ -1153,8 +1210,7 @@ export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = 
   }
   for (const task of Object.values(state.tasks)) {
     const request = openRequest(state, task);
-    // A cancelled task's open request is its cancel cascade's.
-    if ((task.state === 'waiting' || task.state === 'cancelled') && request) requests.push(request);
+    if (showsRequest(task) && request) requests.push(request);
     if (readyForYou(state, task, watched)) ready.push({ kind: 'ready', taskId: task.id });
     if (task.state === 'in-review') reviews.push({ kind: 'review', taskId: task.id });
   }
@@ -1257,8 +1313,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (isTerminal(task) || task.mode !== 'AFK' || !task.loop) return `${task.id} isn’t working through a Ralph loop.`;
       return task.loop.finishing ? `${task.id} already finishes after this ticket.` : null;
     case 'answer': {
-      // A cancelled task's only open request is its cascade's.
-      const request = task.state === 'waiting' || task.state === 'cancelled' ? openRequest(state, task) : undefined;
+      const request = showsRequest(task) ? openRequest(state, task) : undefined;
       if (!request) return `${task.id} has no open attention request.`;
       if (request.permission && !validPermissionAnswer(action.permission)) {
         return 'Allow it once, for this task or always, or deny it with a note for the agent.';
@@ -1277,9 +1332,18 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'requestChanges':
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
-      return typeof action.comments === 'string' && action.comments.trim() ? null : 'Request changes needs your review comments: say what to change.';
+      return (
+        publishingRefusal(task) ??
+        (typeof action.comments === 'string' && action.comments.trim() ? null : 'Request changes needs your review comments: say what to change.')
+      );
     case 'markDone':
-      return task.state === 'in-review' ? null : `${task.id} is not in review.`;
+      return task.state === 'in-review' ? publishingRefusal(task) : `${task.id} is not in review.`;
+    case 'pushAndOpenPr':
+      if (task.state !== 'in-review') return `${task.id} is not in review.`;
+      if (task.autonomy === 'L2') return `${task.id} is at L2, where the factory opens its draft PR itself.`;
+      // HITL work acts as the operator (ADR 0004): the App publishes only L1 work.
+      if (task.autonomy !== 'L1') return `${task.id} is HITL work, which stays yours: push its branch and open its PR yourself.`;
+      return task.publishing ? `${task.id} is already pushing and opening its draft PR.` : null;
     case 'cancel':
       if (action.branch !== undefined && !BRANCH_CHOICES.includes(action.branch)) return 'Keep the branch, or discard the work.';
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
@@ -1381,10 +1445,38 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'ticketReopened':
     case 'ticketUnreopened':
       return task.reopening?.tickets.includes(action.ticket) ? null : `${task.id} isn’t reopening ${action.ticket}.`;
+    case 'branchPushed':
+    case 'pushRefused':
+      return task.publishing?.step === 'push' ? null : `${task.id} isn’t pushing its task branch.`;
+    case 'publishFailed':
+      return task.publishing?.step === action.step ? null : `${task.id} isn’t at ${action.step}.`;
+    case 'prOpened':
+      // A PR opened is the task's however it stands now, even cancelled.
+      return null;
     case 'cleanedUp':
     case 'cleanupFailed':
       return task.cleanup ? null : `${task.id} has no cleanup under way.`;
   }
+}
+
+// The root's Push & open draft PR stopped on `problem`: a github-write
+// request asks the operator, and the root stays In review.
+function failPublishing(state: Lifecycle, task: Task, request: AttentionRequest | undefined, problem: string, at: number): void {
+  task.publishing!.problem = problem;
+  if (!request) addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
+}
+
+// The operator moved the root on without finishing its Push & open draft
+// PR: the request a failed step raised has nothing left to ask.
+function stopPublishing(task: Task, request: AttentionRequest | undefined): void {
+  task.publishing = null;
+  if (request) request.status = 'closed';
+}
+
+// Why the root can't be reviewed while its Push & open draft PR is under
+// way, or null: a step that failed waits on the operator, so it isn't.
+function publishingRefusal(task: Task): string | null {
+  return task.publishing && !task.publishing.problem ? `${task.id} is pushing and opening its draft PR: wait for it to finish.` : null;
 }
 
 // Why the run can't spawn this child, or null. Two of ADR 0009's decisions
@@ -1492,6 +1584,7 @@ function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: nu
     cancelled.handoff = null;
     cancelled.loop = null;
     cancelled.progress = null;
+    cancelled.publishing = null;
     cancelled.state = 'cancelled';
     if (cancelled.child) closeReport(cancelled, { summary: 'Cancelled before it finished.', status: 'cancelled', commits: [], outcome: 'cancelled' }, { forced: true });
     // The daemon reopens the tickets it closed: their work wasn't merged (ADR 0006).
@@ -2017,6 +2110,11 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         if (task.reopening) task.reopening.problem = null;
         break;
       }
+      // The daemon tries the failed step of its Push & open draft PR again; the root stays In review.
+      if (task.state === 'in-review') {
+        if (task.publishing) task.publishing.problem = null;
+        break;
+      }
       // Allow always's rules are the operator's file's, which the daemon added them to.
       if (request!.permission && allowsByRules(action.permission) && action.permission.allow === 'task') {
         const rules = (task.allowRules ??= []);
@@ -2047,11 +2145,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       }
       break;
     case 'requestChanges':
+      stopPublishing(task, request);
       task.changesRequested = true;
       task.resumeWith = changesOpening(task, action.comments);
       task.state = 'queued';
       break;
     case 'markDone':
+      stopPublishing(task, request);
       task.state = 'done';
       task.progress = null;
       // The daemon archives its transcripts, then removes its worktree and branch.
@@ -2407,6 +2507,32 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const problem = `The factory couldn’t reopen ${action.ticket} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`;
       task.reopening!.problem = problem;
       if (!request) addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
+      break;
+    }
+    case 'pushAndOpenPr':
+      task.publishing = { step: 'push', problem: null };
+      break;
+    case 'branchPushed':
+      // A root with a draft PR already has it updated by the push.
+      task.publishing = task.pr ? null : { step: 'open-pr', problem: null };
+      break;
+    case 'prOpened':
+      task.pr = { ...action.pr };
+      task.publishing = null;
+      break;
+    case 'pushRefused': {
+      // The App has no Workflows permission (ADR 0004): the operator pushes by
+      // hand, and once they answer the push finds the branch already pushed.
+      const { branch } = task.worktree!;
+      const files = action.workflowFiles.join(', ');
+      failPublishing(state, task, request, `${branch} changes workflow files (${files}), which the factory’s App may not push. ` +
+        `Push it by hand (\`git push origin ${branch}\`), then answer to open the draft PR.`, at);
+      break;
+    }
+    case 'publishFailed': {
+      // Retried once the operator answers, and never as the operator (ADR 0004).
+      const what = action.step === 'push' ? `push ${task.worktree!.branch}` : `open ${task.id}’s draft PR`;
+      failPublishing(state, task, request, `The factory couldn’t ${what} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`, at);
       break;
     }
     case 'ticketUnclosed':

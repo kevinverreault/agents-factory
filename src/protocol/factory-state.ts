@@ -22,6 +22,7 @@ import {
   type Lifecycle,
   type Mode,
   type Priority,
+  type Publishing,
   type AttentionQueueItem,
   type Artifact,
   type Reopening,
@@ -30,6 +31,7 @@ import {
   type SkillsSetup,
   type TaskState,
 } from '../lifecycle/lifecycle.ts';
+import type { PullRequest } from '../github/github.ts';
 import type { Tier } from '../models/routing.ts';
 import type { ModelUsage } from '../usage/usage.ts';
 
@@ -82,6 +84,10 @@ export type TaskView = {
   reopening: Reopening | null;
   // Its PR body, once its PR body stage wrote it.
   prBody: string | null;
+  // Its Push & open draft PR while under way, and why its step last failed;
+  // and the draft PR it opened.
+  publishing: Publishing | null;
+  pr: PullRequest | null;
   // While its cleanup, once it ended Done or Cancelled, hasn't finished, and why it last failed.
   cleanup: Cleanup | null;
   // Where its transcripts were archived once it ended.
@@ -153,6 +159,8 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       loop: task.loop ? { ticket: task.loop.ticket, finishing: task.loop.finishing ?? false } : null,
       reopening: task.reopening ? structuredClone(task.reopening) : null,
       prBody: task.prBody ?? null,
+      publishing: task.publishing ? { ...task.publishing } : null,
+      pr: task.pr ? { ...task.pr } : null,
       cleanup: task.cleanup ? { ...task.cleanup } : null,
       transcripts: task.transcripts ?? null,
     };
