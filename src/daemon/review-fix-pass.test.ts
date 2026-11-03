@@ -188,8 +188,8 @@ describe('the PR body', () => {
     expect(factory.executor.started).toHaveLength(4);
   });
 
-  test('a PR body run that wrote none raises a stage-blocked attention request', async () => {
-    const { factory, tui } = await reviewing();
+  test('a PR body run that wrote none raises a stage-blocked attention request, and carries on told to write it through write_pr_body', async () => {
+    const { factory, operator, tui } = await reviewing();
     factory.executor.report('R2', { type: 'runCompleted' });
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R3');
 
@@ -197,6 +197,20 @@ describe('the PR body', () => {
 
     const blocked = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
     expect(blocked.attentionQueue).toMatchObject([{ kind: 'attention', taskId: 'T1', reason: 'pr-body’s exit, artifact:pr-body, doesn’t hold: T1 has no pr-body yet.' }]);
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R4');
+    expect(factory.executor.started.at(-1)).toMatchObject({
+      resumesSession: true,
+      reports: ['pr-body'],
+      firstMessage:
+        'The factory couldn’t move this task on: pr-body’s exit, artifact:pr-body, doesn’t hold: T1 has no pr-body yet.\n\n' +
+        'Carry on, unattended, from where this conversation left off.\n\n' +
+        '## Factory context\n' +
+        'Write the PR body through the factory’s write_pr_body tool before you end: the factory opens the PR with it. ' +
+        'Leave out the tickets this task closed and the review findings left over: the factory adds those itself.',
+    });
   });
 
   test('lists every ticket the task closed as Implements #n, turning a closing keyword on one to Implements, through main-flow at L1, URL or not', async () => {

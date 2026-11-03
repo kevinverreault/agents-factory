@@ -2132,9 +2132,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
           if ('allow' in answer && answer.allow === 'once') (task.allowOnce ??= []).push(request!.permission.rule);
           task.resumeWith = openingWithVerdict(request!.permission, answer);
         }
-        // An AFK stage that couldn't move on carries on, told why.
+        // An AFK stage that couldn't move on carries on, told why and how
+        // its stage reports through the factory's tools.
         if (request!.kind === 'stage-blocked' && task.mode === 'AFK' && !task.loop?.step) {
-          task.resumeWith = `The factory couldn’t move this task on: ${request!.reason}\n\n${AFK_RESUME}`;
+          const opening = `The factory couldn’t move this task on: ${request!.reason}\n\n${AFK_RESUME}`;
+          const stage = stageOf(task, task.stage);
+          task.resumeWith = stage ? stageOpening(task, stage, opening) : opening;
         }
         // Skipped, the ticket stays open and the loop picks past it.
         if (action.skip) {
