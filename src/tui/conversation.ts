@@ -1,20 +1,21 @@
 // The full-screen conversation view: a run's conversation, replayed from the
 // session file and then live, with a side rail of the task's usage and
-// artifacts, its detail until the task detail screen comes. A HITL
-// run's has a line for the operator's next message, and the advance and
-// handoff sheets over it; an AFK run never takes chat, so its view only
-// follows it until `c` takes the task over. A task that needs the operator
-// shows its request's answer sheet, whose digits answer it here as on Needs you.
+// artifacts. A HITL run's has a line for the operator's next message, and the
+// advance and handoff sheets over it; an AFK run never takes chat, so its view
+// only follows it until `c` takes the task over. A task that needs the
+// operator shows its request's answer sheet, whose digits answer it here as on
+// Needs you.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
-import type { ArtifactView, FactoryState } from '../protocol/factory-state.ts';
-import { issueRef } from '../artifacts/capture.ts';
+import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
 import { AnswerSheet, answerable, useAnswering } from './answer-sheet.ts';
+import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
+import { Event } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
 import { TaskUsage } from './usage.ts';
@@ -189,44 +190,3 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
 
 const RAIL_WIDTH = 40;
 
-// What the task produced so far, live: captured from the run's tool calls.
-// The newest come first, so a full rail cuts off the oldest.
-function ArtifactRail({ artifacts }: { artifacts: ArtifactView[] }) {
-  return h(
-    Box,
-    { flexDirection: 'column', overflow: 'hidden' },
-    h(Text, { bold: true }, 'Artifacts'),
-    artifacts.length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
-    ...artifacts.toReversed().map((artifact) =>
-      h(
-        Box,
-        { key: artifact.id, gap: 1 },
-        h(Box, { width: 11, flexShrink: 0 }, h(Text, { dimColor: true }, artifactState(artifact))),
-        h(Text, { wrap: 'truncate-start' }, artifactName(artifact)),
-      ),
-    ),
-  );
-}
-
-function artifactState(artifact: ArtifactView): string {
-  if (artifact.kind === 'issue') return 'issue';
-  return artifact.committed ? 'committed' : 'uncommitted';
-}
-
-// A file by its path in the worktree, an issue as `owner/name#number`.
-function artifactName(artifact: ArtifactView): string {
-  return artifact.kind === 'file' ? artifact.path : issueRef(artifact.url);
-}
-
-function Event({ event }: { event: ConversationEvent }) {
-  if (event.type === 'toolUse') {
-    return h(Box, { gap: 1, flexShrink: 0 }, h(Text, { color: 'cyan' }, `  ● ${event.tool}`), h(Text, { dimColor: true, wrap: 'truncate' }, event.summary));
-  }
-  const operator = event.from === 'operator';
-  return h(
-    Box,
-    { gap: 1, flexShrink: 0 },
-    h(Box, { width: 6, flexShrink: 0 }, h(Text, { bold: true, color: operator ? 'green' : 'magenta' }, operator ? 'you' : 'agent')),
-    h(Text, null, event.text),
-  );
-}

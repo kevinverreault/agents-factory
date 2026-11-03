@@ -115,8 +115,10 @@ export type ClientMessage =
   | { type: 'auth'; token: string }
   | { type: 'subscribe' }
   // The per-run conversation subscription: the history replayed from the
-  // Claude session file, then live events, until the client leaves.
-  | { type: 'converse'; runId: string }
+  // Claude session file, then live events, until the client leaves. With
+  // `follow` it only follows the run's output, as the output pane does: the
+  // operator isn't in the conversation, so it still waits for them.
+  | { type: 'converse'; runId: string; follow?: true }
   | { type: 'leaveConversation'; runId: string }
   | { type: 'command'; id: number; command: Command };
 

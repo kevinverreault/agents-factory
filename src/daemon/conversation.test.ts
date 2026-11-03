@@ -91,10 +91,12 @@ describe('launching a HITL task', () => {
   });
 });
 
-// Everything the conversation subscription for `runId` delivers.
-function listen(connection: FactoryConnection, runId: string) {
+// Everything the conversation subscription for `runId` delivers, or with
+// `follow` the subscription that only follows its output.
+function listen(connection: FactoryConnection, runId: string, { follow = false } = {}) {
   const events: ConversationEvent[] = [];
-  const stop = connection.converse(runId, (event) => events.push(event));
+  const listener = (event: ConversationEvent) => void events.push(event);
+  const stop = follow ? connection.follow(runId, listener) : connection.converse(runId, listener);
   return {
     events,
     stop,
@@ -324,6 +326,45 @@ describe('conversation controls', () => {
     expect(busy.attentionQueue).toEqual([]);
     factory.executor.report('R1', { type: 'questionAsked', question });
     expect((await tui.until((state) => state.tasks.T1?.label === 'Ready for you')).attentionQueue).toEqual([{ kind: 'ready', taskId: 'T1' }]);
+  });
+
+  test('following a run’s output streams it as its conversation does, and its HITL task stays Ready for you', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt });
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await tui.until((state) => state.tasks.T1?.label === 'Ready for you');
+
+    const output = listen(operator, 'R1', { follow: true });
+    factory.executor.converse('R1', { type: 'message', from: 'agent', text: 'Which identity provider times out?' });
+
+    expect(await output.until(2)).toEqual([
+      { type: 'message', from: 'operator', text: opening },
+      { type: 'message', from: 'agent', text: 'Which identity provider times out?' },
+    ]);
+    await operator.send({ type: 'daemon.status' });
+    expect(tui.state().tasks.T1?.label).toBe('Ready for you');
+    expect(tui.state().attentionQueue).toEqual([{ kind: 'ready', taskId: 'T1' }]);
+    output.stop();
+  });
+
+  test('a TUI following a run that opens its conversation is in it, and once it leaves, following again leaves the task Ready for you', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt });
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await tui.until((state) => state.tasks.T1?.label === 'Ready for you');
+    const output = listen(operator, 'R1', { follow: true });
+    await output.until(1);
+
+    const conversation = listen(operator, 'R1');
+    expect((await tui.until((state) => state.tasks.T1?.label === 'In conversation')).attentionQueue).toEqual([]);
+    expect(await conversation.until(1)).toEqual([{ type: 'message', from: 'operator', text: opening }]);
+
+    conversation.stop();
+    expect((await tui.until((state) => state.tasks.T1?.label === 'Ready for you')).attentionQueue).toEqual([{ kind: 'ready', taskId: 'T1' }]);
+    factory.executor.converse('R1', { type: 'message', from: 'agent', text: 'Which identity provider times out?' });
+    await output.until(2);
+    expect(output.events.at(-1)).toMatchObject({ text: 'Which identity provider times out?' });
+    output.stop();
   });
 });
 
