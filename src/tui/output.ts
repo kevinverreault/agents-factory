@@ -32,13 +32,19 @@ export function Output({ connection, state, taskId, lines }: { connection: Facto
 // shows it: a glance, the conversation view having the whole.
 export function Event({ event, oneLine = false }: { event: ConversationEvent; oneLine?: boolean }) {
   if (event.type === 'toolUse') {
-    return h(Box, { gap: 1, flexShrink: 0 }, h(Text, { color: 'cyan' }, `  ● ${event.tool}`), h(Text, { dimColor: true, wrap: 'truncate' }, event.summary));
+    return h(Box, { gap: 1, flexShrink: 0 }, h(Text, { color: 'cyan' }, `  ● ${event.tool}`), h(Text, { dimColor: true, wrap: 'truncate' }, oneLine ? flat(event.summary) : event.summary));
   }
   const operator = event.from === 'operator';
   return h(
     Box,
     { gap: 1, flexShrink: 0 },
     h(Box, { width: 6, flexShrink: 0 }, h(Text, { bold: true, color: operator ? 'green' : 'magenta' }, operator ? 'you' : 'agent')),
-    h(Text, oneLine ? { wrap: 'truncate' } : null, event.text),
+    oneLine ? h(Text, { wrap: 'truncate' }, flat(event.text)) : h(Text, null, event.text),
   );
+}
+
+// Text on one row: truncating cuts each of its lines, so a message's
+// paragraphs would each take a row and push the screen past the terminal.
+function flat(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }

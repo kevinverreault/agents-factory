@@ -2175,6 +2175,30 @@ describe('the screens view', () => {
     expect(connection.conversed).toEqual([]);
   });
 
+  test('the output pane gives each event one row, so a long message leaves the tabs and the task tree on screen', async () => {
+    const runs = { R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
+    const { app, connection } = await started({ ...factoryState([task('T1', 'Settle the glossary', 'queued', 'Ready for you', 'HITL'), implementing]), runs });
+    const before = app.lastFrame()!.split('\n').length;
+    await press(app, '\x1b[B');
+    await eventually(() => expect(connection.followed).toEqual(['R3']));
+    const message = Array.from({ length: 30 }, (_, i) => `Paragraph ${i}.`).join('\n\n');
+    connection.serveConversation(
+      'R3',
+      { type: 'message', id: 'E1', from: 'agent', text: message },
+      { type: 'toolUse', id: 'E2', tool: 'Bash', summary: 'npm test\n  --run' },
+    );
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('1 Tasks');
+      expect(frame).toMatch(/T1\s+Settle the glossary[\s\S]*› T2\s+Implement the store/);
+      expect(frame).toMatch(/agent\s+Paragraph 0\. Paragraph 1\./);
+      expect(frame).toMatch(/● Bash\s+npm test --run/);
+      // The two events replace "No runs yet." with two rows.
+      expect(frame.split('\n')).toHaveLength(before + 1);
+    });
+  });
+
   test('3 opens the Runs screen: every run, live ones first and then newest first; enter drills into its task and esc comes back to it', async () => {
     const runs = {
       R1: ran('R1', 'T2', 1, { outcome: 'failed' }),
