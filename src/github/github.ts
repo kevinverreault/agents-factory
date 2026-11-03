@@ -25,8 +25,10 @@ export const TICKET_WRITE: Permissions = { issues: 'write', metadata: 'read' };
 // What pushing a task branch writes with: the repository's contents alone.
 export const PUSH: Permissions = { contents: 'write', metadata: 'read' };
 
-// What opening a PR, and assigning it, writes with: pull requests alone.
-export const OPEN_PR: Permissions = { pull_requests: 'write', metadata: 'read' };
+// What opening a PR, and assigning it, writes with: pull requests alone, and
+// Contents read, without which GitHub can't read the branches ("not all refs
+// are readable").
+export const OPEN_PR: Permissions = { contents: 'read', pull_requests: 'write', metadata: 'read' };
 
 export type InstallationToken = { token: string; expiresAt: number };
 
@@ -140,8 +142,11 @@ export function gitHubApi(): GitHub {
     return { status: response.status, json };
   }
 
-  const refused = (what: string, { status, json }: { status: number; json: any }) =>
-    new GitHubError(`GitHub refused to ${what} (HTTP ${status}${json?.message ? `: ${json.message}` : ''}).`);
+  // With what GitHub said, and each validation error's own message.
+  const refused = (what: string, { status, json }: { status: number; json: any }) => {
+    const said = [json?.message, ...((json?.errors as { message?: string }[] | undefined) ?? []).map((error) => error.message)].filter(Boolean);
+    return new GitHubError(`GitHub refused to ${what} (HTTP ${status}${said.length ? `: ${said.join(': ')}` : ''}).`);
+  };
 
   // The installation covering the repository, or null when there is none.
   async function installationOf(app: FactoryApp, repo: string): Promise<number | null> {

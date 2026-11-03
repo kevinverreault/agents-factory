@@ -193,6 +193,18 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       ).rejects.toThrow(GitHubError);
     });
 
+    test('a token that can write PRs but not read Contents can’t open one: GitHub must read its branches', async () => {
+      const { github, app, installedRepo, clone, operator, baseBranch } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Pushed, never opened.\n' });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      const { token } = await github.mintToken(app, installedRepo, { pull_requests: 'write', metadata: 'read' });
+
+      await expect(
+        github.openDraftPr(token, { repo: installedRepo, head: branch, base: baseBranch, title: 'Never opened', body: '', assignee: operator }),
+      ).rejects.toThrow(GitHubError);
+    });
+
     test('refuses an App whose private key isn’t the one GitHub issued', async () => {
       const { github, app, installedRepo } = await makeFixture();
       const { privateKey } = await import('node:crypto').then(({ generateKeyPairSync }) =>

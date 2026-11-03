@@ -85,7 +85,7 @@ describe('Push & open draft PR on an L1 root in review', () => {
         base: 'main',
         title: 'Add a logout button.',
         assignees: ['octo-operator'],
-        token: expect.objectContaining({ repo: 'acme/widgets', permissions: { pull_requests: 'write', metadata: 'read' } }),
+        token: expect.objectContaining({ repo: 'acme/widgets', permissions: { contents: 'read', pull_requests: 'write', metadata: 'read' } }),
       }),
     ]);
     expect(factory.github.pullRequests[0]!.body).toBe(

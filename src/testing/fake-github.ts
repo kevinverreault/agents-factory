@@ -210,6 +210,8 @@ export class FakeGitHub implements GitHub {
     await this.held();
     if (this.prFailure) throw new GitHubError(this.prFailure);
     const minted = this.scoped(token, repo, 'pull_requests', 'write');
+    // GitHub reads the branches with the same token.
+    this.scoped(token, repo, 'contents', 'read');
     const open = this.pullRequests.find((pr) => pr.repo === repo && pr.head === head);
     if (open) return { number: open.number, url: open.url, draft: open.draft };
     const number = 100 + this.pullRequests.length + 1;
