@@ -6,7 +6,7 @@
 // operator shows its request's answer sheet, whose digits answer it here as on
 // Needs you.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
-import { Box, Text, useInput, useStdout } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
@@ -17,6 +17,7 @@ import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
+import { useRows } from './screen.ts';
 import { edit } from './text-input.ts';
 import { TaskUsage } from './usage.ts';
 
@@ -44,7 +45,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     answered: null,
   });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
-  const { stdout } = useStdout();
+  const height = useRows();
 
   useEffect(() => {
     if (!runId) return;
@@ -133,7 +134,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
 
   return h(
     Box,
-    { flexDirection: 'column', height: (stdout as NodeJS.WriteStream).rows || undefined },
+    { flexDirection: 'column', height },
     // On a full screen only the events give way: squeezed, wrapped text
     // would draw its lines over the next ones.
     h(

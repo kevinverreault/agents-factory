@@ -2199,6 +2199,56 @@ describe('the screens view', () => {
     });
   });
 
+  // A terminal of `rows` rows, which the TUI fits itself to.
+  function resize(app: { stdout: NodeJS.EventEmitter }, rows: number) {
+    Object.defineProperty(app.stdout, 'rows', { value: rows, configurable: true });
+    app.stdout.emit('resize');
+  }
+
+  test('on a short terminal the Tasks screen fits it: the tree scrolls with the cursor, under the tabs and over its keys and output', async () => {
+    const tasks = Array.from({ length: 20 }, (_, i) => task(`T${i + 1}`, `Task number ${i + 1}`, 'queued', 'Ready for you', 'HITL'));
+    const { app } = await started(factoryState(tasks));
+    resize(app, 14);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(14);
+      expect(frame).toContain('1 Tasks');
+      expect(frame).toMatch(/› T1\s+Task number 1\b/);
+      expect(frame).not.toContain('Task number 20');
+      expect(frame).toContain('enter detail');
+      expect(frame).toContain('Output · T1');
+    });
+
+    await press(app, ...Array.from({ length: 15 }, () => DOWN));
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(14);
+      expect(frame).toContain('1 Tasks');
+      expect(frame).toMatch(/› T16\s+Task number 16\b/);
+      expect(frame).not.toMatch(/T1\s+Task number 1\b/);
+      expect(frame).toContain('enter detail');
+      expect(frame).toContain('Output · T16');
+    });
+
+    // Back up, the tree scrolls back with it.
+    await press(app, ...Array.from({ length: 15 }, () => UP));
+    await eventually(() => expect(app.lastFrame()).toMatch(/1 Tasks[\s\S]*› T1\s+Task number 1\b/));
+  });
+
+  test('on a short terminal the Runs screen scrolls with its cursor under the tabs', async () => {
+    const runs = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`R${i + 1}`, ran(`R${i + 1}`, 'T1', 100 - i)]));
+    const { app } = await started({ ...factoryState([grilling]), runs });
+    resize(app, 12);
+    await press(app, '3', ...Array.from({ length: 15 }, () => DOWN));
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(12);
+      expect(frame).toContain('3 Runs');
+      expect(frame).toMatch(/› R16\s+T1/);
+      expect(frame).not.toMatch(/R1\s+T1/);
+    });
+  });
+
   test('3 opens the Runs screen: every run, live ones first and then newest first; enter drills into its task and esc comes back to it', async () => {
     const runs = {
       R1: ran('R1', 'T2', 1, { outcome: 'failed' }),
