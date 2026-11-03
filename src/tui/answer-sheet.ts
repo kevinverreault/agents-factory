@@ -58,10 +58,11 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
   if (item.kind === 'review') {
     const { taskId } = item;
     // An L1 root publishes as the factory's App on the operator's say (ADR
-    // 0007): once it has its draft PR, a push updates it.
+    // 0007): once it has its PR (a regular one where GitHub offers no
+    // drafts), a push updates it.
     const publish: Choice[] =
       task?.autonomy === 'L1' && !task.publishing
-        ? [{ label: task.pr ? `Push to draft PR #${task.pr.number}` : 'Push & open draft PR', command: { type: 'pushAndOpenPr', taskId } }]
+        ? [{ label: task.pr ? `Push to ${task.pr.draft ? 'draft ' : ''}PR #${task.pr.number}` : 'Push & open draft PR', command: { type: 'pushAndOpenPr', taskId } }]
         : [];
     return [
       noted('Request changes', 'Review comments', 'requests changes', (comments) => ({ type: 'requestChanges', taskId, comments })),

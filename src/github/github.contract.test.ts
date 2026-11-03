@@ -10,6 +10,10 @@
 //   scope, which clone the repository, push by hand and clean up: the
 //   branches the tests push are deleted afterwards, which closes their PRs.
 //
+// A private repository under GitHub Free, the operator's own or an
+// organization's, offers no draft PRs, so the factory's are regular ones
+// there: the tests read which from the repository and its owner's plan.
+//
 // Without them it is skipped. The App must not be installed on
 // octocat/Hello-World, which stands for a repository it isn't on.
 import { execFile } from 'node:child_process';
@@ -61,9 +65,21 @@ async function operatorGit(cwd: string, ...args: string[]): Promise<string> {
   return (await execFileAsync('git', args, { cwd })).stdout.trim();
 }
 
+// Whether GitHub offers draft PRs on the repository: on a public one, and on
+// a private one unless its owner, the operator or an organization, is on
+// GitHub Free.
+async function draftsOfferedOn(repo: string): Promise<boolean> {
+  const ghJson = async (path: string) => JSON.parse((await execFileAsync('gh', ['api', path])).stdout);
+  const { private: isPrivate, owner } = await ghJson(`repos/${repo}`);
+  if (!isPrivate) return true;
+  const { plan } = await ghJson(owner.type === 'Organization' ? `orgs/${owner.login}` : 'user');
+  return plan?.name !== 'free';
+}
+
 // One clone of the repository for every test, and the branches they cut in it.
 let cloned: Promise<{ clone: GitHubClone; baseBranch: string }> | null = null;
 const cut: string[] = [];
+let draftsOffered: Promise<boolean> | null = null;
 
 async function cloneOnce(repo: string): Promise<{ clone: GitHubClone; baseBranch: string }> {
   const path = join(mkdtempSync(join(tmpdir(), 'factory-contract-clone-')), 'repo');
@@ -113,6 +129,7 @@ if (!repo) {
       clone,
       baseBranch,
       operator: (await execFileAsync('gh', ['api', 'user', '--jq', '.login'])).stdout.trim(),
+      draftsOffered: await (draftsOffered ??= draftsOfferedOn(repo)),
       async pullRequest(number) {
         const pr = JSON.parse((await execFileAsync('gh', ['api', `repos/${repo}/pulls/${number}`])).stdout);
         return {

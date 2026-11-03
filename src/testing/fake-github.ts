@@ -46,6 +46,7 @@ export class FakeGitHub implements GitHub {
   private readonly apps = new Map<number, FactoryApp>();
   private readonly installed = new Set<string>();
   private readonly issues = new Map<string, FakeIssue>();
+  private readonly noDrafts = new Set<string>();
   private failure: string | null = null;
   private prFailure: string | null = null;
   private hold: { arrived(): void; released: Promise<void> } | null = null;
@@ -77,6 +78,12 @@ export class FakeGitHub implements GitHub {
   // Every call fails with `reason` from now on, or works again with null.
   unreachable(reason: string | null): void {
     this.failure = reason;
+  }
+
+  // GitHub offers no draft PRs on `repo`, as on a private repository under
+  // GitHub Free: PRs opened there are regular ones.
+  offerNoDrafts(repo: string): void {
+    this.noDrafts.add(repo);
   }
 
   // Opening PRs fails with `reason` from now on, or works again with null.
@@ -204,12 +211,13 @@ export class FakeGitHub implements GitHub {
     if (this.prFailure) throw new GitHubError(this.prFailure);
     const minted = this.scoped(token, repo, 'pull_requests', 'write');
     const open = this.pullRequests.find((pr) => pr.repo === repo && pr.head === head);
-    if (open) return { number: open.number, url: open.url };
+    if (open) return { number: open.number, url: open.url, draft: open.draft };
     const number = 100 + this.pullRequests.length + 1;
     const url = `https://github.com/${repo}/pull/${number}`;
+    const draft = !this.noDrafts.has(repo);
     const opener = { ...minted, permissions: { ...minted.permissions } };
-    this.pullRequests.push({ number, url, repo, draft: true, head, base, title, body, assignees: [assignee], token: opener });
-    return { number, url };
+    this.pullRequests.push({ number, url, repo, draft, head, base, title, body, assignees: [assignee], token: opener });
+    return { number, url, draft };
   }
 
   // Waits while writes are held.

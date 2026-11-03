@@ -72,7 +72,7 @@ describe('Push & open draft PR on an L1 root in review', () => {
     expect(await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' })).toEqual({ ok: true });
 
     const published = await tui.until((state) => state.tasks.T1?.pr !== null);
-    expect(published.tasks.T1).toMatchObject({ label: 'In review', pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101' }, publishing: null });
+    expect(published.tasks.T1).toMatchObject({ label: 'In review', pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: true }, publishing: null });
     expect(factory.github.pushes).toEqual([
       { repo: 'acme/widgets', branch, tip, token: expect.objectContaining({ repo: 'acme/widgets', permissions: { contents: 'write', metadata: 'read' } }) },
     ]);
@@ -103,6 +103,18 @@ describe('Push & open draft PR on an L1 root in review', () => {
         'Total tokens: 7,500',
       ].join('\n'),
     );
+    expect(published.attentionQueue).toEqual([{ kind: 'review', taskId: 'T1' }]);
+  });
+
+  test('opens a regular PR where GitHub offers no draft PRs, as on a private repository under GitHub Free', async () => {
+    const { factory, operator, tui } = await inReview();
+    factory.github.offerNoDrafts('acme/widgets');
+
+    await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' });
+
+    const published = await tui.until((state) => state.tasks.T1?.pr !== null);
+    expect(published.tasks.T1).toMatchObject({ pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: false }, publishing: null });
+    expect(factory.github.pullRequests).toEqual([expect.objectContaining({ draft: false, head: branch, assignees: ['octo-operator'] })]);
     expect(published.attentionQueue).toEqual([{ kind: 'review', taskId: 'T1' }]);
   });
 });
@@ -222,7 +234,7 @@ describe('Push & open draft PR', () => {
     await tui.until((state) => state.tasks.T1?.publishing === null && factory.github.pushes.length === 2);
     expect(factory.git.originTip(clone, branch)).toBe(factory.git.branchTip(clone, branch));
     expect(factory.github.pullRequests).toHaveLength(1);
-    expect(tui.state().tasks.T1?.pr).toEqual({ number: 101, url: 'https://github.com/acme/widgets/pull/101' });
+    expect(tui.state().tasks.T1?.pr).toEqual({ number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: true });
   });
 
   test('a daemon that stopped mid-way carries on from the step it was at', async () => {

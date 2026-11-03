@@ -20,6 +20,9 @@ export type GitHubFixture = {
   operator: string;
   // The installed repository's base branch.
   baseBranch: string;
+  // Whether GitHub offers draft PRs on the installed repository: not on a
+  // private one under GitHub Free.
+  draftsOffered: boolean;
   // A PR of the installed repository as GitHub has it.
   pullRequest(number: number): Promise<{ draft: boolean; head: string; base: string; title: string; body: string; assignees: string[] }>;
 };
@@ -156,8 +159,8 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       expect(await github.appOwner(app)).toBe(operator);
     });
 
-    test('a PR token opens a draft PR of a pushed task branch, assigned to the operator, and opening it again finds the same PR', async () => {
-      const { github, app, installedRepo, clone, operator, baseBranch, pullRequest } = await makeFixture();
+    test('a PR token opens a draft PR of a pushed task branch (a regular one where GitHub offers no drafts), assigned to the operator, and opening it again finds the same PR', async () => {
+      const { github, app, installedRepo, clone, operator, baseBranch, draftsOffered, pullRequest } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Opened as a draft by the contract test.\n' });
       await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
@@ -166,9 +169,9 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
 
       const opened = await github.openDraftPr(token, draft);
 
-      expect(opened.url).toBe(`https://github.com/${installedRepo}/pull/${opened.number}`);
+      expect(opened).toMatchObject({ url: `https://github.com/${installedRepo}/pull/${opened.number}`, draft: draftsOffered });
       expect(await pullRequest(opened.number)).toEqual({
-        draft: true,
+        draft: draftsOffered,
         head: branch,
         base: baseBranch,
         title: 'Contract test draft',

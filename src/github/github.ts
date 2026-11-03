@@ -41,7 +41,9 @@ export type Pushed = { pushed: string } | { workflowFiles: string[] };
 // A draft PR the factory opens (ADR 0004): of the pushed task branch `head`
 // into `base`, assigned to `assignee`, the operator.
 export type DraftPr = { repo: string; head: string; base: string; title: string; body: string; assignee: string };
-export type PullRequest = { number: number; url: string };
+// `draft` is false where GitHub offers no draft PRs, as on a private
+// repository under GitHub Free, and the factory opened a regular one.
+export type PullRequest = { number: number; url: string; draft: boolean };
 
 // Those of `paths` (from the top, with `/`) that are workflow files.
 export function workflowFiles(paths: string[]): string[] {
@@ -79,7 +81,8 @@ export interface GitHub {
   push(token: string, push: BranchPush): Promise<Pushed>;
   // Opens the draft PR with `token`, which needs Pull requests write, and
   // assigns it; or finds the open PR of its head branch, as when the factory
-  // stopped before it could record that it opened it.
+  // stopped before it could record that it opened it. Where GitHub offers no
+  // draft PRs, it opens a regular one instead.
   openDraftPr(token: string, pr: DraftPr): Promise<PullRequest>;
   // The login of the account that owns the App: the operator's, whose
   // account `setup github` created it on.
@@ -229,7 +232,10 @@ export function gitHubApi(): GitHub {
       if (found.status !== 200) throw refused(`look for the PR of ${head}`, found);
       let pr = found.json[0];
       if (!pr) {
-        const opened = await call('POST', `/repos/${repo}/pulls`, token, { title, head, base, body, draft: true });
+        let opened = await call('POST', `/repos/${repo}/pulls`, token, { title, head, base, body, draft: true });
+        if (opened.status === 422 && draftsUnsupported(opened.json)) {
+          opened = await call('POST', `/repos/${repo}/pulls`, token, { title, head, base, body, draft: false });
+        }
         if (opened.status !== 201) throw refused(`open a draft PR of ${head}`, opened);
         pr = opened.json;
       }
@@ -237,7 +243,7 @@ export function gitHubApi(): GitHub {
         const assigned = await call('POST', `/repos/${repo}/issues/${pr.number}/assignees`, token, { assignees: [assignee] });
         if (assigned.status !== 201) throw refused(`assign ${assignee} to #${pr.number}`, assigned);
       }
-      return { number: pr.number, url: pr.html_url };
+      return { number: pr.number, url: pr.html_url, draft: pr.draft === true };
     },
     async appOwner(app) {
       const reply = await call('GET', '/app', appJwt(app));
@@ -282,6 +288,14 @@ function gitWithToken(cwd: string, token: string, args: string[]): Promise<strin
       },
     );
   });
+}
+
+// Whether GitHub refused a draft PR because the repository offers none, as a
+// private one under GitHub Free: "Draft pull requests are not supported in
+// this repository."
+function draftsUnsupported(json: any): boolean {
+  const said = [json?.message, ...((json?.errors as { message?: string }[] | undefined) ?? []).map((error) => error.message)];
+  return said.some((message) => /draft pull requests are not supported/i.test(message ?? ''));
 }
 
 // The REST path of an issue `owner/name#n`.

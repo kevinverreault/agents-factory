@@ -1650,16 +1650,21 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'requestChanges', taskId: 'T3', comments: 'Put it in the header' }));
   });
 
-  test('Push & open draft PR publishes the L1 root; once it has its draft PR the choice pushes to it, and none shows while it is under way', async () => {
+  test('Push & open draft PR publishes the L1 root; once it has its PR the choice pushes to it, and none shows while it is under way', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([reviewing], [review]), { connection });
     await press(app, '2', 'a', '4');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'pushAndOpenPr', taskId: 'T3' }));
 
-    const opened = { ...reviewing, pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101' } };
+    const opened = { ...reviewing, pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: true } };
     const withPr = await started(factoryState([opened], [review]));
     await press(withPr.app, '2');
     await eventually(() => expect(unwrapped(withPr.app.lastFrame()!)).toContain('3 Cancel 4 Push to draft PR #101 a answer'));
+
+    // Where GitHub offers no draft PRs, the factory opened a regular one.
+    const regular = await started(factoryState([{ ...opened, pr: { ...opened.pr, draft: false } }], [review]));
+    await press(regular.app, '2');
+    await eventually(() => expect(unwrapped(regular.app.lastFrame()!)).toContain('3 Cancel 4 Push to PR #101 a answer'));
 
     const underWay = await started(factoryState([{ ...reviewing, publishing: { step: 'push' as const, problem: null } }], [review]));
     await press(underWay.app, '2');
