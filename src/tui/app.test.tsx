@@ -2175,6 +2175,123 @@ describe('the screens view', () => {
     expect(connection.conversed).toEqual([]);
   });
 
+  test('the output pane gives each event one row, so a long message leaves the tabs and the task tree on screen', async () => {
+    const runs = { R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
+    const { app, connection } = await started({ ...factoryState([task('T1', 'Settle the glossary', 'queued', 'Ready for you', 'HITL'), implementing]), runs });
+    const before = app.lastFrame()!.split('\n').length;
+    await press(app, '\x1b[B');
+    await eventually(() => expect(connection.followed).toEqual(['R3']));
+    const message = Array.from({ length: 30 }, (_, i) => `Paragraph ${i}.`).join('\n\n');
+    connection.serveConversation(
+      'R3',
+      { type: 'message', id: 'E1', from: 'agent', text: message },
+      { type: 'toolUse', id: 'E2', tool: 'Bash', summary: 'npm test\n  --run' },
+    );
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('1 Tasks');
+      expect(frame).toMatch(/T1\s+Settle the glossary[\s\S]*› T2\s+Implement the store/);
+      expect(frame).toMatch(/agent\s+Paragraph 0\. Paragraph 1\./);
+      expect(frame).toMatch(/● Bash\s+npm test --run/);
+      // The two events replace "No runs yet." with two rows.
+      expect(frame.split('\n')).toHaveLength(before + 1);
+    });
+  });
+
+  // A terminal of `rows` rows, which the TUI fits itself to.
+  function resize(app: { stdout: NodeJS.EventEmitter }, rows: number) {
+    Object.defineProperty(app.stdout, 'rows', { value: rows, configurable: true });
+    app.stdout.emit('resize');
+  }
+
+  test('on a short terminal the Tasks screen fits it: the tree scrolls with the cursor, under the tabs and over its keys and output', async () => {
+    const tasks = Array.from({ length: 20 }, (_, i) => task(`T${i + 1}`, `Task number ${i + 1}`, 'queued', 'Ready for you', 'HITL'));
+    const { app } = await started(factoryState(tasks));
+    resize(app, 14);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(14);
+      expect(frame).toContain('1 Tasks');
+      expect(frame).toMatch(/› T1\s+Task number 1\b/);
+      expect(frame).not.toContain('Task number 20');
+      expect(frame).toContain('enter detail');
+      expect(frame).toContain('Output · T1');
+    });
+
+    await press(app, ...Array.from({ length: 15 }, () => DOWN));
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(14);
+      expect(frame).toContain('1 Tasks');
+      expect(frame).toMatch(/› T16\s+Task number 16\b/);
+      expect(frame).not.toMatch(/T1\s+Task number 1\b/);
+      expect(frame).toContain('enter detail');
+      expect(frame).toContain('Output · T16');
+    });
+
+    // Back up, the tree scrolls back with it.
+    await press(app, ...Array.from({ length: 15 }, () => UP));
+    await eventually(() => expect(app.lastFrame()).toMatch(/1 Tasks[\s\S]*› T1\s+Task number 1\b/));
+  });
+
+  test('on a short terminal the Runs screen scrolls with its cursor under the tabs', async () => {
+    const runs = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`R${i + 1}`, ran(`R${i + 1}`, 'T1', 100 - i)]));
+    const { app } = await started({ ...factoryState([grilling]), runs });
+    resize(app, 12);
+    await press(app, '3', ...Array.from({ length: 15 }, () => DOWN));
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(12);
+      expect(frame).toContain('3 Runs');
+      expect(frame).toMatch(/› R16\s+T1/);
+      expect(frame).not.toMatch(/R1\s+T1/);
+    });
+  });
+
+  test('a task’s detail shows its conversation whole: every message in full, the user’s and the agent’s', async () => {
+    const runs = { R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
+    const { app, connection } = await started({ ...factoryState([implementing]), runs });
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T2'));
+    // Wider than the terminal, so it wraps.
+    const wraps = Array.from({ length: 36 }, (_, i) => `word${i}`).join(' ');
+    connection.serveConversation(
+      'R3',
+      { type: 'message', id: 'E1', from: 'operator', text: `Keep the schema private.\nAnd ${wraps} end of mine.` },
+      { type: 'message', id: 'E2', from: 'agent', text: `Done.\n\nThe store ${wraps} end of the agent’s.` },
+    );
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).not.toContain('…');
+      expect(frame).toMatch(/you\s+Keep the schema private\.\n\s+And word0/);
+      expect(unwrapped(frame)).toContain(`And ${wraps} end of mine.`);
+      expect(unwrapped(frame)).toContain(`The store ${wraps} end of the agent’s.`);
+    });
+  });
+
+  test('on a short terminal a task’s detail keeps its latest messages in view, older ones scrolling off over the runs', async () => {
+    const runs = { R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
+    const { app, connection } = await started({ ...factoryState([implementing]), runs });
+    resize(app, 20);
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T2'));
+    connection.serveConversation(
+      'R3',
+      ...Array.from({ length: 30 }, (_, i) => ({ type: 'message' as const, id: `E${i}`, from: 'agent' as const, text: `Step ${i}.\nIts second line.` })),
+    );
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(20);
+      expect(frame).toContain('Tasks › T2');
+      expect(frame).toContain('Step 29.');
+      expect(frame).not.toContain('Step 0.');
+      expect(frame).toContain('esc back');
+    });
+  });
+
   test('3 opens the Runs screen: every run, live ones first and then newest first; enter drills into its task and esc comes back to it', async () => {
     const runs = {
       R1: ran('R1', 'T2', 1, { outcome: 'failed' }),

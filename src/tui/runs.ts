@@ -3,6 +3,7 @@ import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryState, RunView } from '../protocol/factory-state.ts';
 import { overall, tokensOf } from '../usage/usage.ts';
+import { CursorWindow, fixed } from './screen.ts';
 import { tokens } from './usage.ts';
 
 // Live runs (active or suspended) first, then the ended ones, each newest first.
@@ -29,21 +30,24 @@ export function RunsList({ state, runs, cursor }: { state: FactoryState; runs: R
   return h(
     Box,
     { flexDirection: 'column' },
-    ...runs.map((run, i) =>
-      h(
-        Box,
-        { key: run.id, gap: 1 },
-        h(Text, { color: 'cyan' }, i === cursor ? '›' : ' '),
-        cell(4, run.id, { bold: true }),
-        cell(4, run.taskId),
-        cell(24, state.tasks[run.taskId]?.title ?? ''),
-        cell(4, run.mode),
-        cell(10, run.stage ?? '—'),
-        cell(18, run.model),
-        cell(19, runOutcome(run), run.status === 'ended' ? { dimColor: true } : { color: 'green' }),
-        h(Box, { width: 7, flexShrink: 0, justifyContent: 'flex-end' }, h(Text, { dimColor: true }, tokens(tokensOf(overall(run.usage))))),
+    h(CursorWindow, {
+      cursor,
+      items: runs.map((run, i) =>
+        h(
+          Box,
+          { key: run.id, gap: 1 },
+          h(Text, { color: 'cyan' }, i === cursor ? '›' : ' '),
+          cell(4, run.id, { bold: true }),
+          cell(4, run.taskId),
+          cell(24, state.tasks[run.taskId]?.title ?? ''),
+          cell(4, run.mode),
+          cell(10, run.stage ?? '—'),
+          cell(18, run.model),
+          cell(19, runOutcome(run), run.status === 'ended' ? { dimColor: true } : { color: 'green' }),
+          h(Box, { width: 7, flexShrink: 0, justifyContent: 'flex-end' }, h(Text, { dimColor: true }, tokens(tokensOf(overall(run.usage))))),
+        ),
       ),
-    ),
-    h(Text, { dimColor: true }, 'enter its task’s detail · c converse or take over · x cancel its task · ? keys'),
+    }),
+    fixed(h(Text, { dimColor: true }, 'enter its task’s detail · c converse or take over · x cancel its task · ? keys')),
   );
 }

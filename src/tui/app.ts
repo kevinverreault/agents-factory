@@ -27,6 +27,7 @@ import { Help } from './help.ts';
 import { LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
 import { liveFirst, RunsList } from './runs.ts';
+import { CursorWindow, fixed, useRows } from './screen.ts';
 import { TaskDetail } from './task-detail.ts';
 import { UsageTab } from './usage.ts';
 
@@ -222,6 +223,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   };
   // Keys need raw mode, which a piped stdin can't give.
   const { isRawModeSupported } = useStdin();
+  const height = useRows();
   useInput(
     (input, key) => {
       if (cancelSheet) {
@@ -280,52 +282,62 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
 
   return h(
     Box,
-    { flexDirection: 'column' },
-    h(Tabs, { tab, needsYou: state?.attentionQueue.length ?? 0 }),
-    unregistered
-      ? h(Text, { key: 'register' }, `${unregistered.repo} is not registered. `, h(Text, { bold: true }, 'r'), ' Register this repo')
-      : null,
-    missingSetup
-      ? missingSetup.settingUp
-        ? h(Text, { key: 'setup', dimColor: true }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
-        : h(
-            Text,
-            { key: 'setup', ...(missingSetup.offered ? { color: 'yellow' } : { dimColor: true }) },
-            `${missingSetup.reason} `,
-            ...(missingSetup.offered ? [h(Text, { key: 's', bold: true }, 's'), ' Set up now · '] : []),
-            h(Text, { key: 'R', bold: true }, 'R'),
-            ' re-check',
-          )
-      : null,
-    refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
-    cancelSheet
-      ? h(ChoosePrompt, { key: 'cancel', reason: `Cancel ${cancelSheet.taskId}: ${cancelSheet.reason}`, options: cancelSheet.options.map(({ label }) => label) })
-      : null,
-    state && view.kind === 'launch'
-      ? h(LaunchCard, {
-          connection,
-          state,
-          here: clone?.repo ?? null,
-          onLaunched: (taskId: string) => setView({ kind: 'conversation', taskId }),
-          onCancel: toTabs,
-          openUrl,
-        })
-      : null,
-    state === null
-      ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
-      : help
-        ? h(Help)
-      : drilled
-        ? h(TaskDetail, { connection, state, task: drilled, from: TAB_NAMES[tab] })
-      : tab === 'tasks'
-        ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor, retries: failedTask(state, tasks[cursor]) })
-        : tab === 'needs-you'
-          ? h(NeedsYouList, { state, cursor })
-          : tab === 'runs'
-            ? h(RunsList, { state, runs, cursor })
-            : h(UsageTab, { state }),
-    state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
-    closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
+    { flexDirection: 'column', height, overflow: 'hidden' },
+    // On a full screen only the screen's pane gives way: squeezed, wrapped
+    // text would draw its lines over the next ones.
+    fixed(
+      h(Tabs, { tab, needsYou: state?.attentionQueue.length ?? 0 }),
+      unregistered
+        ? h(Text, { key: 'register' }, `${unregistered.repo} is not registered. `, h(Text, { bold: true }, 'r'), ' Register this repo')
+        : null,
+      missingSetup
+        ? missingSetup.settingUp
+          ? h(Text, { key: 'setup', dimColor: true }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
+          : h(
+              Text,
+              { key: 'setup', ...(missingSetup.offered ? { color: 'yellow' } : { dimColor: true }) },
+              `${missingSetup.reason} `,
+              ...(missingSetup.offered ? [h(Text, { key: 's', bold: true }, 's'), ' Set up now · '] : []),
+              h(Text, { key: 'R', bold: true }, 'R'),
+              ' re-check',
+            )
+        : null,
+      refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
+      cancelSheet
+        ? h(ChoosePrompt, { key: 'cancel', reason: `Cancel ${cancelSheet.taskId}: ${cancelSheet.reason}`, options: cancelSheet.options.map(({ label }) => label) })
+        : null,
+      state && view.kind === 'launch'
+        ? h(LaunchCard, {
+            connection,
+            state,
+            here: clone?.repo ?? null,
+            onLaunched: (taskId: string) => setView({ kind: 'conversation', taskId }),
+            onCancel: toTabs,
+            openUrl,
+          })
+        : null,
+    ),
+    h(
+      Box,
+      { flexDirection: 'column', flexShrink: 1, overflow: 'hidden' },
+      state === null
+        ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
+        : help
+          ? fixed(h(Help))
+        : drilled
+          ? h(TaskDetail, { connection, state, task: drilled, from: TAB_NAMES[tab] })
+        : tab === 'tasks'
+          ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor, retries: failedTask(state, tasks[cursor]) })
+          : tab === 'needs-you'
+            ? h(NeedsYouList, { state, cursor })
+            : tab === 'runs'
+              ? h(RunsList, { state, runs, cursor })
+              : fixed(h(UsageTab, { state })),
+    ),
+    fixed(
+      state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
+      closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
+    ),
   );
 }
 
@@ -391,19 +403,25 @@ function TaskList({
   const finishes = finishable(tasks[cursor]) ? ' · f finish after this ticket' : '';
   const retry = retries ? ' · y retry' : '';
   return column([
-    ...tasks.map((task, i) =>
-      h(Row, {
-        key: task.id,
-        id: task.id,
-        title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
-        detail: `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.progress ? ` · ${task.progress}` : ''}`,
-        selected: i === cursor,
-        dim: finished(task),
-      }),
+    h(CursorWindow, {
+      key: 'tree',
+      cursor,
+      items: tasks.map((task, i) =>
+        h(Row, {
+          key: task.id,
+          id: task.id,
+          title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
+          detail: `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.progress ? ` · ${task.progress}` : ''}`,
+          selected: i === cursor,
+          dim: finished(task),
+        }),
+      ),
+    }),
+    fixed(
+      h(Text, { key: 'keys', dimColor: true }, `enter detail · c converse or take over · t re-tier · x cancel${finishes}${retry} · N launch · ? keys`),
+      hidden === null ? null : h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`),
+      h(Output, { key: 'output', connection, state, taskId: tasks[cursor]!.id, lines: OUTPUT_PANE_LINES }),
     ),
-    h(Text, { key: 'keys', dimColor: true }, `enter detail · c converse or take over · t re-tier · x cancel${finishes}${retry} · N launch · ? keys`),
-    hidden === null ? null : h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`),
-    h(Output, { key: 'output', connection, state, taskId: tasks[cursor]!.id, lines: OUTPUT_PANE_LINES }),
   ]);
 }
 
@@ -470,8 +488,9 @@ function loopDetail({ loop }: TaskView): string {
 
 function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }) {
   if (state.attentionQueue.length === 0) return h(Text, { dimColor: true }, 'Nothing needs you.');
-  return column(
-    state.attentionQueue.map((item, i) => {
+  return h(CursorWindow, {
+    cursor,
+    items: state.attentionQueue.map((item, i) => {
       const key = item.kind === 'attention' ? item.requestId : `${item.kind}-${item.taskId}`;
       const { taskId } = item;
       const task = taskId === null ? undefined : state.tasks[taskId];
@@ -479,7 +498,7 @@ function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }
       const title = task?.title ?? (item.kind === 'attention' ? item.repo : '');
       return h(Row, { key, id: taskId ?? '', title, detail: waitingFor(item, task), selected: i === cursor });
     }),
-  );
+  });
 }
 
 function column(children: ReactNode[]) {

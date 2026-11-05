@@ -7,38 +7,55 @@ import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { runsOf } from './runs.ts';
+import { fixed } from './screen.ts';
 
-// `lines` is how many of the latest events it shows.
-export function Output({ connection, state, taskId, lines }: { connection: FactoryConnection; state: FactoryState; taskId: string; lines: number }) {
+// With `lines`, a glance: that many of the latest events, a row each. Without
+// it, the whole: every event in full, giving way on a short screen so the
+// latest stay in view as older ones scroll off the top.
+export function Output({ connection, state, taskId, lines }: { connection: FactoryConnection; state: FactoryState; taskId: string; lines?: number }) {
   const runId = state.tasks[taskId]?.liveRunId ?? runsOf(state, taskId).at(-1)?.id ?? null;
   const run = runId ? state.runs[runId] : undefined;
+  const whole = lines === undefined;
   const [events, setEvents] = useState<ConversationEvent[]>([]);
   useEffect(() => {
     setEvents([]);
     if (!runId) return;
-    return connection.follow(runId, (event) => setEvents((events) => [...events, event].slice(-lines)));
+    return connection.follow(runId, (event) => setEvents((events) => (lines === undefined ? [...events, event] : [...events, event].slice(-lines))));
   }, [connection, runId, lines]);
 
   return h(
     Box,
-    { flexDirection: 'column', marginTop: 1 },
-    h(Text, { bold: true }, 'Output', h(Text, { bold: false, dimColor: true }, run ? ` · ${taskId} · ${run.id} ${run.status === 'ended' ? 'ended' : 'live'}` : ` · ${taskId}`)),
-    events.length === 0 ? h(Text, { dimColor: true }, run ? 'Nothing yet.' : 'No runs yet.') : null,
-    ...events.map((event) => h(Event, { key: event.id, event, oneLine: true })),
+    // Squeezed below its title, it clips rather than draws over what follows.
+    { flexDirection: 'column', flexShrink: whole ? 1 : 0, overflow: 'hidden', marginTop: 1 },
+    fixed(
+      h(Text, { bold: true }, 'Output', h(Text, { bold: false, dimColor: true }, run ? ` · ${taskId} · ${run.id} ${run.status === 'ended' ? 'ended' : 'live'}` : ` · ${taskId}`)),
+      events.length === 0 ? h(Text, { dimColor: true }, run ? 'Nothing yet.' : 'No runs yet.') : null,
+    ),
+    h(
+      Box,
+      { flexDirection: 'column', flexShrink: 1, justifyContent: 'flex-end', overflow: 'hidden' },
+      ...events.map((event) => h(Event, { key: event.id, event, oneLine: !whole })),
+    ),
   );
 }
 
-// An event as the conversation view shows it, or `oneLine` as the output
-// shows it: a glance, the conversation view having the whole.
+// An event whole, as the conversation view and a task's detail show it, or
+// `oneLine` as the pane under the task tree glances at it.
 export function Event({ event, oneLine = false }: { event: ConversationEvent; oneLine?: boolean }) {
   if (event.type === 'toolUse') {
-    return h(Box, { gap: 1, flexShrink: 0 }, h(Text, { color: 'cyan' }, `  ● ${event.tool}`), h(Text, { dimColor: true, wrap: 'truncate' }, event.summary));
+    return h(Box, { gap: 1, flexShrink: 0 }, h(Text, { color: 'cyan' }, `  ● ${event.tool}`), h(Text, { dimColor: true, wrap: 'truncate' }, oneLine ? flat(event.summary) : event.summary));
   }
   const operator = event.from === 'operator';
   return h(
     Box,
     { gap: 1, flexShrink: 0 },
     h(Box, { width: 6, flexShrink: 0 }, h(Text, { bold: true, color: operator ? 'green' : 'magenta' }, operator ? 'you' : 'agent')),
-    h(Text, oneLine ? { wrap: 'truncate' } : null, event.text),
+    oneLine ? h(Text, { wrap: 'truncate' }, flat(event.text)) : h(Text, null, event.text),
   );
+}
+
+// Text on one row: truncating cuts each of its lines, so a message's
+// paragraphs would each take a row and push the screen past the terminal.
+function flat(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
