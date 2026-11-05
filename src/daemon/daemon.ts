@@ -12,6 +12,7 @@ import {
   GitHubError,
   installationSettings,
   OPEN_PR,
+  PR_WRITE,
   PUSH,
   READ_ONLY,
   TICKET_WRITE,
@@ -53,6 +54,7 @@ import {
   type Readiness,
   type LifecycleAction,
   type LoopEvent,
+  type PrRead,
   type PublishEvent,
   type ReopenEvent,
   type Repository,
@@ -146,6 +148,9 @@ const TOKEN_REFRESH_MS = 10 * 60_000;
 const TOKEN_RETRY_MS = 60_000;
 // How often the daemon checks whether it is idle and fires overdue deadlines.
 const TICK_MS = 5_000;
+// How often the daemon reads the PRs of the roots In review (ADR 0011), besides
+// whenever a TUI attaches: the factory's only poll.
+export const PR_POLL_MS = 15 * 60_000;
 
 export interface Daemon {
   // Settles once the daemon has stopped, for whatever reason.
@@ -201,6 +206,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // tried again once the operator answers, or by the next daemon.
   const publishesStarted = new Set<string>();
   const publishesInFlight = new Set<string>();
+  // The In review roots whose PR this daemon is reading on GitHub, and when
+  // it next reads them all.
+  const prReadsInFlight = new Set<string>();
+  let nextPrPoll = clock.now() + PR_POLL_MS;
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
   let storedApp: Promise<FactoryApp | null> | null = null;
@@ -213,6 +222,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const stopTicking = clock.every(TICK_MS, () => {
     fireOverdueDeadlines();
     refreshBotTokens();
+    if (clock.now() >= nextPrPoll) pollPrs();
     if (needsAClock()) idleSince = null;
     else if ((idleSince ??= clock.now()) + (options.idleExitMs ?? IDLE_EXIT_MS) <= clock.now()) void stop();
   });
@@ -243,6 +253,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         case 'subscribe':
           subscribers.add(socket);
           send(socket, { type: 'snapshot', state: published });
+          pollPrs();
           break;
         case 'converse':
           void converse(socket, message.runId, message.follow ?? false);
@@ -298,6 +309,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return markDone(command);
       case 'cancel':
         return cancel(command);
+      case 'reopenPr':
+        return reopenPr(command.taskId);
       case 'openHandoff':
         return openHandoff(command.taskId);
       case 'handoff':
@@ -573,6 +586,64 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const refusal = await settle(action, new Set());
       return refusal ? { ok: false, reason: refusal } : { ok: true };
     });
+  }
+
+  // Reopen PR (ADR 0011): the daemon reopens the root's PR, closed unmerged,
+  // as the App, then the request that asked is answered. A refusal from
+  // GitHub leaves it open, saying why.
+  function reopenPr(taskId: string): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const action: LifecycleAction = { type: 'reopenPr', taskId };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      const { repo, pr } = lifecycle.tasks[taskId]!;
+      try {
+        const { token } = await appToken(repo, PR_WRITE);
+        await github.reopenPr(token, repo, pr!.number);
+      } catch (error) {
+        if (!isGitHubFailure(error)) throw error;
+        return { ok: false, reason: `The factory couldn’t reopen PR #${pr!.number} on GitHub as its App: ${error.message}` };
+      }
+      const refusal = await settle(action, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
+  }
+
+  // Reads the PR of each root In review on GitHub (ADR 0011), one at a time
+  // per root: what it found goes through the Lifecycle like any other event.
+  function pollPrs(): void {
+    nextPrPoll = clock.now() + PR_POLL_MS;
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (stopping || task.state !== 'in-review' || !task.pr || prReadsInFlight.has(task.id)) continue;
+      prReadsInFlight.add(task.id);
+      void readPr(task).then(
+        (event) =>
+          serially(async () => {
+            prReadsInFlight.delete(task.id);
+            // A root that moved on meanwhile refuses what was read: the next poll reads it again.
+            if (stopping || !event || (await settle(event, new Set()))) return;
+            // A setup task's work, say, has just landed on the base branch.
+            if (event.state === 'merged') await checkSkills(task.repo, { fetch: true });
+          }),
+        (error) => {
+          prReadsInFlight.delete(task.id);
+          throw error;
+        },
+      );
+    }
+  }
+
+  // Where the root's PR stands, read as the App with a read-only token, or
+  // null when GitHub couldn't say: the next poll asks again.
+  async function readPr(task: Task): Promise<PrRead | null> {
+    try {
+      const { token } = await appToken(task.repo, READ_ONLY);
+      return { type: 'prRead', taskId: task.id, state: await github.readPr(token, task.repo, task.pr!.number) };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return null;
+    }
   }
 
   // What deleting the root task's branch would lose, or null when nothing
@@ -1089,6 +1160,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const what = task.cleanup?.keepBranch ? `worktree at ${path}` : `worktree at ${path} and its branch ${branch}`;
       return failed(`The factory couldn’t remove ${task.id}’s ${what}: ${error.message}`);
     }
+    // What the root left on GitHub goes as the App (ADR 0011): a cancelled
+    // root's draft PR is closed, then its remote task branch deleted.
+    const remote = task.cleanup?.remote;
+    if (remote) {
+      try {
+        if (remote.closePr !== null) {
+          const { token } = await appToken(task.repo, PR_WRITE);
+          await github.closePr(token, task.repo, remote.closePr, closingPrComment(task));
+        }
+        const { token } = await appToken(task.repo, PUSH);
+        await github.deleteBranch(token, task.repo, remote.branch);
+      } catch (error) {
+        if (!isGitHubFailure(error)) throw error;
+        const what = remote.closePr === null ? `delete ${remote.branch}` : `close PR #${remote.closePr} and delete ${remote.branch}`;
+        return failed(`The factory couldn’t ${what} on GitHub as its App: ${error.message}`);
+      }
+    }
     return { type: 'cleanedUp', taskId: task.id, transcripts };
   }
 
@@ -1532,6 +1620,11 @@ function reopeningComment(task: Task): string {
     `Reopened: the agents factory’s task ${task.id} (${task.title}) was cancelled, so its work on the task branch ` +
     `\`${task.worktree!.branch}\` wasn’t merged.`
   );
+}
+
+// What closing a cancelled root's draft PR says on it (ADR 0011).
+function closingPrComment(task: Task): string {
+  return `Closed: the agents factory’s task ${task.id} (${task.title}) was cancelled.`;
 }
 
 // What `spawn_child` tells the agent about the child it spawned.

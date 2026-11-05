@@ -1,7 +1,7 @@
 // The GitHub port's contract, shared by the fake and the REST adapter so the
 // two can't drift apart.
 import { describe, expect, test } from 'vitest';
-import { GitHubError, OPEN_PR, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub } from './github.ts';
+import { GitHubError, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub } from './github.ts';
 
 export type GitHubFixture = {
   github: GitHub;
@@ -203,6 +203,51 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       await expect(
         github.openDraftPr(token, { repo: installedRepo, head: branch, base: baseBranch, title: 'Never opened', body: '', assignee: operator }),
       ).rejects.toThrow(GitHubError);
+    });
+
+    test('a read-only token reads where a PR stands, and a PR-writing token closes it, leaves it closed when closed again, and reopens it', async () => {
+      const { github, app, installedRepo, clone, operator, baseBranch } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Closed and reopened by the contract test.\n' });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test PR', body: '', assignee: operator };
+      const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
+      const read = (await github.mintToken(app, installedRepo, READ_ONLY)).token;
+      const write = (await github.mintToken(app, installedRepo, PR_WRITE)).token;
+
+      expect(await github.readPr(read, installedRepo, number)).toBe('open');
+      await expect(github.closePr(read, installedRepo, number, 'A read-only token can’t close this.')).rejects.toThrow(GitHubError);
+
+      await github.closePr(write, installedRepo, number, 'Closed by the contract test.');
+      expect(await github.readPr(read, installedRepo, number)).toBe('closed');
+      await github.closePr(write, installedRepo, number, 'Closed again by the contract test.');
+      expect(await github.readPr(read, installedRepo, number)).toBe('closed');
+
+      await github.reopenPr(write, installedRepo, number);
+      expect(await github.readPr(read, installedRepo, number)).toBe('open');
+      await github.closePr(write, installedRepo, number, 'Closed by the contract test.');
+    });
+
+    test('a push token deletes a pushed task branch, and deleting it again is no error, while a read-only token can’t', async () => {
+      const { github, app, installedRepo, clone } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Deleted by the contract test.\n' });
+      const { token } = await github.mintToken(app, installedRepo, PUSH);
+      await github.push(token, { clonePath: clone.path, repo: installedRepo, branch });
+
+      await expect(github.deleteBranch((await github.mintToken(app, installedRepo, READ_ONLY)).token, installedRepo, branch)).rejects.toThrow(GitHubError);
+      expect(await clone.remoteTip(branch)).not.toBeNull();
+
+      await github.deleteBranch(token, installedRepo, branch);
+      expect(await clone.remoteTip(branch)).toBeNull();
+      await github.deleteBranch(token, installedRepo, branch);
+    });
+
+    test('refuses to delete a branch that isn’t a task branch', async () => {
+      const { github, app, installedRepo, baseBranch } = await makeFixture();
+      const { token } = await github.mintToken(app, installedRepo, PUSH);
+
+      await expect(github.deleteBranch(token, installedRepo, baseBranch)).rejects.toThrow(`The factory pushes only task branches (factory/…), not ${baseBranch}.`);
     });
 
     test('refuses an App whose private key isn’t the one GitHub issued', async () => {

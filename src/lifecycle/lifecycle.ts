@@ -8,7 +8,7 @@
 // (ADR 0006); child tasks arrive with their own slice.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
-import type { Issue, PullRequest } from '../github/github.ts';
+import type { Issue, PrState, PullRequest } from '../github/github.ts';
 import { artifactKindsIn, fillOpening, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { correction, grown, merged, NO_USAGE, overall, plus, tokensOf, type ModelUsage, type Usage } from '../usage/usage.ts';
@@ -134,9 +134,14 @@ export type Loop = {
 };
 
 // An ended task's cleanup while it hasn't finished (ADR 0011): why it last
-// failed, if it did, and whether its local task branch stays, as Keep branch
-// leaves it. Cleanups stored before Cancel cleaned up delete it.
-export type Cleanup = { problem: string | null; keepBranch?: boolean };
+// failed, if it did, whether its local task branch stays, as Keep branch
+// leaves it, and what goes on GitHub. Cleanups stored before Cancel cleaned
+// up delete it.
+export type Cleanup = { problem: string | null; keepBranch?: boolean; remote?: RemoteCleanup | null };
+// What a root with a draft PR leaves on GitHub once it ends: its remote task
+// branch, which the factory deletes as its App, and, once cancelled, its PR,
+// which it closes first with a comment.
+export type RemoteCleanup = { branch: string; closePr: number | null };
 // What Cancel does with a task branch holding commits that exist nowhere
 // else: Keep branch (the default) or Discard work.
 export type BranchChoice = 'keep' | 'discard';
@@ -456,6 +461,9 @@ export type OperatorCommand =
   // level (ADR 0007): the daemon pushes its task branch, then opens its
   // draft PR, unless it has one already, which the push updates.
   | { type: 'pushAndOpenPr'; taskId: string }
+  // Reopens the root's PR, closed without merging, as the factory's App: the
+  // daemon reopens it on GitHub first. The root stays In review.
+  | { type: 'reopenPr'; taskId: string }
   // Finishes a root In review. Unless `anyway`, the daemon first checks that
   // its task branch is merged into the base branch on origin.
   | { type: 'markDone'; taskId: string; anyway?: boolean }
@@ -638,6 +646,9 @@ export type PublishEvent =
   | { type: 'prOpened'; taskId: string; pr: PullRequest }
   | { type: 'publishFailed'; taskId: string; step: Publishing['step']; reason: string };
 
+// What the daemon read of an In review root's PR on GitHub (ADR 0011).
+export type PrRead = { type: 'prRead'; taskId: string; state: PrState };
+
 export type LifecycleAction =
   | OperatorCommand
   | RunEvent
@@ -652,6 +663,7 @@ export type LifecycleAction =
   | LoopEvent
   | ReopenEvent
   | PublishEvent
+  | PrRead
   | CleanupEvent
   | ArtifactsSeen;
 
@@ -1326,6 +1338,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
         // Requests stored before they named their call have no rule to add.
         if (allow === 'always' && !request.permission) return 'This request doesn’t name its call: allow it once or for this task.';
       }
+      if (request.kind === 'pr-closed-unmerged') return `${task.id}’s PR was closed without merging: cancel the task, or reopen its PR.`;
       if (action.skip && !(request.kind === 'failure' && failedIteration(task))) return 'Only a failed iteration’s ticket can be skipped.';
       const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
       return answered ? null : 'Answer every question on the card.';
@@ -1344,6 +1357,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       // HITL work acts as the operator (ADR 0004): the App publishes only L1 work.
       if (task.autonomy !== 'L1') return `${task.id} is HITL work, which stays yours: push its branch and open its PR yourself.`;
       return task.publishing ? `${task.id} is already pushing and opening its draft PR.` : null;
+    case 'reopenPr':
+      if (task.state !== 'in-review') return `${task.id} is not in review.`;
+      return openRequest(state, task)?.kind === 'pr-closed-unmerged' ? null : `${task.id}’s PR isn’t closed unmerged.`;
+    case 'prRead':
+      if (task.state !== 'in-review' || !task.pr) return `${task.id} isn’t in review with a PR.`;
+      return publishingRefusal(task);
     case 'cancel':
       if (action.branch !== undefined && !BRANCH_CHOICES.includes(action.branch)) return 'Keep the branch, or discard the work.';
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
@@ -1457,6 +1476,19 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'cleanupFailed':
       return task.cleanup ? null : `${task.id} has no cleanup under way.`;
   }
+}
+
+// A root In review ends Done: the daemon archives its transcripts, then
+// removes its worktree and branch, and the remote task branch of its PR.
+function finishRoot(task: Task): void {
+  task.state = 'done';
+  task.progress = null;
+  if (task.worktree) task.cleanup = { problem: null, remote: task.pr ? { branch: task.worktree.branch, closePr: null } : null };
+}
+
+// What a pr-closed-unmerged request tells the operator.
+function prClosedReason(task: Task): string {
+  return `PR #${task.pr!.number} of ${task.id} was closed without merging. Cancel the task, or reopen the PR.`;
 }
 
 // The root's Push & open draft PR stopped on `problem`: a github-write
@@ -1592,7 +1624,11 @@ function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: nu
     if (closed.length) cancelled.reopening = { tickets: closed.map(({ ref }) => ref), problem: null };
     // The daemon archives its transcripts, then removes its worktree and
     // branch, unless the operator kept it.
-    if (cancelled.worktree) cancelled.cleanup = { problem: null, keepBranch: cancelled === task && keepBranch };
+    // A root's draft PR is closed, and its remote task branch deleted.
+    if (cancelled.worktree) {
+      const remote = cancelled.pr ? { branch: cancelled.worktree.branch, closePr: cancelled.pr.number } : null;
+      cancelled.cleanup = { problem: null, keepBranch: cancelled === task && keepBranch, remote };
+    }
   }
 }
 
@@ -2155,10 +2191,23 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'markDone':
       stopPublishing(task, request);
-      task.state = 'done';
-      task.progress = null;
-      // The daemon archives its transcripts, then removes its worktree and branch.
-      if (task.worktree) task.cleanup = { problem: null };
+      finishRoot(task);
+      break;
+    case 'prRead':
+      if (action.state === 'merged') {
+        // Merged, the root is Done (ADR 0011), whatever was left to ask.
+        stopPublishing(task, request);
+        finishRoot(task);
+      } else if (action.state === 'closed') {
+        // Never cancelled on the factory's own say: the operator chooses.
+        if (!request) addRequest(state, task, lastRun(state, task), 'pr-closed-unmerged', false, prClosedReason(task), at);
+      } else if (request?.kind === 'pr-closed-unmerged') {
+        // Reopened on GitHub: nothing is left to ask.
+        request.status = 'closed';
+      }
+      break;
+    case 'reopenPr':
+      request!.status = 'answered';
       break;
     case 'cleanedUp':
       task.cleanup = null;
