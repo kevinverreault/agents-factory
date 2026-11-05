@@ -325,7 +325,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         : help
           ? fixed(h(Help))
         : drilled
-          ? fixed(h(TaskDetail, { connection, state, task: drilled, from: TAB_NAMES[tab] }))
+          ? h(TaskDetail, { connection, state, task: drilled, from: TAB_NAMES[tab] })
         : tab === 'tasks'
           ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor, retries: failedTask(state, tasks[cursor]) })
           : tab === 'needs-you'

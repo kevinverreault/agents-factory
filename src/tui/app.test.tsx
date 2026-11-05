@@ -2249,6 +2249,49 @@ describe('the screens view', () => {
     });
   });
 
+  test('a task’s detail shows its conversation whole: every message in full, the user’s and the agent’s', async () => {
+    const runs = { R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
+    const { app, connection } = await started({ ...factoryState([implementing]), runs });
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T2'));
+    // Wider than the terminal, so it wraps.
+    const wraps = Array.from({ length: 36 }, (_, i) => `word${i}`).join(' ');
+    connection.serveConversation(
+      'R3',
+      { type: 'message', id: 'E1', from: 'operator', text: `Keep the schema private.\nAnd ${wraps} end of mine.` },
+      { type: 'message', id: 'E2', from: 'agent', text: `Done.\n\nThe store ${wraps} end of the agent’s.` },
+    );
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).not.toContain('…');
+      expect(frame).toMatch(/you\s+Keep the schema private\.\n\s+And word0/);
+      expect(unwrapped(frame)).toContain(`And ${wraps} end of mine.`);
+      expect(unwrapped(frame)).toContain(`The store ${wraps} end of the agent’s.`);
+    });
+  });
+
+  test('on a short terminal a task’s detail keeps its latest messages in view, older ones scrolling off over the runs', async () => {
+    const runs = { R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
+    const { app, connection } = await started({ ...factoryState([implementing]), runs });
+    resize(app, 20);
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T2'));
+    connection.serveConversation(
+      'R3',
+      ...Array.from({ length: 30 }, (_, i) => ({ type: 'message' as const, id: `E${i}`, from: 'agent' as const, text: `Step ${i}.\nIts second line.` })),
+    );
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(20);
+      expect(frame).toContain('Tasks › T2');
+      expect(frame).toContain('Step 29.');
+      expect(frame).not.toContain('Step 0.');
+      expect(frame).toContain('esc back');
+    });
+  });
+
   test('3 opens the Runs screen: every run, live ones first and then newest first; enter drills into its task and esc comes back to it', async () => {
     const runs = {
       R1: ran('R1', 'T2', 1, { outcome: 'failed' }),

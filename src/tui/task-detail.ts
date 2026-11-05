@@ -1,5 +1,5 @@
 // A task's detail, drilled into from a screen with `enter`: what it is, its
-// runs, its usage and artifacts, and its output.
+// runs, its usage and artifacts, and its output whole.
 import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -8,9 +8,8 @@ import { overall, tokensOf } from '../usage/usage.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { Output } from './output.ts';
 import { runOutcome, runsOf } from './runs.ts';
+import { fixed } from './screen.ts';
 import { dollars, tokens, TaskUsage } from './usage.ts';
-
-const OUTPUT_LINES = 12;
 
 // `from` names the screen `esc` pops back to.
 export function TaskDetail({ connection, state, task, from }: { connection: FactoryConnection; state: FactoryState; task: TaskView; from: string }) {
@@ -27,21 +26,24 @@ export function TaskDetail({ connection, state, task, from }: { connection: Fact
   return h(
     Box,
     { flexDirection: 'column' },
-    h(Text, { dimColor: true, wrap: 'truncate' }, `${from} › ${task.id} ${task.title}`),
-    h(Box, { gap: 2, marginTop: 1 }, h(Text, { bold: true }, task.id), h(Text, { wrap: 'truncate' }, task.title)),
-    h(Text, { dimColor: true, wrap: 'truncate' }, facts.filter(Boolean).join(' · ')),
-    task.progress ? h(Text, { wrap: 'truncate' }, task.progress) : null,
-    h(
-      Box,
-      { flexDirection: 'column', marginY: 1 },
-      h(Text, { bold: true }, 'Runs'),
-      runs.length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
-      ...runs.map((run) => h(RunRow, { key: run.id, run })),
+    // On a short screen only the output gives way.
+    fixed(
+      h(Text, { dimColor: true, wrap: 'truncate' }, `${from} › ${task.id} ${task.title}`),
+      h(Box, { gap: 2, marginTop: 1 }, h(Text, { bold: true }, task.id), h(Text, { wrap: 'truncate' }, task.title)),
+      h(Text, { dimColor: true, wrap: 'truncate' }, facts.filter(Boolean).join(' · ')),
+      task.progress ? h(Text, { wrap: 'truncate' }, task.progress) : null,
+      h(
+        Box,
+        { flexDirection: 'column', marginY: 1 },
+        h(Text, { bold: true }, 'Runs'),
+        runs.length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
+        ...runs.map((run) => h(RunRow, { key: run.id, run })),
+      ),
+      h(TaskUsage, { state, taskId: task.id }),
+      h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id) }),
     ),
-    h(TaskUsage, { state, taskId: task.id }),
-    h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id) }),
-    h(Output, { connection, state, taskId: task.id, lines: OUTPUT_LINES }),
-    h(Text, { dimColor: true }, 'enter open conversation · c converse or take over · a answer · x cancel · esc back · ? keys'),
+    h(Output, { connection, state, taskId: task.id }),
+    fixed(h(Text, { dimColor: true }, 'enter open conversation · c converse or take over · a answer · x cancel · esc back · ? keys')),
   );
 }
 
