@@ -262,6 +262,9 @@ export type Task = {
   // What its next AFK run opens on instead of carrying on, such as the
   // answers to a question its parked run asked.
   resumeWith?: string | null;
+  // The awaited children whose reports its next run opens on, AFK or taken
+  // over, once they all reported (ADR 0009).
+  reportsDue?: string[] | null;
   // The rules the operator allowed for this task (ADR 0007): its L1 runs
   // make calls they cover without asking. Tasks stored before them have none.
   allowRules?: string[];
@@ -1551,21 +1554,25 @@ export function awaitedChildren(state: Lifecycle, task: Task): Task[] {
 // Queues each task waiting on children whose awaited children have all
 // reported (Done or Cancelled; a failed one still waits on the operator),
 // as continuing work whose next run resumes its session on one report per
-// awaited child. Their branches are already in its worktree's clone.
+// awaited child. At L1 their branches are already in its worktree's clone;
+// fetching them into an L2 container arrives with the sandbox.
 function wakeParents(state: Lifecycle): void {
   for (const task of Object.values(state.tasks)) {
     if (task.state !== 'awaiting-children') continue;
     const awaited = awaitedChildren(state, task);
     if (!awaited.every(isTerminal)) continue;
     for (const child of awaited) child.child!.delivered = true;
-    task.resumeWith = reportsOpening(task, awaited);
+    task.reportsDue = awaited.map((child) => child.id);
     task.state = 'queued';
   }
 }
 
 // What a parent resumed from waiting on children opens on: each awaited
-// child's report, and the branches it is to merge.
-function reportsOpening(task: Task, children: Task[]): string {
+// child's report, and the branches it is to merge, before what the run
+// would open on anyway: an AFK run carries on unattended, and a run the
+// operator took over is theirs to steer.
+function reportsOpening(state: Lifecycle, task: Task, due: string[]): string {
+  const children = due.map((id) => state.tasks[id]!);
   const reports = children.map((child) => {
     const report = child.child!.report!;
     const { commits } = report;
@@ -1586,7 +1593,6 @@ function reportsOpening(task: Task, children: Task[]): string {
     `Every awaited child of ${task.id} has reported. Merge each branch that has commits into ${task.worktree?.branch ?? 'your branch'} with a local ` +
       '`git merge`, resolving any conflicts, and carry on from their reports. A merge you can’t resolve fails this run: leave it unresolved, say why, and end.',
     ...reports,
-    AFK_RESUME,
   ].join('\n\n');
 }
 
@@ -1851,6 +1857,9 @@ function startRun(
     resumesSession = task.runIds.length > 0 && !task.newSession,
   } = {},
 ): void {
+  // A task back from waiting on children opens on their reports first.
+  if (task.reportsDue?.length) opening = [reportsOpening(state, task, task.reportsDue), opening].filter(Boolean).join('\n\n');
+  task.reportsDue = null;
   task.resumeWith = null;
   task.newSession = false;
   const tier = nextTier(task);

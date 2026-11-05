@@ -205,6 +205,7 @@ describe('awaited children', () => {
     expect(run.firstMessage!.match(/^### T\d/gm)).toEqual(['### T2', '### T3']);
     expect(run.firstMessage).toContain('The handler is in.');
     expect(run.firstMessage).toContain(`git merge ${branch}--c1`);
+    expect(run.firstMessage).toMatch(/Carry on, unattended, from where this conversation left off\.$/);
     // The child's worktree is gone, but its branch is there to merge.
     expect((await factory.git.worktrees(clone)).map((worktree) => worktree.branch)).toEqual([branch]);
     expect(factory.git.branchTip(clone, `${branch}--c1`)).toBe(childTip);
@@ -247,6 +248,28 @@ describe('awaited children', () => {
     const run = factory.executor.started.find((started) => started.runId === resumed.tasks.T1!.liveRunId)!;
     expect(run.firstMessage).toContain('- Status: cancelled');
     expect(run.firstMessage).toContain('- Branch: no commits to merge.');
+  });
+
+  test('a parent taken over once its children reported still gets their reports, with no unattended instruction', async () => {
+    const { factory, operator, tui } = await running();
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    // Another task holds the one slot left, so the woken parent stays queued.
+    const other = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'unattended', prompt: 'Something else.', tier: 'sonnet' });
+    expect(other.ok).toBe(true);
+    await tui.until((state) => !!state.tasks.T3?.liveRunId);
+    await operator.send({ type: 'setSlotCap', cap: 1 });
+    factory.executor.report('R2', { type: 'resultReported', summary: 'The handler is in.', status: 'done', notes: '' });
+    factory.executor.report('R2', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Queued');
+
+    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: true });
+
+    const taken = await tui.until((state) => state.tasks.T1?.mode === 'HITL' && !!state.tasks.T1.liveRunId);
+    const run = factory.executor.started.find((started) => started.runId === taken.tasks.T1!.liveRunId)!;
+    expect(run.firstMessage).toContain('The handler is in.');
+    expect(run.firstMessage).not.toContain('unattended');
   });
 
   test('a Ralph iteration waiting on children resumes the same ticket afterwards', async () => {

@@ -1482,7 +1482,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // The run event, failed when it ends a guarded run that broke the git
-  // invariants of its snapshot (ADR 0007), saying what broke.
+  // invariants of its snapshot (ADR 0007), saying what broke. A run that
+  // completed within them has the child branches it merged deleted first.
   async function checkedAfterRun(event: RunEvent): Promise<RunEvent> {
     const guard = guarded.get(event.runId);
     if (!guard || (event.type !== 'runCompleted' && event.type !== 'runFailed')) return event;
