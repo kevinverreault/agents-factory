@@ -647,7 +647,7 @@ export type PublishEvent =
   | { type: 'publishFailed'; taskId: string; step: Publishing['step']; reason: string };
 
 // What the daemon read of an In review root's PR on GitHub (ADR 0011).
-export type PrRead = { type: 'prRead'; taskId: string; state: PrState };
+export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState };
 
 export type LifecycleAction =
   | OperatorCommand
@@ -663,7 +663,7 @@ export type LifecycleAction =
   | LoopEvent
   | ReopenEvent
   | PublishEvent
-  | PrRead
+  | PrReadEvent
   | CleanupEvent
   | ArtifactsSeen;
 
@@ -739,6 +739,18 @@ export function openRequest(state: Lifecycle, task: Task): AttentionRequest | un
 // The open request about the repository itself, if any.
 export function openRepoRequest(state: Lifecycle, repo: string): AttentionRequest | undefined {
   return Object.values(state.requests).find((request) => request.repo === repo && request.taskId === null && request.status === 'open');
+}
+
+// Whether the root is In review with a PR, whose state on GitHub the daemon
+// reads (ADR 0011).
+export function waitsOnPr(task: Task): boolean {
+  return task.state === 'in-review' && !!task.pr;
+}
+
+// The root's task branch, if the factory pushed it to GitHub: it has its
+// PR, or its Push & open draft PR got past the push.
+export function pushedBranch(task: Task): string | null {
+  return task.worktree && (task.pr || task.publishing?.step === 'open-pr') ? task.worktree.branch : null;
 }
 
 // The registered repository the operator last launched a task in, if any.
@@ -1361,7 +1373,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
       return openRequest(state, task)?.kind === 'pr-closed-unmerged' ? null : `${task.id}’s PR isn’t closed unmerged.`;
     case 'prRead':
-      if (task.state !== 'in-review' || !task.pr) return `${task.id} isn’t in review with a PR.`;
+      if (!waitsOnPr(task)) return `${task.id} isn’t in review with a PR.`;
       return publishingRefusal(task);
     case 'cancel':
       if (action.branch !== undefined && !BRANCH_CHOICES.includes(action.branch)) return 'Keep the branch, or discard the work.';
@@ -1479,22 +1491,15 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
 }
 
 // A root In review ends Done, its Push & open draft PR stopped: the daemon
-// archives its transcripts, then removes its worktree and branch, and the
-// remote task branch the factory pushed.
-function finishRoot(task: Task, request: AttentionRequest | undefined): void {
-  const remote = remoteCleanup(task, { closePr: false });
+// archives its transcripts, then removes its worktree and branch. Once its
+// work is merged, the task branch the factory pushed goes too; a root
+// finished anyway keeps it, as the only remote copy of work still unmerged.
+function finishRoot(task: Task, request: AttentionRequest | undefined, { merged }: { merged: boolean }): void {
+  const pushed = pushedBranch(task);
   stopPublishing(task, request);
   task.state = 'done';
   task.progress = null;
-  if (task.worktree) task.cleanup = { problem: null, remote };
-}
-
-// What the ending root leaves on GitHub, if the factory pushed its task
-// branch: it has its PR, or its Push & open draft PR got past the push.
-// `closePr` closes that PR too, as Cancel does.
-function remoteCleanup(task: Task, { closePr }: { closePr: boolean }): RemoteCleanup | null {
-  if (!task.worktree || !(task.pr || task.publishing?.step === 'open-pr')) return null;
-  return { branch: task.worktree.branch, prToClose: closePr ? (task.pr?.number ?? null) : null };
+  if (task.worktree) task.cleanup = { problem: null, remote: merged && pushed ? { branch: pushed, prToClose: null } : null };
 }
 
 // What a pr-closed-unmerged request tells the operator.
@@ -1628,7 +1633,8 @@ function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: nu
     cancelled.loop = null;
     cancelled.progress = null;
     // A root's draft PR is closed, and the task branch the factory pushed deleted.
-    const remote = remoteCleanup(cancelled, { closePr: true });
+    const pushed = pushedBranch(cancelled);
+    const remote = pushed ? { branch: pushed, prToClose: cancelled.pr?.number ?? null } : null;
     cancelled.publishing = null;
     cancelled.state = 'cancelled';
     if (cancelled.child) closeReport(cancelled, { summary: 'Cancelled before it finished.', status: 'cancelled', commits: [], outcome: 'cancelled' }, { forced: true });
@@ -2199,20 +2205,25 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.state = 'queued';
       break;
     case 'markDone':
-      finishRoot(task, request);
+      // Unless finished anyway, the daemon found the task branch merged.
+      finishRoot(task, request, { merged: !action.anyway });
       break;
-    case 'prRead':
+    case 'prRead': {
+      const asked = request?.kind === 'pr-closed-unmerged';
       if (action.state === 'merged') {
         // Merged, the root is Done (ADR 0011), whatever was left to ask.
-        finishRoot(task, request);
-      } else if (action.state === 'closed') {
-        // Never cancelled on the factory's own say: the operator chooses.
-        if (!request) addRequest(state, task, lastRun(state, task), 'pr-closed-unmerged', false, prClosedReason(task), at);
-      } else if (request?.kind === 'pr-closed-unmerged') {
+        finishRoot(task, request, { merged: true });
+      } else if (action.state === 'closed' && !asked) {
+        // A failed push to the closed PR has nothing left to update: the
+        // closed PR asks instead. Never cancelled on the factory's own say.
+        stopPublishing(task, request);
+        addRequest(state, task, lastRun(state, task), 'pr-closed-unmerged', false, prClosedReason(task), at);
+      } else if (action.state === 'open' && asked) {
         // Reopened on GitHub: nothing is left to ask.
-        request.status = 'closed';
+        request!.status = 'closed';
       }
       break;
+    }
     case 'reopenPr':
       request!.status = 'answered';
       break;

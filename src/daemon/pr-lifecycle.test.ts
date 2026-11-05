@@ -22,9 +22,11 @@ const clone = resolve('/clones/widgets');
 const branch = 'factory/T1-add-a-logout-button';
 const MINUTE = 60_000;
 
+type Factory = { factory: TestFactory; operator: FactoryConnection; tui: Watched };
+
 // A factory with T1, an L1 root In review whose draft PR #101 the factory
 // opened from its pushed task branch.
-async function withDraftPr(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
+async function withDraftPr(): Promise<Factory> {
   const factory = await startTestFactory();
   factories.push(factory);
   mkdirSync(factory.paths.presetsDir, { recursive: true });
@@ -35,17 +37,24 @@ async function withDraftPr(): Promise<{ factory: TestFactory; operator: FactoryC
   await factory.registerRepo();
   const operator = await factory.attach();
   const tui = watch(operator);
-  const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'unattended', prompt: 'Add a logout button.' });
-  if (!launched.ok) throw new Error(launched.reason);
-  await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
-  const worktree = tui.state().tasks.T1!.worktree!;
-  factory.git.editFile(worktree, 'src/logout.ts', 'export {};\n');
-  factory.git.commitAll(worktree);
-  factory.executor.report('R1', { type: 'runCompleted' });
-  await tui.until((state) => state.tasks.T1?.label === 'In review');
+  const launched = { factory, operator, tui };
+  await inReview(launched, 'Add a logout button.', 'T1', 'R1');
   await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' });
   await tui.until((state) => state.tasks.T1?.pr !== null);
-  return { factory, operator, tui };
+  return launched;
+}
+
+// Launches `prompt` as the root `taskId`, whose build run `runId` commits a
+// file and completes, putting it In review.
+async function inReview({ factory, operator, tui }: Factory, prompt: string, taskId: string, runId: string): Promise<void> {
+  const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'unattended', prompt });
+  if (!launched.ok) throw new Error(launched.reason);
+  await tui.until((state) => state.tasks[taskId]?.liveRunId === runId);
+  const worktree = tui.state().tasks[taskId]!.worktree!;
+  factory.git.editFile(worktree, `src/${taskId}.ts`, 'export {};\n');
+  factory.git.commitAll(worktree);
+  factory.executor.report(runId, { type: 'runCompleted' });
+  await tui.until((state) => state.tasks[taskId]?.label === 'In review');
 }
 
 describe('a merged PR', () => {
@@ -159,7 +168,7 @@ describe('a PR closed without merging', () => {
     const tui = watch(await factory.attach());
     await tui.until((state) => state.attentionQueue.length === 2);
 
-    expect(await operator.send({ type: 'cancel', taskId: 'T1' })).toEqual({ ok: true });
+    expect(await operator.send({ type: 'cancel', taskId: 'T1', branch: 'discard' })).toEqual({ ok: true });
 
     const cancelled = await tui.until((state) => state.tasks.T1?.label === 'Cancelled' && state.tasks.T1.cleanup === null);
     expect(cancelled.attentionQueue).toEqual([]);
@@ -172,7 +181,7 @@ describe('cancelling a root with a draft PR', () => {
   test('closes the PR with a comment, then deletes the remote task branch, both as the App', async () => {
     const { factory, operator, tui } = await withDraftPr();
 
-    expect(await operator.send({ type: 'cancel', taskId: 'T1' })).toEqual({ ok: true });
+    expect(await operator.send({ type: 'cancel', taskId: 'T1', branch: 'discard' })).toEqual({ ok: true });
 
     await tui.until((state) => state.tasks.T1?.label === 'Cancelled' && state.tasks.T1.cleanup === null);
     expect(factory.github.prState(101)).toEqual({ state: 'closed', comments: ['Closed: the agents factory’s task T1 (Add a logout button.) was cancelled.'] });
@@ -186,7 +195,7 @@ describe('cancelling a root with a draft PR', () => {
     const { factory, operator, tui } = await withDraftPr();
     factory.github.unreachable('GitHub couldn’t be reached: ECONNRESET');
 
-    await operator.send({ type: 'cancel', taskId: 'T1' });
+    await operator.send({ type: 'cancel', taskId: 'T1', branch: 'discard' });
 
     const failed = await tui.until((state) => !!state.tasks.T1?.cleanup?.problem);
     expect(failed.tasks.T1?.cleanup?.problem).toBe(
@@ -206,17 +215,10 @@ describe('cancelling a root with a draft PR', () => {
 
 describe('cancelling a root whose draft PR couldn’t be opened', () => {
   test('deletes the task branch the factory pushed', async () => {
-    const { factory, operator, tui } = await withDraftPr();
+    const launched = await withDraftPr();
+    const { factory, operator, tui } = launched;
     // A second root, pushed but with no PR: GitHub refused to open it.
-    await operator.send({ type: 'cancel', taskId: 'T1', branch: 'discard' });
-    await tui.until((state) => state.tasks.T1?.cleanup === null);
-    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'unattended', prompt: 'Add a footer.' });
-    await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
-    const worktree = tui.state().tasks.T2!.worktree!;
-    factory.git.editFile(worktree, 'src/footer.ts', 'export {};\n');
-    factory.git.commitAll(worktree);
-    factory.executor.report('R2', { type: 'runCompleted' });
-    await tui.until((state) => state.tasks.T2?.label === 'In review');
+    await inReview(launched, 'Add a footer.', 'T2', 'R2');
     factory.github.failPullRequests('GitHub couldn’t be reached: ECONNRESET');
     await operator.send({ type: 'pushAndOpenPr', taskId: 'T2' });
     await tui.until((state) => state.attentionQueue.some((item) => item.kind === 'attention' && item.taskId === 'T2'));
@@ -230,14 +232,97 @@ describe('cancelling a root whose draft PR couldn’t be opened', () => {
   });
 });
 
+describe('cancelling a published root whose work isn’t on the base branch', () => {
+  test('asks to keep the branch or discard the work: its remote copy goes with the cancel', async () => {
+    const { operator } = await withDraftPr();
+
+    expect(await operator.send({ type: 'cancel', taskId: 'T1' })).toEqual({
+      ok: false,
+      reason: `${branch} has 1 commit that exists nowhere else once its branch on GitHub is deleted.`,
+      choose: [
+        { label: 'Keep branch', command: { type: 'cancel', taskId: 'T1', branch: 'keep' } },
+        { label: 'Discard work', command: { type: 'cancel', taskId: 'T1', branch: 'discard' } },
+      ],
+    });
+  });
+
+  test('Keep branch keeps the local branch, while the remote one goes', async () => {
+    const { factory, operator, tui } = await withDraftPr();
+
+    await operator.send({ type: 'cancel', taskId: 'T1', branch: 'keep' });
+
+    await tui.until((state) => state.tasks.T1?.label === 'Cancelled' && state.tasks.T1.cleanup === null);
+    expect(factory.git.branchTip(clone, branch)).not.toBeNull();
+    expect(factory.git.originTip(clone, branch)).toBeNull();
+  });
+});
+
 describe('Mark done on a root with a PR', () => {
-  test('deletes its remote task branch too', async () => {
+  test('once its branch is merged, deletes its remote task branch too', async () => {
+    const { factory, operator, tui } = await withDraftPr();
+    factory.git.merge(clone, branch, 'main');
+
+    expect(await operator.send({ type: 'markDone', taskId: 'T1' })).toEqual({ ok: true });
+
+    await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.cleanup === null);
+    expect(factory.git.originTip(clone, branch)).toBeNull();
+  });
+
+  test('finished anyway, unmerged, keeps its remote task branch: the work may still be wanted', async () => {
     const { factory, operator, tui } = await withDraftPr();
 
     expect(await operator.send({ type: 'markDone', taskId: 'T1', anyway: true })).toEqual({ ok: true });
 
     await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.cleanup === null);
-    expect(factory.git.originTip(clone, branch)).toBeNull();
-    expect(factory.github.prState(101).state).toBe('open');
+    expect(factory.git.originTip(clone, branch)).not.toBeNull();
+    expect(factory.github.branchDeletes).toEqual([]);
+  });
+});
+
+describe('the 15-minute poll', () => {
+  test('keeps the daemon up with no TUI attached while a root waits on its PR', async () => {
+    const { factory, operator } = await withDraftPr();
+    operator.close();
+    const probe = await factory.attach();
+    await expect.poll(async () => ((await probe.send({ type: 'daemon.status' })) as { value: { attachedTuis: number } }).value.attachedTuis).toBe(0);
+    probe.close();
+    factory.github.merge(101);
+
+    factory.clock.advance(15 * MINUTE);
+
+    await expect.poll(() => factory.git.originTip(clone, branch)).toBeNull();
+  });
+});
+
+describe('a PR closed while a push to it failed', () => {
+  test('raises the pr-closed-unmerged entry in place of the failed push’s', async () => {
+    const { factory, operator, tui } = await withDraftPr();
+    factory.github.unreachable('GitHub couldn’t be reached: ECONNRESET');
+    await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' });
+    await tui.until((state) => state.attentionQueue.some((item) => item.kind === 'attention' && item.attention === 'github-write'));
+    factory.github.unreachable(null);
+    factory.github.closeUnmerged(101);
+
+    watch(await factory.attach());
+
+    const asked = await tui.until((state) => state.attentionQueue.some((item) => item.kind === 'attention' && item.attention === 'pr-closed-unmerged'));
+    expect(asked.attentionQueue).toEqual([expect.objectContaining({ attention: 'pr-closed-unmerged' }), { kind: 'review', taskId: 'T1' }]);
+    expect(asked.tasks.T1).toMatchObject({ label: 'In review', publishing: null });
+  });
+});
+
+describe('Reopen PR on a PR whose branch GitHub no longer has', () => {
+  test('says why it can’t, and the entry stays', async () => {
+    const { factory, operator } = await withDraftPr();
+    factory.github.closeUnmerged(101);
+    factory.git.deleteOnOrigin('acme/widgets', branch);
+    const tui = watch(await factory.attach());
+    await tui.until((state) => state.attentionQueue.length === 2);
+
+    expect(await operator.send({ type: 'reopenPr', taskId: 'T1' })).toEqual({
+      ok: false,
+      reason: `The factory couldn’t reopen PR #101 on GitHub as its App: ${branch} is gone from GitHub, so #101 can’t be reopened. Push it again first, or cancel the task.`,
+    });
+    expect(tui.state().attentionQueue).toHaveLength(2);
   });
 });

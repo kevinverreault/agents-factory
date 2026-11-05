@@ -133,6 +133,11 @@ export class FakeGit implements Git {
   }
 
   // The clones whose origin is the repository on GitHub.
+  // Whether GitHub has the repository's `branch`.
+  onOrigin(repo: string, branch: string): boolean {
+    return this.clonesOf(repo).some((clone) => clone.origin.has(branch));
+  }
+
   private clonesOf(repo: string): FakeClone[] {
     return [...this.clones.values()].filter(({ originUrl }) => originUrl === `https://github.com/${repo}.git`);
   }
@@ -199,10 +204,11 @@ export class FakeGit implements Git {
     return false;
   }
 
-  async unpushed(clonePath: string, branch: string): Promise<string[]> {
+  async unpushed(clonePath: string, branch: string, { besides }: { besides?: string } = {}): Promise<string[]> {
     const clone = this.cloneAt(clonePath);
     const onOrigin = new Set<string>();
-    for (const tip of clone.fetched.values()) {
+    for (const [name, tip] of clone.fetched) {
+      if (name === besides) continue;
       for (let commit: string | undefined = tip; commit && !onOrigin.has(commit); commit = this.parents.get(commit)) onOrigin.add(commit);
     }
     const unpushed: string[] = [];
