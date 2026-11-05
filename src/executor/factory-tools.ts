@@ -100,16 +100,18 @@ function delegationTools(runId: string, sink: RunSink, child: boolean, spawns: b
   const spawnChild = tool(
     'spawn_child',
     'Hand a self-contained piece of work to a child task: its own AFK run on its own branch, cut from your branch’s tip, which the operator can watch and steer. ' +
-      'The child doesn’t see this conversation, so the goal must stand on its own. A fire-and-forget child’s code never joins your branch: ' +
-      'its output is its report and any issues it opens. Returns the child’s id, or why it can’t be spawned (such as a depth or fan-out limit): then do the work yourself.',
+      'The child doesn’t see this conversation, so the goal must stand on its own. You wait for an awaited child (the default): keep doing what doesn’t ' +
+      'depend on it, then end your turn, and the factory resumes you with each awaited child’s report once they all reported, its branch ready for you to ' +
+      '`git merge`. A fire-and-forget child’s code never joins your branch: its output is its report and any issues it opens. ' +
+      'Returns the child’s id, or why it can’t be spawned (such as a depth or fan-out limit): then do the work yourself.',
     {
       goal: z.string().min(1).describe('What the child must achieve, standing on its own.'),
       skill: z.string().optional().describe('A skill of the factory’s skill set to invoke on the goal.'),
       tier: z.enum(TIERS).optional().describe('The model tier: yours or a lower one. A higher one is lowered to yours.'),
       autonomy: z.enum(['L1', 'L2']).optional().describe('The autonomy level: yours or a lower one.'),
-      await: z.boolean().optional().describe('Whether you wait for its report. Only fire-and-forget children (false) are supported yet.'),
+      await: z.boolean().optional().describe('Whether you wait for its report and merge its branch (the default), or not: a fire-and-forget child (false).'),
     },
-    async (args, extra) => ask(sink, { type: 'spawnChild', toolUseId: toolUseIdOf(extra), ...args, await: args.await ?? false }),
+    async (args, extra) => ask(sink, { type: 'spawnChild', toolUseId: toolUseIdOf(extra), ...args }),
   );
   const listChildren = tool(
     'list_children',

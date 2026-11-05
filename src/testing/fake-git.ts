@@ -248,6 +248,19 @@ export class FakeGit implements Git {
     this.edits.get(worktreePath)?.delete(path);
   }
 
+  // Something merges the local `branch` into the worktree's branch, as a
+  // fast-forward: the fake's commits have one parent each.
+  mergeBranch(worktreePath: string, branch: string): void {
+    const worktree = this.worktreeAt(worktreePath);
+    const clone = this.cloneAt(worktree.linkedTo);
+    const tip = clone.branches.get(branch);
+    let commit: string | undefined = tip;
+    while (commit && commit !== worktree.head) commit = this.parents.get(commit);
+    if (!tip || !commit) throw new Error(`${branch} doesn’t fast-forward ${worktree.branch}.`);
+    worktree.head = tip;
+    clone.branches.set(worktree.branch, tip);
+  }
+
   // Something checks `branch` out in the worktree instead of its own.
   checkout(worktreePath: string, branch: string): void {
     this.worktreeAt(worktreePath).branch = branch;

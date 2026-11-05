@@ -34,6 +34,7 @@ import {
   guard,
   initialLifecycle,
   isTerminal,
+  keptChildBranches,
   label,
   liveRun,
   nextTaskId,
@@ -42,8 +43,10 @@ import {
   pullRequestOf,
   pushedBranch,
   reduce,
+  rootOf,
   runReports,
   sessionsOf,
+  subtree,
   childSpawnedBy,
   spawnsWithinDepth,
   ticketSources,
@@ -880,7 +883,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + sweepsPending > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -1023,6 +1026,57 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveCleanups();
     driveReopens();
     drivePublishes();
+    driveBranchSweeps(before);
+  }
+
+  // Sweeps a task's kept child branches (ADR 0011) after each of its runs
+  // ends, whatever the run's mode or outcome, and after each of its
+  // children's cleanups, which may finish later. One sweep at a time.
+  let sweeps: Promise<void> = Promise.resolve();
+  let sweepsPending = 0;
+  function driveBranchSweeps(before: Lifecycle): void {
+    const due = new Set<string>();
+    for (const run of Object.values(lifecycle.runs)) {
+      const was = before.runs[run.id];
+      if (was && was.status !== 'ended' && run.status === 'ended') due.add(run.taskId);
+    }
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (task.parent && before.tasks[task.id]?.cleanup && !task.cleanup) due.add(task.parent);
+    }
+    for (const taskId of due) {
+      sweepsPending++;
+      const sweep = sweeps.then(() => sweepChildBranches(taskId));
+      sweeps = sweep.then(
+        () => {},
+        () => {},
+      );
+      void sweep.finally(() => sweepsPending--);
+    }
+  }
+
+  // Deletes the task's kept child branches its branch merged (ADR 0011), or,
+  // once its root ended, every kept child branch of the tree. A branch that
+  // can't be checked or deleted now is tried again at the next sweep, and by
+  // its root's cleanup, which says why it fails.
+  async function sweepChildBranches(taskId: string): Promise<void> {
+    const task = lifecycle.tasks[taskId];
+    const repository = task && lifecycle.repositories[task.repo];
+    if (stopping || !task || !repository) return;
+    const root = rootOf(lifecycle, task);
+    const rootEnded = isTerminal(root);
+    for (const child of keptChildBranches(rootEnded ? subtree(lifecycle, root).slice(1) : childrenOf(lifecycle, task))) {
+      const { branch } = child.worktree!;
+      try {
+        if (!rootEnded && !(task.worktree && (await git.isMerged(repository.path, branch, task.worktree.branch)))) continue;
+        await git.deleteBranch(repository.path, branch);
+      } catch (error) {
+        if (!(error instanceof GitError)) throw error;
+        continue;
+      }
+      await serially(async () => {
+        if (!stopping) await settle({ type: 'childBranchDeleted', taskId: child.id }, new Set());
+      });
+    }
   }
 
   // Takes each root's Push & open draft PR its next step (ADR 0007): once per
@@ -1168,12 +1222,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     const repository = lifecycle.repositories[task.repo];
     if (!repository) return failed(`${task.repo} isn’t registered any more, so ${task.id}’s worktree at ${path} stays.`);
+    // A root's tree goes with it: each child branch kept to merge, merged or
+    // not (ADR 0011). One whose child's own cleanup is still under way is
+    // left to the sweep after it.
+    const childBranches = task.parent ? [] : keptChildBranches(subtree(lifecycle, task).slice(1));
     try {
       await git.removeWorktree(repository.path, path);
       if (!task.cleanup?.keepBranch) await git.deleteBranch(repository.path, branch);
+      for (const child of childBranches) await git.deleteBranch(repository.path, child.worktree!.branch);
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
-      const what = task.cleanup?.keepBranch ? `worktree at ${path}` : `worktree at ${path} and its branch ${branch}`;
+      const branches = [...(task.cleanup?.keepBranch ? [] : [branch]), ...childBranches.map((child) => child.worktree!.branch)];
+      const what = branches.length ? `worktree at ${path} and the branches ${branches.join(', ')}` : `worktree at ${path}`;
       return failed(`The factory couldn’t remove ${task.id}’s ${what}: ${error.message}`);
     }
     // What the root left on GitHub goes as the App (ADR 0011): a cancelled
@@ -1188,7 +1248,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       });
       if (problem) return failed(problem);
     }
-    return { type: 'cleanedUp', taskId: task.id, transcripts };
+    return { type: 'cleanedUp', taskId: task.id, transcripts, childBranches: childBranches.map((child) => child.id) };
   }
 
   // Starts the step on GitHub of each loop between its iterations (ADR 0006):
@@ -1440,7 +1500,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         skill: request.skill?.trim() || null,
         tier: request.tier ?? null,
         autonomy: request.autonomy ?? null,
-        awaited: request.await ?? false,
+        // The Lifecycle defaults it by the run's mode (ADR 0009).
+        awaited: request.await ?? null,
         // Filled once the limits allow it.
         preset: null!,
         worktree: { branch: '', path: '' },
