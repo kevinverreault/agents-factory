@@ -1,7 +1,8 @@
 // Seam 1: child tasks (ADR 0009, ADR 0011). An AFK run's agent delegates
 // through the factory's tools: a child gets its own branch cut from the
 // parent's tip, its own worktree and its own run of the `child` preset, and
-// reports up when it ends. Only fire-and-forget children exist yet.
+// reports up when it ends. A run that ends with awaited children still
+// open waits on them, and its next run resumes on their reports.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -38,8 +39,25 @@ async function running(preset = ''): Promise<{ factory: TestFactory; operator: F
   return { factory, operator, tui, worktree: state.tasks.T1!.worktree! };
 }
 
+// A factory with T1 launched from main-flow at its implement loop, on the
+// spec acme/widgets#10 whose one ready ticket is #11: its first iteration
+// is live.
+async function looping(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
+  const factory = await startTestFactory();
+  factories.push(factory);
+  await factory.registerRepo();
+  factory.github.addIssue('acme/widgets#10');
+  factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
+  const operator = await factory.attach();
+  const tui = watch(operator);
+  const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'] });
+  if (!launched.ok) throw new Error(launched.reason);
+  await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
+  return { factory, operator, tui };
+}
+
 let calls = 0;
-// The run's agent spawns a fire-and-forget child with `goal`.
+// The run's agent spawns a fire-and-forget child with `goal`, unless `more` says otherwise.
 function spawn(factory: TestFactory, runId: string, goal: string, more: Record<string, unknown> = {}) {
   return factory.executor.delegate(runId, { type: 'spawnChild', toolUseId: `toolu_${++calls}`, goal, await: false, ...more });
 }
@@ -125,11 +143,129 @@ describe('spawning a child', () => {
     expect(factory.executor.started.find((run) => run.taskId === 'T2')!.firstMessage).toContain('your tree has no room for children of your own');
   });
 
-  test('an awaited child is refused for now, and so is a goal that is blank', async () => {
+  test('a goal that is blank is refused', async () => {
     const { factory } = await running();
 
-    expect(await spawn(factory, 'R1', 'Survey sign-out.', { await: true })).toMatchObject({ ok: false, error: expect.stringContaining('Awaited children aren’t supported yet') });
     expect(await spawn(factory, 'R1', '  ')).toMatchObject({ ok: false, error: expect.stringContaining('needs a goal') });
+  });
+});
+
+describe('awaited children', () => {
+  // The run's agent spawns an awaited child with `goal`.
+  function spawnAwaited(factory: TestFactory, runId: string, goal: string) {
+    return factory.executor.delegate(runId, { type: 'spawnChild', toolUseId: `toolu_${++calls}`, goal });
+  }
+
+  test('a child an AFK run spawns is awaited unless it says otherwise', async () => {
+    const { factory, tui } = await running();
+
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+
+    const state = await tui.until((state) => !!state.tasks.T2);
+    expect(state.tasks.T2!.child).toMatchObject({ awaited: true });
+    expect(factory.executor.started.find((run) => run.taskId === 'T2')?.firstMessage).toContain('Your parent waits for your report and merges your branch.');
+  });
+
+  test('a run that ends with an awaited child still open ends waiting on children and frees its slot', async () => {
+    const { factory, operator, tui } = await running();
+    await operator.send({ type: 'setSlotCap', cap: 1 });
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+    expect((await tui.until((state) => !!state.tasks.T2)).tasks.T2!.label).toBe('Queued');
+
+    factory.executor.report('R1', { type: 'runCompleted', result: 'Waiting on T2.' });
+
+    const state = await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    expect(state.runs.R1!.outcome).toBe('waiting on children');
+    expect(state.tasks.T1!.label).toBe('Waiting on children');
+    expect(state.tasks.T1!.liveRunId).toBeNull();
+  });
+
+  test('the parent resumes only once every awaited child reported, with one report each, and their branches in its worktree', async () => {
+    const { factory, operator, tui } = await running();
+    await operator.send({ type: 'setSlotCap', cap: 3 });
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+    await spawnAwaited(factory, 'R1', 'Add the logout button.');
+    const state = await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+    const childTree = state.tasks.T2!.worktree!;
+    factory.git.editFile(childTree, 'src/logout.ts');
+    factory.git.commitAll(childTree);
+    const childTip = (await factory.git.snapshot(childTree)).head;
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Waiting on children');
+
+    factory.executor.report(state.tasks.T2!.liveRunId!, { type: 'resultReported', summary: 'The handler is in.', status: 'done', notes: '' });
+    factory.executor.report(state.tasks.T2!.liveRunId!, { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T2?.label === 'Done' && state.tasks.T2.transcripts !== null);
+    expect(tui.state().tasks.T1!.label).toBe('Waiting on children');
+    factory.executor.report(state.tasks.T3!.liveRunId!, { type: 'runCompleted', result: 'Nothing to do.' });
+
+    const resumed = await tui.until((state) => !!state.tasks.T1?.liveRunId);
+    const run = factory.executor.started.find((started) => started.runId === resumed.tasks.T1!.liveRunId)!;
+    expect(run.resumesSession).toBe(true);
+    expect(run.firstMessage!.match(/^### T\d/gm)).toEqual(['### T2', '### T3']);
+    expect(run.firstMessage).toContain('The handler is in.');
+    expect(run.firstMessage).toContain(`git merge ${branch}--c1`);
+    // The child's worktree is gone, but its branch is there to merge.
+    expect((await factory.git.worktrees(clone)).map((worktree) => worktree.branch)).toEqual([branch]);
+    expect(factory.git.branchTip(clone, `${branch}--c1`)).toBe(childTip);
+  });
+
+  test('once the parent’s run merged a child’s branch, the branch is deleted; one it didn’t merge stays', async () => {
+    const { factory, operator, tui, worktree } = await running();
+    await operator.send({ type: 'setSlotCap', cap: 3 });
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+    await spawnAwaited(factory, 'R1', 'Write the logout test.');
+    const state = await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+    for (const id of ['T2', 'T3']) {
+      factory.git.editFile(state.tasks[id]!.worktree!, `src/${id}.ts`);
+      factory.git.commitAll(state.tasks[id]!.worktree!);
+    }
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Waiting on children');
+    for (const id of ['T2', 'T3']) factory.executor.report(state.tasks[id]!.liveRunId!, { type: 'runCompleted', result: 'Done.' });
+    const resumed = await tui.until((state) => !!state.tasks.T1?.liveRunId && state.tasks.T2?.transcripts !== null && state.tasks.T3?.transcripts !== null);
+
+    factory.git.mergeBranch(worktree, `${branch}--c1`);
+    factory.executor.report(resumed.tasks.T1!.liveRunId!, { type: 'runCompleted' });
+
+    await tui.until((state) => state.tasks.T1?.label === 'In review');
+    await expect.poll(() => factory.git.branchTip(clone, `${branch}--c1`)).toBeNull();
+    expect(factory.git.branchTip(clone, `${branch}--c2`)).not.toBeNull();
+  });
+
+  test('a failed awaited child keeps its parent waiting; cancelled by the operator, it reports cancelled and the parent resumes', async () => {
+    const { factory, operator, tui } = await running();
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    factory.executor.report('R1', { type: 'runCompleted' });
+    factory.executor.report('R2', { type: 'runFailed', reason: 'Boom.' });
+    await tui.until((state) => state.tasks.T2?.label === 'Needs you' && state.tasks.T1?.label === 'Waiting on children');
+
+    await operator.send({ type: 'cancel', taskId: 'T2' });
+
+    const resumed = await tui.until((state) => !!state.tasks.T1?.liveRunId);
+    const run = factory.executor.started.find((started) => started.runId === resumed.tasks.T1!.liveRunId)!;
+    expect(run.firstMessage).toContain('- Status: cancelled');
+    expect(run.firstMessage).toContain('- Branch: no commits to merge.');
+  });
+
+  test('a Ralph iteration waiting on children resumes the same ticket afterwards', async () => {
+    const { factory, operator, tui } = await looping();
+    await operator.send({ type: 'setSlotCap', cap: 3 });
+    const iteration = await tui.until((state) => !!state.tasks.T1?.liveRunId);
+    const runId = iteration.tasks.T1!.liveRunId!;
+    expect(iteration.runs[runId]!.ticket).toBe('acme/widgets#11');
+    await spawnAwaited(factory, runId, 'Write the logout handler.');
+    const spawned = await tui.until((state) => !!state.tasks.T2?.liveRunId);
+    factory.executor.report(runId, { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Waiting on children');
+
+    factory.executor.report(spawned.tasks.T2!.liveRunId!, { type: 'runCompleted', result: 'Done.' });
+
+    const resumed = await tui.until((state) => !!state.tasks.T1?.liveRunId && state.tasks.T1.liveRunId !== runId);
+    const run = resumed.runs[resumed.tasks.T1!.liveRunId!]!;
+    expect(run.ticket).toBe('acme/widgets#11');
+    expect(factory.executor.started.find((started) => started.runId === run.id)).toMatchObject({ resumesSession: true });
   });
 });
 

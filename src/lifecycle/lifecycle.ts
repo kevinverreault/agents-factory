@@ -176,6 +176,9 @@ export type Child = {
   // What the agent reported through `report_result`, until the child ends
   // and it becomes part of `report`.
   agentReport?: Pick<ChildReport, 'summary' | 'status' | 'notes'> | null;
+  // True once an awaited child's report was handed to its parent's resumed
+  // run: its parent waits for it no longer.
+  delivered?: boolean;
 };
 
 // The tickets a cancelled task closed that the factory hasn't reopened yet
@@ -1527,19 +1530,64 @@ function publishingRefusal(task: Task): string | null {
   return task.publishing && !task.publishing.problem ? `${task.id} is pushing and opening its draft PR: wait for it to finish.` : null;
 }
 
-// Why the run can't spawn this child, or null. Two of ADR 0009's decisions
-// are staged: its tool table gives HITL runs fire-and-forget spawning, which
-// arrives with #57, and its `await` default (true from AFK runs) needs
-// waiting on children, which arrives with #55. Until then only AFK runs
-// spawn, and only fire-and-forget children.
+// Why the run can't spawn this child, or null. One of ADR 0009's decisions
+// is staged: its tool table gives HITL runs fire-and-forget spawning, which
+// arrives with #57. Until then only AFK runs spawn.
 function spawnRefusal(state: Lifecycle, task: Task, run: Run, spawn: ChildSpawned): string | null {
   if (run.mode !== 'AFK') return 'Only an AFK run spawns children.';
   if (!task.worktree) return `${task.id} has no task branch to cut a child’s from.`;
   if (!spawn.goal.trim()) return 'A child needs a goal that stands on its own: it doesn’t see this conversation.';
   if (spawn.tier !== null && !isTier(spawn.tier)) return tierRefusal(spawn.tier);
   if (spawn.autonomy !== null && !AUTONOMY_LEVELS.includes(spawn.autonomy)) return `${spawn.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
-  if (spawn.awaited) return 'Awaited children aren’t supported yet: spawn it with await: false, as a fire-and-forget child whose work never joins your branch.';
   return spawnLimit(state, task);
+}
+
+// The task's awaited children whose reports it hasn't been handed yet: a
+// run of it that ends while it has any waits on them (ADR 0009).
+export function awaitedChildren(state: Lifecycle, task: Task): Task[] {
+  return childrenOf(state, task).filter((child) => child.child?.awaited && !child.child.delivered);
+}
+
+// Queues each task waiting on children whose awaited children have all
+// reported (Done or Cancelled; a failed one still waits on the operator),
+// as continuing work whose next run resumes its session on one report per
+// awaited child. Their branches are already in its worktree's clone.
+function wakeParents(state: Lifecycle): void {
+  for (const task of Object.values(state.tasks)) {
+    if (task.state !== 'awaiting-children') continue;
+    const awaited = awaitedChildren(state, task);
+    if (!awaited.every(isTerminal)) continue;
+    for (const child of awaited) child.child!.delivered = true;
+    task.resumeWith = reportsOpening(task, awaited);
+    task.state = 'queued';
+  }
+}
+
+// What a parent resumed from waiting on children opens on: each awaited
+// child's report, and the branches it is to merge.
+function reportsOpening(task: Task, children: Task[]): string {
+  const reports = children.map((child) => {
+    const report = child.child!.report!;
+    const { commits } = report;
+    const work = commits.length
+      ? `- Branch: ${report.branch}, with ${commits.length} ${commits.length === 1 ? 'commit' : 'commits'} (${commits.map(short).join(', ')}). Merge it: \`git merge ${report.branch}\``
+      : '- Branch: no commits to merge.';
+    return [
+      `### ${child.id}: ${child.title}`,
+      `- Status: ${report.status}; its run ended ${report.outcome ?? 'without a run'}.`,
+      work,
+      '',
+      report.summary,
+      ...(report.notes ? ['', `Notes: ${report.notes}`] : []),
+    ].join('\n');
+  });
+  return [
+    '## Factory context',
+    `Every awaited child of ${task.id} has reported. Merge each branch that has commits into ${task.worktree?.branch ?? 'your branch'} with a local ` +
+      '`git merge`, resolving any conflicts, and carry on from their reports. A merge you can’t resolve fails this run: leave it unresolved, say why, and end.',
+    ...reports,
+    AFK_RESUME,
+  ].join('\n\n');
 }
 
 // What a child's first run opens on (ADR 0009): its skill on the goal (or the
@@ -2367,6 +2415,14 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       else run!.turn = 'operator';
       break;
     case 'runCompleted': {
+      // Whatever the agent said, a run that ends with awaited children it
+      // hasn't had the reports of waits on them, holding no slot (ADR 0009).
+      // A loop's iteration keeps its ticket, which its next run resumes.
+      if (awaitedChildren(state, task).length) {
+        endRun(run!, 'waiting on children', at);
+        task.state = 'awaiting-children';
+        break;
+      }
       endRun(run!, 'completed', at);
       // A child ends Done and reports up: only the root is reviewed.
       if (task.child) {
@@ -2628,6 +2684,7 @@ export function reduce(state: Lifecycle, action: LifecycleAction, at: number, ro
   if (refusal) return { state, refusal };
   const next = structuredClone(state);
   apply(next, action, at);
+  wakeParents(next);
   placeInQueue(state, next);
   if (!('unreadable' in routes)) schedule(next, at);
   const started = Object.values(next.runs).filter((run) => !state.runs[run.id]);

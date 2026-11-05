@@ -1440,7 +1440,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         skill: request.skill?.trim() || null,
         tier: request.tier ?? null,
         autonomy: request.autonomy ?? null,
-        awaited: request.await ?? false,
+        // Only AFK runs spawn, and their children are awaited by default (ADR 0009).
+        awaited: request.await ?? true,
         // Filled once the limits allow it.
         preset: null!,
         worktree: { branch: '', path: '' },
@@ -1497,11 +1498,31 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (!(error instanceof GitError)) throw error;
       broken = [`The factory couldn't check the run's worktree: ${error.message}`];
     }
+    if (broken.length === 0 && event.type === 'runCompleted') await deleteMergedChildBranches(event.runId);
     if (broken.length === 0) return event.type === 'runCompleted' ? withCommits(event, guard.worktree) : event;
     const breach = `broke the factory’s git guards. ${broken.join(' ')}`;
     return event.type === 'runCompleted'
       ? { type: 'runFailed', runId: event.runId, reason: `The run ${breach}` }
       : { ...event, reason: `${event.reason} It also ${breach}` };
+  }
+
+  // Deletes the branch of each awaited child of the run's task whose report
+  // it was handed, once the branch's tip is in the task branch's history: the
+  // run merged it (ADR 0011). A branch still unmerged stays, as does one
+  // whose child's cleanup hasn't removed its worktree yet; one already
+  // deleted is passed over.
+  async function deleteMergedChildBranches(runId: string): Promise<void> {
+    const task = lifecycle.tasks[lifecycle.runs[runId]?.taskId ?? ''];
+    const repository = task && lifecycle.repositories[task.repo];
+    if (!task?.worktree || !repository) return;
+    for (const child of childrenOf(lifecycle, task)) {
+      if (!child.child?.awaited || !child.child.delivered || child.cleanup || !child.worktree) continue;
+      try {
+        if (await git.isMerged(repository.path, child.worktree.branch, task.worktree.branch)) await git.deleteBranch(repository.path, child.worktree.branch);
+      } catch (error) {
+        if (!(error instanceof GitError)) throw error;
+      }
+    }
   }
 
   // A Ralph loop iteration's completion, with the commits on the task branch
