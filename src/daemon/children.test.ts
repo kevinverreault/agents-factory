@@ -272,6 +272,109 @@ describe('awaited children', () => {
     expect(run.firstMessage).not.toContain('unattended');
   });
 
+  // T1 spawned the awaited T2, which committed and ended Done, and T1's run
+  // waited on it: T1's next run is live, on T2's report.
+  async function woken() {
+    const running_ = await running();
+    const { factory, tui } = running_;
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+    const spawned = await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    factory.git.editFile(spawned.tasks.T2!.worktree!, 'src/logout.ts');
+    factory.git.commitAll(spawned.tasks.T2!.worktree!);
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Waiting on children');
+    factory.executor.report('R2', { type: 'resultReported', summary: 'The handler is in.', status: 'done', notes: '' });
+    factory.executor.report('R2', { type: 'runCompleted' });
+    const state = await tui.until((state) => !!state.tasks.T1?.liveRunId);
+    return { ...running_, runId: state.tasks.T1!.liveRunId! };
+  }
+
+  test('a woken run that fails before it started hands the reports to the retry', async () => {
+    const { factory, operator, tui, runId } = await woken();
+
+    factory.executor.report(runId, { type: 'runFailed', reason: 'The factory couldn’t read the run’s worktree.' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    await operator.send({ type: 'answer', taskId: 'T1' });
+
+    const retried = await tui.until((state) => !!state.tasks.T1?.liveRunId && state.tasks.T1.liveRunId !== runId);
+    expect(factory.executor.started.find((started) => started.runId === retried.tasks.T1!.liveRunId)!.firstMessage).toContain('The handler is in.');
+  });
+
+  test('a run that started on the reports hands them over: the next run opens on none', async () => {
+    const { factory, operator, tui, runId } = await woken();
+    factory.executor.report(runId, { type: 'runStarted', pid: 1, createdAt: 1, model: 'claude-sonnet' });
+
+    factory.executor.report(runId, { type: 'runFailed', reason: 'Boom.' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    await operator.send({ type: 'answer', taskId: 'T1' });
+
+    const retried = await tui.until((state) => !!state.tasks.T1?.liveRunId && state.tasks.T1.liveRunId !== runId);
+    expect(factory.executor.started.find((started) => started.runId === retried.tasks.T1!.liveRunId)!.firstMessage).not.toContain('The handler is in.');
+  });
+
+  test('a parent run that fails with an awaited child still open is retried once the child reported, on its report', async () => {
+    const { factory, operator, tui } = await running();
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    factory.executor.report('R1', { type: 'runFailed', reason: 'Boom.' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+
+    await operator.send({ type: 'answer', taskId: 'T1' });
+    expect((await tui.until((state) => state.tasks.T1?.label === 'Waiting on children')).tasks.T1!.liveRunId).toBeNull();
+    factory.executor.report('R2', { type: 'runCompleted', result: 'The handler is in.' });
+
+    const resumed = await tui.until((state) => !!state.tasks.T1?.liveRunId);
+    expect(factory.executor.started.find((started) => started.runId === resumed.tasks.T1!.liveRunId)!.firstMessage).toContain('The handler is in.');
+  });
+
+  test('a child branch merged by a parent the operator took over is deleted once its run ends', async () => {
+    const { factory, operator, tui, worktree, runId } = await woken();
+    await operator.send({ type: 'takeOver', taskId: 'T1' });
+    const taken = await tui.until((state) => state.tasks.T1?.mode === 'HITL' && !!state.tasks.T1.liveRunId && state.tasks.T1.liveRunId !== runId);
+    await tui.until((state) => state.tasks.T2?.transcripts !== null);
+
+    factory.git.mergeBranch(worktree, `${branch}--c1`);
+    factory.executor.report(taken.tasks.T1!.liveRunId!, { type: 'runCompleted' });
+
+    await expect.poll(() => factory.git.branchTip(clone, `${branch}--c1`)).toBeNull();
+  });
+
+  test('a merged child branch whose cleanup lagged behind its parent’s run is deleted once that cleanup finishes', async () => {
+    const { factory, tui, worktree } = await running();
+    factory.executor.failArchive('EACCES: permission denied');
+    await spawnAwaited(factory, 'R1', 'Write the logout handler.');
+    const spawned = await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    factory.git.editFile(spawned.tasks.T2!.worktree!, 'src/logout.ts');
+    factory.git.commitAll(spawned.tasks.T2!.worktree!);
+    factory.executor.report('R1', { type: 'runCompleted' });
+    factory.executor.report('R2', { type: 'runCompleted' });
+    const resumed = await tui.until((state) => !!state.tasks.T1?.liveRunId && !!state.tasks.T2?.cleanup?.problem);
+    factory.git.mergeBranch(worktree, `${branch}--c1`);
+    factory.executor.report(resumed.tasks.T1!.liveRunId!, { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'In review');
+    expect(factory.git.branchTip(clone, `${branch}--c1`)).not.toBeNull();
+
+    factory.executor.failArchive(null);
+    await factory.restart();
+    const later = watch(await factory.attach());
+
+    await later.until((state) => state.tasks.T2?.cleanup === null);
+    await expect.poll(() => factory.git.branchTip(clone, `${branch}--c1`)).toBeNull();
+  });
+
+  test('a child branch still unmerged when its root is done is deleted with the tree', async () => {
+    const { factory, operator, tui, runId } = await woken();
+    await tui.until((state) => state.tasks.T2?.transcripts !== null);
+    factory.executor.report(runId, { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'In review');
+    expect(factory.git.branchTip(clone, `${branch}--c1`)).not.toBeNull();
+
+    await operator.send({ type: 'markDone', taskId: 'T1', anyway: true });
+
+    await tui.until((state) => state.tasks.T1?.transcripts !== null);
+    expect(factory.git.branchTip(clone, `${branch}--c1`)).toBeNull();
+  });
+
   test('a Ralph iteration waiting on children resumes the same ticket afterwards', async () => {
     const { factory, operator, tui } = await looping();
     await operator.send({ type: 'setSlotCap', cap: 3 });

@@ -111,7 +111,7 @@ function delegationTools(runId: string, sink: RunSink, child: boolean, spawns: b
       autonomy: z.enum(['L1', 'L2']).optional().describe('The autonomy level: yours or a lower one.'),
       await: z.boolean().optional().describe('Whether you wait for its report and merge its branch (the default), or not: a fire-and-forget child (false).'),
     },
-    async (args, extra) => ask(sink, { type: 'spawnChild', toolUseId: toolUseIdOf(extra), ...args, await: args.await ?? true }),
+    async (args, extra) => ask(sink, { type: 'spawnChild', toolUseId: toolUseIdOf(extra), ...args }),
   );
   const listChildren = tool(
     'list_children',

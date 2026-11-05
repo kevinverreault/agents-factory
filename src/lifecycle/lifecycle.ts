@@ -176,9 +176,12 @@ export type Child = {
   // What the agent reported through `report_result`, until the child ends
   // and it becomes part of `report`.
   agentReport?: Pick<ChildReport, 'summary' | 'status' | 'notes'> | null;
-  // True once an awaited child's report was handed to its parent's resumed
-  // run: its parent waits for it no longer.
+  // True once a run of its parent that opened on an awaited child's report
+  // started: its parent waits for it no longer.
   delivered?: boolean;
+  // True once its local branch is gone: deleted with its worktree, merged
+  // into its parent's branch, or with its tree once the root ended (ADR 0011).
+  branchDeleted?: boolean;
 };
 
 // The tickets a cancelled task closed that the factory hasn't reopened yet
@@ -262,9 +265,6 @@ export type Task = {
   // What its next AFK run opens on instead of carrying on, such as the
   // answers to a question its parked run asked.
   resumeWith?: string | null;
-  // The awaited children whose reports its next run opens on, AFK or taken
-  // over, once they all reported (ADR 0009).
-  reportsDue?: string[] | null;
   // The rules the operator allowed for this task (ADR 0007): its L1 runs
   // make calls they cover without asking. Tasks stored before them have none.
   allowRules?: string[];
@@ -331,6 +331,9 @@ export type Run = {
   ticket?: string | null;
   // The message the run starts with, or null to wait for the operator's.
   opening: string | null;
+  // The awaited children whose reports its opening carries: handed over
+  // once it started. Runs stored before awaited children have none.
+  reports?: string[];
   proposal: Proposal | null;
   // The tier it started at, and the exact model: routed from that tier at
   // start, then the one the CLI reports it runs. Runs stored before tiers
@@ -545,7 +548,9 @@ export type ChildSpawned = {
   skill: string | null;
   tier: Tier | null;
   autonomy: AutonomyLevel | null;
-  awaited: boolean;
+  // Whether the parent waits for it, if the agent said: the Lifecycle
+  // decides the default by the spawning run's mode (`awaitsChild`).
+  awaited: boolean | null;
   // The `child` preset, frozen for it.
   preset: FrozenPreset;
   worktree: TaskWorktree;
@@ -619,10 +624,18 @@ export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: A
 // continuing fresh.
 export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string } & HandoffChoices;
 
+// The daemon deleted a child's kept branch (ADR 0011): its parent's branch
+// had merged it, or its root ended.
+export type ChildBranchDeleted = { type: 'childBranchDeleted'; taskId: string };
+
 // What the daemon did to clean up after a task ended Done or Cancelled
 // (ADR 0011): archived its transcripts to `transcripts`, then removed its
 // worktree and (unless kept) its local task branch, or failed to, saying why.
-export type CleanupEvent = { type: 'cleanedUp'; taskId: string; transcripts: string } | { type: 'cleanupFailed'; taskId: string; reason: string };
+// A root's cleanup deletes its tree's kept child branches too: those of
+// `childBranches`, by their tasks.
+export type CleanupEvent =
+  | { type: 'cleanedUp'; taskId: string; transcripts: string; childBranches?: string[] }
+  | { type: 'cleanupFailed'; taskId: string; reason: string };
 
 // The daemon's clock found deadlines that have passed (ADR 0003).
 export type ClockEvent = { type: 'deadlinesDue' };
@@ -671,6 +684,7 @@ export type LifecycleAction =
   | PublishEvent
   | PrReadEvent
   | CleanupEvent
+  | ChildBranchDeleted
   | ArtifactsSeen;
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
@@ -1493,6 +1507,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'cleanedUp':
     case 'cleanupFailed':
       return task.cleanup ? null : `${task.id} has no cleanup under way.`;
+    case 'childBranchDeleted':
+      return keptChildBranches([task]).length ? null : `${task.id} keeps no child branch.`;
   }
 }
 
@@ -1551,28 +1567,46 @@ export function awaitedChildren(state: Lifecycle, task: Task): Task[] {
   return childrenOf(state, task).filter((child) => child.child?.awaited && !child.child.delivered);
 }
 
+// Whether the child the run spawns is awaited: as the agent asked from an
+// AFK run, by default yes, and never from a HITL run (ADR 0009).
+function awaitsChild(run: Run, spawn: ChildSpawned): boolean {
+  return run.mode === 'AFK' && (spawn.awaited ?? true);
+}
+
+// Those of `tasks` that are ended children whose local branch is still
+// kept once their worktree is gone: awaited children that ended Done. The
+// daemon deletes each once its parent's branch merged it, or its root ended
+// (ADR 0011).
+export function keptChildBranches(tasks: Task[]): Task[] {
+  return tasks.filter((task) => task.child && task.worktree && isTerminal(task) && !task.cleanup && !task.child.branchDeleted);
+}
+
 // Queues each task waiting on children whose awaited children have all
 // reported (Done or Cancelled; a failed one still waits on the operator),
 // as continuing work whose next run resumes its session on one report per
 // awaited child. At L1 their branches are already in its worktree's clone;
-// fetching them into an L2 container arrives with the sandbox.
+// fetching them into an L2 container arrives with the L2 sandbox (#64).
 function wakeParents(state: Lifecycle): void {
   for (const task of Object.values(state.tasks)) {
-    if (task.state !== 'awaiting-children') continue;
-    const awaited = awaitedChildren(state, task);
-    if (!awaited.every(isTerminal)) continue;
-    for (const child of awaited) child.child!.delivered = true;
-    task.reportsDue = awaited.map((child) => child.id);
-    task.state = 'queued';
+    if (task.state === 'awaiting-children' && awaitedChildren(state, task).every(isTerminal)) task.state = 'queued';
   }
 }
 
-// What a parent resumed from waiting on children opens on: each awaited
-// child's report, and the branches it is to merge, before what the run
-// would open on anyway: an AFK run carries on unattended, and a run the
+// The task queued again, to wait first for any awaited child still open.
+function requeue(state: Lifecycle, task: Task): void {
+  task.state = awaitedChildren(state, task).length ? 'awaiting-children' : 'queued';
+}
+
+// The run's awaited children are handed over: it started on their reports.
+function handReports(state: Lifecycle, run: Run): void {
+  for (const id of run.reports ?? []) state.tasks[id]!.child!.delivered = true;
+}
+
+// What a run of a parent opens on before what it would open on anyway, once
+// some of its awaited children ended: each one's report, and the branches it
+// is to merge. An AFK run then carries on unattended, and a run the
 // operator took over is theirs to steer.
-function reportsOpening(state: Lifecycle, task: Task, due: string[]): string {
-  const children = due.map((id) => state.tasks[id]!);
+function reportsOpening(task: Task, children: Task[]): string {
   const reports = children.map((child) => {
     const report = child.child!.report!;
     const { commits } = report;
@@ -1610,7 +1644,7 @@ function childOpening(state: Lifecycle, parent: Task, child: Task, spawn: ChildS
     `- Your branch: ${child.worktree!.branch}, cut from ${short(spawn.base)} on ${parent.worktree!.branch}. Commit your work there; the factory never pushes it.`,
     `- Depth ${child.child!.depth} of ${limits.depth}: ${spawnable(state, child, limits)}.`,
   ];
-  const reporting = spawn.awaited
+  const reporting = child.child!.awaited
     ? 'Your parent waits for your report and merges your branch.'
     : `You are a fire-and-forget child: your parent doesn’t wait for you, and your code never joins ${root.worktree?.branch ?? 'the root’s branch'}. ` +
       'Your output is what you report, and any issues you open.';
@@ -1857,9 +1891,11 @@ function startRun(
     resumesSession = task.runIds.length > 0 && !task.newSession,
   } = {},
 ): void {
-  // A task back from waiting on children opens on their reports first.
-  if (task.reportsDue?.length) opening = [reportsOpening(state, task, task.reportsDue), opening].filter(Boolean).join('\n\n');
-  task.reportsDue = null;
+  // A task back from waiting on children opens on their reports first: they
+  // count as handed over once the run started, so a run that never did hands
+  // them to the next.
+  const reported = awaitedChildren(state, task).filter(isTerminal);
+  if (reported.length) opening = [reportsOpening(task, reported), opening].filter(Boolean).join('\n\n');
   task.resumeWith = null;
   task.newSession = false;
   const tier = nextTier(task);
@@ -1882,6 +1918,7 @@ function startRun(
     stage: task.stage ?? null,
     ticket: task.mode === 'AFK' ? (task.loop?.ticket ?? null) : null,
     opening,
+    reports: reported.map((child) => child.id),
     proposal: null,
     tier,
     // Routed by `reduce`, once it knows every run the action starts.
@@ -2252,7 +2289,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
           (task.skippedTickets ??= []).push(task.loop!.ticket!);
           task.loop = picking(task.loop!.finishing);
         }
-        task.state = 'queued';
+        // A retried run waits for the awaited children still open, as
+        // the run that failed would have, and opens on their reports.
+        requeue(state, task);
       }
       break;
     case 'requestChanges':
@@ -2285,8 +2324,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       request!.status = 'answered';
       break;
     case 'cleanedUp':
+      // A child's branch went with its worktree, unless it was kept to merge.
+      if (task.child && !task.cleanup!.keepBranch) task.child.branchDeleted = true;
+      // A root's tree's kept child branches went with it.
+      for (const id of action.childBranches ?? []) state.tasks[id]!.child!.branchDeleted = true;
       task.cleanup = null;
       task.transcripts = action.transcripts;
+      break;
+    case 'childBranchDeleted':
+      task.child!.branchDeleted = true;
       break;
     case 'cleanupFailed':
       // Tried again later, keeping what it keeps.
@@ -2307,7 +2353,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         title: action.title,
         repo: task.repo,
         parent: task.id,
-        child: { depth: depthOf(task) + 1, spawnedBy: { runId: parentRun.id, toolUseId: action.toolUseId }, awaited: action.awaited, base: action.base, report: null },
+        child: {
+          depth: depthOf(task) + 1,
+          spawnedBy: { runId: parentRun.id, toolUseId: action.toolUseId },
+          awaited: awaitsChild(parentRun, action),
+          base: action.base,
+          report: null,
+        },
         progress: null,
         mode: 'AFK',
         // Lowered, never raised: the parent's level (L1 under HITL) is its ceiling.
@@ -2353,6 +2405,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'runStarted':
       run!.cli = { pid: action.pid, createdAt: action.createdAt };
       run!.model = action.model;
+      handReports(state, run!);
       break;
     case 'questionAsked':
       run!.question = action.question;
@@ -2427,6 +2480,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // Whatever the agent said, a run that ends with awaited children it
       // hasn't had the reports of waits on them, holding no slot (ADR 0009).
       // A loop's iteration keeps its ticket, which its next run resumes.
+      handReports(state, run!);
       if (awaitedChildren(state, task).length) {
         endRun(run!, 'waiting on children', at);
         task.state = 'awaiting-children';
