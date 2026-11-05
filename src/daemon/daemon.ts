@@ -1165,15 +1165,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const remote = task.cleanup?.remote;
     if (remote) {
       try {
-        if (remote.closePr !== null) {
+        if (remote.prToClose !== null) {
           const { token } = await appToken(task.repo, PR_WRITE);
-          await github.closePr(token, task.repo, remote.closePr, closingPrComment(task));
+          await github.closePr(token, task.repo, remote.prToClose, closingPrComment(task));
         }
         const { token } = await appToken(task.repo, PUSH);
         await github.deleteBranch(token, task.repo, remote.branch);
       } catch (error) {
         if (!isGitHubFailure(error)) throw error;
-        const what = remote.closePr === null ? `delete ${remote.branch}` : `close PR #${remote.closePr} and delete ${remote.branch}`;
+        const what = remote.prToClose === null ? `delete ${remote.branch}` : `close PR #${remote.prToClose} and delete ${remote.branch}`;
         return failed(`The factory couldn’t ${what} on GitHub as its App: ${error.message}`);
       }
     }

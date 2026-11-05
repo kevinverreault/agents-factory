@@ -294,12 +294,14 @@ export class FakeGitHub implements GitHub {
     return { state, comments: [...comments] };
   }
 
+  // The PR a test names: one it never opened is the test's mistake.
   private prAt(number: number): FakePullRequest {
     const pr = this.pullRequests.find((pr) => pr.number === number);
     if (!pr) throw new Error(`There is no PR #${number}.`);
     return pr;
   }
 
+  // The PR a call names, which GitHub doesn't find unless it has it.
   private foundPr(repo: string, number: number): FakePullRequest {
     const pr = this.pullRequests.find((pr) => pr.repo === repo && pr.number === number);
     if (!pr) throw new GitHubError('GitHub refused the call (HTTP 404: Not Found).');

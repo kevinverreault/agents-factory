@@ -132,7 +132,8 @@ export class FakeGit implements Git {
     for (const clone of this.clonesOf(repo)) clone.origin.delete(branch);
   }
 
-  private clonesOf(repo: string) {
+  // The clones whose origin is the repository on GitHub.
+  private clonesOf(repo: string): FakeClone[] {
     return [...this.clones.values()].filter(({ originUrl }) => originUrl === `https://github.com/${repo}.git`);
   }
 

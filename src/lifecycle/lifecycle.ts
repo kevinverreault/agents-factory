@@ -138,10 +138,10 @@ export type Loop = {
 // leaves it, and what goes on GitHub. Cleanups stored before Cancel cleaned
 // up delete it.
 export type Cleanup = { problem: string | null; keepBranch?: boolean; remote?: RemoteCleanup | null };
-// What a root with a draft PR leaves on GitHub once it ends: its remote task
-// branch, which the factory deletes as its App, and, once cancelled, its PR,
-// which it closes first with a comment.
-export type RemoteCleanup = { branch: string; closePr: number | null };
+// What a root the factory published leaves on GitHub once it ends: its
+// remote task branch, which the factory deletes as its App, and, once
+// cancelled, the number of its PR, which it closes first with a comment.
+export type RemoteCleanup = { branch: string; prToClose: number | null };
 // What Cancel does with a task branch holding commits that exist nowhere
 // else: Keep branch (the default) or Discard work.
 export type BranchChoice = 'keep' | 'discard';
@@ -1478,12 +1478,23 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   }
 }
 
-// A root In review ends Done: the daemon archives its transcripts, then
-// removes its worktree and branch, and the remote task branch of its PR.
-function finishRoot(task: Task): void {
+// A root In review ends Done, its Push & open draft PR stopped: the daemon
+// archives its transcripts, then removes its worktree and branch, and the
+// remote task branch the factory pushed.
+function finishRoot(task: Task, request: AttentionRequest | undefined): void {
+  const remote = remoteCleanup(task, { closePr: false });
+  stopPublishing(task, request);
   task.state = 'done';
   task.progress = null;
-  if (task.worktree) task.cleanup = { problem: null, remote: task.pr ? { branch: task.worktree.branch, closePr: null } : null };
+  if (task.worktree) task.cleanup = { problem: null, remote };
+}
+
+// What the ending root leaves on GitHub, if the factory pushed its task
+// branch: it has its PR, or its Push & open draft PR got past the push.
+// `closePr` closes that PR too, as Cancel does.
+function remoteCleanup(task: Task, { closePr }: { closePr: boolean }): RemoteCleanup | null {
+  if (!task.worktree || !(task.pr || task.publishing?.step === 'open-pr')) return null;
+  return { branch: task.worktree.branch, prToClose: closePr ? (task.pr?.number ?? null) : null };
 }
 
 // What a pr-closed-unmerged request tells the operator.
@@ -1616,6 +1627,8 @@ function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: nu
     cancelled.handoff = null;
     cancelled.loop = null;
     cancelled.progress = null;
+    // A root's draft PR is closed, and the task branch the factory pushed deleted.
+    const remote = remoteCleanup(cancelled, { closePr: true });
     cancelled.publishing = null;
     cancelled.state = 'cancelled';
     if (cancelled.child) closeReport(cancelled, { summary: 'Cancelled before it finished.', status: 'cancelled', commits: [], outcome: 'cancelled' }, { forced: true });
@@ -1624,11 +1637,7 @@ function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: nu
     if (closed.length) cancelled.reopening = { tickets: closed.map(({ ref }) => ref), problem: null };
     // The daemon archives its transcripts, then removes its worktree and
     // branch, unless the operator kept it.
-    // A root's draft PR is closed, and its remote task branch deleted.
-    if (cancelled.worktree) {
-      const remote = cancelled.pr ? { branch: cancelled.worktree.branch, closePr: cancelled.pr.number } : null;
-      cancelled.cleanup = { problem: null, keepBranch: cancelled === task && keepBranch, remote };
-    }
+    if (cancelled.worktree) cancelled.cleanup = { problem: null, keepBranch: cancelled === task && keepBranch, remote };
   }
 }
 
@@ -2190,14 +2199,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.state = 'queued';
       break;
     case 'markDone':
-      stopPublishing(task, request);
-      finishRoot(task);
+      finishRoot(task, request);
       break;
     case 'prRead':
       if (action.state === 'merged') {
         // Merged, the root is Done (ADR 0011), whatever was left to ask.
-        stopPublishing(task, request);
-        finishRoot(task);
+        finishRoot(task, request);
       } else if (action.state === 'closed') {
         // Never cancelled on the factory's own say: the operator chooses.
         if (!request) addRequest(state, task, lastRun(state, task), 'pr-closed-unmerged', false, prClosedReason(task), at);

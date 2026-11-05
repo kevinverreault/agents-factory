@@ -204,6 +204,32 @@ describe('cancelling a root with a draft PR', () => {
   });
 });
 
+describe('cancelling a root whose draft PR couldn’t be opened', () => {
+  test('deletes the task branch the factory pushed', async () => {
+    const { factory, operator, tui } = await withDraftPr();
+    // A second root, pushed but with no PR: GitHub refused to open it.
+    await operator.send({ type: 'cancel', taskId: 'T1', branch: 'discard' });
+    await tui.until((state) => state.tasks.T1?.cleanup === null);
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'unattended', prompt: 'Add a footer.' });
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R2');
+    const worktree = tui.state().tasks.T2!.worktree!;
+    factory.git.editFile(worktree, 'src/footer.ts', 'export {};\n');
+    factory.git.commitAll(worktree);
+    factory.executor.report('R2', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T2?.label === 'In review');
+    factory.github.failPullRequests('GitHub couldn’t be reached: ECONNRESET');
+    await operator.send({ type: 'pushAndOpenPr', taskId: 'T2' });
+    await tui.until((state) => state.attentionQueue.some((item) => item.kind === 'attention' && item.taskId === 'T2'));
+    const footer = 'factory/T2-add-a-footer';
+    expect(factory.git.originTip(clone, footer)).not.toBeNull();
+
+    await operator.send({ type: 'cancel', taskId: 'T2', branch: 'discard' });
+
+    await tui.until((state) => state.tasks.T2?.label === 'Cancelled' && state.tasks.T2.cleanup === null);
+    expect(factory.git.originTip(clone, footer)).toBeNull();
+  });
+});
+
 describe('Mark done on a root with a PR', () => {
   test('deletes its remote task branch too', async () => {
     const { factory, operator, tui } = await withDraftPr();
