@@ -305,6 +305,8 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
 
         await push(clone, 'factory/T1-a');
         expect(await git.unpushed(clone, 'factory/T1-a')).toEqual([]);
+        // Unless its own branch on origin, which is to be deleted, doesn't count.
+        expect(await git.unpushed(clone, 'factory/T1-a', { besides: 'factory/T1-a' })).toEqual([second, first]);
         expect(await git.unpushed(clone, 'factory/T9-gone')).toEqual([]);
       }));
 

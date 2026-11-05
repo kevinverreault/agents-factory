@@ -1,5 +1,6 @@
 import {
   GitHubError,
+  goneHead,
   pushRefusal,
   workflowFiles,
   type BranchPush,
@@ -10,6 +11,7 @@ import {
   type Permissions,
   type Pushed,
   type DraftPr,
+  type PrState,
   type PullRequest,
 } from '../github/github.ts';
 import type { FakeClock } from './fake-clock.ts';
@@ -20,8 +22,24 @@ const TOKEN_LIFETIME_MS = 60 * 60_000;
 
 type Minted = { repo: string; permissions: Permissions } & InstallationToken;
 
-// A PR as GitHub has it, with the token that opened it.
-type FakePullRequest = PullRequest & { repo: string; draft: boolean; head: string; base: string; title: string; body: string; assignees: string[]; token: Minted };
+// A PR as GitHub has it, with the token that opened it, where it stands, and its comments.
+type FakePullRequest = PullRequest & {
+  repo: string;
+  draft: boolean;
+  head: string;
+  base: string;
+  title: string;
+  body: string;
+  assignees: string[];
+  token: Minted;
+  state: PrState;
+  comments: string[];
+};
+
+// The token as it was minted, kept with a write it made.
+function snapshot(minted: Minted): Minted {
+  return { ...minted, permissions: { ...minted.permissions } };
+}
 
 // Why an issue is in its state, as GitHub says: closed as completed, or reopened.
 type StateReason = 'completed' | 'reopened' | null;
@@ -40,6 +58,10 @@ export class FakeGitHub implements GitHub {
   readonly pushes: { repo: string; branch: string; tip: string; token: Minted }[] = [];
   // Every PR opened, in order.
   readonly pullRequests: FakePullRequest[] = [];
+  // Each PR closed or reopened through the port, with its token.
+  readonly prWrites: { action: 'close' | 'reopen'; repo: string; number: number; token: Minted }[] = [];
+  // Each branch deleted through the port, with its token.
+  readonly branchDeletes: { repo: string; branch: string; token: Minted }[] = [];
   // The login of the account that owns every App: the operator's.
   readonly operator = 'octo-operator';
   private readonly codes = new Map<string, string>();
@@ -176,7 +198,7 @@ export class FakeGitHub implements GitHub {
     issue.comments.push(comment);
     issue.open = false;
     issue.stateReason = 'completed';
-    this.writes.push({ action: 'close', ref, comment, token: { ...minted, permissions: { ...minted.permissions } } });
+    this.writes.push({ action: 'close', ref, comment, token: snapshot(minted) });
   }
 
   async reopenIssue(token: string, ref: string, comment: string): Promise<void> {
@@ -186,7 +208,7 @@ export class FakeGitHub implements GitHub {
     issue.comments.push(comment);
     issue.open = true;
     issue.stateReason = 'reopened';
-    this.writes.push({ action: 'reopen', ref, comment, token: { ...minted, permissions: { ...minted.permissions } } });
+    this.writes.push({ action: 'reopen', ref, comment, token: snapshot(minted) });
   }
 
   async push(token: string, { clonePath, repo, branch }: BranchPush): Promise<Pushed> {
@@ -202,7 +224,7 @@ export class FakeGitHub implements GitHub {
     const workflows = workflowFiles(git.outgoingChanges(clonePath, branch, remoteTip));
     if (workflows.length) return { workflowFiles: workflows };
     git.push(clonePath, branch);
-    this.pushes.push({ repo, branch, tip, token: { ...minted, permissions: { ...minted.permissions } } });
+    this.pushes.push({ repo, branch, tip, token: snapshot(minted) });
     return { pushed: tip };
   }
 
@@ -212,14 +234,85 @@ export class FakeGitHub implements GitHub {
     const minted = this.scoped(token, repo, 'pull_requests', 'write');
     // GitHub reads the branches with the same token.
     this.scoped(token, repo, 'contents', 'read');
-    const open = this.pullRequests.find((pr) => pr.repo === repo && pr.head === head);
+    const open = this.pullRequests.find((pr) => pr.repo === repo && pr.head === head && pr.state === 'open');
     if (open) return { number: open.number, url: open.url, draft: open.draft };
     const number = 100 + this.pullRequests.length + 1;
     const url = `https://github.com/${repo}/pull/${number}`;
     const draft = !this.noDrafts.has(repo);
-    const opener = { ...minted, permissions: { ...minted.permissions } };
-    this.pullRequests.push({ number, url, repo, draft, head, base, title, body, assignees: [assignee], token: opener });
+    const opener = snapshot(minted);
+    this.pullRequests.push({ number, url, repo, draft, head, base, title, body, assignees: [assignee], token: opener, state: 'open', comments: [] });
     return { number, url, draft };
+  }
+
+  // Someone merges the PR on GitHub: the base branch takes its head.
+  merge(number: number): void {
+    const pr = this.prAt(number);
+    pr.state = 'merged';
+    this.git.mergeOnOrigin(pr.repo, pr.head, pr.base);
+  }
+
+  // Someone closes the PR on GitHub without merging it.
+  closeUnmerged(number: number): void {
+    this.prAt(number).state = 'closed';
+  }
+
+  // Someone reopens the PR on GitHub.
+  reopen(number: number): void {
+    this.prAt(number).state = 'open';
+  }
+
+  async readPr(token: string, ref: string): Promise<PrState> {
+    this.scoped(token, ref, 'pull_requests', 'read');
+    return this.foundPr(ref).state;
+  }
+
+  async closePr(token: string, ref: string, comment: string): Promise<void> {
+    await this.held();
+    const minted = this.scoped(token, ref, 'pull_requests', 'write');
+    const pr = this.foundPr(ref);
+    if (pr.state !== 'open') return;
+    pr.comments.push(comment);
+    pr.state = 'closed';
+    this.prWrites.push({ action: 'close', repo: pr.repo, number: pr.number, token: snapshot(minted) });
+  }
+
+  async reopenPr(token: string, ref: string): Promise<void> {
+    await this.held();
+    const minted = this.scoped(token, ref, 'pull_requests', 'write');
+    const pr = this.foundPr(ref);
+    if (!this.git.onOrigin(pr.repo, pr.head)) throw new GitHubError(goneHead(pr.head, pr.number));
+    if (pr.state === 'merged') throw new GitHubError('GitHub refused to reopen a merged PR (HTTP 422: Validation Failed).');
+    pr.state = 'open';
+    this.prWrites.push({ action: 'reopen', repo: pr.repo, number: pr.number, token: snapshot(minted) });
+  }
+
+  async deleteBranch(token: string, repo: string, branch: string): Promise<void> {
+    const refusal = pushRefusal(branch);
+    if (refusal) throw new GitHubError(refusal);
+    await this.held();
+    const minted = this.scoped(token, repo, 'contents', 'write');
+    this.git.deleteOnOrigin(repo, branch);
+    this.branchDeletes.push({ repo, branch, token: snapshot(minted) });
+  }
+
+  // The PR as GitHub has it now.
+  prState(number: number): { state: PrState; comments: string[] } {
+    const { state, comments } = this.prAt(number);
+    return { state, comments: [...comments] };
+  }
+
+  // The PR a test names: one it never opened is the test's mistake.
+  private prAt(number: number): FakePullRequest {
+    const pr = this.pullRequests.find((pr) => pr.number === number);
+    if (!pr) throw new Error(`There is no PR #${number}.`);
+    return pr;
+  }
+
+  // The PR a call names, which GitHub doesn't find unless it has it.
+  private foundPr(ref: string): FakePullRequest {
+    const pr = this.pullRequests.find((pr) => `${pr.repo}#${pr.number}` === ref);
+    if (!pr) throw new GitHubError('GitHub refused the call (HTTP 404: Not Found).');
+    return pr;
   }
 
   // Waits while writes are held.

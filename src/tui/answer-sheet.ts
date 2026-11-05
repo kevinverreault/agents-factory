@@ -52,8 +52,7 @@ function byRules(taskId: string, permission: Permission, { label, enter, answer 
 }
 
 // The digits' choices on a request other than a question with its card, or
-// on a root in review. Kinds whose answers arrive with their own slices (a
-// closed PR) take none yet.
+// on a root in review.
 export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined): Choice[] {
   if (item.kind === 'review') {
     const { taskId } = item;
@@ -99,6 +98,12 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
     case 'github-write':
       // Answered once the operator fixed what refused the write.
       return [{ label: 'Try again', command: answer }];
+    case 'pr-closed-unmerged':
+      // The factory never cancels on its own (ADR 0011): the operator chooses.
+      return [
+        { label: 'Cancel task', command: { type: 'cancel', taskId } },
+        { label: 'Reopen PR', command: { type: 'reopenPr', taskId } },
+      ];
     case 'stage-blocked':
       // A stalled loop picks again once answered.
       return task?.mode === 'AFK' && task.loop ? [{ label: 'Retry', command: answer }, ...takeOver, cancel] : [{ label: 'Dismiss', command: answer }];

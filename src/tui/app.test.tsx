@@ -1458,6 +1458,19 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
   });
 
+  test('a PR closed without merging offers Cancel task or Reopen PR', async () => {
+    const connection = new FakeConnection();
+    const inReview = task('T2', 'Implement the store', 'in-review', 'In review');
+    const closed = { ...failure, attention: 'pr-closed-unmerged' as const, reason: 'PR #101 of T2 was closed without merging. Cancel the task, or reopen the PR.' };
+    const { app } = await started(factoryState([inReview], [closed]), { connection });
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('reopen the PR. 1 Cancel task 2 Reopen PR a answer'));
+
+    await press(app, 'a', '2');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'reopenPr', taskId: 'T2' }));
+  });
+
   test('cancelling a failed task from its sheet asks first when work would be lost', async () => {
     const connection = new FakeConnection();
     const keep = { type: 'cancel' as const, taskId: 'T2', branch: 'keep' as const };

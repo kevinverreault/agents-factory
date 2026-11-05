@@ -4,7 +4,8 @@
 // tokens narrowed to one repository and the permissions asked for. With such
 // a token it reads the Ralph loop's tickets, closes them, and reopens them
 // when their task is cancelled (ADR 0006), pushes task branches, and opens
-// their draft PRs. The REST adapter (`gitHubApi`) is the real one.
+// their draft PRs, reads those PRs, closes or reopens them, and deletes the
+// task branches it pushed (ADR 0011). The REST adapter (`gitHubApi`) is the real one.
 import { execFile } from 'node:child_process';
 import { sign } from 'node:crypto';
 import { issueRef } from '../artifacts/capture.ts';
@@ -16,7 +17,8 @@ export type FactoryApp = { id: number; slug: string; privateKey: string };
 export type Permission = 'contents' | 'issues' | 'pull_requests' | 'metadata';
 export type Permissions = Partial<Record<Permission, 'read' | 'write'>>;
 
-// What an AFK run reads GitHub with: Issues, Pull requests and Metadata read.
+// What an AFK run reads GitHub with, and the daemon reads a root's PR with
+// (ADR 0011): Issues, Pull requests and Metadata read.
 export const READ_ONLY: Permissions = { issues: 'read', pull_requests: 'read', metadata: 'read' };
 
 // What closing a ticket, or reopening it, writes with: a comment and the issue's state.
@@ -39,6 +41,13 @@ export type BranchPush = { clonePath: string; repo: string; branch: string };
 // files its commits change: the App has no Workflows permission, so the
 // operator pushes those by hand (ADR 0004).
 export type Pushed = { pushed: string } | { workflowFiles: string[] };
+
+// What closing a draft PR, with its comment, or reopening it, writes with:
+// pull requests alone.
+export const PR_WRITE: Permissions = { pull_requests: 'write', metadata: 'read' };
+
+// Where a PR stands on GitHub: open, merged, or closed without merging.
+export type PrState = 'open' | 'merged' | 'closed';
 
 // A draft PR the factory opens (ADR 0004): of the pushed task branch `head`
 // into `base`, assigned to `assignee`, the operator.
@@ -86,6 +95,21 @@ export interface GitHub {
   // stopped before it could record that it opened it. Where GitHub offers no
   // draft PRs, it opens a regular one instead.
   openDraftPr(token: string, pr: DraftPr): Promise<PullRequest>;
+  // Where the PR `ref` (`owner/name#n`) stands, read with `token`, which
+  // needs Pull requests read (ADR 0011).
+  readPr(token: string, ref: string): Promise<PrState>;
+  // Comments `comment` on the open PR, then closes it, with `token`, which
+  // needs Pull requests write. A PR already closed or merged is left as it is.
+  closePr(token: string, ref: string, comment: string): Promise<void>;
+  // Reopens the PR closed unmerged, with `token`, which needs Pull requests
+  // write. Throws a `GitHubError` saying so when GitHub no longer has its
+  // head branch, without which it can't be reopened.
+  reopenPr(token: string, ref: string): Promise<void>;
+  // Deletes the task branch on GitHub with `token`, which needs Contents
+  // write, under the same refspec guard as `push`. A branch GitHub no longer
+  // has, such as one its auto-delete removed, is deleted already. Throws a
+  // `GitHubError` when the guard or GitHub refuses it.
+  deleteBranch(token: string, repo: string, branch: string): Promise<void>;
   // The login of the account that owns the App: the operator's, whose
   // account `setup github` created it on.
   appOwner(app: FactoryApp): Promise<string>;
@@ -154,6 +178,13 @@ export function gitHubApi(): GitHub {
     if (reply.status === 404) return null;
     if (reply.status !== 200) throw refused(`say whether the App is installed on ${repo}`, reply);
     return reply.json.id as number;
+  }
+
+  // The PR `ref` as GitHub has it.
+  async function pullRequest(token: string, ref: string): Promise<any> {
+    const reply = await call('GET', pullPath(ref), token);
+    if (reply.status !== 200) throw refused(`read ${ref}`, reply);
+    return reply.json;
   }
 
   // Each page of a listing, a hundred at a time.
@@ -250,6 +281,32 @@ export function gitHubApi(): GitHub {
       }
       return { number: pr.number, url: pr.html_url, draft: pr.draft === true };
     },
+    async readPr(token, ref) {
+      return stateOf(await pullRequest(token, ref));
+    },
+    async closePr(token, ref, comment) {
+      if (stateOf(await pullRequest(token, ref)) !== 'open') return;
+      const commented = await call('POST', `${issuePath(ref)}/comments`, token, { body: comment });
+      if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
+      const closed = await call('PATCH', pullPath(ref), token, { state: 'closed' });
+      if (closed.status !== 200) throw refused(`close ${ref}`, closed);
+    },
+    async reopenPr(token, ref) {
+      const head = (await pullRequest(token, ref)).head.ref as string;
+      const [repo, number] = ref.split('#');
+      const branch = await call('GET', `/repos/${repo}/git/ref/heads/${refPath(head)}`, token);
+      if (branch.status === 404) throw new GitHubError(goneHead(head, number!));
+      const reopened = await call('PATCH', pullPath(ref), token, { state: 'open' });
+      if (reopened.status !== 200) throw refused(`reopen ${ref}`, reopened);
+    },
+    async deleteBranch(token, repo, branch) {
+      const refusal = pushRefusal(branch);
+      if (refusal) throw new GitHubError(refusal);
+      const reply = await call('DELETE', `/repos/${repo}/git/refs/heads/${refPath(branch)}`, token);
+      // Deleted already, such as by GitHub's auto-delete; any other refusal is one.
+      if (reply.status === 204 || (reply.status === 422 && /reference does not exist/i.test(reply.json?.message ?? ''))) return;
+      throw refused(`delete ${branch} of ${repo}`, reply);
+    },
     async appOwner(app) {
       const reply = await call('GET', '/app', appJwt(app));
       if (reply.status !== 200) throw refused('say who owns the App', reply);
@@ -301,6 +358,27 @@ function gitWithToken(cwd: string, token: string, args: string[]): Promise<strin
 function draftsUnsupported(json: any): boolean {
   const said = [json?.message, ...((json?.errors as { message?: string }[] | undefined) ?? []).map((error) => error.message)];
   return said.some((message) => /draft pull requests are not supported/i.test(message ?? ''));
+}
+
+// Why a PR can't be reopened: GitHub no longer has its head branch.
+export function goneHead(head: string, number: string | number): string {
+  return `${head} is gone from GitHub, so #${number} can’t be reopened. Push it again first, or cancel the task.`;
+}
+
+// Where the PR stands, from GitHub's own account of it.
+function stateOf(pr: { merged: boolean; state: string }): PrState {
+  return pr.merged ? 'merged' : pr.state === 'open' ? 'open' : 'closed';
+}
+
+// The REST path of a PR `owner/name#n`.
+function pullPath(ref: string): string {
+  const [repo, number] = ref.split('#');
+  return `/repos/${repo}/pulls/${number}`;
+}
+
+// A branch name as a ref path, each segment escaped.
+function refPath(branch: string): string {
+  return branch.split('/').map(encodeURIComponent).join('/');
 }
 
 // The REST path of an issue `owner/name#n`.

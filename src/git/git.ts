@@ -41,8 +41,9 @@ export interface Git {
   isMerged(clonePath: string, branch: string, into: string): Promise<boolean>;
   // The commits on the local `branch` that no branch of origin has, as the
   // clone last fetched or pushed them, newest first: the work deleting the
-  // branch would lose (ADR 0011). A branch the clone doesn't have has none.
-  unpushed(clonePath: string, branch: string): Promise<string[]>;
+  // branch would lose (ADR 0011). Origin's branch `besides`, which is to be
+  // deleted too, doesn't count. A branch the clone doesn't have has none.
+  unpushed(clonePath: string, branch: string, options?: { besides?: string }): Promise<string[]>;
   // Which of `paths` (relative to the worktree, with `/`) have changes not
   // yet committed there, untracked files included.
   uncommitted(worktreePath: string, paths: string[]): Promise<string[]>;
@@ -177,10 +178,11 @@ export const gitCli: Git = {
     return (await git(clonePath, 'merge-base', '--is-ancestor', tip!, base!)) !== null;
   },
 
-  async unpushed(clonePath, branch) {
+  async unpushed(clonePath, branch, { besides } = {}) {
     const ref = `refs/heads/${branch}`;
     if ((await git(clonePath, 'rev-parse', '--verify', '--quiet', ref)) === null) return [];
-    const commits = await run(clonePath, 'rev-list', ref, '--not', '--remotes=origin');
+    const exclude = besides ? [`--exclude=origin/${besides}`] : [];
+    const commits = await run(clonePath, 'rev-list', ref, '--not', ...exclude, '--remotes=origin');
     return commits ? commits.split(/\r?\n/) : [];
   },
 
