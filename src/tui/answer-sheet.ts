@@ -177,13 +177,15 @@ export function useAnswering(
     if (!item?.taskId || itemKey === null) return;
     const { taskId } = item;
     const sentFor = itemKey;
+    // An answered request leaves the queue, so its digits stay spent. A root
+    // in review stays there after its choice goes through (a push to its PR
+    // keeps it In review), so its digits answer again once the daemon replies.
+    const stays = item.kind === 'review';
     sheet.current.sent.add(sentFor);
     onSend?.();
     void connection.send(command).then((reply) => {
-      if (!reply.ok) {
-        sheet.current.sent.delete(sentFor);
-        if (sheet.current.cardFor === sentFor) sheet.current.card = newCard();
-      }
+      if (!reply.ok || stays) sheet.current.sent.delete(sentFor);
+      if (!reply.ok && sheet.current.cardFor === sentFor) sheet.current.card = newCard();
       if (!reply.ok && reply.confirm) {
         sheet.current.confirm = { for: sentFor, reason: reply.reason, options: [{ label: 'yes', command: reply.confirm }], yesNo: true };
       } else if (!reply.ok && reply.choose?.length) {

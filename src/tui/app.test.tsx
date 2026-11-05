@@ -1686,6 +1686,21 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(unwrapped(underWay.app.lastFrame()!)).toContain('3 Cancel a answer'));
   });
 
+  test('a root still in review once its choice went through takes the digits again: a later push, or Mark done', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([reviewing], [review]), { connection });
+    await press(app, '2', 'a', '4');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'pushAndOpenPr', taskId: 'T3' }]));
+
+    const opened = { ...reviewing, pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: true } };
+    connection.serveSnapshot(factoryState([opened], [review]));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('4 Push to draft PR #101'));
+    await press(app, '4');
+    await eventually(() => expect(connection.sent).toHaveLength(2));
+    await press(app, '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'markDone', taskId: 'T3' }));
+  });
+
   test('Mark done on an unmerged branch asks “Finish anyway?”: y finishes it, n backs out', async () => {
     const connection = new FakeConnection();
     const confirm = { type: 'markDone' as const, taskId: 'T3', anyway: true };
