@@ -2432,23 +2432,25 @@ describe('the screens view', () => {
   });
 });
 
+// The built-in wayfinder preset, frozen: chart, its work loop, then main-flow from spec.
+const stage = (id: string, more: object = {}) => ({ id, kind: 'run' as const, skill: id, mode: 'HITL' as const, model: 'opus' as const, ...more });
+const wayfinder = {
+  name: 'wayfinder',
+  description: null,
+  source: 'built-in' as const,
+  path: 'wayfinder.preset.yaml',
+  hash: '0123456789abcdef',
+  repoCommit: 'c0ffee',
+  stages: [
+    stage('chart', { exit: 'artifact:map' }),
+    { id: 'work', kind: 'loop' as const, skill: 'wayfinder', mode: 'HITL' as const, model: 'opus' as const, exit: 'map-cleared' },
+    stage('spec', { exit: 'artifact:spec' }),
+    stage('tickets', { exit: 'artifact:tickets' }),
+    { id: 'implement', kind: 'loop' as const, skill: 'implement', mode: 'AFK' as const, model: 'sonnet' as const },
+  ],
+};
+
 describe('the wayfinder work loop', () => {
-  const stage = (id: string, more: object = {}) => ({ id, kind: 'run' as const, skill: id, mode: 'HITL' as const, model: 'opus' as const, ...more });
-  const wayfinder = {
-    name: 'wayfinder',
-    description: null,
-    source: 'built-in' as const,
-    path: 'wayfinder.preset.yaml',
-    hash: '0123456789abcdef',
-    repoCommit: 'c0ffee',
-    stages: [
-      stage('chart', { exit: 'artifact:map' }),
-      { id: 'work', kind: 'loop' as const, skill: 'wayfinder', mode: 'HITL' as const, model: 'opus' as const, exit: 'map-cleared' },
-      stage('spec', { exit: 'artifact:spec' }),
-      stage('tickets', { exit: 'artifact:tickets' }),
-      { id: 'implement', kind: 'loop' as const, skill: 'implement', mode: 'AFK' as const, model: 'sonnet' as const },
-    ],
-  };
   const frontier = [
     { ref: 'acme/widgets#31', title: 'Which payment provider?' },
     { ref: 'acme/widgets#33', title: 'Invoice layout' },
@@ -2535,13 +2537,10 @@ describe('the wayfinder work loop', () => {
   });
 });
 
-
 describe('a stalled work loop', () => {
   test('offers to read the map again once its blockers move, or cancel', async () => {
     const connection = new FakeConnection();
-    const stages = [{ id: 'work', kind: 'loop' as const, skill: 'wayfinder', mode: 'HITL' as const, model: 'opus' as const, exit: 'map-cleared' }];
-    const preset = { name: 'wayfinder', description: null, source: 'built-in' as const, path: 'wayfinder.preset.yaml', hash: '0123456789abcdef', repoCommit: 'c0ffee', stages };
-    const stalled: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: false } };
+    const stalled: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: false } };
     const blocked = {
       kind: 'attention' as const, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
       reason: 'work’s map has no frontier: every open ticket is blocked (acme/widgets#31 by acme/widgets#39).', question: null, permission: null,
@@ -2553,5 +2552,18 @@ describe('a stalled work loop', () => {
     await press(app, 'a', '1');
 
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1' }));
+  });
+
+  test('once the map has cleared, a next stage that couldn’t start is only dismissed: nothing is read again', async () => {
+    const connection = new FakeConnection();
+    const blockedNext: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: true } };
+    const blocked = {
+      kind: 'attention' as const, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      reason: 'spec can’t start: its args need {{artifacts.map}}, and T1 has no map.', question: null, permission: null,
+    };
+    const { app } = await started(factoryState([blockedNext], [blocked]), { connection });
+    await press(app, '2');
+
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('has no map. 1 Dismiss a answer'));
   });
 });

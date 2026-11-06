@@ -19,6 +19,7 @@ import {
   type FactoryApp,
   type GitHub,
   type InstallationToken,
+  type Issue,
   type Permissions,
 } from '../github/github.ts';
 import { writeRunGh } from '../github/run-gh.ts';
@@ -1259,14 +1260,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Starts the step on GitHub of each loop between its iterations (ADR 0006):
-  // picking the next ticket, or closing the one the last iteration did, and
-  // reading the map of a work loop between its tickets. Its outcome goes
+  // picking the next ticket, or closing the one the last iteration did; and
+  // of each work loop between its tickets (ADR 0012): reading its map. Its outcome goes
   // through the Lifecycle like any other event.
   function driveLoops(): void {
     for (const task of Object.values(lifecycle.tasks)) {
-      if (stopping || stepsInFlight.has(task.id) || !(betweenIterations(lifecycle, task) || readingMap(lifecycle, task))) continue;
+      if (stopping || stepsInFlight.has(task.id)) continue;
+      const step = readingMap(lifecycle, task)
+        ? readMap(task)
+        : betweenIterations(lifecycle, task)
+          ? task.loop!.step === 'pick' ? pickTicket(task) : closeTicket(task)
+          : null;
+      if (!step) continue;
       stepsInFlight.add(task.id);
-      const step = task.loop!.step === 'pick' ? pickTicket(task) : closeTicket(task);
       void step.then(
         (event) =>
           // The step is over once its event is in: the next one may start from there.
@@ -1282,26 +1288,43 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
   }
 
-  // Reads the task's ticket set from GitHub with a read-only token, in
-  // order: each source's sub-issues, or a ticket source itself when it has none.
+  // Picks a Ralph loop's next ticket: reads its ticket set, with the task
+  // branch's tip the iteration starts from.
   async function pickTicket(task: Task): Promise<LoopEvent> {
     try {
-      const { token } = await appToken(task.repo, READ_ONLY);
-      const { kind, refs: sources } = ticketSources(lifecycle, task)!;
-      const refs: string[] = [];
-      for (const source of sources) {
-        // A spec or a map is never a ticket itself.
-        const subIssues = await github.subIssues(token, source);
-        for (const ref of subIssues.length || kind !== 'tickets' ? subIssues : [source]) if (!refs.includes(ref)) refs.push(ref);
-      }
-      const tickets = [];
-      for (const ref of refs) tickets.push(await github.readIssue(token, ref));
+      const tickets = await readTicketSet(task);
       const { head } = await git.snapshot(task.worktree!.path);
       return { type: 'ticketsRead', taskId: task.id, tickets, base: head, sessionId: randomUUID() };
     } catch (error) {
       if (!isGitHubFailure(error) && !(error instanceof GitError)) throw error;
       return { type: 'ticketsUnread', taskId: task.id, reason: error.message };
     }
+  }
+
+  // Reads a work loop's map: its tickets, for the frontier the operator picks from.
+  async function readMap(task: Task): Promise<LoopEvent> {
+    try {
+      return { type: 'mapRead', taskId: task.id, tickets: await readTicketSet(task), sessionId: randomUUID() };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'ticketsUnread', taskId: task.id, reason: error.message };
+    }
+  }
+
+  // Reads the task's ticket set from GitHub with a read-only token, in
+  // order: each source's sub-issues, or a ticket source itself when it has
+  // none. A spec or a map is never a ticket itself.
+  async function readTicketSet(task: Task): Promise<Issue[]> {
+    const { token } = await appToken(task.repo, READ_ONLY);
+    const { kind, refs: sources } = ticketSources(lifecycle, task)!;
+    const refs: string[] = [];
+    for (const source of sources) {
+      const subIssues = await github.subIssues(token, source);
+      for (const ref of subIssues.length || kind !== 'tickets' ? subIssues : [source]) if (!refs.includes(ref)) refs.push(ref);
+    }
+    const tickets: Issue[] = [];
+    for (const ref of refs) tickets.push(await github.readIssue(token, ref));
+    return tickets;
   }
 
   // Closes the ticket the last iteration did as completed, as the App, with

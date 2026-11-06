@@ -413,6 +413,21 @@ describe('finishing after this ticket', () => {
     expect(reviewing.runs.R3).toMatchObject({ ticket: null });
   });
 
+  test('taken over and parked, the task is Ready for you to reopen: it reads no map', async () => {
+    const { factory, operator, tui } = await looping();
+    await operator.send({ type: 'finishLoop', taskId: 'T1' });
+    await operator.send({ type: 'takeOver', taskId: 'T1' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+
+    factory.clock.advance(31 * 60_000);
+
+    const parked = await tui.until((state) => state.runs.R2?.outcome === 'parked');
+    expect(parked.tasks.T1).toMatchObject({ mode: 'HITL', state: 'queued', label: 'Ready for you' });
+    expect(parked.attentionQueue).toEqual([{ kind: 'ready', taskId: 'T1' }]);
+    expect(await operator.send({ type: 'open', taskId: 'T1' })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R3');
+  });
+
   test('is only for a task working through its loop', async () => {
     const { operator, tui } = await withSpec();
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', prompt: 'Fix #45' });

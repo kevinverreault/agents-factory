@@ -89,7 +89,7 @@ The HITL loop over a map: the operator picks a frontier ticket (or takes the fir
 _Avoid_: HITL Ralph loop, map loop
 
 **Ticket**:
-A GitHub issue a Ralph loop works through, one per iteration, such as a vertical slice of a spec. It is an artifact the task reads, never a task itself.
+A GitHub issue a loop works through, one per iteration: a vertical slice of a spec for a Ralph loop, a decision on a map for a work loop. It is an artifact the task reads, never a task itself.
 _Avoid_: Work item, slice
 
 **Artifact**:

@@ -1,7 +1,7 @@
 // Seam 1: the wayfinder preset's work loop. Once the chart stage made its
 // map, the factory reads the map's frontier from GitHub, shows it under the
 // task in Ready for you, and runs each ticket the operator picks (or the
-// first) in a fresh HITL session, until the map has no open children. Then
+// first) in a fresh HITL session, until the map has no open ticket. Then
 // the operator chooses whether to continue to spec, jump to tickets, or end.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -168,7 +168,7 @@ async function cleared() {
 }
 
 describe('the map clearing', () => {
-  test('map-cleared holds once the map has no open children: the task is Ready for you to choose where it goes', async () => {
+  test('map-cleared holds once the map has no open ticket: the task is Ready for you to choose where it goes', async () => {
     const { tui } = await cleared();
 
     const state = tui.state();
@@ -200,7 +200,10 @@ describe('the map clearing', () => {
     expect(await operator.send({ type: 'advanceStage', taskId: 'T1', skip: ['spec'] })).toEqual({ ok: true });
 
     expect((await tui.until((state) => state.tasks.T1?.liveRunId === 'R3')).tasks.T1).toMatchObject({ stage: 'tickets', loop: null });
-    expect(factory.executor.started.at(-1)).toMatchObject({ runId: 'R3', firstMessage: '/factory:to-tickets acme/widgets#30' });
+    const run = factory.executor.started.at(-1)!;
+    // Fresh, as the spec jumped over would have started.
+    expect(run).toMatchObject({ runId: 'R3', resumesSession: false, firstMessage: '/factory:to-tickets acme/widgets#30' });
+    expect(run.sessionId).not.toBe(factory.executor.started[1]!.sessionId);
   });
 
   test('end: the task goes In review, no run started', async () => {

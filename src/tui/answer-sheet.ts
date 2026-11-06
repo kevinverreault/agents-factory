@@ -7,6 +7,7 @@
 import { createElement as h, useReducer, useRef } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { AttentionQueueItem, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
+import { isWorkLoop } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
 import type { Command, Option, Reply } from '../protocol/protocol.ts';
@@ -110,7 +111,10 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
     case 'stage-blocked':
       // A stalled loop picks again once answered, and a work loop reads its map again.
       if (task?.mode === 'AFK' && task.loop) return [{ label: 'Retry', command: answer }, ...takeOver, cancel];
-      return task?.loop && workLoopAt(task) ? [{ label: 'Read the map again', command: answer }, cancel] : [{ label: 'Dismiss', command: answer }];
+      // Raised once the map cleared, it is the next stage that couldn't start: nothing is read again.
+      return task?.loop && !task.loop.cleared && workLoopAt(task)
+        ? [{ label: 'Read the map again', command: answer }, cancel]
+        : [{ label: 'Dismiss', command: answer }];
     default:
       return [];
   }
@@ -139,8 +143,7 @@ function workLoopChoices(task: TaskView): Choice[] {
 
 // Whether the task is at a work loop over a map.
 function workLoopAt({ preset, stage }: TaskView): boolean {
-  const at = preset?.stages.find(({ id }) => id === stage);
-  return at?.kind === 'loop' && at.mode === 'HITL' && at.exit === 'map-cleared';
+  return isWorkLoop(preset?.stages.find(({ id }) => id === stage));
 }
 
 // Whether the digits answer the item.
