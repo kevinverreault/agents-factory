@@ -108,8 +108,9 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
         { label: 'Reopen PR', command: { type: 'reopenPr', taskId } },
       ];
     case 'stage-blocked':
-      // A stalled loop picks again once answered.
-      return task?.mode === 'AFK' && task.loop ? [{ label: 'Retry', command: answer }, ...takeOver, cancel] : [{ label: 'Dismiss', command: answer }];
+      // A stalled loop picks again once answered, and a work loop reads its map again.
+      if (task?.mode === 'AFK' && task.loop) return [{ label: 'Retry', command: answer }, ...takeOver, cancel];
+      return task?.loop && workLoopAt(task) ? [{ label: 'Read the map again', command: answer }, cancel] : [{ label: 'Dismiss', command: answer }];
     default:
       return [];
   }
@@ -134,6 +135,12 @@ function workLoopChoices(task: TaskView): Choice[] {
     ...(hitl(next) && hitl(after) ? [{ label: `Jump to ${after!.id}`, command: { type: 'advanceStage' as const, taskId, skip: [next!.id] }, opens: true }] : []),
     { label: `End: put ${taskId} in review`, command: { type: 'advanceStage', taskId, end: true } },
   ];
+}
+
+// Whether the task is at a work loop over a map.
+function workLoopAt({ preset, stage }: TaskView): boolean {
+  const at = preset?.stages.find(({ id }) => id === stage);
+  return at?.kind === 'loop' && at.mode === 'HITL' && at.exit === 'map-cleared';
 }
 
 // Whether the digits answer the item.

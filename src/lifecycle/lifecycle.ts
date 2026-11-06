@@ -854,14 +854,20 @@ export function betweenIterations(state: Lifecycle, task: Task): boolean {
 
 // A HITL task at its work loop while the factory reads its map, before
 // the operator is offered the frontier: it holds no slot.
+// (A Ralph loop taken over keeps its loop while HITL, and reads nothing.)
 export function readingMap(state: Lifecycle, task: Task): boolean {
-  return task.mode === 'HITL' && task.state === 'queued' && task.loop?.step === 'pick' && !liveRun(state, task);
+  return atWorkLoop(task) && task.state === 'queued' && task.loop!.step === 'pick' && !liveRun(state, task);
 }
 
-// Whether the task is at a HITL work loop over a map (wayfinder's `work`).
+// Whether the stage is a work loop over a map (wayfinder's `work`): a HITL
+// loop whose exit is `map-cleared`.
+function isWorkLoop(stage: Stage | undefined): boolean {
+  return stage?.kind === 'loop' && stage.mode === 'HITL' && stage.exit === 'map-cleared';
+}
+
+// Whether the task is at its work loop over a map.
 function atWorkLoop(task: Task): boolean {
-  const stage = stageOf(task, task.stage);
-  return task.mode === 'HITL' && stage?.kind === 'loop' && stage.exit === 'map-cleared' && !!task.loop;
+  return task.mode === 'HITL' && isWorkLoop(stageOf(task, task.stage)) && !!task.loop;
 }
 
 // A work loop between its tickets, waiting on the operator to pick one
@@ -1017,8 +1023,9 @@ function enterStage(task: Task, stage: Stage, sessionId: string | undefined): vo
 // factory picks the first iteration's ticket once the task has a slot.
 // A HITL work loop starts no run either: the factory reads its map, then
 // offers the operator its frontier in Ready for you.
+// Any other HITL loop stage is one conversation, as before.
 function enterLoop(state: Lifecycle, task: Task, stage: Stage): boolean {
-  if (stage.kind !== 'loop' || !ticketSources(state, task)) return false;
+  if (stage.kind !== 'loop' || (task.mode === 'HITL' && !isWorkLoop(stage)) || !ticketSources(state, task)) return false;
   task.loop = picking();
   if (task.mode === 'HITL') task.state = 'queued';
   return true;
@@ -2776,7 +2783,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'ticketsRead': {
       const stage = stageOf(task, task.stage)!;
       const last = lastRun(state, task);
-      if (task.mode === 'HITL') {
+      if (atWorkLoop(task)) {
         readMap(state, task, stage, action, last, at);
         break;
       }

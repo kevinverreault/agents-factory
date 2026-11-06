@@ -2535,3 +2535,23 @@ describe('the wayfinder work loop', () => {
   });
 });
 
+
+describe('a stalled work loop', () => {
+  test('offers to read the map again once its blockers move, or cancel', async () => {
+    const connection = new FakeConnection();
+    const stages = [{ id: 'work', kind: 'loop' as const, skill: 'wayfinder', mode: 'HITL' as const, model: 'opus' as const, exit: 'map-cleared' }];
+    const preset = { name: 'wayfinder', description: null, source: 'built-in' as const, path: 'wayfinder.preset.yaml', hash: '0123456789abcdef', repoCommit: 'c0ffee', stages };
+    const stalled: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: false } };
+    const blocked = {
+      kind: 'attention' as const, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      reason: 'work’s map has no frontier: every open ticket is blocked (acme/widgets#31 by acme/widgets#39).', question: null, permission: null,
+    };
+    const { app } = await started(factoryState([stalled], [blocked]), { connection });
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('acme/widgets#39). 1 Read the map again 2 Cancel a answer'));
+
+    await press(app, 'a', '1');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1' }));
+  });
+});

@@ -3,6 +3,8 @@
 // task in Ready for you, and runs each ticket the operator picks (or the
 // first) in a fresh HITL session, until the map has no open children. Then
 // the operator chooses whether to continue to spec, jump to tickets, or end.
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { relayHook } from '../hooks/relay.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -240,5 +242,27 @@ describe('launching at the work loop', () => {
     expect(offered.tasks.T1).toMatchObject({ stage: 'work', label: 'Ready for you', liveRunId: null });
     expect(offered.tasks.T1!.loop!.frontier).toEqual([{ ref: 'acme/widgets#31', title: 'Which payment provider?' }]);
     expect(factory.executor.started).toEqual([]);
+  });
+});
+
+describe('other HITL loops', () => {
+  test('a HITL loop stage that works no map starts its run at once, as before', async () => {
+    const factory = await startTestFactory();
+    factories.push(factory);
+    mkdirSync(factory.paths.presetsDir, { recursive: true });
+    writeFileSync(
+      join(factory.paths.presetsDir, 'triaging.preset.yaml'),
+      'stages:\n  - { id: triage, kind: loop, skill: triage, args: "{{artifacts.tickets}}", mode: HITL, exit: tickets-closed }\n',
+    );
+    await factory.registerRepo();
+    factory.github.addIssue('acme/widgets#11');
+    const operator = await factory.attach();
+    const tui = watch(operator);
+
+    const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'triaging', issues: ['#11'] });
+    expect(launched.ok).toBe(true);
+
+    const started = await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
+    expect(started.tasks.T1).toMatchObject({ label: 'In conversation', loop: null });
   });
 });
