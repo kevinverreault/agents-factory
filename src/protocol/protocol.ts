@@ -55,8 +55,10 @@ export type LaunchCommand = {
   priority?: Priority;
 };
 // The advance sheet's confirm: the HITL task leaves its stage for the next
-// one, skipping the optional stages named in `skip`.
-export type AdvanceCommand = { type: 'advanceStage'; taskId: string; skip?: string[] };
+// one, skipping the optional stages named in `skip`. At a work loop it
+// finishes the ticket its run works; once the map cleared, `skip` may jump
+// over the next stage, and `end` puts the task In review.
+export type AdvanceCommand = { type: 'advanceStage'; taskId: string; skip?: string[]; end?: boolean };
 // The handoff sheet (`ctrl+h` or `/handoff`): opening it has the HITL run
 // write the brief, interrupting the agent mid-turn or resuming a parked
 // conversation, and `closeHandoff` backs out. `handoff` confirms it with the

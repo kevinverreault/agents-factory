@@ -76,8 +76,20 @@ _Avoid_: Bundle, plugin, skill pack
 A run sequence that takes one ready ticket per iteration with fresh context, until every ticket is done, the loop stalls, or the operator ends it early.
 _Avoid_: Agent loop, autopilot
 
+**Map**:
+The GitHub issue a wayfinder task charts, whose sub-issues are the decision tickets that clear the way to its destination. It is never a ticket itself.
+_Avoid_: Plan, epic
+
+**Frontier**:
+A map's open tickets with no open blockers, in sub-issue order: the ones takeable now.
+_Avoid_: Backlog, next up
+
+**Work loop**:
+The HITL loop over a map: the operator picks a frontier ticket (or takes the first), works it in a fresh conversation, and the factory reads the map again, until the map has no open ticket. Unlike a Ralph loop, the operator picks.
+_Avoid_: HITL Ralph loop, map loop
+
 **Ticket**:
-A GitHub issue a Ralph loop works through, one per iteration, such as a vertical slice of a spec. It is an artifact the task reads, never a task itself.
+A GitHub issue a loop works through, one per iteration: a vertical slice of a spec for a Ralph loop, a decision on a map for a work loop. It is an artifact the task reads, never a task itself.
 _Avoid_: Work item, slice
 
 **Artifact**:

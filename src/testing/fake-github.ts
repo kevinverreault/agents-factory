@@ -44,7 +44,7 @@ function snapshot(minted: Minted): Minted {
 // Why an issue is in its state, as GitHub says: closed as completed, or reopened.
 type StateReason = 'completed' | 'reopened' | null;
 
-type FakeIssue = { open: boolean; stateReason: StateReason; labels: string[]; blockedBy: string[]; subIssues: string[]; comments: string[] };
+type FakeIssue = { title: string; open: boolean; stateReason: StateReason; labels: string[]; blockedBy: string[]; subIssues: string[]; comments: string[] };
 
 // GitHub as the factory identity sees it: Apps created from manifest codes,
 // the repositories each is installed on, a record of every token minted with
@@ -128,16 +128,24 @@ export class FakeGitHub implements GitHub {
     };
   }
 
-  // An open issue (`owner/name#n`) with `labels`, added last among the
-  // sub-issues of `parent`, and blocked by the issues `blockedBy`.
-  addIssue(ref: string, { parent, labels = [], blockedBy = [] }: { parent?: string; labels?: string[]; blockedBy?: string[] } = {}): void {
-    this.issues.set(ref, { open: true, stateReason: null, labels: [...labels], blockedBy: [...blockedBy], subIssues: [], comments: [] });
+  // An open issue (`owner/name#n`) titled `title`, with `labels`, added last
+  // among the sub-issues of `parent`, and blocked by the issues `blockedBy`.
+  addIssue(
+    ref: string,
+    { title = `Issue ${ref}`, parent, labels = [], blockedBy = [] }: { title?: string; parent?: string; labels?: string[]; blockedBy?: string[] } = {},
+  ): void {
+    this.issues.set(ref, { title, open: true, stateReason: null, labels: [...labels], blockedBy: [...blockedBy], subIssues: [], comments: [] });
     if (parent) this.issueAt(parent).subIssues.push(ref);
   }
 
   // The operator reorders the parent's sub-issues on GitHub.
   reorder(parent: string, subIssues: string[]): void {
     this.issueAt(parent).subIssues = [...subIssues];
+  }
+
+  // Someone marks the issue blocked by `blocker` on GitHub.
+  block(ref: string, blocker: string): void {
+    this.issueAt(ref).blockedBy.push(blocker);
   }
 
   // Someone closes the issue on GitHub.
@@ -187,8 +195,8 @@ export class FakeGitHub implements GitHub {
 
   async readIssue(token: string, ref: string): Promise<Issue> {
     this.scoped(token, ref, 'issues', 'read');
-    const { open, labels, blockedBy } = this.found(ref);
-    return { ref, open, labels: [...labels], openBlockers: blockedBy.filter((blocker) => this.issues.get(blocker)?.open) };
+    const { title, open, labels, blockedBy } = this.found(ref);
+    return { ref, title, open, labels: [...labels], openBlockers: blockedBy.filter((blocker) => this.issues.get(blocker)?.open) };
   }
 
   async closeIssue(token: string, ref: string, comment: string): Promise<void> {

@@ -1,6 +1,7 @@
 // The advance sheet (`ctrl+n` in a conversation): the operator confirms
 // moving a HITL task on from its stage to the next HITL one, skipping
 // optional stages on the way. An AFK stage next is the handoff's to start.
+// On a ticket of a work loop over a map, it finishes the ticket.
 import { createElement as h, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -55,6 +56,18 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
     });
   });
 
+  // At a work loop, confirming finishes the ticket its run works instead.
+  const ticket = task.loop && !task.loop.cleared ? task.loop.ticket : null;
+  if (ticket) {
+    return h(
+      Box,
+      { flexDirection: 'column', borderStyle: 'round', paddingX: 1, flexShrink: 0 },
+      h(Text, { bold: true }, `Advance ${task.id} from ${task.stage}`),
+      h(Text, null, `Finish ${ticket}: the factory reads the map again for its next frontier.`),
+      refusal ? h(Text, { color: 'red' }, refusal) : null,
+      h(Text, { dimColor: true }, 'enter finish the ticket · esc back'),
+    );
+  }
   const then = handoff
     ? rows.length === 0
       ? h(Text, { color: 'yellow' }, `The next stage, ${handoff.id}, is AFK: hand ${task.id} off to start it.`)

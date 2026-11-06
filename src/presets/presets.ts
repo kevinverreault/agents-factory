@@ -155,6 +155,12 @@ export function fillOpening(stage: Stage, valueOf: (variable: string) => string 
   return { opening: stage.skill === undefined ? args : `/factory:${stage.skill}${args ? ` ${args}` : ''}` };
 }
 
+// Whether the stage is a work loop over a map (wayfinder's `work`): a HITL
+// loop whose exit is `map-cleared`.
+export function isWorkLoop(stage: Stage | undefined): boolean {
+  return stage?.kind === 'loop' && stage.mode === 'HITL' && stage.exit === 'map-cleared';
+}
+
 // The artifact kinds a stage's args name, such as `spec` for `{{artifacts.spec}}`.
 export function artifactKindsIn(stage: Stage): string[] {
   return variablesOf(stage).flatMap((variable) => (variable.startsWith('artifacts.') ? [variable.slice('artifacts.'.length)] : []));

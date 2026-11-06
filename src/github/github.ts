@@ -61,9 +61,9 @@ export function workflowFiles(paths: string[]): string[] {
   return paths.filter((path) => path.startsWith('.github/workflows/'));
 }
 
-// An issue (`owner/name#n`) as the Ralph loop reads it: whether it is open,
-// its labels, and the open issues blocking it (GitHub's native dependencies).
-export type Issue = { ref: string; open: boolean; labels: string[]; openBlockers: string[] };
+// An issue (`owner/name#n`) as a loop reads it: its title, whether it is
+// open, its labels, and the open issues blocking it (GitHub's native dependencies).
+export type Issue = { ref: string; title: string; open: boolean; labels: string[]; openBlockers: string[] };
 
 export interface GitHub {
   // The App GitHub created from the factory's manifest, by the code its
@@ -228,6 +228,7 @@ export function gitHubApi(): GitHub {
       const blockers = await list(`${issuePath(ref)}/dependencies/blocked_by`, token, `read what blocks ${ref}`);
       return {
         ref,
+        title: String(reply.json.title ?? ''),
         open: reply.json.state === 'open',
         labels: (reply.json.labels as { name: string }[]).map(({ name }) => name),
         openBlockers: blockers.filter((issue) => issue.state === 'open').map((issue) => issueRef(issue.html_url)),

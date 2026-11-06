@@ -17,6 +17,7 @@ import {
   type AutonomyLevel,
   type Cleanup,
   type ClosedTicket,
+  type FrontierTicket,
   type FrozenPreset,
   type HandoffSheet,
   type Lifecycle,
@@ -77,9 +78,11 @@ export type TaskView = {
   closedTickets: ClosedTicket[];
   // The tickets the operator skipped, which its loop leaves open.
   skippedTickets: string[];
-  // Its Ralph loop, while it is at a loop stage with a ticket set: the
-  // ticket its iteration works, and whether it ends after that one.
-  loop: { ticket: string | null; finishing: boolean } | null;
+  // Its Ralph loop or work loop, while it is at a loop stage with a ticket
+  // set: the ticket its iteration works, and whether it ends after that one.
+  // A work loop over a map between its tickets offers the map's frontier, as last
+  // read, or has `cleared` once the map had no open ticket left.
+  loop: { ticket: string | null; finishing: boolean; frontier: FrontierTicket[] | null; cleared: boolean } | null;
   // Once it is cancelled, while the tickets it closed aren't all reopened, and why it last failed to.
   reopening: Reopening | null;
   // Its PR body, once its PR body stage wrote it.
@@ -156,7 +159,14 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       handoff: handoffView(task.handoff ?? null),
       closedTickets: structuredClone(task.closedTickets ?? []),
       skippedTickets: [...(task.skippedTickets ?? [])],
-      loop: task.loop ? { ticket: task.loop.ticket, finishing: task.loop.finishing ?? false } : null,
+      loop: task.loop
+        ? {
+            ticket: task.loop.ticket,
+            finishing: task.loop.finishing ?? false,
+            frontier: task.loop.frontier ? structuredClone(task.loop.frontier) : null,
+            cleared: task.loop.cleared ?? false,
+          }
+        : null,
       reopening: task.reopening ? structuredClone(task.reopening) : null,
       prBody: task.prBody ?? null,
       publishing: task.publishing ? { ...task.publishing } : null,
