@@ -168,7 +168,7 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
 
   test.each([
     'git config core.autocrlf > ../autocrlf.txt',
-    'git config core.autocrlf > /tmp/autocrlf.txt',
+    'git config core.autocrlf > /tmp/../autocrlf.txt',
     'git config core.autocrlf > ~/autocrlf.txt',
     'git config core.autocrlf > $HOME/autocrlf.txt',
     'git config core.autocrlf > .git/hooks/pre-commit',
@@ -183,6 +183,97 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
     'cat > notes.md <<EOF\n$(rm -rf ~)\nEOF',
   ])('redirected or moved out of the worktree, it still asks: `%s`', async (command) => {
     expect(await gated([command])).toEqual([false]);
+  });
+
+  // As run T12 reached for it: the temp folder is scratch space, as for the file tools.
+  test('redirected into the temp folder, it runs without asking', async () => {
+    const commands = [
+      'git config core.autocrlf > /tmp/autocrlf.txt',
+      'git show HEAD:notes.txt > /tmp/a.txt && git show :notes.txt > /tmp/b.txt && diff /tmp/a.txt /tmp/b.txt | head',
+      `git diff --stat 2>&1 > ${slashed(join(tmpdir(), 'stat.txt'))}`,
+    ];
+    expect(await gated(commands)).toEqual([true, true, true]);
+  });
+
+  // As run T11 wrote them: files backed up to the temp folder, broken on
+  // purpose for a test to catch, and put back.
+  test('cp or mv into the worktree or the temp folder runs without asking', async () => {
+    const commands = [
+      "cp src/a.ts /tmp/a.ts && cp src/b.ts /tmp/b.ts && sed -i 's/owl/heron/' src/a.ts && npx vitest run 2>&1 | tail -5; cp /tmp/a.ts src/a.ts; cp /tmp/b.ts src/b.ts",
+      'mv /tmp/a.ts src/a.ts',
+      'cp -t /tmp src/a.ts src/b.ts',
+      'cp src/a.ts /tmp',
+      'cp -r src /tmp/src-backup',
+      'cp ../elsewhere/notes.txt notes.txt',
+      'cd src && cp a.ts ../a.bak',
+    ];
+    const folders = (worktree: string) => {
+      mkdirSync(join(worktree, 'src'), { recursive: true });
+      mkdirSync(join(worktree, 'node_modules', '.bin'), { recursive: true });
+      writeFileSync(join(worktree, 'node_modules', '.bin', 'vitest'), '');
+    };
+    expect(await gated(commands, folders)).toEqual([true, true, true, true, true, true, true]);
+  });
+
+  test.each([
+    'cp notes.txt /tmp/..',
+    'cp notes.txt ../elsewhere/notes.txt',
+    'cp notes.txt ~/notes.txt',
+    'cp hook.sh .git/hooks/pre-commit',
+    'cp -t .git/hooks hook.sh',
+    'cp notes.txt $DEST',
+    'cp notes.txt',
+    'mv ../elsewhere/notes.txt notes.txt',
+    'mv ~/.bashrc /tmp/bashrc',
+  ])('cp or mv writing elsewhere, or moving what lies elsewhere, still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  // As run T11 wrote them: Python told to read files as UTF-8, as Windows'
+  // doesn't by default.
+  test('a command after plain variables, or an export of them, runs without asking', async () => {
+    const script = join(tmpdir(), 'daemon_fix.py');
+    const calls: Asked[] = [
+      { tool: 'Write', input: { file_path: script, content: "print('an owl')\n" } },
+      `PYTHONUTF8=1 python -I ${bashPath(script)} && grep -n owl notes.txt && npm run typecheck 2>&1 | tail -10`,
+      "export PYTHONUTF8=1 && python - <<'EOF'\nprint('an owl')\nEOF\ngit diff --stat",
+      'NO_COLOR=1 FORCE_COLOR=0 npm test',
+      'LC_ALL=C sort notes.txt',
+      'export LANG=C.UTF-8 TZ=UTC',
+    ];
+    expect(await gated(calls)).toEqual([true, true, true, true, true, true]);
+  });
+
+  test.each([
+    'PATH=/tmp:$PATH npm test',
+    'NODE_OPTIONS=--require=./hook.js npm test',
+    'GIT_SSH_COMMAND=ssh git status',
+    'PYTHONUTF8=1 make',
+    'export GIT_CONFIG_COUNT=0',
+    'export PATH=/tmp:$PATH',
+    'export PYTHONUTF8',
+    'export -p',
+  ])('a command after other variables, or an export of them, still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  test('a temp script the run overwrote by a redirection, cp or mv no longer runs without asking', async () => {
+    const script = (name: string) => slashed(join(tmpdir(), name));
+    const calls: Asked[] = [
+      { tool: 'Write', input: { file_path: join(tmpdir(), 'fix.py'), content: 'print(1)\n' } },
+      { tool: 'Write', input: { file_path: join(tmpdir(), 'seed.py'), content: 'print(1)\n' } },
+      { tool: 'Write', input: { file_path: join(tmpdir(), 'edit.py'), content: 'print(1)\n' } },
+      `echo 'print(2)' > ${script('fix.py')}; python ${script('fix.py')}`,
+      `python ${script('fix.py')}`,
+      `cp notes.txt ${script('seed.py')}`,
+      `python ${script('seed.py')}`,
+      `cp notes.txt ${script('')}`,
+      `python ${script('fix.py')}`,
+      // Asked about, the operator may yet allow it.
+      `make > ${script('edit.py')}`,
+      `python ${script('edit.py')}`,
+    ];
+    expect(await gated(calls)).toEqual([true, true, true, false, false, true, false, true, false, false, false]);
   });
 
   test('installs from the lockfile, and npx of a binary the project installed, run without asking', async () => {
