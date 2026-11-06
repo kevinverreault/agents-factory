@@ -277,7 +277,9 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
 // environment, without the operator's credentials. Commits carry the
 // factory's trailers, not Claude Code's attribution (ADR 0004).
 function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
-  const env: Record<string, string | undefined> = { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards!.env };
+  // Python reads and writes files as UTF-8, not Windows' code page, so the
+  // run needn't ask to set it for each script (T11).
+  const env: Record<string, string | undefined> = { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', PYTHONUTF8: '1', ...guards!.env };
   for (const name of AFK_UNSET) delete env[name];
   return {
     env,

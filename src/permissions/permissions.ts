@@ -151,12 +151,17 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
 // The factory's commands: the rest of its allow list, which its own matcher
 // lets through by reading the command, where no rule's glob can say it.
 // Claude Code asks about these, and the gate answers them. Besides these,
-// `cd` within the worktree and redirects to its files outside `.git` are
-// covered, for the run's Edit tool writes there anyway (see `uncovered`).
+// `cd` within the worktree and redirects to its files outside `.git`, or to
+// the temp folder, are covered, for the run's file tools write there anyway
+// (see `uncovered`).
 // `covered` says whether the rules or these cover another command.
 function factoryCommand(command: SimpleCommand, at: Place, covered: (other: SimpleCommand) => boolean): boolean {
   const { words, heredoc } = command;
   const [program = '', ...args] = words;
+  if (ASSIGNMENT.test(program)) return withPlainEnv(command, covered);
+  if (program === 'export') return args.length > 0 && args.every(plainAssignment);
+  if (program === 'cp') return copiesWithin(args, at, false);
+  if (program === 'mv') return copiesWithin(args, at, true);
   if (program === 'git' && args[0] === '-c') return withPlainConfig(command, covered);
   if (program === 'git' && args[0] === 'config') return readsGitConfig(args.slice(1));
   if (program === 'git' && args[0] === 'branch') return listsBranches(args.slice(1));
@@ -183,6 +188,76 @@ function withPlainConfig(command: SimpleCommand, covered: (other: SimpleCommand)
 
 // The settings `withPlainConfig` lets through.
 const PLAIN_CONFIG = /^(core\.(autocrlf|safecrlf|eol|quotepath|filemode|ignorecase|longpaths)|color\.[\w.-]+|advice\.\w+|i18n\.\w+|user\.(name|email))(=|$)/i;
+
+// `NAME=value cmd`, for variables that change how a program encodes, colours
+// or buffers its output, and nothing it runs: covered when the command
+// without them is. Others, such as `PATH`, `NODE_OPTIONS` or the `GIT_*`
+// the run's cleaned environment sets, change what runs or undo its guards.
+function withPlainEnv(command: SimpleCommand, covered: (other: SimpleCommand) => boolean): boolean {
+  const first = command.words.findIndex((word) => !ASSIGNMENT.test(word));
+  if (first < 0 || !command.words.slice(0, first).every(plainAssignment)) return false;
+  const words = command.words.slice(first);
+  return covered({ ...command, text: words.map(quoted).join(' '), words });
+}
+
+const ASSIGNMENT = /^[A-Za-z_]\w*=/;
+
+// Whether the word sets one of the variables `withPlainEnv` lets through, as
+// `export` does too: for the rest of the line, as Windows' Python needs
+// `PYTHONUTF8` to read the worktree's files (T11).
+const plainAssignment = (word: string) => PLAIN_ENV.test(word);
+const PLAIN_ENV =
+  /^(PYTHONUTF8|PYTHONIOENCODING|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE|NODE_ENV|CI|FORCE_COLOR|NO_COLOR|TERM|COLUMNS|LANG|LANGUAGE|LC_[A-Z]+|TZ)=/;
+
+// `cp` or `mv` into a file or folder in the worktree, outside `.git`, or in
+// the temp folder, where the run's file tools may write too: as T11 backed
+// files up there and put them back. What `mv` moves goes from where it was,
+// so that lies in one of them too; `cp` only reads its sources.
+function copiesWithin(args: string[], at: Place, moves: boolean): boolean {
+  const { sources, destination } = copyOf(args);
+  const writable = (path: string | null) => path !== null && (at.inside(path) !== null || inTempOrIt(path) !== null);
+  return sources.length > 0 && writable(destination) && (!moves || sources.every(writable));
+}
+
+// What `cp` or `mv` copies, and the file or folder it copies to: its last
+// operand, or the folder `-t` names.
+function copyOf(args: string[]): { sources: string[]; destination: string | null } {
+  const { options, operands } = optionsOf(args, 'tS', ['--target-directory', '--suffix']);
+  const target = options.filter(({ name }) => name === '-t' || name === '--target-directory').at(-1);
+  if (target) return { sources: operands, destination: target.value };
+  return { sources: operands.slice(0, -1), destination: operands.at(-1) ?? null };
+}
+
+// The files in the temp folder the command writes, but by the heredoc `cat`
+// that writes a script whole: by redirection, or as `cp` or `mv` put them
+// there. Each is no longer a script the run wrote, and nor is one in a folder
+// it copies into.
+function tempOverwrites(command: SimpleCommand): string[] {
+  const [program = '', ...args] = command.words;
+  const written = heredocScript(command) === null ? [...command.writes] : [];
+  if (program === 'cp' || program === 'mv') {
+    const { sources, destination } = copyOf(args);
+    if (destination !== null) written.push(destination);
+    if (program === 'mv') written.push(...sources);
+  }
+  return written.flatMap((path) => inTempOrIt(path) ?? []);
+}
+
+// The path, resolved, when it lies in the temp folder or is that folder.
+const inTempOrIt = (path: string) => inTemp(path) ?? inTemp(`${path}/`)?.replace(/\/$/, '') ?? null;
+
+// The run's temp scripts once the command ran: those it overwrote, or that
+// lie in a folder it copied into, forgotten, and the one it wrote whole
+// added, if it `adds`.
+function scriptsAfter(command: SimpleCommand, scripts: Set<string>, adds = true): void {
+  for (const path of tempOverwrites(command)) {
+    for (const script of scripts) {
+      if (comparable(script) === comparable(path) || comparable(script).startsWith(`${comparable(path)}/`)) scripts.delete(script);
+    }
+  }
+  const script = adds ? heredocScript(command) : null;
+  if (script !== null) scripts.add(script);
+}
 
 // A word as the shell would read it back.
 const quoted = (word: string) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`);
@@ -447,12 +522,12 @@ const mustHoldRules = (path: string) => `${path} must hold \`allow:\`, a list of
 // run's `worktree` when known: the commands of a Bash chain (`&&`, `||`, `;`,
 // `&` or `|`), less their redirections, which a rule or the factory's
 // commands may cover, or else the call itself. A Bash command that can't be
-// read, writes outside the worktree or `cd`s out of it is one part, which
-// only its exact rule covers. None when the rules cover the call. `scripts`
-// are those the run wrote to the temp folder in its earlier calls, as
-// `scriptsWritten` names them, which it may run as it would its line's own.
-// The temp folder is the run's scratch space too: its file tools may write
-// there, as they may in the worktree.
+// read, writes outside the worktree and the temp folder or `cd`s out of the
+// worktree is one part, which only its exact rule covers. None when the
+// rules cover the call. `scripts` are those the run wrote to the temp folder
+// in its earlier calls, as `trackScripts` keeps them, which it may run as it
+// would its line's own. The temp folder is the run's scratch space too: its
+// file tools, redirections, `cp` and `mv` may write there, as in the worktree.
 export function uncovered(rules: readonly string[], call: ToolCall, worktree: string | null = null, scripts: ReadonlySet<string> = new Set()): ToolCall[] {
   const parsed = rules.flatMap((rule) => parseRule(rule) ?? []).filter((rule) => toolMatches(rule.tool, call.tool));
   if (parsed.some((rule) => rule.specifier === null)) return [];
@@ -486,26 +561,28 @@ function fileInTemp(path: string): string | null {
   return process.platform === 'win32' && !/^[a-z]:[\\/]/i.test(path) ? null : inTemp(path);
 }
 
-// The scripts in the temp folder the call writes whole, which the run's
-// later calls may run: the file Write writes, or those a line's heredoc
-// `cat`s write.
-export function scriptsWritten(call: Pick<ToolCall, 'tool' | 'input'>): string[] {
-  if (call.tool === 'Write') {
+// Updates the run's `scripts` in the temp folder, which its later calls may
+// run, for a call it makes: the file Write writes whole, or a line's heredoc
+// `cat`s write, is one, when the rules `cover` the call, and one a line
+// overwrites otherwise, by a redirection, `cp` or `mv`, no longer is, even
+// when they don't: the operator may yet allow it.
+export function trackScripts(call: Pick<ToolCall, 'tool' | 'input'>, scripts: Set<string>, covered: boolean): void {
+  if (call.tool === 'Write' && covered) {
     const script = typeof call.input.file_path === 'string' ? fileInTemp(call.input.file_path) : null;
-    return script === null ? [] : [script];
+    if (script !== null) scripts.add(script);
   }
-  if (call.tool !== 'Bash') return [];
-  const commands = readCommandLine(String(call.input.command ?? '')) ?? [];
-  return commands.flatMap((command) => heredocScript(command) ?? []);
+  if (call.tool !== 'Bash') return;
+  for (const command of readCommandLine(String(call.input.command ?? '')) ?? []) scriptsAfter(command, scripts, covered);
 }
 
 // The simple commands of a line, but its `cd`s and bare redirections, each
 // with where it runs, or null when the line can't be read, writes outside
-// the worktree, or a `cd` may leave it. A `cd` in a loop, a condition or a
-// group may run more than once or not at all, so no reading says where it
-// leaves. A heredoc `cat` writes to the temp folder is a script the
-// commands after it may run, as an interpreter would run the heredoc itself,
-// and so are the run's earlier `written` scripts.
+// the worktree and the temp folder, or a `cd` may leave the worktree. A `cd`
+// in a loop, a condition or a group may run more than once or not at all,
+// so no reading says where it leaves. A heredoc `cat` writes to the temp
+// folder is a script the commands after it may run, as an interpreter would
+// run the heredoc itself, and so are the run's earlier `written` scripts,
+// until the line overwrites them otherwise.
 function partsWithin(commands: SimpleCommand[] | null, worktree: string | null, written: ReadonlySet<string>): { command: SimpleCommand; at: Place }[] | null {
   if (commands === null || commands.length === 0) return null;
   // Where each command runs, as far as the `cd`s before it in the line say.
@@ -514,9 +591,8 @@ function partsWithin(commands: SimpleCommand[] | null, worktree: string | null, 
   const parts: { command: SimpleCommand; at: Place }[] = [];
   for (const command of commands) {
     const at = place(worktree, dir, new Set(scripts));
-    const script = heredocScript(command);
-    if (script !== null) scripts.add(script);
-    else if (!command.writes.every((path) => at.inside(path) !== null)) return null;
+    if (!command.writes.every((path) => at.inside(path) !== null || inTemp(path) !== null)) return null;
+    scriptsAfter(command, scripts);
     if (command.words[0] === 'cd') {
       if (command.compound || (dir = movesTo(command, at)) === null) return null;
     } else if (command.words.length) parts.push({ command, at });

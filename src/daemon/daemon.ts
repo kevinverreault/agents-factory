@@ -93,7 +93,7 @@ import {
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import type { Routes } from '../models/routing.ts';
-import { addOperatorRules, readAllowRules, scriptsWritten, uncovered, type ToolCall } from '../permissions/permissions.ts';
+import { addOperatorRules, readAllowRules, trackScripts, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
   appStages,
@@ -1625,13 +1625,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // permission request. A call asked about while another request holds its
   // run is held until that one is answered; one the Lifecycle won't ask about
   // otherwise is refused, with its reason. The run's later calls may run the
-  // temp scripts a call the rules cover writes.
+  // temp scripts a call the rules cover writes, but none a call overwrote.
   function gate(runId: string, call: ToolCall): void {
     const { rules, error } = readAllowRules(options.permissionsPath);
     const guard = guarded.get(runId);
     const parts = uncovered(rules, call, guard?.worktree ?? null, guard?.scripts);
+    if (guard) trackScripts(call, guard.scripts, parts.length === 0);
     if (parts.length === 0) {
-      for (const script of scriptsWritten(call)) guard?.scripts.add(script);
       return executor.permit(runId, call.id, { allow: true });
     }
     void dispatch({ type: 'permissionAsked', runId, call, parts, rulesProblem: error }).then((reply) => {
