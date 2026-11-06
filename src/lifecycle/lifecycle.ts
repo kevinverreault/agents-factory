@@ -131,7 +131,17 @@ export type Loop = {
   // True once the operator chose to finish after this ticket: the loop ends
   // at its next pick. Loops stored before it carry on.
   finishing?: boolean;
+  // A HITL work loop over a map (wayfinder) waits on the operator between
+  // its tickets: `frontier` is what the map offered when last read (its open
+  // tickets with no open blockers, in sub-issue order), for them to pick
+  // from, with the session the picked ticket starts; `cleared` is true once
+  // the map had no open tickets, for them to choose where the task goes.
+  frontier?: FrontierTicket[] | null;
+  session?: string | null;
+  cleared?: boolean;
 };
+// A ticket on a map's frontier, by its ref and title.
+export type FrontierTicket = { ref: string; title: string };
 
 // An ended task's cleanup while it hasn't finished (ADR 0011): why it last
 // failed, if it did, whether its local task branch stays, as Keep branch
@@ -449,7 +459,9 @@ export type OperatorCommand =
       submit?: boolean;
     }
   | { type: 'submit'; taskId: string }
-  | { type: 'open'; taskId: string }
+  // Opens a HITL task's conversation. At a work loop between its tickets it
+  // starts the ticket `ticket` of the map's frontier, by default the first.
+  | { type: 'open'; taskId: string; ticket?: string }
   | { type: 'sendMessage'; taskId: string; text: string }
   // Cuts the agent's turn short; the run lives on.
   | { type: 'interrupt'; taskId: string }
@@ -605,8 +617,10 @@ export type TaskLaunched = {
 
 // The operator confirmed the advance sheet: the task leaves its stage for the
 // next one it didn't skip (only optional stages can be). The daemon names a
-// session, for a next stage whose context is fresh.
-export type StageAdvanced = { type: 'stageAdvanced'; taskId: string; skip: string[]; sessionId: string };
+// session, for a next stage whose context is fresh. At a work loop it
+// finishes the live ticket instead, and once the map cleared may jump over
+// the next stage, or `end` the task (In review).
+export type StageAdvanced = { type: 'stageAdvanced'; taskId: string; skip: string[]; sessionId: string; end?: boolean };
 
 // The operator opened the handoff sheet (`ctrl+h` or `/handoff`), and the
 // daemon read how the task's worktree stands.
@@ -806,10 +820,15 @@ function issuesFor(state: Lifecycle, task: Task, kind: string): string[] {
 // specs, whose sub-issues are its tickets and which never are one, else its
 // tickets, each standing for its sub-issues if it has any. Null when the
 // task has no ticket set, as after an early handoff that skipped the stages
-// making them.
-export type TicketSources = { kind: 'spec' | 'tickets'; refs: string[] };
+// making them. At a work loop (exit `map-cleared`), its maps, whose
+// sub-issues are its tickets and which never are one.
+export type TicketSources = { kind: 'spec' | 'tickets' | 'map'; refs: string[] };
 
 export function ticketSources(state: Lifecycle, task: Task): TicketSources | null {
+  if (stageOf(task, task.stage)?.exit === 'map-cleared') {
+    const maps = issuesFor(state, task, 'map');
+    return maps.length ? { kind: 'map', refs: maps } : null;
+  }
   const specs = issuesFor(state, task, 'spec');
   if (specs.length) return { kind: 'spec', refs: specs };
   const tickets = issuesFor(state, task, 'tickets');
@@ -831,6 +850,24 @@ function lastRun(state: Lifecycle, task: Task): Run | undefined {
 // factory reads or closes tickets.
 export function betweenIterations(state: Lifecycle, task: Task): boolean {
   return task.mode === 'AFK' && task.state === 'running' && !!task.loop?.step && !liveRun(state, task);
+}
+
+// A HITL task at its work loop while the factory reads its map, before
+// the operator is offered the frontier: it holds no slot.
+export function readingMap(state: Lifecycle, task: Task): boolean {
+  return task.mode === 'HITL' && task.state === 'queued' && task.loop?.step === 'pick' && !liveRun(state, task);
+}
+
+// Whether the task is at a HITL work loop over a map (wayfinder's `work`).
+function atWorkLoop(task: Task): boolean {
+  const stage = stageOf(task, task.stage);
+  return task.mode === 'HITL' && stage?.kind === 'loop' && stage.exit === 'map-cleared' && !!task.loop;
+}
+
+// A work loop between its tickets, waiting on the operator to pick one
+// from the frontier.
+function picksFromFrontier(task: Task): boolean {
+  return atWorkLoop(task) && !task.loop!.step && !task.loop!.ticket && !task.loop!.cleared && !!task.loop!.frontier?.length;
 }
 
 // The tier the task's next run starts at: the operator's, then its stage's,
@@ -940,6 +977,10 @@ function unmetExit(state: Lifecycle, task: Task, stage: Stage): string | null {
   if (stage.exit === undefined || stage.exit === 'run-completed') return null;
   // A loop with no ticket set runs once, and its run completing ends it.
   if (stage.exit === 'tickets-closed' && !ticketSources(state, task)) return null;
+  // Read from GitHub between the work loop's tickets.
+  if (stage.exit === 'map-cleared') {
+    return task.loop?.cleared ? null : `${stage.id}’s exit, map-cleared, doesn’t hold: ${issuesFor(state, task, 'map').join(', ') || 'the map'} still has open tickets.`;
+  }
   const kind = /^artifact:(.*)$/.exec(stage.exit)?.[1];
   // The PR body is the one artifact kind that is no issue.
   const made = kind === 'pr-body' ? !!task.prBody : !!kind && issuesOfKind(state, task, kind).length > 0;
@@ -974,9 +1015,12 @@ function enterStage(task: Task, stage: Stage, sessionId: string | undefined): vo
 
 // Starts the task's Ralph loop at a loop stage, if it has a ticket set: the
 // factory picks the first iteration's ticket once the task has a slot.
+// A HITL work loop starts no run either: the factory reads its map, then
+// offers the operator its frontier in Ready for you.
 function enterLoop(state: Lifecycle, task: Task, stage: Stage): boolean {
   if (stage.kind !== 'loop' || !ticketSources(state, task)) return false;
   task.loop = picking();
+  if (task.mode === 'HITL') task.state = 'queued';
   return true;
 }
 
@@ -1128,6 +1172,37 @@ function iterationOpening(state: Lifecycle, task: Task, stage: Stage, ticket: st
   return `/factory:${stage.skill} ${ticket}\n\n${context.join('\n\n')}`;
 }
 
+// What the factory read of a work loop's map: with no open ticket left the
+// map has cleared, and the operator chooses where the task goes next;
+// otherwise they are offered its frontier, the open tickets with no open
+// blockers in sub-issue order. Every open ticket blocked, the loop stalls.
+function readMap(state: Lifecycle, task: Task, stage: Stage, { tickets, sessionId }: Extract<LoopEvent, { type: 'ticketsRead' }>, last: Run | undefined, at: number): void {
+  const open = tickets.filter((ticket) => ticket.open);
+  if (open.length === 0) {
+    task.loop = { step: null, ticket: null, base: null, commits: [], cleared: true };
+    return;
+  }
+  const frontier = open.filter((ticket) => ticket.openBlockers.length === 0);
+  if (frontier.length === 0) {
+    const blocked = open.map(({ ref, openBlockers }) => `${ref} by ${openBlockers.join(', ')}`).join('; ');
+    raise(state, task, last, 'stage-blocked', false, `${stage.id}’s map has no frontier: every open ticket is blocked (${blocked}).`, at);
+    return;
+  }
+  task.loop = { step: null, ticket: null, base: null, commits: [], frontier: frontier.map(({ ref, title }) => ({ ref, title })), session: sessionId };
+}
+
+// What a work loop's run on a ticket of its map opens on: its stage's skill
+// on the map and that ticket, and the factory context it works in.
+function workOpening(state: Lifecycle, task: Task, { ref, title }: FrontierTicket): string {
+  const stage = stageOf(task, task.stage)!;
+  const filled = fillOpening(stage, (variable) => argValue(state, task, variable) ?? '');
+  const opening = 'opening' in filled ? filled.opening : `/factory:${stage.skill}`;
+  const context =
+    `This run works one ticket of the map with the operator: ${ref}, ${title}. Resolve that ticket alone, and don’t start another. ` +
+    'Once it is resolved, the operator advances, and the factory reads the map again for its next frontier.';
+  return `${opening} ${ref}\n\n## Factory context\n${context}`;
+}
+
 function short(commit: string): string {
   return commit.slice(0, 7);
 }
@@ -1142,14 +1217,28 @@ function nextAfkStage(task: Task, from: Stage): Stage | null {
 // Where the advance sheet's confirm takes the task: past its stage and the
 // optional ones it skips, to the next HITL stage, or past the last stage
 // (null). An AFK stage next is the handoff's to start.
-function planAdvance(state: Lifecycle, task: Task, skip: string[]): { from: Stage; to: Stage | null } | { refusal: string } {
+// At a work loop, confirming finishes the ticket its live iteration works
+// (`ticket`), and the factory reads the map again. Once the map cleared, it
+// leaves the loop: on to the next stage, jumping over it (`skip` names it,
+// optional or not), or, with `end`, to the end.
+type AdvancePlan = { from: Stage; to: Stage | null; ticket?: true; jumped?: Stage };
+
+function planAdvance(state: Lifecycle, task: Task, skip: string[], end = false): AdvancePlan | { refusal: string } {
   const { stages } = task.preset!;
   const at = stages.findIndex(({ id }) => id === task.stage);
+  const from = stages[at]!;
+  const cleared = atWorkLoop(task) && !!task.loop!.cleared;
+  if (atWorkLoop(task) && !cleared) {
+    if (!task.loop!.ticket) return { refusal: `${task.id} works no ticket of its map yet: pick one from its frontier first.` };
+    if (skip.length || end) return { refusal: `${task.id}’s map hasn’t cleared: finish ${task.loop!.ticket} first.` };
+    return { from, to: from, ticket: true };
+  }
+  if (end) return cleared ? { from, to: null } : { refusal: `Only a cleared map ends ${task.id} early.` };
   let next = at + 1;
   for (; next < stages.length && skip.includes(stages[next]!.id); next++) {
-    if (!stages[next]!.optional) return { refusal: `${stages[next]!.id} isn’t optional, so it can’t be skipped.` };
+    // A cleared map may jump over the stage after it.
+    if (!stages[next]!.optional && !(cleared && next === at + 1)) return { refusal: `${stages[next]!.id} isn’t optional, so it can’t be skipped.` };
   }
-  const from = stages[at]!;
   const to = stages[next] ?? null;
   const between = stages.slice(at + 1, next).map(({ id }) => id);
   const stray = skip.find((id) => !between.includes(id));
@@ -1157,7 +1246,16 @@ function planAdvance(state: Lifecycle, task: Task, skip: string[]): { from: Stag
   const unmet = unmetExit(state, task, from);
   if (unmet) return { refusal: unmet };
   if (to?.mode === 'AFK') return { refusal: `The next stage, ${to.id}, is AFK: hand ${task.id} off to start it.` };
-  return { from, to };
+  return cleared && next > at + 1 ? { from, to, jumped: stages[at + 1]! } : { from, to };
+}
+
+// The args value of a stage a cleared map jumped to: the map stands in for
+// the artifact the stage it jumped over would have made (wayfinder's
+// tickets are written from the map when the spec is jumped over).
+function jumpValue(state: Lifecycle, task: Task, jumped: Stage | undefined, variable: string): string | null {
+  const value = argValue(state, task, variable);
+  if (value !== null || !jumped?.exit?.startsWith('artifact:')) return value;
+  return variable === `artifacts.${jumped.exit.slice('artifact:'.length)}` ? issuesFor(state, task, 'map').join(' ') || null : null;
 }
 
 // The live runs whose park deadline has passed at `at`.
@@ -1179,7 +1277,8 @@ export function waitsOnOperator(run: Run): boolean {
 // runs whose conversations are open).
 export function readyForYou(state: Lifecycle, task: Task, watched: ReadonlySet<string>): boolean {
   if (task.mode !== 'HITL') return false;
-  if (task.state === 'queued') return true;
+  // A work loop's frontier is offered once the factory read its map.
+  if (task.state === 'queued') return task.loop?.step !== 'pick';
   const run = task.state === 'running' ? liveRun(state, task) : undefined;
   return !!run && waitsOnOperator(run) && !watched.has(run.id);
 }
@@ -1190,7 +1289,8 @@ export function label(task: Task, ready = false): string {
     case 'draft':
       return 'Draft';
     case 'queued':
-      return task.mode === 'HITL' ? 'Ready for you' : 'Queued';
+      if (task.mode === 'AFK') return 'Queued';
+      return task.loop?.step === 'pick' ? 'Reading the map' : 'Ready for you';
     case 'running':
       if (task.mode === 'AFK') return 'Running';
       return ready ? 'Ready for you' : 'In conversation';
@@ -1317,6 +1417,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'open':
       if (task.mode !== 'HITL') return `${task.id} is AFK. Take it over to talk to it.`;
       if (task.state !== 'draft' && task.state !== 'queued') return `${task.id} isn't ready for a conversation (it is ${label(task)}).`;
+      if (task.loop?.step === 'pick') return `The factory is reading ${task.id}’s map: its frontier shows once it has.`;
+      if (task.loop?.cleared && atWorkLoop(task)) return `${task.id}’s map has cleared: choose where it goes next.`;
+      if (action.ticket !== undefined) {
+        if (!picksFromFrontier(task)) return `${task.id} isn’t picking a ticket from a map’s frontier.`;
+        if (!task.loop!.frontier!.some(({ ref }) => ref === action.ticket)) return `${action.ticket} isn’t on ${task.id}’s frontier.`;
+      }
       return cantStartRuns(state, task);
     case 'sendMessage':
       if (task.mode === 'AFK') return takesNoChat(task);
@@ -1462,9 +1568,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (task.mode !== 'HITL' || (task.state !== 'running' && task.state !== 'queued')) {
         return `Only a HITL task in conversation or ready for you advances its stage (${task.id} is ${label(task)}).`;
       }
-      const plan = planAdvance(state, task, action.skip);
+      const plan = planAdvance(state, task, action.skip, action.end);
       if ('refusal' in plan) return plan.refusal;
-      return plan.to ? cantStartRuns(state, task) : null;
+      return plan.to && !plan.ticket ? cantStartRuns(state, task) : null;
     }
     case 'attentionRaised':
     case 'permissionAsked':
@@ -1481,11 +1587,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'deadlinesDue':
       return null;
     case 'ticketsRead':
+      if (readingMap(state, task)) return null;
       if (!betweenIterations(state, task) || task.loop!.step !== 'pick') return `${task.id} isn’t picking a ticket.`;
       // Refused while the clone is missing: the pick runs again once it is found.
       return cantStartRuns(state, task);
     case 'ticketsUnread':
-      return betweenIterations(state, task) && task.loop!.step === 'pick' ? null : `${task.id} isn’t picking a ticket.`;
+      return readingMap(state, task) || (betweenIterations(state, task) && task.loop!.step === 'pick') ? null : `${task.id} isn’t picking a ticket.`;
     case 'ticketUnclosed':
       return betweenIterations(state, task) && task.loop!.step === 'close' && task.loop!.ticket === action.ticket
         ? null
@@ -2158,16 +2265,31 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         createdAt: at,
       };
       state.tasks[launched.id] = launched;
-      if (mode === 'HITL') startRun(state, launched, at);
-      else enterLoop(state, launched, stageOf(launched, action.stage)!);
+      // A loop starts from its tickets (a HITL one from its map's frontier).
+      if (!enterLoop(state, launched, stageOf(launched, action.stage)!) && mode === 'HITL') startRun(state, launched, at);
       break;
     }
     case 'submit':
       task.state = 'queued';
       break;
-    case 'open':
-      startRun(state, task, at);
+    case 'open': {
+      if (!picksFromFrontier(task)) {
+        startRun(state, task, at);
+        break;
+      }
+      // Each ticket of the map is worked in a fresh session (wayfinder
+      // resolves one ticket per session).
+      const { frontier, session } = task.loop!;
+      const ticket = frontier!.find(({ ref }) => ref === action.ticket) ?? frontier![0]!;
+      task.loop = { step: null, ticket: ticket.ref, base: null, commits: [] };
+      if (session) {
+        task.sessionId = session;
+        task.newSession = true;
+        task.context = null;
+      }
+      startRun(state, task, at, { opening: workOpening(state, task, ticket) });
       break;
+    }
     case 'sendMessage':
       // Talking on sets the agent's proposal aside.
       run!.proposal = null;
@@ -2446,24 +2568,32 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (task.handoff && !task.handoff.brief) task.handoff.brief = tidyBrief(action.brief);
       break;
     case 'stageAdvanced': {
-      const plan = planAdvance(state, task, action.skip);
+      const plan = planAdvance(state, task, action.skip, action.end);
       if ('refusal' in plan) break;
       const { to } = plan;
       if (run) endRun(run, 'completed', at);
-      // Past the last stage, the root task is the operator's to review.
+      // The work loop's ticket is done: the factory reads the map again.
+      if (plan.ticket) {
+        task.loop = picking();
+        task.state = 'queued';
+        break;
+      }
+      // Past the last stage, or ended there, the root task is the operator's to review.
       if (!to) {
+        task.loop = null;
         task.state = 'in-review';
         break;
       }
-      const filled = fillOpening(to, (variable) => argValue(state, task, variable));
+      const filled = fillOpening(to, (variable) => jumpValue(state, task, plan.jumped, variable));
       if ('missing' in filled) {
         // The stage raises an attention request instead of starting. The
         // task stays at the stage it was leaving, to advance again from.
         raise(state, task, lastRun(state, task), 'stage-blocked', false, cantFill(task, to, filled.missing), at);
         break;
       }
+      task.loop = null;
       enterStage(task, to, action.sessionId);
-      startRun(state, task, at, { opening: filled.opening });
+      if (!enterLoop(state, task, to)) startRun(state, task, at, { opening: filled.opening });
       break;
     }
     case 'turnEnded':
@@ -2646,6 +2776,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'ticketsRead': {
       const stage = stageOf(task, task.stage)!;
       const last = lastRun(state, task);
+      if (task.mode === 'HITL') {
+        readMap(state, task, stage, action, last, at);
+        break;
+      }
       // Finishing after its last ticket, the loop ends early: the stage moves on.
       if (task.loop!.finishing) {
         advanceFrom(state, task, stage, last, action.sessionId, at);

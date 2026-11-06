@@ -1,7 +1,9 @@
 // The answer sheet: the bottom pane of Needs you, for the selected item, and
 // of the conversation of a task that needs the operator. A question shows its
 // card, whose options the digits pick; any other request, and a root in
-// review, lists what each digit does. Ready items take no digits here.
+// review, lists what each digit does. Ready items take no digits here, but
+// for a work loop's: its map's frontier tickets, or once it cleared, where
+// the task goes next.
 import { createElement as h, useReducer, useRef } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { AttentionQueueItem, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
@@ -54,6 +56,7 @@ function byRules(taskId: string, permission: Permission, { label, enter, answer 
 // The digits' choices on a request other than a question with its card, or
 // on a root in review.
 export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined): Choice[] {
+  if (item.kind === 'ready') return task ? workLoopChoices(task) : [];
   if (item.kind === 'review') {
     const { taskId } = item;
     // An L1 root publishes as the factory's App on the operator's say (ADR
@@ -112,6 +115,27 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
   }
 }
 
+// A work loop over a map (wayfinder) Ready for you between its tickets: a
+// digit picks a ticket of its frontier into its conversation, 1 the first.
+// Once its map has cleared, the operator chooses where the task goes: on to
+// the next stage, jumping over it to the one after, or to the end.
+function workLoopChoices(task: TaskView): Choice[] {
+  const { loop, preset, stage, id: taskId } = task;
+  if (!loop || loop.ticket || !preset) return [];
+  if (loop.frontier) {
+    return loop.frontier.slice(0, 9).map(({ ref, title }) => ({ label: `${ref} ${title}`, command: { type: 'open', taskId, ticket: ref }, opens: true }));
+  }
+  if (!loop.cleared) return [];
+  const at = preset.stages.findIndex(({ id }) => id === stage);
+  const [next, after] = preset.stages.slice(at + 1);
+  const hitl = (to: typeof next) => to?.mode === 'HITL';
+  return [
+    ...(hitl(next) ? [{ label: `Continue to ${next!.id}`, command: { type: 'advanceStage' as const, taskId }, opens: true }] : []),
+    ...(hitl(next) && hitl(after) ? [{ label: `Jump to ${after!.id}`, command: { type: 'advanceStage' as const, taskId, skip: [next!.id] }, opens: true }] : []),
+    { label: `End: put ${taskId} in review`, command: { type: 'advanceStage', taskId, end: true } },
+  ];
+}
+
 // Whether the digits answer the item.
 export function answerable(item: AttentionQueueItem | undefined, task: TaskView | undefined): boolean {
   if (!item || item.taskId === null) return false;
@@ -127,6 +151,7 @@ function keyOf(item: AttentionQueueItem): string {
 // own label (Ready for you, In review).
 export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined): string {
   if (item.kind === 'attention') return item.reason ? `${item.attention}: ${item.reason}` : item.attention;
+  if (item.kind === 'ready' && task?.loop?.cleared) return `${task.label}: the map has cleared`;
   return task?.label ?? '';
 }
 

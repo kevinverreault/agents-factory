@@ -28,6 +28,7 @@ import {
   allowsByRules,
   artifactsOf,
   betweenIterations,
+  readingMap,
   BRIEF_REQUEST,
   childrenOf,
   coveredRequests,
@@ -309,7 +310,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return launch(command);
       case 'advanceStage':
         // Named now, for a next stage whose context is fresh.
-        return dispatch({ type: 'stageAdvanced', taskId: command.taskId, skip: command.skip ?? [], sessionId: randomUUID() });
+        return dispatch({
+          type: 'stageAdvanced',
+          taskId: command.taskId,
+          skip: command.skip ?? [],
+          sessionId: randomUUID(),
+          ...(command.end && { end: true }),
+        });
       case 'markDone':
         return markDone(command);
       case 'cancel':
@@ -1252,11 +1259,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Starts the step on GitHub of each loop between its iterations (ADR 0006):
-  // picking the next ticket, or closing the one the last iteration did. Its
-  // outcome goes through the Lifecycle like any other event.
+  // picking the next ticket, or closing the one the last iteration did, and
+  // reading the map of a work loop between its tickets. Its outcome goes
+  // through the Lifecycle like any other event.
   function driveLoops(): void {
     for (const task of Object.values(lifecycle.tasks)) {
-      if (stopping || stepsInFlight.has(task.id) || !betweenIterations(lifecycle, task)) continue;
+      if (stopping || stepsInFlight.has(task.id) || !(betweenIterations(lifecycle, task) || readingMap(lifecycle, task))) continue;
       stepsInFlight.add(task.id);
       const step = task.loop!.step === 'pick' ? pickTicket(task) : closeTicket(task);
       void step.then(
@@ -1282,9 +1290,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const { kind, refs: sources } = ticketSources(lifecycle, task)!;
       const refs: string[] = [];
       for (const source of sources) {
-        // A spec is never a ticket itself.
+        // A spec or a map is never a ticket itself.
         const subIssues = await github.subIssues(token, source);
-        for (const ref of subIssues.length || kind === 'spec' ? subIssues : [source]) if (!refs.includes(ref)) refs.push(ref);
+        for (const ref of subIssues.length || kind !== 'tickets' ? subIssues : [source]) if (!refs.includes(ref)) refs.push(ref);
       }
       const tickets = [];
       for (const ref of refs) tickets.push(await github.readIssue(token, ref));

@@ -221,7 +221,7 @@ describe('cancelling', () => {
 
 describe('finishing a loop', () => {
   test('f finishes the selected loop after its ticket, and its row says so', async () => {
-    const looping = { ...task('T1', 'Implement the spec', 'running', 'Running'), loop: { ticket: 'acme/widgets#11', finishing: false } };
+    const looping = { ...task('T1', 'Implement the spec', 'running', 'Running'), loop: { ticket: 'acme/widgets#11', finishing: false, frontier: null, cleared: false } };
     const { app, connection } = await started(factoryState([looping]));
     await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Implement the spec\s+Running · sonnet · on acme\/widgets#11/));
     expect(app.lastFrame()).toContain('f finish after this ticket');
@@ -1412,7 +1412,7 @@ describe('answering from Needs you', () => {
 
   test('a failed iteration of a loop can be retried, skipped, taken over or cancelled: a digit skips its ticket', async () => {
     const connection = new FakeConnection();
-    const looping = { ...failing, loop: { ticket: 'acme/widgets#11', finishing: false } };
+    const looping = { ...failing, loop: { ticket: 'acme/widgets#11', finishing: false, frontier: null, cleared: false } };
     const { app } = await started(factoryState([looping], [failure]), { connection });
     await press(app, '2');
     await eventually(() =>
@@ -1425,7 +1425,7 @@ describe('answering from Needs you', () => {
   });
 
   test('a failure of a loop’s ticket taken over offers no skip: the operator works it', async () => {
-    const takenOver = { ...failing, mode: 'HITL' as const, loop: { ticket: 'acme/widgets#11', finishing: false } };
+    const takenOver = { ...failing, mode: 'HITL' as const, loop: { ticket: 'acme/widgets#11', finishing: false, frontier: null, cleared: false } };
     const { app } = await started(factoryState([takenOver], [failure]));
     await press(app, '2');
 
@@ -1434,7 +1434,7 @@ describe('answering from Needs you', () => {
 
   test('a stalled loop can be retried once its blockers move, taken over or cancelled', async () => {
     const connection = new FakeConnection();
-    const stalled = { ...failing, loop: { ticket: null, finishing: false } };
+    const stalled = { ...failing, loop: { ticket: null, finishing: false, frontier: null, cleared: false } };
     const blocked = { ...failure, attention: 'stage-blocked' as const, reason: 'implement’s loop stalled: every open ticket is blocked (acme/widgets#12 by acme/widgets#11).' };
     const { app } = await started(factoryState([stalled], [blocked]), { connection });
     await press(app, '2');
@@ -2431,3 +2431,107 @@ describe('the screens view', () => {
     await eventually(() => expect(app.lastFrame()).not.toMatch(/^\s*enter\s{2,}/m));
   });
 });
+
+describe('the wayfinder work loop', () => {
+  const stage = (id: string, more: object = {}) => ({ id, kind: 'run' as const, skill: id, mode: 'HITL' as const, model: 'opus' as const, ...more });
+  const wayfinder = {
+    name: 'wayfinder',
+    description: null,
+    source: 'built-in' as const,
+    path: 'wayfinder.preset.yaml',
+    hash: '0123456789abcdef',
+    repoCommit: 'c0ffee',
+    stages: [
+      stage('chart', { exit: 'artifact:map' }),
+      { id: 'work', kind: 'loop' as const, skill: 'wayfinder', mode: 'HITL' as const, model: 'opus' as const, exit: 'map-cleared' },
+      stage('spec', { exit: 'artifact:spec' }),
+      stage('tickets', { exit: 'artifact:tickets' }),
+      { id: 'implement', kind: 'loop' as const, skill: 'implement', mode: 'AFK' as const, model: 'sonnet' as const },
+    ],
+  };
+  const frontier = [
+    { ref: 'acme/widgets#31', title: 'Which payment provider?' },
+    { ref: 'acme/widgets#33', title: 'Invoice layout' },
+  ];
+  const picking: TaskView = {
+    ...task('T1', 'Overhaul billing', 'queued', 'Ready for you', 'HITL'),
+    preset: wayfinder,
+    stage: 'work',
+    loop: { ticket: null, finishing: false, frontier, cleared: false },
+  };
+  const cleared: TaskView = { ...picking, loop: { ticket: null, finishing: false, frontier: null, cleared: true } };
+  const ready = [{ kind: 'ready' as const, taskId: 'T1' }];
+
+  test('the frontier tickets show under the task in Ready for you, and a digit picks one into its conversation', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([picking], ready), { connection });
+    await press(app, '2');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain('T1 Overhaul billing ── Ready for you 1 acme/widgets#31 Which payment provider? 2 acme/widgets#33 Invoice layout a answer'),
+    );
+
+    await press(app, 'a', '2');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'open', taskId: 'T1', ticket: 'acme/widgets#33' }));
+    await eventually(() => expect(app.lastFrame()).toContain('ctrl+b back'));
+  });
+
+  test('1 takes the first frontier ticket', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([picking], ready), { connection });
+
+    await press(app, '2', 'a', '1');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'open', taskId: 'T1', ticket: 'acme/widgets#31' }));
+  });
+
+  test('a cleared map offers continue to spec, jump to tickets or end, each sent as the advance it is', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([cleared], ready), { connection });
+    await press(app, '2');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain('Ready for you: the map has cleared 1 Continue to spec 2 Jump to tickets 3 End: put T1 in review a answer'),
+    );
+
+    await press(app, 'a', '3');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'advanceStage', taskId: 'T1', end: true }));
+  });
+
+  test('jumping to tickets skips the spec', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([cleared], ready), { connection });
+
+    await press(app, '2', 'a', '2');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'advanceStage', taskId: 'T1', skip: ['spec'] }));
+  });
+
+  test('continuing to spec goes into its conversation', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([cleared], ready), { connection });
+
+    await press(app, '2', 'a', '1');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'advanceStage', taskId: 'T1' }));
+    await eventually(() => expect(app.lastFrame()).toContain('ctrl+b back'));
+  });
+
+  test('in a ticket’s conversation, the advance sheet finishes the ticket', async () => {
+    const connection = new FakeConnection();
+    const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', finishing: false, frontier: null, cleared: false } };
+    const run = {
+      id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, turn: 'operator' as const, queued: [] as string[],
+      question: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {},
+    };
+    const { app } = await started({ ...factoryState([working]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await settle();
+
+    app.stdin.write('\x0e');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Finish acme/widgets#31: the factory reads the map again for its next frontier.'));
+    app.stdin.write('\r');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'advanceStage', taskId: 'T1' }));
+  });
+});
+
