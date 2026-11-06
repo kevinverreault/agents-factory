@@ -78,9 +78,9 @@ export type TaskView = {
   closedTickets: ClosedTicket[];
   // The tickets the operator skipped, which its loop leaves open.
   skippedTickets: string[];
-  // Its Ralph loop, while it is at a loop stage with a ticket set: the
-  // ticket its iteration works, and whether it ends after that one. A work
-  // loop over a map between its tickets offers the map's frontier, as last
+  // Its Ralph loop or work loop, while it is at a loop stage with a ticket
+  // set: the ticket its iteration works, and whether it ends after that one.
+  // A work loop over a map between its tickets offers the map's frontier, as last
   // read, or has `cleared` once the map had no open ticket left.
   loop: { ticket: string | null; finishing: boolean; frontier: FrontierTicket[] | null; cleared: boolean } | null;
   // Once it is cancelled, while the tickets it closed aren't all reopened, and why it last failed to.
