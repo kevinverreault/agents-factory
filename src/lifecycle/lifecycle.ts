@@ -334,6 +334,9 @@ export type Run = {
   queued: string[];
   // The card the agent's turn waits on, if any.
   question: Question | null;
+  // A HITL run's permission card: the tool call no rule covers, which waits
+  // on the operator's answer in the conversation. Runs stored before it have none.
+  permission?: Permission | null;
   // The stage of its task's preset the run works on, if the task has one.
   stage: string | null;
   // The ticket it works on, as a Ralph loop's iteration. Runs stored before
@@ -1294,7 +1297,21 @@ export function activeAfkRuns(state: Lifecycle): number {
 
 // Whether a live run waits on the operator: its turn, or a card it asked.
 export function waitsOnOperator(run: Run): boolean {
-  return run.status === 'active' && (run.turn === 'operator' || run.question !== null);
+  return run.status === 'active' && (run.turn === 'operator' || run.question !== null || !!run.permission);
+}
+
+// The permission the task's `answer` decides: its open permission request's
+// while it shows one, or else its HITL run's card, if any.
+export function openPermission(state: Lifecycle, task: Task): Permission | null {
+  const request = showsRequest(task) ? openRequest(state, task) : undefined;
+  return request ? (request.permission ?? null) : openCard(state, task);
+}
+
+// The card the task's live HITL run waits on for a tool call, which the
+// task's `answer` decides while it shows no request, if any.
+export function openCard(state: Lifecycle, task: Task): Permission | null {
+  if (task.mode !== 'HITL' || (showsRequest(task) && openRequest(state, task))) return null;
+  return liveRun(state, task)?.permission ?? null;
 }
 
 // A HITL task whose turn is the operator's: queued for its conversation, or
@@ -1405,8 +1422,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
   if ('runId' in action) {
     const run = state.runs[action.runId];
     if (!run) return `There is no run ${action.runId}.`;
-    if (run.status === 'suspended' && action.type === 'permissionAsked') {
-      // The task's rules still decide a suspended run's other calls.
+    if (action.type === 'permissionAsked' && (run.status === 'suspended' || (run.status === 'active' && run.permission))) {
+      // The task's rules still decide the other calls of a run that waits
+      // on a request, or on a HITL run's card.
       if (!grantFor(state.tasks[run.taskId]!, run, action)) return 'Another request of this run is waiting on the operator.';
     } else if (run.status !== 'active' && !(run.status === 'suspended' && action.type === 'runFailed') && !isMetering(action)) {
       // A suspended run can still fail: its CLI may exit while it waits on
@@ -1489,17 +1507,14 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.loop.finishing ? `${task.id} already finishes after this ticket.` : null;
     case 'answer': {
       const request = showsRequest(task) ? openRequest(state, task) : undefined;
+      // A HITL run's card takes only a permission answer.
+      if (openCard(state, task)) return permissionRefusal(action.permission, true);
       if (!request) return `${task.id} has no open attention request.`;
-      if (request.permission && !validPermissionAnswer(action.permission)) {
-        return 'Allow it once, for this task or always, or deny it with a note for the agent.';
-      }
-      if (allowsByRules(action.permission)) {
-        const { allow, rules } = action.permission;
-        if (rules !== undefined && !(Array.isArray(rules) && rules.length > 0 && rules.every(isRule))) {
-          return `${BY_RULES[allow].answer} needs at least one rule, each such as \`Bash(sed -i *)\`.`;
-        }
-        // Requests stored before they named their call have no rule to add.
-        if (allow === 'always' && !request.permission) return 'This request doesn’t name its call: allow it once or for this task.';
+      const refused = permissionRefusal(action.permission, !!request.permission);
+      if (refused) return refused;
+      // Requests stored before they named their call have no rule to add.
+      if (allowsByRules(action.permission) && action.permission.allow === 'always' && !request.permission) {
+        return 'This request doesn’t name its call: allow it once or for this task.';
       }
       if (request.kind === 'pr-closed-unmerged') return `${task.id}’s PR was closed without merging: cancel the task, or reopen its PR.`;
       if (action.skip && !(request.kind === 'failure' && failedIteration(task))) return 'Only a failed iteration’s ticket can be skipped.';
@@ -1598,8 +1613,10 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return plan.kind === 'advance' && plan.to ? cantStartRuns(state, task) : null;
     }
     case 'attentionRaised':
-    case 'permissionAsked':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
+    case 'permissionAsked':
+      // A HITL run's call shows as a card in the conversation.
+      return null;
     case 'repoRegistered': {
       const registered = state.repositories[action.repo];
       return registered ? `${action.repo} is already registered at ${registered.path}.` : null;
@@ -1880,6 +1897,17 @@ function validPermissionAnswer(answer: PermissionAnswer | undefined): boolean {
   return 'deny' in answer ? typeof answer.deny === 'string' && answer.deny.trim() !== '' : answer.allow === 'once' || allowsByRules(answer);
 }
 
+// Why a permission answer can't stand, or null. `named` says the call it
+// answers is named, so only an allow or a deny with a note answers it.
+function permissionRefusal(answer: PermissionAnswer | undefined, named: boolean): string | null {
+  if (named && !validPermissionAnswer(answer)) return 'Allow it once, for this task or always, or deny it with a note for the agent.';
+  if (!allowsByRules(answer)) return null;
+  const { allow, rules } = answer;
+  return rules !== undefined && !(Array.isArray(rules) && rules.length > 0 && rules.every(isRule))
+    ? `${BY_RULES[allow].answer} needs at least one rule, each such as \`Bash(sed -i *)\`.`
+    : null;
+}
+
 // Whether the answer allows by rules: for the rest of the task, or always.
 export function allowsByRules(answer: PermissionAnswer | undefined): answer is RulesAnswer {
   return !!answer && 'allow' in answer && (answer.allow === 'task' || answer.allow === 'always');
@@ -2151,6 +2179,23 @@ export function allowedRules(permission: Permission, answer: RulesAnswer): strin
   return answer.rules?.map((rule) => rule.trim()) ?? permission.proposed?.map(({ rule }) => rule) ?? [permission.rule];
 }
 
+// Answers the task's HITL run's card, if `answer` decides one: the executor
+// hands its call the verdict. Allow for this task adds its rules to the
+// task's; Allow always's are the operator's file's, which the daemon added them to.
+function answerCard(state: Lifecycle, task: Task, answer: PermissionAnswer | undefined): boolean {
+  const card = openCard(state, task);
+  if (!card) return false;
+  if (allowsByRules(answer) && answer.allow === 'task') addTaskRules(task, card, answer);
+  liveRun(state, task)!.permission = null;
+  return true;
+}
+
+// Allow for this task: the answer's rules join the task's, each once.
+function addTaskRules(task: Task, permission: Permission, answer: RulesAnswer): void {
+  const rules = (task.allowRules ??= []);
+  for (const rule of allowedRules(permission, answer)) if (!rules.includes(rule)) rules.push(rule);
+}
+
 function raise(
   state: Lifecycle,
   task: Task,
@@ -2397,6 +2442,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.loop!.finishing = true;
       break;
     case 'answer':
+      if (answerCard(state, task, action.permission)) break;
       request!.status = 'answered';
       // The daemon tries the tickets left to reopen again; the task stays Cancelled.
       if (task.state === 'cancelled') {
@@ -2410,8 +2456,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       }
       // Allow always's rules are the operator's file's, which the daemon added them to.
       if (request!.permission && allowsByRules(action.permission) && action.permission.allow === 'task') {
-        const rules = (task.allowRules ??= []);
-        for (const rule of allowedRules(request!.permission, action.permission)) if (!rules.includes(rule)) rules.push(rule);
+        addTaskRules(task, request!.permission, action.permission);
       }
       if (request!.holdsRun) {
         // Resumes at once, even over the slot cap.
@@ -2583,6 +2628,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         // The executor interrupts the turn: what it waited on goes with it.
         run.queued = [];
         run.question = null;
+        if (run.permission) run.permission = null;
       }
       break;
     }
@@ -2629,6 +2675,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // now, so the agent answers it at once: the brief, once a handoff
       // interrupted the turn.
       run!.question = null;
+      if (run!.permission) run!.permission = null;
       if (task.handoff && !task.handoff.asked && !task.handoff.brief) task.handoff.asked = true;
       else if (run!.queued.length) run!.queued = [];
       else run!.turn = 'operator';
@@ -2728,11 +2775,16 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (grant === 'once') run!.allowOnce!.splice(run!.allowOnce!.indexOf(ruleFor(action.call)), 1);
       if (grant) break;
       const { id, tool, summary } = action.call;
+      const parts = leftUncovered(task, action);
+      const permission = { id, tool, summary, rule: ruleFor(action.call), proposed: proposals(parts) };
+      // A HITL run asks in its conversation: its run stays live, holding no slot.
+      if (task.mode === 'HITL') {
+        run!.permission = permission;
+        break;
+      }
       suspend(run!, at);
       // Named by the parts no rule covers.
-      const parts = leftUncovered(task, action);
       const problem = action.rulesProblem && ` (${action.rulesProblem.replace(/\.$/, '')}, so its rules granted nothing.)`;
-      const permission = { id, tool, summary, rule: ruleFor(action.call), proposed: proposals(parts) };
       raise(state, task, run!, 'permission', true, `${tool}: ${parts.map((part) => part.summary).join(' · ')}${problem ?? ''}`, at, { permission });
       break;
     }

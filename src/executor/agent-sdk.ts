@@ -85,10 +85,13 @@ export function agentSdkExecutor(): Executor {
         permitting: new Map(),
         stopped: false,
       };
+      // Both modes hand what would prompt to the factory's gate: a HITL run's
+      // asks with a card in its conversation, an L1 run's with a request.
+      const canUseTool = askTheOperator(start.runId, spawning, gateCall(spawning));
       const options: Options = {
         ...(start.mode === 'HITL'
-          ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink))
-          : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)), afkFactoryTools(start.runId, sink, start.reports, start))),
+          ? hitlOptions(start.credential, canUseTool, hitlFactoryTools(start.runId, sink))
+          : l1Options(start, canUseTool, afkFactoryTools(start.runId, sink, start.reports, start))),
         cwd: start.cwd!,
         model: start.model,
         // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
@@ -243,7 +246,8 @@ function archiveStore(dir: string): SessionStore {
 
 // HITL runs act as the operator (ADR 0005): every settings source loads,
 // plus the skill set plugin and the factory MCP server. Edits and the
-// factory's tools are accepted, and `canUseTool` decides the rest. Every tool
+// factory's tools are accepted, and `canUseTool` hands the rest to the
+// factory's gate, which asks the operator with a card when no rule covers a call. Every tool
 // call's outcome goes to artifact capture, in the background so the run never
 // waits on it.
 function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, factory: FactoryTools): Options {
@@ -329,15 +333,9 @@ function afkFailure(result: SDKResultMessage, maxTurns: number | null): string |
   return result.is_error ? result.result : null;
 }
 
-// A HITL run may not use a tool that would prompt, until the factory can ask
-// the operator in the conversation.
-const hitlRefusal: CanUseTool = async (toolName) => ({
-  behavior: 'deny',
-  message: `The factory can't ask the operator for permission to use ${toolName} yet. Say what you wanted to do instead.`,
-});
-
-// Hands an L1 run's tool call to the factory's gate, and holds it until the
-// gate's verdict: at once, or once the operator answers its permission request.
+// Hands a run's tool call to the factory's gate, and holds it until the
+// gate's verdict: at once, or once the operator answers its permission
+// request (an L1 run's) or card (a HITL run's).
 function gateCall(run: Omit<LiveRun, 'query'>): CanUseTool {
   return async (toolName, input, { signal, toolUseID }) => {
     const verdict = await new Promise<Verdict | null>((resolve) => {

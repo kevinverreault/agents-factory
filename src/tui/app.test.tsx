@@ -1901,6 +1901,38 @@ describe('answering in the conversation', () => {
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which endpoint?': 'v2' } }));
   });
 
+  test('a HITL run’s permission card shows in its conversation, answered as a request is, and chat waits until it is', async () => {
+    const connection = new FakeConnection();
+    const hitl: TaskView = { ...task('T1', 'Grill me about the login flow.', 'running', 'In conversation', 'HITL'), liveRunId: 'R1' };
+    const card = {
+      id: 'toolu_3',
+      tool: 'Bash',
+      summary: 'npm test',
+      rule: 'Bash(npm test)',
+      proposed: [{ part: 'npm test', rule: 'Bash(npm test *)' }],
+    };
+    const asking = { ...suspended, mode: 'HITL' as const, autonomy: null, status: 'active' as const, permission: card };
+    const { app } = await started({ ...factoryState([hitl]), runs: { R1: asking } }, { connection });
+    await press(app, ENTER, ENTER);
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('permission: Bash: npm test 1 Allow once 2 Allow for this task: Bash(npm test *) 3 Allow always: Bash(npm test *) 4 Deny with a note');
+      expect(frame).toContain('The agent is waiting on you.');
+      expect(frame).toContain('digits answer · ctrl+b back');
+      expect(frame).not.toContain('›');
+    });
+
+    await press(app, '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'once' } }));
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...asking, permission: null } }]);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).not.toContain('Allow once');
+      expect(frame).toContain('enter queue · esc interrupt');
+    });
+  });
+
   test('a refused answer shows its reason in the conversation and can be answered again', async () => {
     const connection = new FakeConnection();
     connection.replyTo('answer', { ok: false, reason: 'T1 has no open attention request.' });
@@ -2053,7 +2085,7 @@ describe('usage', () => {
   const usage = (input: number, output: number, cacheRead = 0, cacheWrite = 0, cost = 0) => ({ input, output, cacheRead, cacheWrite, cost });
   function metered(id: string, taskId: string, stage: string | null, ticket: string | null, used: RunView['usage']): RunView {
     return {
-      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', turn: 'agent', queued: [], question: null, stage, ticket,
+      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', turn: 'agent', queued: [], question: null, permission: null, stage, ticket,
       proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used,
     };
   }
@@ -2116,7 +2148,7 @@ describe('the screens view', () => {
   const SONNET = 'claude-sonnet-5-5';
   function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
     return {
-      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', turn: 'agent', queued: [], question: null, stage: 'implement',
+      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
       ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, ...fields,
     };
   }
@@ -2523,7 +2555,7 @@ describe('the wayfinder work loop', () => {
     const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', finishing: false, frontier: null, cleared: false } };
     const run = {
       id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, turn: 'operator' as const, queued: [] as string[],
-      question: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {},
+      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {},
     };
     const { app } = await started({ ...factoryState([working]), runs: { R1: run } }, { connection });
     await press(app, '\r', '\r');

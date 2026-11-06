@@ -143,6 +143,10 @@ _Avoid_: Bot account, service account
 An AFK run's call for an operator answer, permission or decision, raised when it needs one or fails.
 _Avoid_: Interrupt, alert, needs-human
 
+**Permission card**:
+A HITL run's call that no rule covers, waiting in its conversation for the operator to allow or deny it. Unlike an attention request it suspends nothing, and it ends with the agent's turn.
+_Avoid_: Permission prompt, HITL request
+
 **Parked run**:
 A run ended while it waited on the operator, either suspended on an attention request or a HITL run left idle. Answering or reopening it starts a new run on the same conversation.
 

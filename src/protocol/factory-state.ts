@@ -28,6 +28,7 @@ import {
   type Artifact,
   type Reopening,
   type Repository,
+  type Permission,
   type Run,
   type SkillsSetup,
   type TaskState,
@@ -102,7 +103,7 @@ export type HandoffView = Omit<HandoffSheet, 'asked'>;
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
-> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage };
+> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage; permission: Permission | null };
 
 // `app` is null until the daemon has checked the App's installation, and
 // `skills` until it has checked the skill set's setup.
@@ -178,7 +179,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
   const runs: Record<string, RunView> = {};
   for (const run of Object.values(lifecycle.runs)) {
     const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
-    // Runs stored before stages, proposals, max turns and tiers have none,
+    // Runs stored before stages, proposals, max turns, tiers and permission cards have none,
     // and proposals stored before handoffs proposed advancing.
     const stage = run.stage ?? null;
     const proposal = run.proposal ? { ...run.proposal, kind: run.proposal.kind ?? 'advance' } : null;
@@ -194,6 +195,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       turn,
       queued,
       question,
+      permission: run.permission ?? null,
       stage,
       proposal,
       tier,

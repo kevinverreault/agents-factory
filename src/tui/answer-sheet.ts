@@ -146,6 +146,22 @@ function workLoopAt({ preset, stage }: TaskView): boolean {
   return isWorkLoop(preset?.stages.find(({ id }) => id === stage));
 }
 
+// A HITL run's permission card, as the sheet's item: answered as a
+// permission request is, though it is no attention request.
+export function cardItem(task: TaskView, permission: Permission): AttentionQueueItem {
+  return {
+    kind: 'attention',
+    taskId: task.id,
+    repo: task.repo,
+    requestId: permission.id,
+    attention: 'permission',
+    holdsRun: true,
+    reason: `${permission.tool}: ${permission.summary}`,
+    question: null,
+    permission,
+  };
+}
+
 // Whether the digits answer the item.
 export function answerable(item: AttentionQueueItem | undefined, task: TaskView | undefined): boolean {
   if (!item || item.taskId === null) return false;

@@ -27,6 +27,8 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
 
   Allow always proposes the same rules, and the factory appends the confirmed ones to `~/.agent-factory/permissions.yaml`, keeping the file's rules and comments and skipping rules it already holds. The file is read for every call, so they cover every run from its next call on, and the factory lets through the other waiting permission requests they now cover. If the file is invalid or can't be written, the answer fails with the reason and the request stays open.
 
+- **HITL runs ask through the same gate, with a card.** A HITL run loads every settings source (ADR 0005), so Claude Code lets most of its calls through itself. A call that still reaches `canUseTool` is matched against the same rules as an L1 run's, in the task's worktree. One no rule covers shows as a **permission card** in the conversation, never an attention request, and is answered the same four ways. The run stays live and holds no slot. Its other calls wait behind the card, and the card ends with its turn. Left unanswered, it parks the run like any other wait on the operator.
+
 - **No repo scope for permissions.** Allow rules and extra L2 egress hosts come from the built-in list, the user file and the task, never from the target repo. A repo you clone could otherwise grant its own runs permissions. A child task gets a frozen copy of its parent's task rules and egress hosts at spawn, and its level stays ≤ its parent's.
 
 - **L2 asks no permissions.** Questions still reach the operator, because `AskUserQuestion` goes through `canUseTool` in every mode. Egress denials are logged on the run. When a run fails, its failure request lists the denied hosts, with "allow host for this task and retry".

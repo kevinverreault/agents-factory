@@ -12,7 +12,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
-import { AnswerSheet, answerable, useAnswering } from './answer-sheet.ts';
+import { AnswerSheet, answerable, cardItem, useAnswering } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event } from './output.ts';
@@ -64,9 +64,12 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   // The handoff sheet opens once the daemon has opened the task's handoff.
   const handOff = () => void connection.send({ type: 'openHandoff', taskId }).then(tell);
   const sheet = takesChat && task?.handoff ? task.handoff : null;
-  // The task's open request, while it needs the operator: when its sheet
-  // takes digits, every key but ctrl+b is the sheet's.
-  const request = state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId);
+  // The task's open request, while it needs the operator, or else its HITL
+  // run's permission card: when its sheet takes digits, every key but ctrl+b
+  // is the sheet's.
+  const request =
+    state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId) ??
+    (live && run.permission && task ? cardItem(task, run.permission) : undefined);
   const answers = useAnswering(connection, request, task, { onReply: ({ reply }) => tell(reply) });
   const answering = answerable(request, task);
   // A live AFK task is talked to only once taken over, which `c` does from
@@ -181,7 +184,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
         : null,
       request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
-      live && (run.turn === 'operator' || question) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
+      live && (run.turn === 'operator' || question || run.permission) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
       refusal ? h(Text, { color: 'red' }, refusal) : null,
       chat ? h(Text, null, `› ${draft}▏`) : null,
       h(Text, { dimColor: true }, hint),
