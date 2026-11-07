@@ -157,6 +157,7 @@ describe('when the next stage can’t start', () => {
         question: null,
         permission: null,
         recovery: null,
+        deniedHosts: null,
       },
     ]);
     expect(factory.executor.started).toHaveLength(1);

@@ -117,7 +117,7 @@ import {
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
-import { SandboxError, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
+import { SandboxError, egressFor, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
@@ -1849,6 +1849,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const guard = guarded.get(event.runId);
     if (!guard || (event.type !== 'runCompleted' && event.type !== 'runFailed')) return event;
     unguard(event.runId);
+    // What the run's container denied it is logged on the run, whatever else it did.
+    if (guard.container) {
+      const deniedHosts = await guard.container.deniedHosts().catch((error) => {
+        if (!(error instanceof SandboxError)) throw error;
+        return [];
+      });
+      if (deniedHosts.length) event = { ...event, deniedHosts };
+    }
     // The factory's own branches for other tasks, cut while the run worked.
     const branches = Object.values(lifecycle.tasks).flatMap((task) =>
       task.worktree && task.worktree.path !== guard.worktree ? [task.worktree.branch] : [],
@@ -1968,7 +1976,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         throw new SandboxError((error as Error).message);
       }
       const plugin = run.skillSet ? skillSets.pathOf(run.skillSet) : null;
-      const container = await sandbox.prepare({ taskId: task.id, clonePath: lifecycle.repositories[task.repo]!.path, branch, branches, plugin, runDir, sessionsDir });
+      const egress = egressFor(task.egressHosts ?? []);
+      const container = await sandbox.prepare({ taskId: task.id, clonePath: lifecycle.repositories[task.repo]!.path, branch, branches, plugin, runDir, sessionsDir, egress });
       containers.set(task.id, true);
       return container;
     });

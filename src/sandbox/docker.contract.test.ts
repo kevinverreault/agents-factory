@@ -35,6 +35,10 @@ function sh(container: Container, script: string, env: Record<string, string> = 
 
 let edits = 0;
 
+// Two hosts on the internet that answer HTTPS: the fixture's specs allow the first alone.
+const ALLOWED = 'example.com';
+const DENIED = 'example.org';
+
 type DockerFixture = SandboxFixture & { root: string };
 
 async function fixture(): Promise<DockerFixture> {
@@ -52,7 +56,7 @@ async function fixture(): Promise<DockerFixture> {
       git(clonePath, 'add', 'README.md');
       git(clonePath, 'commit', '--quiet', '-m', 'Start');
       git(clonePath, 'worktree', 'add', '--quiet', '-b', branch, worktree, 'main');
-      const spec = { taskId, clonePath, branch, branches: [], plugin: null, runDir: join(root, `${taskId}-run`), sessionsDir: join(root, `${taskId}-sessions`) };
+      const spec = { taskId, clonePath, branch, branches: [], plugin: null, runDir: join(root, `${taskId}-run`), sessionsDir: join(root, `${taskId}-sessions`), egress: [ALLOWED] };
       return { spec, worktree };
     },
     async commitOnHost(worktree) {
@@ -82,6 +86,11 @@ async function fixture(): Promise<DockerFixture> {
     async containerTip(container, branch) {
       return (await container.git(['rev-parse', `refs/heads/${branch}`])).stdout.trim();
     },
+    async reach(container, host) {
+      return (await sh(container, `curl --silent --output /dev/null --max-time 20 https://${host}/`)).code === 0;
+    },
+    allowedHost: ALLOWED,
+    deniedHost: DENIED,
     async dispose() {
       for (const { taskId } of await sandbox.list()) await sandbox.remove(taskId);
       rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -141,6 +150,18 @@ describe('the Docker sandbox: containment', () => {
       expect((await container.git(['push', '--quiet', 'origin', 'HEAD:refs/heads/pushed'])).code).not.toBe(0);
       expect((await sh(container, `cat ${container.plugin}/SKILL.md`)).stdout).toBe('skill\n');
       expect((await sh(container, `touch ${container.plugin}/SKILL.md`)).code).not.toBe(0);
+    }));
+
+  test('egress that goes around the proxy fails: no outside name resolves and no outside address routes', () =>
+    withTask(async (_f, _sandbox, container) => {
+      expect((await sh(container, `curl --silent --output /dev/null --max-time 10 https://${ALLOWED}/`)).code).toBe(0);
+
+      expect((await sh(container, `curl --silent --output /dev/null --max-time 10 --noproxy '*' https://${ALLOWED}/`)).code).not.toBe(0);
+      expect((await sh(container, `curl --silent --output /dev/null --max-time 10 --noproxy '*' https://1.1.1.1/`)).code).not.toBe(0);
+      expect((await sh(container, `getent hosts ${ALLOWED}`)).code).not.toBe(0);
+      // Plain HTTP goes through the proxy too, and is denied the same.
+      expect(await sh(container, `curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 http://${DENIED}/`)).toMatchObject({ stdout: '403' });
+      expect(await container.deniedHosts()).toEqual([DENIED]);
     }));
 
   test('a variable a run is handed reaches only that run', () =>

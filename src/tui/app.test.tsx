@@ -20,7 +20,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -72,6 +72,7 @@ describe('the bare TUI', () => {
           {
             kind: 'attention',
             recovery: null,
+            deniedHosts: null,
             taskId: 'T2',
             repo: 'acme/widgets',
             requestId: 'A1',
@@ -239,6 +240,7 @@ describe('the task tree', () => {
   const failure = (taskId: string): FactoryState['attentionQueue'][number] => ({
     kind: 'attention',
     recovery: null,
+    deniedHosts: null,
     taskId,
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -434,6 +436,7 @@ describe('repositories', () => {
           {
             kind: 'attention',
             recovery: null,
+            deniedHosts: null,
             taskId: null,
             repo: 'acme/widgets',
             requestId: 'A1',
@@ -465,6 +468,7 @@ describe('repositories', () => {
       reason: 'The factory restarted after it stopped uncleanly. Requeued T1 (R1).',
       question: null,
       permission: null,
+      deniedHosts: null,
       recovery: { requeued: [{ taskId: 'T1', runId: 'R1' }], parked: [], failed: [] },
     };
     const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running')], [report]), { connection });
@@ -527,6 +531,7 @@ describe('launching and conversing', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
+    deniedHosts: [] as string[],
   };
   const repositories = { 'acme/gadgets': gadgets, 'acme/widgets': widgets };
 
@@ -988,6 +993,7 @@ describe('launching and conversing', () => {
   const failure = {
     kind: 'attention' as const,
     recovery: null,
+    deniedHosts: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -1378,6 +1384,7 @@ describe('answering from Needs you', () => {
   const asked = {
     kind: 'attention' as const,
     recovery: null,
+    deniedHosts: null,
     taskId: 'T1',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -1390,6 +1397,7 @@ describe('answering from Needs you', () => {
   const failure = {
     kind: 'attention' as const,
     recovery: null,
+    deniedHosts: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A2',
@@ -1458,6 +1466,30 @@ describe('answering from Needs you', () => {
     await press(app, 'a', '2');
 
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', skip: true }));
+  });
+
+  test('a failed L2 run lists the hosts it was denied: a digit allows them for its task and retries it', async () => {
+    const connection = new FakeConnection();
+    const denied = {
+      ...failure,
+      reason: 'pip install failed. Its container’s egress proxy denied pypi.org and files.pythonhosted.org.',
+      deniedHosts: ['pypi.org', 'files.pythonhosted.org'],
+    };
+    const { app } = await started(factoryState([{ ...failing, autonomy: 'L2' as const }], [denied]), { connection });
+    await press(app, '2');
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain(
+        '1 Retry 2 Allow both hosts for this task and retry 3 Allow pypi.org for this task and retry 4 Allow files.pythonhosted.org for this task and retry 5 Take over 6 Cancel a answer',
+      ),
+    );
+
+    await press(app, 'a', '4');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', allowHosts: ['files.pythonhosted.org'] }));
+
+    const again = new FakeConnection();
+    const { app: other } = await started(factoryState([{ ...failing, autonomy: 'L2' as const }], [denied]), { connection: again });
+    await press(other, '2', 'a', '2');
+    await eventually(() => expect(again.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', allowHosts: ['pypi.org', 'files.pythonhosted.org'] }));
   });
 
   test('a failure of a loop’s ticket taken over offers no skip: the operator works it', async () => {
@@ -1827,10 +1859,12 @@ describe('answering in the conversation', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
+    deniedHosts: [] as string[],
   };
   const permission = {
     kind: 'attention' as const,
     recovery: null,
+    deniedHosts: null,
     taskId: 'T1',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -2045,10 +2079,12 @@ describe('taking over with c', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
+    deniedHosts: [] as string[],
   };
   const permission = {
     kind: 'attention' as const,
     recovery: null,
+    deniedHosts: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -2143,7 +2179,7 @@ describe('the conversation of an AFK task that is no longer live', () => {
     const ended = {
       id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const, interruption: null,
       turn: 'agent' as const, queued: [] as string[], question: null, permission: null, stage: 'implement', ticket: null, proposal: null,
-      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {},
+      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {}, deniedHosts: [] as string[],
     };
     const { app } = await started({ ...factoryState([reviewed]), runs: { R1: ended } }, { connection });
     await press(app, '\r', '\r');
@@ -2162,7 +2198,7 @@ describe('usage', () => {
   function metered(id: string, taskId: string, stage: string | null, ticket: string | null, used: RunView['usage']): RunView {
     return {
       id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage, ticket,
-      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used,
+      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used, deniedHosts: [],
     };
   }
   const implementing = { ...task('T1', 'Implement the login flow', 'running', 'Running'), groups: ['login'] };
@@ -2225,7 +2261,7 @@ describe('the screens view', () => {
   function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
     return {
       id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
-      ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, ...fields,
+      ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, deniedHosts: [], ...fields,
     };
   }
   const grilling = task('T1', 'Grill me about the docs', 'queued', 'Ready for you', 'HITL');
@@ -2489,7 +2525,7 @@ describe('the screens view', () => {
 
   test('a answers the selected task’s request: from the Tasks screen or a task’s detail it goes to Needs you, the digits on that request', async () => {
     const failure = (taskId: string, requestId: string): FactoryState['attentionQueue'][number] => ({
-      kind: 'attention', recovery: null, taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+      kind: 'attention', recovery: null, deniedHosts: null, taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
     });
     const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
     const { app, connection } = await started(factoryState([{ ...grilling, state: 'waiting', label: 'Needs you' }, failing], [failure('T1', 'A1'), failure('T2', 'A2')]));
@@ -2631,7 +2667,7 @@ describe('the wayfinder work loop', () => {
     const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', finishing: false, frontier: null, cleared: false } };
     const run = {
       id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, interruption: null, turn: 'operator' as const, queued: [] as string[],
-      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {},
+      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {}, deniedHosts: [] as string[],
     };
     const { app } = await started({ ...factoryState([working]), runs: { R1: run } }, { connection });
     await press(app, '\r', '\r');
@@ -2650,7 +2686,7 @@ describe('a stalled work loop', () => {
     const connection = new FakeConnection();
     const stalled: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: false } };
     const blocked = {
-      kind: 'attention' as const, recovery: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      kind: 'attention' as const, recovery: null, deniedHosts: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
       reason: 'work’s map has no frontier: every open ticket is blocked (acme/widgets#31 by acme/widgets#39).', question: null, permission: null,
     };
     const { app } = await started(factoryState([stalled], [blocked]), { connection });
@@ -2666,7 +2702,7 @@ describe('a stalled work loop', () => {
     const connection = new FakeConnection();
     const blockedNext: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: true } };
     const blocked = {
-      kind: 'attention' as const, recovery: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      kind: 'attention' as const, recovery: null, deniedHosts: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
       reason: 'spec can’t start: its args need {{artifacts.map}}, and T1 has no map.', question: null, permission: null,
     };
     const { app } = await started(factoryState([blockedNext], [blocked]), { connection });

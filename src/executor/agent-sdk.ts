@@ -338,10 +338,12 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
 // in the container. Nothing of the daemon's environment goes in. Artifact
 // capture's relay hook runs on the host, so an L2 run has none. The SDK
 // warns that `canUseTool` is never invoked under `bypassPermissions`, but
-// AskUserQuestion still reaches it, as the L2 run contract test shows.
+// AskUserQuestion still reaches it, as the L2 run contract test shows. The
+// CLI sends no telemetry or error reports: the container's egress proxy
+// would deny them, and they would crowd the hosts a failed run lists.
 function l2Options({ maxTurns, guards, token, container }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
   return {
-    env: { CLAUDE_CODE_OAUTH_TOKEN: token!, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards!.env },
+    env: { CLAUDE_CODE_OAUTH_TOKEN: token!, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', ...guards!.env },
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     settingSources: ['project'],

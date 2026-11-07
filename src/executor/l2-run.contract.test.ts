@@ -16,7 +16,7 @@ import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import type { RunEvent } from '../lifecycle/lifecycle.ts';
 import { waitFor } from '../os/test-support.ts';
 import { dockerSandbox } from '../sandbox/docker.ts';
-import { inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
+import { BUILT_IN_EGRESS, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { windowsCredentials } from '../secrets/secrets.ts';
 import type { RunSnapshot } from '../git/git.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
@@ -70,7 +70,7 @@ async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void
   const sessionsDir = executor.sessionsDir(worktree);
   const runDir = join(root, 'run');
   try {
-    const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir });
+    const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir, egress: [...BUILT_IN_EGRESS] });
     const snapshot = await container.checks.snapshot(container.workdir);
     const env = prepareRunGit(runDir, FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
     const run: RunStart = {
@@ -112,6 +112,8 @@ test('an L2 run commits in its container on the subscription token, keeps the gu
       expect(reported.find((event) => event.type === 'runFailed')).toBeUndefined();
       expect(typesOf(reported)).toEqual(['runStarted', 'runCompleted']);
       expect(live.filter((event) => event.type === 'toolUse').map((event) => event.tool)).toEqual(['Bash', 'Bash', 'Bash']);
+      // The CLI reached the Claude API through the egress proxy on the built-in hosts alone.
+      expect(await container.deniedHosts()).toEqual([]);
       // The host's worktree is untouched until the commit comes out.
       expect(git(worktree, 'rev-parse', 'HEAD')).toBe(start);
 

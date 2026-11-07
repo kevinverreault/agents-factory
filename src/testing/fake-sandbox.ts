@@ -2,7 +2,7 @@ import { join, resolve } from 'node:path';
 import { SandboxError, type Container, type ContainerListing, type ContainerSpec, type Sandbox } from '../sandbox/sandbox.ts';
 import type { FakeGit } from './fake-git.ts';
 
-type FakeContainer = { spec: ContainerSpec; running: boolean };
+type FakeContainer = { spec: ContainerSpec; running: boolean; denied: string[] };
 
 // Containers that exist only in memory: each one's clone is a clone of the
 // fake git, sharing its commits, at `clonePathOf(task)`, with its working
@@ -40,6 +40,17 @@ export class FakeSandbox implements Sandbox {
     else this.failures.set(op, reason);
   }
 
+  // A request from the task's running container to `host`, as its run
+  // would make one through its egress proxy: whether it got through. One
+  // its spec's egress doesn't allow is denied, and listed.
+  request(taskId: string, host: string): boolean {
+    const container = this.containers.get(taskId);
+    if (!container?.running) throw new Error(`${taskId} has no running container.`);
+    if (container.spec.egress.includes(host)) return true;
+    if (!container.denied.includes(host)) container.denied.push(host);
+    return false;
+  }
+
   // Listing fails with `reason` from now on, as with Docker unreachable, or works again.
   failList(reason: string | null): void {
     this.unlistable = reason;
@@ -48,7 +59,7 @@ export class FakeSandbox implements Sandbox {
   // The daemon before this one made the task's container, now in `state`.
   leave(spec: ContainerSpec, state: 'running' | 'stopped'): void {
     this.git.cloneOf(spec.clonePath, this.clonePathOf(spec.taskId), this.workdirOf(spec.taskId), spec.branch);
-    this.containers.set(spec.taskId, { spec, running: state === 'running' });
+    this.containers.set(spec.taskId, { spec, running: state === 'running', denied: [] });
   }
 
   async prepare(spec: ContainerSpec): Promise<Container> {
@@ -57,10 +68,11 @@ export class FakeSandbox implements Sandbox {
     let container = this.containers.get(spec.taskId);
     if (!container) {
       this.git.cloneOf(spec.clonePath, this.clonePathOf(spec.taskId), this.workdirOf(spec.taskId), spec.branch);
-      this.containers.set(spec.taskId, (container = { spec, running: false }));
+      this.containers.set(spec.taskId, (container = { spec, running: false, denied: [] }));
     }
     container.spec = spec;
     container.running = true;
+    container.denied = [];
     const path = this.clonePathOf(spec.taskId);
     const host = this.git.branchTip(spec.clonePath, spec.branch)!;
     const mine = this.git.branchTip(path, spec.branch)!;
@@ -125,12 +137,14 @@ export class FakeSandbox implements Sandbox {
   }
 
   private handle(spec: ContainerSpec): Container {
+    const container = this.containers.get(spec.taskId)!;
     return {
       taskId: spec.taskId,
       workdir: this.workdirOf(spec.taskId),
       plugin: spec.plugin === null ? null : '/opt/factory/plugin',
       checks: this.git,
       git: () => Promise.reject(new Error('The fake sandbox runs no git command.')),
+      deniedHosts: async () => [...container.denied],
       spawn: () => {
         throw new Error('The fake sandbox spawns no process.');
       },

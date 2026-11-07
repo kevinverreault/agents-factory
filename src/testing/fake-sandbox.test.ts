@@ -20,7 +20,7 @@ describeSandboxContract('the fake sandbox', async () => {
       const branch = `factory/${taskId}`;
       git.addClone(clonePath, { originUrl: 'https://github.com/acme/widgets.git', defaultBranch: 'main' });
       await git.addWorktree(clonePath, { path: worktree, branch, startPoint: 'main' });
-      const spec = { taskId, clonePath, branch, branches: [], plugin: null, runDir: join(worktree, '..', 'run'), sessionsDir: join(worktree, '..', 'sessions') };
+      const spec = { taskId, clonePath, branch, branches: [], plugin: null, runDir: join(worktree, '..', 'run'), sessionsDir: join(worktree, '..', 'sessions'), egress: ['example.com'] };
       return { spec, worktree };
     },
     commitOnHost: commit,
@@ -36,6 +36,11 @@ describeSandboxContract('the fake sandbox', async () => {
     async containerTip(container, branch) {
       return git.branchTip(sandbox.clonePathOf(container.taskId), branch)!;
     },
+    async reach(container, host) {
+      return sandbox.request(container.taskId, host);
+    },
+    allowedHost: 'example.com',
+    deniedHost: 'example.org',
     async dispose() {},
   };
 });

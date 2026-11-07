@@ -584,6 +584,7 @@ describe('a tool call no rule covers', () => {
           proposed: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
         },
         recovery: null,
+        deniedHosts: null,
       },
     ]);
     expect(factory.executor.verdicts('R1')).toEqual({});

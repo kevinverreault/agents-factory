@@ -256,6 +256,7 @@ describe('the Factory recovered report', () => {
         reason: 'The factory restarted after it stopped uncleanly. Requeued T1 (R1). Parked T2 (R2), T3 (R3).',
         question: null,
         permission: null,
+        deniedHosts: null,
         recovery: {
           requeued: [{ taskId: 'T1', runId: 'R1' }],
           parked: [
