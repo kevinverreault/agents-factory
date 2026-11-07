@@ -226,6 +226,11 @@ describe('a research child that reports', () => {
     expect(factory.github.pushes).toEqual([]);
     expect(factory.github.issueState(TICKET).open).toBe(true);
     expect(asked.tasks.T2!.label).toBe('Done');
+    // The conversation that spawned it hears so, after the report's own note.
+    expect(asked.runs.R1!.queued).toHaveLength(2);
+    expect(asked.runs.R1!.queued[1]).toMatch(/^## Factory note/);
+    expect(asked.runs.R1!.queued[1]).toContain('src/sign-in.ts');
+    expect(asked.runs.R1!.queued[1]).toContain(`${TICKET} stays open`);
   });
 
   test('with no findings committed, has its ticket closed with its report, and nothing pushed', async () => {

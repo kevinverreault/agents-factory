@@ -1894,14 +1894,14 @@ function failResearch(state: Lifecycle, task: Task, request: AttentionRequest | 
   if (!request) addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
 }
 
-// The ended fire-and-forget child's report, as a factory note to its HITL
-// parent's conversation (ADR 0009): queued behind the agent's turn, or held
-// for the operator's turn or the parent's next run. An AFK parent reads it
-// through list_children, and an ended one hears nothing.
-function noteParent(state: Lifecycle, child: Task): void {
+// A factory note about the fire-and-forget child to its HITL parent's
+// conversation (ADR 0009), by default its report once it ended: queued
+// behind the agent's turn, or held for the operator's turn or the parent's
+// next run. An AFK parent reads its report through list_children, and an
+// ended one hears nothing.
+function noteParent(state: Lifecycle, child: Task, note = childNote(child)): void {
   const parent = state.tasks[child.parent!];
   if (!parent || parent.mode !== 'HITL' || isTerminal(parent) || child.child!.awaited) return;
-  const note = childNote(child);
   const run = liveRun(state, parent);
   if (run?.status === 'active' && run.turn === 'agent') run.queued.push(note);
   else (parent.factoryNotes ??= []).push(note);
@@ -2442,8 +2442,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'researchPushRefused': {
       const { branch } = task.worktree!;
-      failResearch(state, task, request, `${branch} changes ${action.paths.join(', ')}, outside docs/research/, so the factory won’t push it ` +
-        `or close ${task.child!.research!.ticket}. Rewrite the branch to touch docs/research/** alone, then answer to try again.`, at);
+      const { ticket } = task.child!.research!;
+      const paths = action.paths.join(', ');
+      failResearch(state, task, request, `${branch} changes ${paths}, outside docs/research/, so the factory won’t push it ` +
+        `or close ${ticket}. Rewrite the branch to touch docs/research/** alone, then answer to try again.`, at);
+      // The conversation that spawned it was told the push comes next.
+      if (!request) {
+        noteParent(state, task, `## Factory note\n\nThe factory didn’t push ${branch} of your child ${task.id}: it changes ${paths}, outside ` +
+          `docs/research/. ${ticket} stays open until the operator answers the attention request this raised.`);
+      }
       break;
     }
     case 'researchFailed': {
