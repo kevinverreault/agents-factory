@@ -63,6 +63,7 @@ import {
   type LoopEvent,
   type PrReadEvent,
   type PublishEvent,
+  type ResearchEvent,
   type ReopenEvent,
   type Repository,
   type RepoEvent,
@@ -116,7 +117,7 @@ import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
-import { childWorktree, cutWorktree, fetchBase, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
+import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
 import type { Clock } from './clock.ts';
 
 export type DaemonOptions = {
@@ -213,6 +214,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // tried again once the operator answers, or by the next daemon.
   const publishesStarted = new Set<string>();
   const publishesInFlight = new Set<string>();
+  // The research children's steps on GitHub this daemon has started, and
+  // those still under way, as `<task> <step>`. One that failed is tried
+  // again once the operator answers, or by the next daemon.
+  const researchStarted = new Set<string>();
+  const researchInFlight = new Set<string>();
+  // The HITL tasks whose held factory notes are being delivered.
+  const notesInFlight = new Set<string>();
   // The In review roots whose PR this daemon is reading on GitHub, and when
   // it next reads them all.
   const prReadsInFlight = new Set<string>();
@@ -891,7 +899,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + sweepsPending > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -916,11 +924,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await checkEverySetup();
     // A loop the daemon stopped between iterations carries on, and so do a
     // cleanup, a cancelled task's reopening and a Push & open draft PR it
-    // didn't finish.
+    // didn't finish, and a research child's publishing. Factory notes a
+    // conversation on the operator's turn holds are delivered.
     driveLoops();
     driveCleanups();
     driveReopens();
     drivePublishes();
+    driveResearch();
+    driveNotes();
   });
 
   // Deadlines are wall-clock times persisted in the store (ADR 0003), never
@@ -1034,7 +1045,81 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveCleanups();
     driveReopens();
     drivePublishes();
+    driveResearch();
     driveBranchSweeps(before);
+    driveNotes();
+  }
+
+  // Takes each research child that reported its next step on GitHub (ADR
+  // 0007): once per daemon, and again once the operator answers the request
+  // a failure raised. Its outcome goes through the Lifecycle like any other event.
+  function driveResearch(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      const research = task.child?.research;
+      if (!research?.step) continue;
+      const key = `${task.id} ${research.step}`;
+      if (stopping || researchInFlight.has(key) || (researchStarted.has(key) && research.problem)) continue;
+      researchStarted.add(key);
+      researchInFlight.add(key);
+      void (research.step === 'push' ? pushResearch(task) : closeResearch(task, research.ticket)).then(
+        (event) =>
+          serially(async () => {
+            researchInFlight.delete(key);
+            if (!stopping) await settle(event, new Set());
+          }),
+        (error) => {
+          researchInFlight.delete(key);
+          throw error;
+        },
+      );
+    }
+  }
+
+  // Pushes the research child's `research/<name>` as the App, with a token
+  // narrowed to Contents (ADR 0004), and only if its commits touch nothing
+  // but `docs/research/**`, which the GitHub port holds to (ADR 0007).
+  async function pushResearch(task: Task): Promise<ResearchEvent> {
+    const failed = (reason: string): ResearchEvent => ({ type: 'researchFailed', taskId: task.id, step: 'push', reason });
+    const repository = lifecycle.repositories[task.repo];
+    if (!repository) return failed(`${task.repo} isn’t registered any more.`);
+    const unfetched = await fetchBase(git, repository);
+    if (unfetched) return failed(unfetched);
+    try {
+      const { token } = await appToken(task.repo, PUSH);
+      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch });
+      if ('outsideResearch' in pushed) return { type: 'researchPushRefused', taskId: task.id, paths: pushed.outsideResearch };
+      // Workflow files are outside docs/research/, so the port refuses them as that first.
+      if ('workflowFiles' in pushed) return failed(`${task.worktree!.branch} changes workflow files (${pushed.workflowFiles.join(', ')}), which the factory’s App may not push.`);
+      return { type: 'researchPushed', taskId: task.id };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return failed(error.message);
+    }
+  }
+
+  // Closes the research child's ticket as completed, as the App, with a
+  // comment pointing at its research branch and holding its report.
+  async function closeResearch(task: Task, ticket: string): Promise<ResearchEvent> {
+    try {
+      const { token } = await appToken(task.repo, TICKET_WRITE);
+      await github.closeIssue(token, ticket, researchComment(task));
+      return { type: 'researchClosed', taskId: task.id };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'researchFailed', taskId: task.id, step: 'close', reason: error.message };
+    }
+  }
+
+  // Delivers the factory notes each HITL task holds once its live run is on
+  // the operator's turn (ADR 0009): `notesDelivered` sends them.
+  function driveNotes(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (stopping || !task.factoryNotes?.length || notesInFlight.has(task.id)) continue;
+      const run = liveRun(lifecycle, task);
+      if (run?.status !== 'active' || run.turn !== 'operator') continue;
+      notesInFlight.add(task.id);
+      void dispatch({ type: 'notesDelivered', taskId: task.id }).finally(() => notesInFlight.delete(task.id));
+    }
   }
 
   // Sweeps a task's kept child branches (ADR 0011) after each of its runs
@@ -1125,6 +1210,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const { token } = await appToken(task.repo, PUSH);
       const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch });
       if ('workflowFiles' in pushed) return { type: 'pushRefused', taskId: task.id, workflowFiles: pushed.workflowFiles };
+      // A task branch is never a research branch.
+      if ('outsideResearch' in pushed) return failed(`${task.worktree!.branch} isn’t a task branch.`);
       return { type: 'branchPushed', taskId: task.id, commit: pushed.pushed };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
@@ -1372,6 +1459,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // turn it was sent during ends, with whatever else waited.
     if (action.type === 'sendMessage') {
       if (before.runs[run!.id]!.turn === 'operator') executor.send(run!.id, action.text);
+    } else if (action.type === 'notesDelivered') {
+      executor.send(run!.id, before.tasks[action.taskId]!.factoryNotes!.join('\n\n'));
     } else if (action.type === 'interrupt') {
       executor.interrupt(run!.id);
     } else if (action.type === 'answerQuestion') {
@@ -1477,7 +1566,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       allowRules: run.mode === 'AFK' ? readAllowRules(options.permissionsPath).rules : [],
       reports: runReports(task, run),
       child: !!task.child,
-      spawns: run.mode === 'AFK' && spawnsWithinDepth(lifecycle, task),
+      spawns: spawnsWithinDepth(lifecycle, task),
     };
     executor.start(start, {
       // A session is named for each completed run now, in case the next
@@ -1514,14 +1603,24 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Spawns a child of the run's task (ADR 0009): checked against the tree
   // limits first, then its branch `<task-branch>--c<n>` is cut from the
   // parent's tip into its own worktree, and the child queues for a slot
-  // with the `child` preset frozen. A replay of the same tool call returns
-  // the child it spawned.
+  // with the `child` preset frozen. A research child's `research/<name>` is
+  // cut from the fetched base branch instead, so nothing of the parent's
+  // branch rides along when the factory pushes it (ADR 0007). A replay of
+  // the same tool call returns the child it spawned.
   function spawnChild(runId: string, request: Extract<Delegation, { type: 'spawnChild' }>): Promise<DelegationReply> {
     return serially(async (): Promise<DelegationReply> => {
       if (stopping) return { ok: false, error: 'The daemon is stopping.' };
       const replayed = childSpawnedBy(lifecycle, runId, request.toolUseId);
       if (replayed) return { ok: true, text: spawnedText(replayed) };
       const goal = typeof request.goal === 'string' ? request.goal : '';
+      const parentTask = lifecycle.tasks[lifecycle.runs[runId]?.taskId ?? ''];
+      if (!parentTask) return { ok: false, error: `There is no run ${runId}.` };
+      let research: ChildSpawned['research'] = null;
+      if (request.research) {
+        const refs = issueRefs([String(request.research.ticket).trim()], parentTask.repo);
+        if ('error' in refs) return { ok: false, error: refs.error };
+        research = { ticket: refs.issues[0]!, name: String(request.research.name).trim() };
+      }
       const action: ChildSpawned = {
         type: 'childSpawned',
         runId,
@@ -1533,6 +1632,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         autonomy: request.autonomy ?? null,
         // The Lifecycle defaults it by the run's mode (ADR 0009).
         awaited: request.await ?? null,
+        research,
         // Filled once the limits allow it.
         preset: null!,
         worktree: { branch: '', path: '' },
@@ -1553,10 +1653,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if ('error' in resolved) return { ok: false, error: resolved.error };
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       const childId = nextTaskId(lifecycle);
-      action.worktree = childWorktree(options.worktreeRoot, repository, parent.worktree!, childId, childrenOf(lifecycle, parent).length + 1);
+      action.worktree = research
+        ? researchWorktree(options.worktreeRoot, repository, childId, research.name)
+        : childWorktree(options.worktreeRoot, repository, parent.worktree!, childId, childrenOf(lifecycle, parent).length + 1);
       try {
-        action.base = (await git.snapshot(parent.worktree!.path)).head;
-        await git.addWorktree(repository.path, { ...action.worktree, startPoint: action.base });
+        if (research) {
+          const unfetched = await fetchBase(git, repository);
+          if (unfetched) return { ok: false, error: `The factory couldn’t cut ${action.worktree.branch} for the child: ${unfetched}` };
+          await git.addWorktree(repository.path, { ...action.worktree, startPoint: `origin/${repository.baseBranch}` });
+          action.base = (await git.snapshot(action.worktree.path)).head;
+        } else {
+          action.base = (await git.snapshot(parent.worktree!.path)).head;
+          await git.addWorktree(repository.path, { ...action.worktree, startPoint: action.base });
+        }
       } catch (error) {
         if (!(error instanceof GitError)) throw error;
         return { ok: false, error: `The factory couldn’t cut ${action.worktree.branch} for the child: ${error.message}` };
@@ -1716,6 +1825,16 @@ function closingComment(task: Task, commits: string[]): string {
   );
 }
 
+// What closing a research ticket says on it (ADR 0007): where the findings
+// are, when the child committed any, and its report.
+function researchComment(task: Task): string {
+  const report = task.child!.report!;
+  const where = report.commits.length
+    ? `The findings are on \`${report.branch}\`: https://github.com/${task.repo}/tree/${report.branch}. It is never merged.`
+    : 'It committed no findings.';
+  return [`Researched by the agents factory’s task ${task.id} (${task.title}). ${where}`, report.summary, ...(report.notes ? [report.notes] : [])].join('\n\n');
+}
+
 // What reopening a cancelled task's ticket says on it (ADR 0006): the work
 // that closed it never made it off the task branch.
 function reopeningComment(task: Task): string {
@@ -1751,6 +1870,8 @@ function childListing(child: Task) {
     branch: child.worktree?.branch ?? null,
     awaited: child.child?.awaited ?? false,
     report: child.child?.report ?? null,
+    // The research ticket a research child resolves.
+    research: child.child?.research?.ticket ?? null,
   };
 }
 
