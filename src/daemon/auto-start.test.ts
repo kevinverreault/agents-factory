@@ -1,14 +1,14 @@
 // Seam 1: a TUI starting with no daemon running starts one, and closing the
 // TUI never stops it.
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'vitest';
-import { readMessages, send } from '../protocol/protocol.ts';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { PROTOCOL_VERSION, readMessages, send, type ClientMessage, type Command, type DaemonMessage } from '../protocol/protocol.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch } from '../testing/watch.ts';
-import { connectOrStart } from './auto-start.ts';
+import { connectOrStart, restartDaemon, VersionSkew } from './auto-start.ts';
 import { pipePathFor } from './paths.ts';
 
 const factories: TestFactory[] = [];
@@ -35,7 +35,7 @@ describe('starting the TUI', () => {
     });
 
     expect(starts).toBe(1);
-    expect(tui.protocolVersion).toBe(20);
+    expect(tui.protocolVersion).toBe(PROTOCOL_VERSION);
     tui.close();
   });
 
@@ -78,7 +78,8 @@ describe('starting the TUI', () => {
 
     try {
       await expect(connectOrStart(endpoint, () => starts++)).rejects.toThrow(
-        'The running daemon speaks protocol 3 and this agents-factory speaks 20. Stop it with `agents-factory daemon stop`, then try again.',
+        `The running daemon speaks protocol 3 and this agents-factory speaks ${PROTOCOL_VERSION}. ` +
+          'Open agents-factory to restart it now or when idle, or stop it with `agents-factory daemon stop`, then try again.',
       );
       expect(starts).toBe(0);
     } finally {
@@ -93,5 +94,82 @@ describe('starting the TUI', () => {
     await expect(connectOrStart(factory.paths, () => {}, { timeoutMs: 300 })).rejects.toThrow(
       'The daemon did not start within 300 ms.',
     );
+  });
+});
+
+// A daemon from an older build on the factory's pipe: it welcomes any
+// client, records the commands it gets and replies to each as `reply` says.
+// It stops on `daemon.stop`, or when the test stops it.
+async function oldDaemon(pipePath: string, reply: (command: Command) => object = () => ({ ok: true })) {
+  const commands: Command[] = [];
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    send(socket, { type: 'hello', protocolVersion: 3 });
+    readMessages<ClientMessage>(socket, (message) => {
+      if (message.type === 'auth') return send(socket, { type: 'welcome' });
+      if (message.type !== 'command') return;
+      commands.push(message.command);
+      send(socket, { type: 'reply', id: message.id, ...reply(message.command) } as DaemonMessage);
+      if (message.command.type === 'daemon.stop') void stop();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(pipePath, resolve));
+  let stopping: Promise<void> | null = null;
+  const stop = () =>
+    (stopping ??= new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      for (const socket of sockets) socket.end(() => socket.destroy());
+    }));
+  return { commands, stop };
+}
+
+describe('a daemon of another version', () => {
+  async function skewed(reply?: (command: Command) => object) {
+    const factory = await factoryWithNoDaemon();
+    const old = await oldDaemon(factory.paths.pipePath, reply);
+    const skew = await connectOrStart(factory.paths, () => {
+      throw new Error('A daemon is running.');
+    }).catch((error: unknown) => error);
+    expect(skew).toBeInstanceOf(VersionSkew);
+    return { factory, old, skew: skew as VersionSkew };
+  }
+
+  test('restart now stops it gracefully, then the TUI starts its own build’s and attaches', async () => {
+    const { factory, old, skew } = await skewed();
+    expect(skew.daemonVersion).toBe(3);
+
+    const tui = await restartDaemon(skew, 'now', factory.paths, () => void factory.startDaemon());
+
+    expect(old.commands).toEqual([{ type: 'daemon.stop' }]);
+    expect(tui.protocolVersion).toBe(PROTOCOL_VERSION);
+    tui.close();
+  });
+
+  test('restart when idle waits for it to stop once no run is active, then attaches to a new one', async () => {
+    const { factory, old, skew } = await skewed(() => ({ ok: true, value: { activeRuns: 2 } }));
+    let waiting: number | null = null;
+    let attached = false;
+
+    const restarted = restartDaemon(skew, 'idle', factory.paths, () => void factory.startDaemon(), { onWaiting: (runs) => (waiting = runs) });
+    void restarted.then(() => (attached = true));
+    await vi.waitFor(() => expect(waiting).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(attached).toBe(false);
+    await old.stop();
+
+    const tui = await restarted;
+    expect(old.commands).toEqual([{ type: 'daemon.restartWhenIdle' }]);
+    expect(tui.protocolVersion).toBe(PROTOCOL_VERSION);
+    tui.close();
+  });
+
+  test('one too old to restart when idle is left running, and the TUI says to restart it now instead', async () => {
+    const { factory, old, skew } = await skewed();
+
+    await expect(restartDaemon(skew, 'idle', factory.paths, () => void factory.startDaemon())).rejects.toThrow(
+      'The running daemon is too old to restart when idle: restart it now, or stop it later with `agents-factory daemon stop`.',
+    );
+    await old.stop();
   });
 });

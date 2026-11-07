@@ -20,7 +20,7 @@ import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
-import { AnswerSheet, answerable, useAnswering, waitingFor } from './answer-sheet.ts';
+import { AnswerSheet, answerable, titleOf, useAnswering, waitingFor } from './answer-sheet.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { Conversation } from './conversation.ts';
 import { Help } from './help.ts';
@@ -137,7 +137,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     onSend: () => setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } })),
     onReply: ({ reply, taskId, opens }) => {
       setRefusal(reply.ok ? null : reply.reason);
-      if (reply.ok && opens) setView({ kind: 'conversation', taskId });
+      if (reply.ok && opens && taskId) setView({ kind: 'conversation', taskId });
     },
   });
   // Answers the selected task's request: Needs you, its cursor and the
@@ -494,8 +494,7 @@ function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }
       const key = item.kind === 'attention' ? item.requestId : `${item.kind}-${item.taskId}`;
       const { taskId } = item;
       const task = taskId === null ? undefined : state.tasks[taskId];
-      // A request about a repository itself has no task: the repository takes the title's place.
-      const title = task?.title ?? (item.kind === 'attention' ? item.repo : '');
+      const title = titleOf(item, task);
       return h(Row, { key, id: taskId ?? '', title, detail: waitingFor(item, task), selected: i === cursor });
     }),
   });

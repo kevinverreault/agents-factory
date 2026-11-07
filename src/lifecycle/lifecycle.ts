@@ -314,6 +314,9 @@ export type Task = {
   // Where its session transcripts were archived once it ended: its
   // conversation is read from there.
   transcripts?: string | null;
+  // How many unclean daemon starts in a row found its run active, until one
+  // of its runs ends other than interrupted (ADR 0003's crash-loop guard).
+  uncleanStarts?: number;
 };
 
 export type Run = {
@@ -380,9 +383,11 @@ export type UsageSample = { id: string; runId: string; minute: number; models: M
 
 export type AttentionRequest = {
   id: string;
-  repo: string;
+  // The repository it is about, or null for one about the factory itself
+  // (`recovery-report`).
+  repo: string | null;
   // The task and run it is about, or null for a request about the repository
-  // itself (`repo-missing`).
+  // itself (`repo-missing`) or the factory.
   taskId: string | null;
   runId: string | null;
   kind: AttentionKind;
@@ -394,8 +399,16 @@ export type AttentionRequest = {
   question?: Question | null;
   // The call a `permission` request asks about. Requests stored before it have none.
   permission?: Permission | null;
+  // What a `recovery-report` says recovery did.
+  recovery?: Recovery | null;
   raisedAt: number;
 };
+
+// What recovery did with the runs an unclean start found live (ADR 0003):
+// those it requeued as interrupted, those it parked, and those the
+// crash-loop guard failed.
+export type Recovery = { requeued: RunRef[]; parked: RunRef[]; failed: RunRef[] };
+export type RunRef = { taskId: string; runId: string };
 
 // A GitHub repository the operator registered through their own clone
 // (ADR 0010). Its settings live only here, never in the repo.
@@ -498,7 +511,9 @@ export type OperatorCommand =
   // Sets an AFK task's autonomy level between runs, clamped by its stage's ceiling.
   | { type: 'setAutonomy'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'setSlotCap'; cap: number }
-  | { type: 'removeRepo'; repo: string };
+  | { type: 'removeRepo'; repo: string }
+  // Dismisses the Factory recovered report: it asks nothing but to be read.
+  | { type: 'dismiss'; requestId: string };
 
 // What the executor reports about a run.
 export type RunEvent =
@@ -654,6 +669,12 @@ export type CleanupEvent =
 // The daemon's clock found deadlines that have passed (ADR 0003).
 export type ClockEvent = { type: 'deadlinesDue' };
 
+// The daemon ends every live run, since no new daemon can reattach to one
+// (ADR 0002, ADR 0003): on a graceful stop, or at a start that found no
+// clean-shutdown marker (`unclean`). Active AFK runs end `interrupted` and
+// their tasks queue again; suspended and HITL runs park.
+export type Reconciled = { type: 'runsReconciled'; interruption: Interruption };
+
 // What the daemon did on GitHub between a Ralph loop's iterations (ADR 0006),
 // and between a work loop's tickets (ADR 0012).
 export type LoopEvent =
@@ -698,6 +719,7 @@ export type LifecycleAction =
   | ReadinessRead
   | HandedOff
   | ClockEvent
+  | Reconciled
   | LoopEvent
   | ReopenEvent
   | PublishEvent
@@ -714,6 +736,13 @@ export const DEFAULT_MAX_TURNS = 300;
 // What a resumed AFK run opens on: it takes no chat, so nothing else would
 // start its turn.
 const AFK_RESUME = 'Carry on, unattended, from where this conversation left off.';
+// What the run after an interrupted one opens on (ADR 0003): its worktree is
+// left exactly as the interrupted turn left it.
+export const RECOVERY_NOTE =
+  'The factory restarted mid-turn. Your last turn may be incomplete. Check `git status` and re-verify before continuing.';
+// How many unclean starts in a row may find a task's run active before it
+// fails instead of being requeued (ADR 0003).
+const CRASH_LOOP_STARTS = 2;
 export const PRIORITIES: readonly Priority[] = ['normal', 'urgent'];
 export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ['L1', 'L2'];
 // Past this share of the context window, the handoff sheet pre-selects
@@ -773,6 +802,11 @@ export function liveRun(state: Lifecycle, task: Task): Run | undefined {
 
 export function openRequest(state: Lifecycle, task: Task): AttentionRequest | undefined {
   return Object.values(state.requests).find((request) => request.taskId === task.id && request.status === 'open');
+}
+
+// The Factory recovered report while the operator hasn't dismissed it.
+function recoveryReport(state: Lifecycle): AttentionRequest | undefined {
+  return Object.values(state.requests).find((request) => request.kind === 'recovery-report' && request.status === 'open');
 }
 
 // The open request about the repository itself, if any.
@@ -1336,18 +1370,19 @@ export type AttentionQueueItem =
   | {
       kind: 'attention';
       taskId: string | null;
-      repo: string;
+      repo: string | null;
       requestId: string;
       attention: AttentionKind;
       holdsRun: boolean;
       reason: string | null;
       question: Question | null;
       permission: Permission | null;
+      recovery: Recovery | null;
     }
   | { kind: 'ready'; taskId: string }
   | { kind: 'review'; taskId: string };
 
-const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null }: AttentionRequest): AttentionQueueItem => ({
+const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null, recovery = null }: AttentionRequest): AttentionQueueItem => ({
   kind: 'attention',
   taskId,
   repo,
@@ -1357,6 +1392,7 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = nu
   reason,
   question,
   permission,
+  recovery: structuredClone(recovery),
 });
 
 // Whether the task's open request, if any, waits on the operator: a task
@@ -1373,6 +1409,8 @@ export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = 
   const requests: AttentionRequest[] = [];
   const ready: AttentionQueueItem[] = [];
   const reviews: AttentionQueueItem[] = [];
+  const report = recoveryReport(state);
+  if (report) requests.push(report);
   for (const repository of Object.values(state.repositories)) {
     const request = openRepoRequest(state, repository.id);
     if (request) requests.push(request);
@@ -1545,6 +1583,12 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';
+    case 'dismiss': {
+      const request = state.requests[action.requestId];
+      if (!request) return `There is no attention request ${action.requestId}.`;
+      if (request.kind !== 'recovery-report') return 'Only the Factory recovered report can be dismissed.';
+      return request.status === 'open' ? null : 'That report is already dismissed.';
+    }
     case 'runStarted':
     case 'runCompleted':
     case 'runFailed':
@@ -1610,6 +1654,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'appChecked':
     case 'skillsChecked':
     case 'deadlinesDue':
+    case 'runsReconciled':
       return null;
     case 'mapRead':
       return readingMap(state, task) ? null : `${task.id} isn’t reading a map.`;
@@ -2108,6 +2153,82 @@ function park(state: Lifecycle, task: Task, run: Run, at: number): void {
   const request = openRequest(state, task);
   if (request?.holdsRun) request.holdsRun = false;
   else task.state = 'queued';
+}
+
+// Ends every live run (ADR 0002, ADR 0003): an active AFK run is
+// interrupted, losing only its in-flight turn, and its task queues again to
+// resume on the recovery note. Suspended and HITL runs park, as they would
+// once their deadline passed. A task whose run was active at the unclean
+// start before this one too isn't requeued again: its run fails.
+// After an unclean start, what it did goes in the one Factory recovered
+// report: the open one, if the operator hasn't dismissed it yet.
+function reconcile(state: Lifecycle, interruption: Interruption, at: number): void {
+  const recovery: Recovery = { requeued: [], parked: [], failed: [] };
+  // An unclean start that finds a task with no active run ends its crash loop.
+  if (interruption === 'unclean') {
+    for (const task of Object.values(state.tasks)) {
+      const run = liveRun(state, task);
+      if (task.uncleanStarts && !(run?.status === 'active' && run.mode === 'AFK')) task.uncleanStarts = 0;
+    }
+  }
+  for (const run of Object.values(state.runs)) {
+    if (run.status === 'ended') continue;
+    const task = state.tasks[run.taskId]!;
+    const ref = { taskId: task.id, runId: run.id };
+    if (run.status === 'active' && run.mode === 'AFK') {
+      if (interruption === 'unclean') task.uncleanStarts = (task.uncleanStarts ?? 0) + 1;
+      if ((task.uncleanStarts ?? 0) >= CRASH_LOOP_STARTS) {
+        endRun(run, 'failed', at);
+        raise(state, task, run, 'failure', false, `${run.id} was active when the factory stopped uncleanly twice in a row, so the factory didn’t requeue it again: it may be what crashes the factory.`, at);
+        recovery.failed.push(ref);
+        continue;
+      }
+      endRun(run, 'interrupted', at);
+      run.interruption = interruption;
+      task.resumeWith = RECOVERY_NOTE;
+      requeue(state, task);
+      recovery.requeued.push(ref);
+    } else {
+      park(state, task, run, at);
+      recovery.parked.push(ref);
+    }
+  }
+  if (interruption === 'unclean' && Object.values(recovery).some((refs) => refs.length)) reportRecovery(state, recovery, at);
+}
+
+// Adds what recovery did to the open Factory recovered report, or raises one.
+function reportRecovery(state: Lifecycle, recovery: Recovery, at: number): void {
+  const open = recoveryReport(state);
+  const before = open?.recovery ?? { requeued: [], parked: [], failed: [] };
+  const merged: Recovery = {
+    requeued: [...before.requeued, ...recovery.requeued],
+    parked: [...before.parked, ...recovery.parked],
+    failed: [...before.failed, ...recovery.failed],
+  };
+  const request: AttentionRequest = open ?? {
+    id: nextId(state, 'request'),
+    repo: null,
+    taskId: null,
+    runId: null,
+    kind: 'recovery-report',
+    status: 'open',
+    holdsRun: false,
+    reason: null,
+    raisedAt: at,
+  };
+  request.recovery = merged;
+  request.reason = recoveryReason(merged);
+  state.requests[request.id] = request;
+}
+
+function recoveryReason({ requeued, parked, failed }: Recovery): string {
+  const runs = (refs: RunRef[]) => refs.map(({ taskId, runId }) => `${taskId} (${runId})`).join(', ');
+  return [
+    'The factory restarted after it stopped uncleanly.',
+    ...(requeued.length ? [`Requeued ${runs(requeued)}.`] : []),
+    ...(parked.length ? [`Parked ${runs(parked)}.`] : []),
+    ...(failed.length ? [`Failed ${runs(failed)}: active at two unclean starts in a row.`] : []),
+  ].join(' ');
 }
 
 // What the run that resumes a root on the operator's review comments opens on.
@@ -2800,6 +2921,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'deadlinesDue':
       for (const overdue of overdueRuns(state, at)) park(state, state.tasks[overdue.taskId]!, overdue, at);
       break;
+    case 'runsReconciled':
+      reconcile(state, action.interruption, at);
+      break;
+    case 'dismiss':
+      state.requests[action.requestId]!.status = 'closed';
+      break;
     case 'ticketsRead': {
       const stage = stageOf(task, task.stage)!;
       const last = lastRun(state, task);
@@ -2901,22 +3028,36 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
 
 // `routes` is the routing table each run the action starts is routed
 // through (ADR 0009). While it can't be read, queued AFK tasks wait, and an
-// action that would start a run itself is refused.
-export function reduce(state: Lifecycle, action: LifecycleAction, at: number, routes: Routes): Reduction {
+// action that would start a run itself is refused. So it is while the daemon
+// starts no new run, as it stops or waits to restart: `holdRuns` says why.
+export function reduce(state: Lifecycle, action: LifecycleAction, at: number, routes: Routes, { holdRuns = null }: { holdRuns?: string | null } = {}): Reduction {
   const refusal = guard(state, action);
   if (refusal) return { state, refusal };
   const next = structuredClone(state);
   apply(next, action, at);
   wakeParents(next);
   placeInQueue(state, next);
-  if (!('unreadable' in routes)) schedule(next, at);
+  const held = 'unreadable' in routes ? routes.unreadable : holdRuns;
+  if (held === null) schedule(next, at);
   const started = Object.values(next.runs).filter((run) => !state.runs[run.id]);
   if (started.length) {
     if ('unreadable' in routes) return { state, refusal: routes.unreadable };
+    if (holdRuns !== null) return { state, refusal: holdRuns };
     for (const run of started) run.model = route(routes, run.tier!).model;
   }
   armIdleParks(next, at);
+  resetCrashCounts(state, next);
   return { state: next, refusal: null };
+}
+
+// A run that ends any way but interrupted ends the crash loop its task was
+// in, if any (ADR 0003): a run the guard failed included.
+function resetCrashCounts(before: Lifecycle, after: Lifecycle): void {
+  for (const run of Object.values(after.runs)) {
+    if (run.status !== 'ended' || run.outcome === 'interrupted' || before.runs[run.id]?.status === 'ended') continue;
+    const task = after.tasks[run.taskId]!;
+    if (task.uncleanStarts) task.uncleanStarts = 0;
+  }
 }
 
 // Gives each task that has just become Queued the next place in the queue.

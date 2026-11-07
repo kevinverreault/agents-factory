@@ -101,7 +101,7 @@ export type HandoffView = Omit<HandoffSheet, 'asked'>;
 
 export type RunView = Pick<
   Run,
-  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
+  'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'interruption' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
 > & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage };
 
 // `app` is null until the daemon has checked the App's installation, and
@@ -178,6 +178,8 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
   const runs: Record<string, RunView> = {};
   for (const run of Object.values(lifecycle.runs)) {
     const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
+    // Runs stored before interruptions were flagged have none.
+    const interruption = run.interruption ?? null;
     // Runs stored before stages, proposals, max turns and tiers have none,
     // and proposals stored before handoffs proposed advancing.
     const stage = run.stage ?? null;
@@ -191,6 +193,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       autonomy,
       status,
       outcome,
+      interruption,
       turn,
       queued,
       question,

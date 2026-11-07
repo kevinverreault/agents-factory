@@ -9,6 +9,12 @@ export interface Store {
   // The Lifecycle as last saved, or null for a new store.
   loadLifecycle(): Lifecycle | null;
   saveLifecycle(lifecycle: Lifecycle): void;
+  // Whether the daemon before stopped gracefully (ADR 0003), as the marker it
+  // wrote last says. The marker is gone once read, so a crash from now on
+  // leaves none.
+  takeCleanShutdown(): boolean;
+  // Written last on a graceful stop, once every run is reconciled.
+  markCleanShutdown(): void;
   close(): void;
 }
 
@@ -96,5 +102,15 @@ export function openStore(path: string): Store {
     }
   }
 
-  return { loadLifecycle: load, saveLifecycle: save, close: () => db.close() };
+  function takeCleanShutdown(): boolean {
+    const marker = db.prepare(`SELECT value FROM meta WHERE key = 'clean-shutdown'`).get();
+    db.prepare(`DELETE FROM meta WHERE key = 'clean-shutdown'`).run();
+    return marker !== undefined;
+  }
+
+  function markCleanShutdown(): void {
+    db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('clean-shutdown', ?)`).run(new Date().toISOString());
+  }
+
+  return { loadLifecycle: load, saveLifecycle: save, takeCleanShutdown, markCleanShutdown, close: () => db.close() };
 }
