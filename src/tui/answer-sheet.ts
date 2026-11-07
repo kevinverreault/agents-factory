@@ -74,6 +74,8 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
       ...publish,
     ];
   }
+  // The Factory recovered report asks only to be read (ADR 0003).
+  if (item.kind === 'attention' && item.attention === 'recovery-report') return [{ label: 'Dismiss', command: { type: 'dismiss', requestId: item.requestId } }];
   if (item.kind !== 'attention' || item.taskId === null || item.question) return [];
   const { taskId } = item;
   const answer: Command = { type: 'answer', taskId };
@@ -148,7 +150,7 @@ function workLoopAt({ preset, stage }: TaskView): boolean {
 
 // Whether the digits answer the item.
 export function answerable(item: AttentionQueueItem | undefined, task: TaskView | undefined): boolean {
-  if (!item || item.taskId === null) return false;
+  if (!item) return false;
   return (item.kind === 'attention' && !!item.question) || choicesFor(item, task).length > 0;
 }
 
@@ -160,14 +162,23 @@ function keyOf(item: AttentionQueueItem): string {
 // What the operator is asked for: the attention request, or else the task's
 // own label (Ready for you, In review).
 export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined): string {
+  if (item.kind === 'attention' && item.attention === 'recovery-report') return item.reason ?? '';
   if (item.kind === 'attention') return item.reason ? `${item.attention}: ${item.reason}` : item.attention;
   if (item.kind === 'ready' && task?.loop?.cleared) return `${task.label}: the map has cleared`;
   return task?.label ?? '';
 }
 
 // What `onReply` hears of a sent answer: the daemon's reply, the task it
-// answered for, and whether its choice opens that task's conversation.
-export type Answered = { reply: Reply; taskId: string; opens: boolean };
+// answered for (none for a request about the factory or a repository), and
+// whether its choice opens that task's conversation.
+export type Answered = { reply: Reply; taskId: string | null; opens: boolean };
+
+// What an item's row and sheet are titled by: its task, or else the
+// repository a request is about, or the factory itself.
+export function titleOf(item: AttentionQueueItem, task: TaskView | undefined, { withId = false } = {}): string {
+  if (task) return withId ? `${task.id} ${task.title}` : task.title;
+  return item.kind === 'attention' ? (item.repo ?? 'Factory recovered') : '';
+}
 
 // What a refusal asks back: whether to go ahead anyway (no `options`), or
 // which of its options to go ahead with.
@@ -209,7 +220,7 @@ export function useAnswering(
   const confirm = itemKey !== null && sheet.current.confirm?.for === itemKey ? sheet.current.confirm : null;
 
   const send = (command: Command, opens = false) => {
-    if (!item?.taskId || itemKey === null) return;
+    if (!item || itemKey === null) return;
     const { taskId } = item;
     const sentFor = itemKey;
     // An answered request leaves the queue, so its digits stay spent. A root
@@ -232,8 +243,8 @@ export function useAnswering(
   // A digit on the item's sheet: an option of its question's card (toggled
   // on a multi-select, which enter confirms), or a choice.
   const answer = (input: string, key: Key) => {
-    if (!item?.taskId || itemKey === null || sheet.current.sent.has(itemKey)) return;
-    if (item.kind === 'attention' && item.question) {
+    if (!item || itemKey === null || sheet.current.sent.has(itemKey)) return;
+    if (item.kind === 'attention' && item.question && item.taskId) {
       if (sheet.current.cardFor !== itemKey) Object.assign(sheet.current, { card: newCard(), cardFor: itemKey });
       const onCard = cardKey(item.question, sheet.current.card, '', input, key);
       if (onCard.kind === 'card') sheet.current.card = onCard.card;
@@ -306,8 +317,7 @@ type Props = {
 };
 
 export function AnswerSheet({ item, task, card, answering, form, confirm = null, escBack = true }: Props) {
-  // A request about a repository itself has no task: the repository takes the title's place.
-  const title = task ? `${task.id} ${task.title}` : item.kind === 'attention' ? item.repo : '';
+  const title = titleOf(item, task, { withId: true });
   const question = item.kind === 'attention' ? item.question : null;
   const hint = answerable(item, task)
     ? confirm !== null

@@ -92,6 +92,7 @@ import {
   type RepoCommand,
   type Option,
   type Reply,
+  type RestartWhenIdle,
   type SetupView,
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
@@ -179,6 +180,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const { store, clock, executor, git, github, secrets, skillSets, routingTable } = options;
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
+  // Whether the daemon before this one stopped gracefully (ADR 0003).
+  const cleanStart = store.takeCleanShutdown();
   let published: FactoryState = toFactoryState(lifecycle);
   const startedAt = clock.now();
   const sockets = new Set<Socket>();
@@ -231,6 +234,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolve) => (resolveStopped = resolve));
   let stopping: Promise<void> | null = null;
+  // Why the daemon starts no new run now, if it doesn't: it is stopping, or
+  // stops once no run is active, to be restarted (ADR 0002).
+  let holdRuns: string | null = null;
+  let restartsWhenIdle = false;
 
   // Idle exit (ADR 0002): the daemon stays up while anything needs a clock.
   let idleSince: number | null = null;
@@ -283,6 +290,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             (reply) => {
               send(socket, { type: 'reply', id, ...reply });
               if (command.type === 'daemon.stop') void stop();
+              if (command.type === 'daemon.restartWhenIdle') restartIfIdle();
             },
             (error: Error) => send(socket, { type: 'reply', id, ok: false, reason: error.message }),
           );
@@ -299,6 +307,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return serially(async () => ({ ok: true, value: status() }));
       case 'daemon.stop':
         return { ok: true };
+      case 'daemon.restartWhenIdle':
+        return serially(async (): Promise<Reply> => {
+          restartsWhenIdle = true;
+          holdRuns ??= 'The daemon restarts once no run is active, so it starts no new run.';
+          const value: RestartWhenIdle = { activeRuns: status().activeRuns };
+          return { ok: true, value };
+        });
       case 'registerRepo':
         return registerRepo(command);
       case 'moveRepo':
@@ -890,6 +905,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       activeRuns: runs.filter((run) => run.status === 'active').length,
       suspendedRuns: runs.filter((run) => run.status === 'suspended').length,
       queuedTasks: Object.values(lifecycle.tasks).filter((task) => task.state === 'queued').length,
+      restartsWhenIdle,
     };
   }
 
@@ -910,6 +926,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     queue = result.catch(() => {});
     return result;
   }
+
+  // Before anything else, every run the store still shows live is
+  // reconciled (ADR 0003): no run outlives the daemon that started it. After
+  // a graceful stop there is none; after a crash, they are flagged unclean.
+  void serially(() => settle({ type: 'runsReconciled', interruption: cleanStart ? 'graceful' : 'unclean' }, new Set()));
 
   // Every repository's clone is checked at start (ADR 0010), and the skill
   // set versions finished tasks left behind are removed.
@@ -967,7 +988,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // the rules cover is let through.
   async function answerAlways(taskId: string, permission: RulesAnswer): Promise<Reply> {
     const answer = { type: 'answer', taskId, permission } as const;
-    const { refusal } = reduce(lifecycle, answer, clock.now(), routes());
+    const { refusal } = reduce(lifecycle, answer, clock.now(), routes(), { holdRuns });
     if (refusal) return { ok: false, reason: refusal };
     const rules = allowedRules(openRequest(lifecycle, lifecycle.tasks[taskId]!)!.permission!, permission);
     const problem = addOperatorRules(options.permissionsPath, rules);
@@ -992,7 +1013,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // clones were already found in place, so they aren't checked twice.
   async function settle(action: LifecycleAction, inPlace: Set<string>): Promise<string | null> {
     for (;;) {
-      const { state, refusal } = reduce(lifecycle, action, clock.now(), routes());
+      const { state, refusal } = reduce(lifecycle, action, clock.now(), routes(), { holdRuns });
       if (refusal) return refusal;
       const missing = await missingClones(state, inPlace);
       if (missing.length === 0) {
@@ -1048,6 +1069,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveResearch();
     driveBranchSweeps(before);
     driveNotes();
+    restartIfIdle();
+  }
+
+  // Restart when idle (ADR 0002): once no run is active, the daemon stops
+  // gracefully, and the TUI that asked starts its own build's.
+  function restartIfIdle(): void {
+    if (restartsWhenIdle && status().activeRuns === 0) void stop();
   }
 
   // Takes each research child that reported its next step on GitHub (ADR
@@ -1353,6 +1381,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   function driveLoops(): void {
     for (const task of Object.values(lifecycle.tasks)) {
       if (stopping || stepsInFlight.has(task.id)) continue;
+      // A pick starts the next iteration's run, which waits for the next
+      // daemon while this one starts none.
+      if (holdRuns && !readingMap(lifecycle, task) && task.loop?.step === 'pick') continue;
       const step = readingMap(lifecycle, task)
         ? readMap(task)
         : betweenIterations(lifecycle, task)
@@ -1793,9 +1824,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (ops.length) for (const socket of subscribers) send(socket, { type: 'patch', ops });
   }
 
+  // A graceful stop ends every live run first (ADR 0002): an active AFK run
+  // is requeued, losing its in-flight turn, and the rest are parked. The
+  // next daemon starts what is queued.
   function stop(): Promise<void> {
     stopping ??= (async () => {
       stopTicking();
+      holdRuns = 'The daemon is stopping, so it starts no new run.';
+      await serially(() => settle({ type: 'runsReconciled', interruption: 'graceful' }, new Set()));
+      // Written before the pipe is let go: the next daemon may start as soon
+      // as it is, and must find the marker. Nothing after it starts a run.
+      store.markCleanShutdown();
       // On Windows the pipe name stays taken until every connection is gone.
       const closed = new Promise<void>((resolve) => server.close(() => resolve()));
       // Destroyed only once flushed, so the reply to `daemon stop` still

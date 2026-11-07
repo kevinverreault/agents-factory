@@ -71,6 +71,7 @@ describe('tasks end only Done or Cancelled', () => {
         reason: 'The agent hit max turns.',
         question: null,
         permission: null,
+        recovery: null,
       },
     ]);
   });
