@@ -20,7 +20,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -1716,6 +1716,11 @@ describe('answering from Needs you', () => {
     const underWay = await started(factoryState([{ ...reviewing, publishing: { step: 'push' as const, problem: null } }], [review]));
     await press(underWay.app, '2');
     await eventually(() => expect(unwrapped(underWay.app.lastFrame()!)).toContain('3 Cancel a answer'));
+
+    // Pushed since its last run started, its PR has all its work.
+    const pushed = await started(factoryState([{ ...opened, pushed: true }], [review]));
+    await press(pushed.app, '2');
+    await eventually(() => expect(unwrapped(pushed.app.lastFrame()!)).toContain('3 Cancel a answer'));
   });
 
   test('a root still in review once its choice went through takes the digits again: a later push, or Mark done', async () => {
@@ -1912,6 +1917,37 @@ describe('answering in the conversation', () => {
     });
   });
 
+  test('a heredoc’s exact rule takes one line on the sheet, so a full screen keeps every choice in view', async () => {
+    const script = ["cat > /tmp/edit.py <<'EOF'", ...Array.from({ length: 41 }, (_, i) => `print(${i})`), 'EOF'].join('\n');
+    const flat = script.replace(/\s+/g, ' ').slice(0, 200);
+    const heredoc = {
+      ...permission,
+      reason: `Bash: ${flat}…`,
+      permission: { id: 'toolu_1', tool: 'Bash', summary: `${flat}…`, rule: `Bash(${script})`, proposed: [{ part: `${flat}…`, rule: `Bash(${script})` }] },
+    };
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([waiting], [heredoc]), runs: { R1: suspended } }, { connection });
+    Object.defineProperty(app.stdout, 'rows', { value: 30 });
+    await press(app, ENTER, ENTER);
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain("2 Allow for this task: Bash(cat > /tmp/edit.py <<'EOF' ↵ print(0) ↵");
+      expect(frame).toContain('print(40) ↵ EOF) 3 Allow always');
+      expect(frame).not.toContain('print(20)');
+      expect(frame).toContain('4 Deny with a note');
+      expect(frame).toContain('digits answer · c take over · ctrl+b back');
+    });
+
+    // Its field shows the rule as the label does, and allows it whole.
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('print(40) ↵ EOF) enter allows for this task · esc back'));
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: [`Bash(${script})`] } }),
+    );
+  });
+
   test('a question request shows its card in the conversation, and a digit answers it', async () => {
     const connection = new FakeConnection();
     const question = {
@@ -1933,6 +1969,38 @@ describe('answering in the conversation', () => {
 
     await press(app, '2');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which endpoint?': 'v2' } }));
+  });
+
+  test('a HITL run’s permission card shows in its conversation, answered as a request is, and chat waits until it is', async () => {
+    const connection = new FakeConnection();
+    const hitl: TaskView = { ...task('T1', 'Grill me about the login flow.', 'running', 'In conversation', 'HITL'), liveRunId: 'R1' };
+    const card = {
+      id: 'toolu_3',
+      tool: 'Bash',
+      summary: 'npm test',
+      rule: 'Bash(npm test)',
+      proposed: [{ part: 'npm test', rule: 'Bash(npm test *)' }],
+    };
+    const asking = { ...suspended, mode: 'HITL' as const, autonomy: null, status: 'active' as const, permission: card };
+    const { app } = await started({ ...factoryState([hitl]), runs: { R1: asking } }, { connection });
+    await press(app, ENTER, ENTER);
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('permission: Bash: npm test 1 Allow once 2 Allow for this task: Bash(npm test *) 3 Allow always: Bash(npm test *) 4 Deny with a note');
+      expect(frame).toContain('The agent is waiting on you.');
+      expect(frame).toContain('digits answer · ctrl+b back');
+      expect(frame).not.toContain('›');
+    });
+
+    await press(app, '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'once' } }));
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...asking, permission: null } }]);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).not.toContain('Allow once');
+      expect(frame).toContain('enter queue · esc interrupt');
+    });
   });
 
   test('a refused answer shows its reason in the conversation and can be answered again', async () => {
@@ -2089,7 +2157,7 @@ describe('usage', () => {
   const usage = (input: number, output: number, cacheRead = 0, cacheWrite = 0, cost = 0) => ({ input, output, cacheRead, cacheWrite, cost });
   function metered(id: string, taskId: string, stage: string | null, ticket: string | null, used: RunView['usage']): RunView {
     return {
-      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, stage, ticket,
+      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage, ticket,
       proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used,
     };
   }
@@ -2152,7 +2220,7 @@ describe('the screens view', () => {
   const SONNET = 'claude-sonnet-5-5';
   function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
     return {
-      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, stage: 'implement',
+      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
       ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, ...fields,
     };
   }
@@ -2559,7 +2627,7 @@ describe('the wayfinder work loop', () => {
     const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', finishing: false, frontier: null, cleared: false } };
     const run = {
       id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, interruption: null, turn: 'operator' as const, queued: [] as string[],
-      question: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {},
+      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {},
     };
     const { app } = await started({ ...factoryState([working]), runs: { R1: run } }, { connection });
     await press(app, '\r', '\r');
