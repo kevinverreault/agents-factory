@@ -247,6 +247,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const researchInFlight = new Set<string>();
   // The HITL tasks whose held factory notes are being delivered.
   const notesInFlight = new Set<string>();
+  // The tasks whose quick launch is opening its handoff sheet.
+  const quickInFlight = new Set<string>();
   // The In review roots whose PR this daemon is reading on GitHub, and when
   // it next reads them all.
   const prReadsInFlight = new Set<string>();
@@ -565,6 +567,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         autonomy: command.autonomy ?? 'L1',
         maxTurns: command.maxTurns ?? null,
         priority: command.priority ?? 'normal',
+        quick: command.quick === true,
         worktree: { branch: '', path: '' },
         sessionId: randomUUID(),
         skillSet: '',
@@ -795,10 +798,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Opens the handoff sheet on how the task's worktree stands now.
-  function openHandoff(taskId: string): Promise<Reply> {
+  // `quick` when the factory opens it to end a quick launch's grill: the
+  // Lifecycle refuses it once the operator has expanded the grill meanwhile.
+  function openHandoff(taskId: string, { quick = false } = {}): Promise<Reply> {
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
-      const action: LifecycleAction = { type: 'handoffOpened', taskId, readiness: { blockers: [], toCommit: [] } };
+      const action: LifecycleAction = { type: 'handoffOpened', taskId, readiness: { blockers: [], toCommit: [] }, ...(quick && { quick }) };
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
       action.readiness = await readiness(lifecycle.tasks[taskId]!);
@@ -1146,6 +1151,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveResearch();
     driveBranchSweeps(before);
     driveNotes();
+    driveQuickLaunches();
     restartIfIdle();
   }
 
@@ -1224,6 +1230,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (run?.status !== 'active' || run.turn !== 'operator') continue;
       notesInFlight.add(task.id);
       void dispatch({ type: 'notesDelivered', taskId: task.id }).finally(() => notesInFlight.delete(task.id));
+    }
+  }
+
+  // Ends each quick launch's grill on its handoff sheet once it is done,
+  // opened as `openHandoff` opens it.
+  function driveQuickLaunches(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (stopping || !task.quick?.done || task.handoff || quickInFlight.has(task.id)) continue;
+      if (liveRun(lifecycle, task)?.status !== 'active') continue;
+      quickInFlight.add(task.id);
+      void openHandoff(task.id, { quick: true }).finally(() => quickInFlight.delete(task.id));
     }
   }
 

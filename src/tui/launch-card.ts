@@ -47,12 +47,21 @@ type Draft = {
 type Listing = PresetsView | { refusal: string };
 
 const LABEL = 12;
+// What a launch says while no repository is registered.
+export const NO_REPOSITORY = 'Register a repository first: run `agents-factory repo add` in a clone.';
+
+// The repository a launch starts on: the one holding the working directory,
+// else the last one used, else any registered one.
+export function defaultRepo(state: FactoryState, here: string | null): string | null {
+  const repositories = Object.keys(state.repositories);
+  return [here, state.lastUsedRepo].find((repo) => repo && repositories.includes(repo)) ?? repositories[0] ?? null;
+}
 
 export function LaunchCard({ connection, state, here, onLaunched, onCancel, openUrl }: Props) {
   const repositories = Object.keys(state.repositories);
   const [draft, setDraft] = useState<Draft>(() => ({
     field: 'prompt',
-    repo: [here, state.lastUsedRepo].find((repo) => repo && repositories.includes(repo)) ?? repositories[0] ?? null,
+    repo: defaultRepo(state, here),
     preset: null,
     stage: null,
     tier: null,
@@ -134,7 +143,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
       Box,
       { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
       h(Text, { bold: true }, 'Launch a task'),
-      h(Text, { color: 'yellow' }, 'Register a repository first: run `agents-factory repo add` in a clone.'),
+      h(Text, { color: 'yellow' }, NO_REPOSITORY),
       h(Text, { dimColor: true }, 'esc back'),
     );
   }

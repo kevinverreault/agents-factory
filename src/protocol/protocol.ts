@@ -9,7 +9,7 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 21;
+export const PROTOCOL_VERSION = 22;
 
 // The daemon's own verbs, which a client of another protocol version may
 // still send (ADR 0002): their shapes never change. `daemon.stop` stops it
@@ -62,6 +62,9 @@ export type LaunchCommand = {
   autonomy?: AutonomyLevel;
   maxTurns?: number;
   priority?: Priority;
+  // A quick launch (`n`): its HITL start stage asks at most three questions
+  // and ends on the handoff sheet.
+  quick?: boolean;
 };
 // The advance sheet's confirm: the HITL task leaves its stage for the next
 // one, skipping the optional stages named in `skip`. At a work loop it
