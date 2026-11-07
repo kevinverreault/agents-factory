@@ -24,6 +24,7 @@ import {
   type Mode,
   type Priority,
   type Publishing,
+  type QuickLaunch,
   type AttentionQueueItem,
   type Artifact,
   type Reopening,
@@ -77,6 +78,8 @@ export type TaskView = {
   goal: string | null;
   // Its open handoff sheet, if any.
   handoff: HandoffView | null;
+  // Its quick launch while its grill is one: the questions answered so far.
+  quick: QuickLaunch | null;
   // The tickets its Ralph loop closed, with their commits.
   closedTickets: ClosedTicket[];
   // The tickets the operator skipped, which its loop leaves open.
@@ -163,6 +166,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       egressHosts: [...(task.egressHosts ?? [])],
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
+      quick: task.quick ? { ...task.quick } : null,
       closedTickets: structuredClone(task.closedTickets ?? []),
       skippedTickets: [...(task.skippedTickets ?? [])],
       loop: task.loop

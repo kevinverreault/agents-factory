@@ -112,6 +112,12 @@ export type HandoffSheet = {
   contextShare: number | null;
   readiness: Readiness;
 };
+// A quick launch's grill, while it lasts (`n`): the questions the operator
+// has answered so far, of at most QUICK_QUESTIONS, and whether the grill is
+// `done`, so the factory opens its handoff sheet: once a turn of it ends on
+// the operator's, or it asks past its questions. It ends once its handoff
+// sheet opens, or once the operator expands it into a full conversation.
+export type QuickLaunch = { questions: number; done: boolean };
 // How much of its model's context window a session fills, as its latest turn left it.
 export type ContextUse = { used: number; window: number };
 
@@ -302,6 +308,8 @@ export type Task = {
   egressHosts?: string[];
   // Its open handoff sheet, if any. Tasks stored before handoffs have none.
   handoff?: HandoffSheet | null;
+  // Its quick launch, while its grill is one. Tasks stored before quick launches have none.
+  quick?: QuickLaunch | null;
   // How much of the context window its session fills, once a turn said.
   context?: ContextUse | null;
   // The handoff brief it was handed off with, if any.
@@ -515,6 +523,9 @@ export type OperatorCommand =
   | { type: 'answerQuestion'; taskId: string; questionId: string; answers: Answers }
   // Backs out of the handoff sheet: the conversation carries on.
   | { type: 'closeHandoff'; taskId: string }
+  // Expands a quick launch into a full conversation (`ctrl+e`): its grill
+  // goes on as long as the operator likes, and opens no handoff sheet itself.
+  | { type: 'expandQuickLaunch'; taskId: string }
   | { type: 'takeOver'; taskId: string }
   // Finish after this ticket: the task's Ralph loop ends once its live
   // iteration, if any, is judged and its ticket closed.
@@ -665,6 +676,8 @@ export type TaskLaunched = {
   autonomy: AutonomyLevel;
   maxTurns: number | null;
   priority: Priority;
+  // Whether it is a quick launch (`n`), whose HITL start stage is a short grill.
+  quick: boolean;
   worktree: TaskWorktree;
   sessionId: string;
   skillSet: string;
@@ -679,7 +692,8 @@ export type StageAdvanced = { type: 'stageAdvanced'; taskId: string; skip: strin
 
 // The operator opened the handoff sheet (`ctrl+h` or `/handoff`), and the
 // daemon read how the task's worktree stands.
-export type HandoffOpened = { type: 'handoffOpened'; taskId: string; readiness: Readiness };
+// `quick` when the factory opened it to end a quick launch's grill.
+export type HandoffOpened = { type: 'handoffOpened'; taskId: string; readiness: Readiness; quick?: boolean };
 
 // The daemon read the worktree again for the open handoff sheet, such as
 // once the agent's turn ended: it may have changed files meanwhile.
@@ -808,6 +822,8 @@ export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ['L1', 'L2'];
 // Past this share of the context window, the handoff sheet pre-selects
 // continuing fresh from the brief.
 export const FRESH_AT = 0.6;
+// The most questions a quick launch's grill asks before its handoff sheet opens.
+export const QUICK_QUESTIONS = 3;
 // What the factory asks a HITL run for when the operator opens the handoff sheet.
 export const BRIEF_REQUEST =
   'The operator is handing this task off to an unattended AFK run. Write the handoff brief now with the factory’s ' +
@@ -1570,6 +1586,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       }
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
       if (state.repositories[action.repo]!.missing) return `${action.repo} is missing, so its runs can’t start.`;
+      if (action.quick && action.preset && action.preset.stages.find(({ id }) => id === action.stage)?.mode !== 'HITL') {
+        return `A quick launch grills you first, but ${action.preset.name} starts at an AFK stage (${action.stage}).`;
+      }
       return priorityRefusal(action.priority);
     case 'removeRepo': {
       const unfinished = unfinishedTasks(state, action.repo);
@@ -1619,6 +1638,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'closeHandoff':
       return task.handoff ? null : `${task.id} has no handoff sheet open.`;
+    case 'expandQuickLaunch':
+      return task.quick ? null : `${task.id} is no quick launch, or is one no longer.`;
     case 'takeOver':
       return task.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state)
         ? cantStartRuns(state, task)
@@ -1729,6 +1750,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
         return `Only a HITL task in conversation or ready for you can be handed off (${task.id} is ${label(task)}).`;
       }
       if (task.runIds.length === 0) return `There is nothing to hand off yet: ${task.id} has had no conversation.`;
+      // The operator may have expanded it meanwhile.
+      if (action.quick && !task.quick?.done) return `${task.id}’s quick launch no longer ends on its handoff sheet.`;
       const to = handoffStage(task);
       if (to?.kind === 'action') return `The next AFK stage, ${to.id}, is a factory action, which the factory can’t run yet.`;
       return liveRun(state, task) ? null : cantStartRuns(state, task);
@@ -2675,6 +2698,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         runIds: [],
         state: 'queued',
         createdAt: at,
+        quick: action.quick ? { questions: 0, done: false } : null,
       };
       state.tasks[launched.id] = launched;
       // A loop starts from its tickets (a HITL one from its map's frontier).
@@ -2750,6 +2774,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'answerQuestion':
       // The executor hands the answers to the waiting turn.
+      if (task.quick) task.quick.questions += run!.question!.questions.length;
       run!.question = null;
       break;
     case 'handedOff': {
@@ -2794,6 +2819,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     }
     case 'closeHandoff':
       task.handoff = null;
+      break;
+    case 'expandQuickLaunch':
+      task.quick = null;
       break;
     case 'takeOver':
       if (request) request.status = 'superseded';
@@ -2995,9 +3023,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       run!.model = action.model;
       handReports(state, run!);
       break;
-    case 'questionAsked':
-      run!.question = action.question;
+    case 'questionAsked': {
+      // A quick launch's card is cut to the questions it has left to ask.
+      // Past them, its grill is done: the handoff sheet opens instead,
+      // interrupting the agent, so the card never shows.
+      const left = task.quick ? QUICK_QUESTIONS - task.quick.questions : Infinity;
+      if (left <= 0) task.quick!.done = true;
+      else run!.question = { ...action.question, questions: action.question.questions.slice(0, left) };
       break;
+    }
     case 'advanceProposed':
       run!.proposal = { kind: 'advance', reason: action.reason };
       break;
@@ -3007,6 +3041,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'handoffOpened': {
       const sheet = (task.handoff ??= newHandoffSheet(task, action.readiness));
       sheet.readiness = action.readiness;
+      // A quick launch ends on its handoff sheet: backing out of it keeps the conversation going.
+      task.quick = null;
       if (sheet.brief) break;
       if (!run) {
         // A parked conversation is resumed just to write the brief.
@@ -3074,6 +3110,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (task.handoff && !task.handoff.asked && !task.handoff.brief) task.handoff.asked = true;
       else if (run!.queued.length) run!.queued = [];
       else run!.turn = 'operator';
+      // A quick launch's grill is done once a turn of it ends on the operator's.
+      if (task.quick && run!.turn === 'operator') task.quick.done = true;
       break;
     case 'runCompleted': {
       logDenials(run!, action.deniedHosts);

@@ -2,7 +2,7 @@
 // (`1`–`4`) fed by the factory-state subscription, with a task's detail
 // drilled into (`enter`) and popped back out of (`esc`); the task tree with
 // the selected task's output under it, and its Done and Cancelled tasks
-// dimmed or hidden (`H`); the launch card (`N`), the conversation view
+// dimmed or hidden (`H`); the launch card (`N`), quick launch (`n`), the conversation view
 // (`enter` in a task's detail), re-tiering a task (`t`), conversing with or
 // taking over one (`c`), handing one off (`ctrl+h`), cancelling one with its
 // subtree (`x`, with the cancel sheet when work would be lost), finishing a
@@ -26,6 +26,7 @@ import { Conversation } from './conversation.ts';
 import { Help } from './help.ts';
 import { LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
+import { QuickLaunch } from './quick-launch.ts';
 import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useRows } from './screen.ts';
 import { TaskDetail } from './task-detail.ts';
@@ -35,9 +36,9 @@ import { UsageTab } from './usage.ts';
 const TABS = ['tasks', 'needs-you', 'runs', 'usage'] as const;
 type Tab = (typeof TABS)[number];
 const TAB_NAMES: Record<Tab, string> = { tasks: 'Tasks', 'needs-you': 'Needs you', runs: 'Runs', usage: 'Usage' };
-// What fills the screen: the screens, the launch card over them, or one
-// task's conversation.
-type View = { kind: 'tabs' } | { kind: 'launch' } | { kind: 'conversation'; taskId: string };
+// What fills the screen: the screens, the launch card or quick launch over
+// them, or one task's conversation.
+type View = { kind: 'tabs' } | { kind: 'launch' } | { kind: 'quick' } | { kind: 'conversation'; taskId: string };
 // How many of the selected task's latest events the pane under the task tree shows.
 const OUTPUT_PANE_LINES = 6;
 // The row a pane's cursor is on, and where it was, for when that row is gone.
@@ -254,6 +255,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (screen) show(screen);
       if (key.escape && drilled) setDetail(null);
       if (input === 'N' && state) setView({ kind: 'launch' });
+      if (input === 'n' && !key.ctrl && state) setView({ kind: 'quick' });
       if (input === 'H' && tab === 'tasks' && !drilled) setHideFinished((hide) => !hide);
       if (key.upArrow && !drilled) move(-1);
       if (key.downArrow && !drilled) move(1);
@@ -314,6 +316,15 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
             onLaunched: (taskId: string) => setView({ kind: 'conversation', taskId }),
             onCancel: toTabs,
             openUrl,
+          })
+        : null,
+      state && view.kind === 'quick'
+        ? h(QuickLaunch, {
+            connection,
+            state,
+            here: clone?.repo ?? null,
+            onExpand: (taskId: string) => setView({ kind: 'conversation', taskId }),
+            onLeave: toTabs,
           })
         : null,
     ),
@@ -399,7 +410,7 @@ function TaskList({
   cursor: number;
   retries: boolean;
 }) {
-  if (tasks.length === 0) return h(Text, { dimColor: true }, hidden ? `Every task is finished. H shows the ${hidden}.` : 'No tasks yet. N launches one.');
+  if (tasks.length === 0) return h(Text, { dimColor: true }, hidden ? `Every task is finished. H shows the ${hidden}.` : 'No tasks yet. n quick-launches one, N launches one.');
   const finishes = finishable(tasks[cursor]) ? ' · f finish after this ticket' : '';
   const retry = retries ? ' · y retry' : '';
   return column([
@@ -418,7 +429,7 @@ function TaskList({
       ),
     }),
     fixed(
-      h(Text, { key: 'keys', dimColor: true }, `enter detail · c converse or take over · t re-tier · x cancel${finishes}${retry} · N launch · ? keys`),
+      h(Text, { key: 'keys', dimColor: true }, `enter detail · c converse or take over · t re-tier · x cancel${finishes}${retry} · n quick launch · N launch · ? keys`),
       hidden === null ? null : h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`),
       h(Output, { key: 'output', connection, state, taskId: tasks[cursor]!.id, lines: OUTPUT_PANE_LINES }),
     ),

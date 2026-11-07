@@ -20,7 +20,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -2709,5 +2709,199 @@ describe('a stalled work loop', () => {
     await press(app, '2');
 
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('has no map. 1 Dismiss a answer'));
+  });
+});
+
+describe('quick launch', () => {
+  const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
+  const prompt = 'Add a --json flag to status.';
+  const grilling: TaskView = {
+    ...task('T1', prompt, 'running', 'In conversation', 'HITL'),
+    liveRunId: 'R1',
+    stage: 'grill',
+    sessionId: '5f0c2a8e-3b1d-4c6e-9a7f-2d8b4e1c0a93',
+    quick: { questions: 0, done: false },
+  };
+  const run: RunView = {
+    id: 'R1',
+    taskId: 'T1',
+    mode: 'HITL',
+    autonomy: null,
+    status: 'active',
+    outcome: null,
+    interruption: null,
+    turn: 'agent',
+    queued: [],
+    question: null,
+    permission: null,
+    stage: 'grill',
+    ticket: null,
+    proposal: null,
+    tier: 'opus',
+    model: 'claude-opus-5-5',
+    maxTurns: null,
+    cli: { pid: 4242, createdAt: 1 },
+    skillSet: null,
+    startedAt: 1,
+    endedAt: null,
+    usage: {},
+    deniedHosts: [],
+  };
+  const question = {
+    id: 'toolu_1',
+    questions: [
+      {
+        question: 'Same fields as the table?',
+        header: 'Fields',
+        options: [
+          { label: 'Yes', description: 'One schema' },
+          { label: 'No', description: 'Raw records' },
+        ],
+        multiSelect: false,
+      },
+    ],
+  };
+  const sheet = {
+    brief: { goal: 'status --json prints JSON.', decided: [], doneWhen: [], outOfScope: [], links: [] },
+    stage: 'implement',
+    continueAs: 'resume' as const,
+    autonomy: 'L1' as const,
+    tier: 'sonnet' as const,
+    maxTurns: 300,
+    contextShare: null,
+    readiness: { blockers: [], toCommit: [] },
+  };
+  const CTRL_H = '\x1b[104;5u';
+  const CTRL_E = '\x05';
+
+  // The TUI in the widgets clone, `n` pressed, the prompt typed and launched
+  // as T1, now grilling on R1.
+  async function launched(runView: RunView = run) {
+    const connection = new FakeConnection();
+    connection.replyTo('inspectClone', { ok: true, value: { repo: 'acme/widgets', path: widgets.path } });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': widgets } }, { cwd: '/clones/widgets', connection });
+    app.stdin.write('n');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/Quick launch[\s\S]*acme\/widgets/));
+    for (const char of prompt) app.stdin.write(char);
+    await settle();
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'quick', prompt, quick: true }));
+    connection.servePatch([
+      { op: 'set', path: ['tasks', 'T1'], value: grilling },
+      { op: 'set', path: ['runs', 'R1'], value: runView },
+    ]);
+    await settle();
+    connection.sent.length = 0;
+    return { connection, app };
+  }
+
+  test('n takes one prompt into a small card that shows the agent’s question, which a digit answers', async () => {
+    const { app, connection } = await launched({ ...run, question });
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/Quick launch T1[\s\S]*Same fields as the table\?[\s\S]*1\s+Yes\s+One schema/);
+      expect(frame).toContain('ctrl+e full conversation');
+      // The card, not the full conversation view.
+      expect(frame).not.toContain('claude --resume');
+    });
+    app.stdin.write('1');
+
+    await eventually(() =>
+      expect(connection.sent).toEqual([{ type: 'answerQuestion', taskId: 'T1', questionId: 'toolu_1', answers: { 'Same fields as the table?': 'Yes' } }]),
+    );
+  });
+
+  test('it ends on the handoff sheet at L1, and once handed off the card closes onto the task list', async () => {
+    const { app, connection } = await launched();
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, quick: null, handoff: sheet } }]);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('Hand off T1 to implement (AFK)');
+      expect(frame).toContain('Autonomy ‹ L1 (on this machine) ›');
+    });
+
+    // Its keys reach the sheet once it has mounted, a moment after its first frame.
+    await settle();
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', taskId: 'T1', autonomy: 'L1' }]));
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, mode: 'AFK', state: 'queued', label: 'Queued', quick: null, handoff: null } }]);
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).not.toContain('Hand off T1');
+      expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+Queued/);
+    });
+  });
+
+  test('ctrl+h at a question opens the handoff sheet', async () => {
+    const { app, connection } = await launched({ ...run, question });
+    await eventually(() => expect(app.lastFrame()).toContain('Same fields as the table?'));
+
+    app.stdin.write(CTRL_H);
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'openHandoff', taskId: 'T1' }]));
+  });
+
+  test('ctrl+e expands the card into the full conversation on the same session', async () => {
+    const { app, connection } = await launched({ ...run, question });
+    await eventually(() => expect(app.lastFrame()).toContain('Same fields as the table?'));
+
+    app.stdin.write(CTRL_E);
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'expandQuickLaunch', taskId: 'T1' }]));
+    await eventually(() => {
+      expect(connection.conversed).toEqual(['R1']);
+      expect(app.lastFrame()).toContain('claude --resume 5f0c2a8e-3b1d-4c6e-9a7f-2d8b4e1c0a93');
+    });
+  });
+
+  test('backing out of its handoff sheet keeps the conversation going, in the full conversation view', async () => {
+    const { app, connection } = await launched();
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, quick: null, handoff: sheet } }]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Hand off T1'));
+
+    app.stdin.write('\x1b');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'closeHandoff', taskId: 'T1' }]));
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, quick: null } }]);
+
+    await eventually(() => expect(app.lastFrame()).toContain('claude --resume'));
+  });
+
+  test('esc on a launched card leaves it as an ordinary conversation, back on the task list', async () => {
+    const { app, connection } = await launched({ ...run, question });
+    await eventually(() => expect(app.lastFrame()).toContain('Same fields as the table?'));
+
+    app.stdin.write('\x1b');
+
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'expandQuickLaunch', taskId: 'T1' }]));
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).not.toContain('Quick launch');
+      expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+In conversation/);
+    });
+  });
+
+  test('a quick launch cancelled meanwhile closes its card', async () => {
+    const { app, connection } = await launched();
+    await eventually(() => expect(app.lastFrame()).toContain('Quick launch T1'));
+
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, state: 'cancelled', label: 'Cancelled', liveRunId: null } }]);
+
+    await eventually(() => expect(app.lastFrame()).not.toContain('Quick launch T1'));
+  });
+
+  test('esc on the prompt backs out without launching', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': widgets } }, { connection });
+    app.stdin.write('n');
+    await eventually(() => expect(app.lastFrame()).toContain('Quick launch'));
+
+    app.stdin.write('\x1b');
+
+    await eventually(() => expect(app.lastFrame()).not.toContain('Quick launch'));
+    expect(connection.sent).toEqual([]);
   });
 });

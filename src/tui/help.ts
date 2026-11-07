@@ -7,6 +7,7 @@ const KEYS: [string, string][] = [
   ['↑ ↓', 'move'],
   ['enter', 'drill into a task’s detail; in a detail, open its conversation; on Needs you, answer or open'],
   ['esc', 'back out of a task’s detail'],
+  ['n', 'quick launch: one prompt, at most three questions, then the handoff'],
   ['N', 'new task, on the launch card'],
   ['a', 'answer the selected task’s request, on Needs you'],
   ['c', 'converse with a HITL task, or take an AFK one over'],
@@ -16,6 +17,7 @@ const KEYS: [string, string][] = [
   ['y', 'retry a failed task'],
   ['H', 'hide or show Done and Cancelled tasks'],
   ['ctrl+h', 'hand a HITL task off'],
+  ['ctrl+e', 'expand a quick launch into its full conversation'],
   ['ctrl+b', 'leave a conversation, back to where you were'],
   ['?', 'this help'],
 ];
