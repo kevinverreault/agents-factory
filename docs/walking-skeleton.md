@@ -13,7 +13,8 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | SDK streaming input, tool calls, `interrupt()` | Holds. No `claude -p` fallback needed | `src/executor/agent-sdk.contract.test.ts` |
 | Detached daemon survives its terminal window closing | Holds, for a console window and for Windows Terminal | `src/daemon/spawn-detached.contract.test.ts` |
 | Kill-on-close job helper with nested jobs | Holds. Keep the helper | `src/os/job-object.contract.test.ts` |
-| Keep-awake helper holds an idle-sleep block | Holds | `src/os/keep-awake.contract.test.ts` |
+| Keep-awake helper holds an idle-sleep block | Holds | `src/os/windows-processes.contract.test.ts` |
+| Descendant sweep: a run's tree, by its job and by parent PID, never a reused PID (#62) | Holds | `src/os/windows-processes.contract.test.ts` |
 | Factory plugin loads, `/factory:<skill> args`, cross-skill calls | Holds. No `.claude/skills/` fallback needed | `src/skills/plugin.contract.test.ts` |
 | `gh` re-reads a refreshed `hosts.yml` | Holds | `src/github/gh-config.contract.test.ts` |
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
@@ -46,18 +47,26 @@ For the autonomy gate (later tickets):
 
 ## Kill-on-close job helper (ADR 0003)
 
-`openKillOnCloseJob()` (`src/os/job-object.ts`) starts a non-detached PowerShell helper. It creates one job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and no breakaway, and assigns each PID it is sent. The test's tree is daemon → CLI → tools. The tools take the two routes out of libuv's jobs: one started through a shell (`cmd.exe`), one started `detached`. The daemon then "crashes" (`taskkill /F`, no tree kill).
+`openKillOnCloseJobs()` (`src/os/job-object.ts`) starts a non-detached PowerShell helper. It holds one job per run (#62), each with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and no breakaway, and assigns each PID it is sent to the job named with it. The test's tree is daemon → CLI → tools. The tools take the two routes out of libuv's jobs: one started through a shell (`cmd.exe`), one started `detached`. The daemon then "crashes" (`taskkill /F`, no tree kill).
 
 - **With the job, everything dies:** the helper (killed by the daemon's libuv job), the CLI, and both tools. Assigning a process that is already in libuv's job (and in the test runner's job) works, so nested jobs are fine on Windows 10.
 - **Without the job, both tools are orphaned.** The CLI itself dies, and so would any direct child of a libuv process, because each libuv parent kills its own non-detached children. Anything started through a shell, or `detached`, survives. This matches ADR 0002's "their children break away silently".
 - Not covered: the stand-ins are Node, not the Bun-built `claude.exe`. Bun spawns through libuv too, so the routes out are the same, but it isn't proven. The descendant sweep stays the guarantee, as ADR 0003 says.
+
+## Descendant sweep (ADR 0003, #62)
+
+`osProcesses()` (`src/os/processes.ts`) is the OS process port's Windows adapter, and shares its contract (`src/os/processes-contract.ts`) with the fake. The executor hands each CLI to `adopt` right after spawn, which assigns it to its run's job. At the run's end, `sweep` closes that job, then walks `Win32_Process` by `ParentProcessId` from the CLI's PID, keeping only processes newer than their parent.
+
+- **The job is what reaches a tool started through a shell once the CLI is gone.** When the CLI exits, libuv kills its direct children, the shell among them, and the tool the shell started is left with a dead parent PID that no walk can follow. The contract test without the job's half failed on exactly this. Runs usually end that way: `runCompleted` arrives after the CLI exits.
+- **The walk alone finds the tree of a CLI that still runs,** as at the start after a crash, when this daemon holds no job for the dead daemon's runs.
+- **A reused PID is never matched.** If another process holds the CLI's PID now, only children started before it count as the CLI's. The test records the CLI as created a minute earlier than it was, and the sweep kills nothing.
 
 ## Keep-awake helper (ADR 0003)
 
 `holdAwake()` (`src/os/keep-awake.ts`) starts a PowerShell helper that calls `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` and holds it until its stdin closes. The block is observed through `CallNtPowerInformation(SystemExecutionState)`, which needs no elevation. `powercfg /requests` needs an elevated prompt, so it can't be used in tests or by the daemon.
 
 - The block is set while the helper lives. It is released when the daemon stops the helper, and also when the helper is killed.
-- The test refuses to run if another process already holds `ES_SYSTEM_REQUIRED`, because the readout is system-wide.
+- The test refuses to run if another process already holds `ES_SYSTEM_REQUIRED`, because the readout is system-wide. Since #62 it is part of the OS process contract, which the daemon's keep-awake uses. When #62 landed (2026-11-07), another process on the operator's machine held the block, so the keep-awake checks weren't re-run then. The helper itself didn't change.
 
 ## Factory skill set as a local plugin (ADR 0005)
 

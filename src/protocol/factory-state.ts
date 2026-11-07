@@ -4,6 +4,7 @@
 import {
   attentionQueue,
   heldSlots,
+  keepsAwake,
   label,
   lastUsedRepo,
   liveRun,
@@ -129,6 +130,8 @@ export type FactoryState = {
   artifacts: Record<string, ArtifactView>;
   attentionQueue: AttentionQueueItem[];
   slots: { active: number; cap: number };
+  // Whether the machine is kept from idle sleep while an AFK run is active.
+  keepAwake: boolean;
   // Where a launch card goes when the working directory is in no registered clone.
   lastUsedRepo: string | null;
 };
@@ -231,6 +234,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
     attentionQueue: attentionQueue(lifecycle, watched),
     // A loop between its iterations keeps its slot.
     slots: { active: heldSlots(lifecycle), cap: lifecycle.slotCap },
+    keepAwake: keepsAwake(lifecycle),
     lastUsedRepo: lastUsedRepo(lifecycle),
   };
 }

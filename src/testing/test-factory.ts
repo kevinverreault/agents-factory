@@ -9,11 +9,13 @@ import { GITHUB_APP_SECRET, startDaemon, type Daemon, type DaemonOptions } from 
 import { factoryPaths, type FactoryPaths } from '../daemon/paths.ts';
 import { routingTable } from '../models/routing-table.ts';
 import { connect, type FactoryConnection } from '../protocol/client.ts';
+import type { AwakeBlock, Processes } from '../os/processes.ts';
 import { openStore, type Store } from '../store/store.ts';
 import { FakeClock } from './fake-clock.ts';
 import { FakeExecutor } from './fake-executor.ts';
 import { FakeGit } from './fake-git.ts';
 import { FakeGitHub } from './fake-github.ts';
+import { FakeProcesses } from './fake-processes.ts';
 import { FakeSandbox } from './fake-sandbox.ts';
 import { FakeSecrets } from './fake-secrets.ts';
 import { FakeSkillSets } from './fake-skill-sets.ts';
@@ -26,6 +28,7 @@ export type TestFactory = {
   github: FakeGitHub;
   sandbox: FakeSandbox;
   secrets: FakeSecrets;
+  processes: FakeProcesses;
   skillSets: FakeSkillSets;
   // The daemon currently running, if any.
   daemon(): Daemon;
@@ -40,7 +43,8 @@ export type TestFactory = {
   restart(): Promise<void>;
   // The daemon dies without a graceful stop: nothing it does from now on
   // reaches the store, which stays as the crash left it, with no
-  // clean-shutdown marker.
+  // clean-shutdown marker, nor the OS, whose idle-sleep blocks it held
+  // go with it.
   crash(): Promise<void>;
   dispose(): Promise<void>;
 };
@@ -59,6 +63,7 @@ export async function startTestFactory({
   const sandbox = new FakeSandbox(git);
   const github = new FakeGitHub(clock, git);
   const secrets = new FakeSecrets();
+  const processes = new FakeProcesses(clock);
   if (!withoutApp) await secrets.write(GITHUB_APP_SECRET, JSON.stringify(await github.createApp(github.manifestCode())));
   const connections: FactoryConnection[] = [];
   const daemons: Daemon[] = [];
@@ -68,6 +73,18 @@ export async function startTestFactory({
   async function start(more: Partial<DaemonOptions> = {}): Promise<Daemon> {
     const opened = openStore(paths.storePath);
     let dead = false;
+    // What the daemon does to the OS, until it crashes.
+    const blocks = new Set<AwakeBlock>();
+    const daemonProcesses: Processes = {
+      adopt: async (runId, pid) => void (dead || (await processes.adopt(runId, pid))),
+      sweep: async (runId, cli) => void (dead || (await processes.sweep(runId, cli))),
+      async holdAwake() {
+        const block = await processes.holdAwake();
+        if (dead) block.release();
+        else blocks.add(block);
+        return block;
+      },
+    };
     const store: Store = {
       loadLifecycle: () => opened.loadLifecycle(),
       saveLifecycle: (lifecycle) => void (dead || opened.saveLifecycle(lifecycle)),
@@ -77,9 +94,12 @@ export async function startTestFactory({
     };
     try {
       const table = routingTable(paths.modelsTable);
-      const daemon = await startDaemon({ ...paths, store, clock, executor, git, github, sandbox, secrets, skillSets, routingTable: table, ...overrides, ...more });
+      const daemon = await startDaemon({ ...paths, store, clock, executor, git, github, sandbox, secrets, skillSets, processes: daemonProcesses, routingTable: table, ...overrides, ...more });
       daemons.push(daemon);
-      crashes.set(daemon, () => (dead = true));
+      crashes.set(daemon, () => {
+        dead = true;
+        for (const block of blocks) block.release();
+      });
       return daemon;
     } catch (error) {
       opened.close();
@@ -98,6 +118,7 @@ export async function startTestFactory({
     sandbox,
     secrets,
     skillSets,
+    processes,
     daemon: () => daemons.at(-1)!,
     async attach() {
       const connection = await connect(paths);

@@ -6,7 +6,8 @@
 // the operator's clones; `skills update` and `skills status` move and inspect
 // the skill set pin; `models update` moves each model tier to the model this
 // factory ships; `setup github` creates the factory's GitHub App, and
-// `setup token` stores the subscription token L2 runs use. `hook`
+// `setup token` stores the subscription token L2 runs use; `keep-awake`
+// turns off or on keeping the machine awake while AFK runs are active. `hook`
 // is run by Claude Code, not the operator: it relays a run's hook events
 // to the daemon.
 import { userInfo } from 'node:os';
@@ -37,6 +38,7 @@ const USAGE = [
   '       agents-factory models update',
   '       agents-factory setup github [--name <app-name>]',
   '       agents-factory setup token',
+  '       agents-factory keep-awake on | keep-awake off',
 ].join('\n');
 
 // The manifest flow's code is valid for an hour.
@@ -105,6 +107,20 @@ async function main(args: string[]): Promise<number> {
     return skillsCommand(args[1], paths);
   }
   if (args[0] === 'models' && args[1] === 'update' && args.length === 2) return modelsCommand(paths);
+  if (args[0] === 'keep-awake' && (args[1] === 'on' || args[1] === 'off') && args.length === 2) {
+    const connection = await connectOrStart(paths);
+    try {
+      const reply = await connection.send({ type: 'setKeepAwake', on: args[1] === 'on' });
+      if (!reply.ok) {
+        console.error(reply.reason);
+        return 1;
+      }
+      console.log(args[1] === 'on' ? 'The machine is kept awake while AFK runs are active.' : 'The machine may sleep while AFK runs are active.');
+      return 0;
+    } finally {
+      connection.close();
+    }
+  }
   if (args[0] === 'setup' && args[1] === 'token' && args.length === 2) {
     const token = await readToken();
     const connection = await connectOrStart(paths);
