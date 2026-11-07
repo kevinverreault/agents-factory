@@ -6,10 +6,13 @@
 // (`enter` in a task's detail), re-tiering a task (`t`), conversing with or
 // taking over one (`c`), handing one off (`ctrl+h`), cancelling one with its
 // subtree (`x`, with the cancel sheet when work would be lost), finishing a
-// loop after its ticket (`f`), retrying a failed task from the tree (`y`),
+// loop after its ticket (`F`), retrying a failed task from the tree (`y`),
 // answering its request on Needs you's answer sheet (`a`), `?` help, and Set
 // up now (`s`) or Re-check (`R`) for a repository without the skill set's
-// setup.
+// setup. Over the same state, the condensed view (`v`): Needs you and the
+// groups, the task tree and the selected task's detail side by side, `tab`
+// moving the focus and `f` zooming the detail. The group picker (`g`) and
+// the `:` command line (`:task 9`, `:group billing`) jump anywhere.
 // Plain .ts (no JSX) so Node runs it without a build step.
 import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, useStdin } from 'ink';
@@ -22,6 +25,9 @@ import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, titleOf, useAnswering, waitingFor } from './answer-sheet.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
+import { CommandLine, runCommand, type Jump } from './command-line.ts';
+import { Condensed, groupCounts, PANES, Sidebar, type Pane } from './condensed.ts';
+import { GroupPicker, pickerKey } from './group-picker.ts';
 import { Conversation } from './conversation.ts';
 import { Help } from './help.ts';
 import { LaunchCard } from './launch-card.ts';
@@ -29,6 +35,7 @@ import { Output } from './output.ts';
 import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useRows } from './screen.ts';
 import { TaskDetail } from './task-detail.ts';
+import { edit } from './text-input.ts';
 import { UsageTab } from './usage.ts';
 
 // The screens, in the order of the number keys that switch to them.
@@ -68,6 +75,27 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const [hideFinished, setHideFinished] = useState(false);
   // Whether `?` help is open.
   const [help, setHelp] = useState(false);
+  // Whether the condensed view (`v`) shows instead of the screens, and
+  // whether its detail is zoomed (`f`) to the whole width.
+  const [condensed, setCondensed] = useState(false);
+  const [zoom, setZoom] = useState(false);
+  // The group the task tree is filtered by, and the group picker's cursor
+  // while `g` has it open, in a ref too for keys typed in one burst.
+  const [group, setGroup] = useState<string | null>(null);
+  const pickerAt = useRef<number | null>(null);
+  const [pickerCursor, setPickerState] = useState<number | null>(null);
+  const setPickerCursor = (cursor: number | null) => {
+    pickerAt.current = cursor;
+    setPickerState(cursor);
+  };
+  // The `:` command line's draft while it is open. Keys typed in one burst
+  // arrive before a re-render, so each goes on from the last in the ref.
+  const draft = useRef<string | null>(null);
+  const [command, setCommandState] = useState<string | null>(null);
+  const setCommand = (line: string | null) => {
+    draft.current = line;
+    setCommandState(line);
+  };
   const [clone, setClone] = useState<CloneView | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [view, setView] = useState<View>({ kind: 'tabs' });
@@ -101,7 +129,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const missingSetup = state ? withoutSetup(state, clone?.repo ?? null) : null;
   // The task tree: each root, then its descendants under it.
   const tree = state ? treeOrder(Object.values(state.tasks)) : [];
-  const tasks = hideFinished ? withoutFinished(tree) : tree;
+  const grouped = group === null ? tree : keepingAncestors(tree, (task) => task.groups.includes(group));
+  const tasks = hideFinished ? keepingAncestors(grouped, (task) => !finished(task)) : grouped;
+  const groups = groupCounts(tree);
   const queue = state?.attentionQueue ?? [];
   const runs = state ? liveFirst(state) : [];
   const rows = tab === 'tasks' ? tasks.map((task) => task.id) : tab === 'needs-you' ? queue.map(rowOf) : tab === 'runs' ? runs.map((run) => run.id) : [];
@@ -126,10 +156,50 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // Ready for you. On the Tasks and Runs screens it drills in instead.
   const opens = drilled ? drilled.id : ready?.liveRunId ? ready.id : undefined;
   const drills = drilled || tab === 'needs-you' ? undefined : selected?.id;
+  // In the condensed view the focus is where the screens' state is: on a
+  // task drilled into, the detail; on Needs you, the sidebar; else the tree.
+  // The detail pane follows the selection: the task drilled into, or the
+  // one the focused pane's cursor is on.
+  const focus: Pane = drilled ? 'detail' : tab === 'needs-you' ? 'sidebar' : 'tree';
+  const followed = selected ?? itemTask;
+  // With no task to show, the detail is skipped.
+  const nextPane = () => {
+    const next = PANES[(PANES.indexOf(focus) + 1) % PANES.length]!;
+    if (next !== 'detail') {
+      setDetail(null);
+      setTab(next === 'sidebar' ? 'needs-you' : 'tasks');
+    } else if (followed) setDetail(followed.id);
+    else setTab('needs-you');
+  };
+  // Toggles the condensed view: the Runs and Usage screens have no pane in
+  // it, so it opens on the tree from them.
+  const toggleCondensed = () => {
+    setZoom(false);
+    setCondensed((condensed) => !condensed);
+    if (!condensed && (tab === 'runs' || tab === 'usage')) show('tasks');
+  };
   // A number key switches to its screen, leaving any detail behind.
   const show = (next: Tab) => {
     setTab(next);
     setDetail(null);
+  };
+  // Where the command line jumps: a task's detail, the tree under the cursor
+  // on it, or the tree filtered by a group.
+  const jump = (to: Jump) => {
+    if ('refused' in to) return setRefusal(to.refused);
+    setRefusal(null);
+    if (to.to === 'group') return filterBy(to.group);
+    const { taskId } = to;
+    // A task the group filter hides shows again in the whole tree.
+    if (group !== null && !state?.tasks[taskId]?.groups.includes(group)) setGroup(null);
+    setCursors((cursors) => ({ ...cursors, tasks: { row: taskId, index: Math.max(tree.findIndex(({ id }) => id === taskId), 0) } }));
+    setTab('tasks');
+    setDetail(taskId);
+  };
+  // Filters the task tree by a group, or by none, and shows it.
+  const filterBy = (next: string | null) => {
+    setGroup(next);
+    show('tasks');
   };
   // The selected request's answer. The cursor stays where it is, so once the
   // request leaves Needs you the next item slides under it.
@@ -236,6 +306,25 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         if (input === '?' || key.escape) setHelp(false);
         return;
       }
+      if (draft.current !== null) {
+        const line = draft.current;
+        if (key.escape) setCommand(null);
+        else if (key.return) {
+          setCommand(null);
+          if (state) jump(runCommand(line, state));
+        } else setCommand(edit(line, input, key) ?? line);
+        return;
+      }
+      if (pickerAt.current !== null) {
+        const picked = pickerKey(groups.map(([name]) => name), pickerAt.current, input, key);
+        if (picked === 'back') setPickerCursor(null);
+        else if (picked && 'cursor' in picked) setPickerCursor(picked.cursor);
+        else if (picked) {
+          setPickerCursor(null);
+          filterBy(picked.picked);
+        }
+        return;
+      }
       if (answering && !item) setAnswering(false);
       else if (answering) {
         if (answers.form !== null || answers.confirm !== null) answers.key(input, key);
@@ -250,8 +339,18 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (item && (input === 'a' || (key.return && answerable(item, itemTask)))) return setAnswering(true);
       if (input === 'a') return answer();
       if (input === '?') return setHelp(true);
+      if (input === 'g') return setPickerCursor(groups.findIndex(([name]) => name === group) + 1);
+      if (input === ':') return setCommand('');
+      if (input === 'v') return toggleCondensed();
+      if (condensed && key.tab) return nextPane();
+      if (condensed && input === 'f') return setZoom((zoom) => !zoom);
+      if (condensed && zoom && key.escape) return setZoom(false);
       const screen = TABS[Number(input) - 1];
-      if (screen) show(screen);
+      if (screen) {
+        setCondensed(false);
+        setZoom(false);
+        show(screen);
+      }
       if (key.escape && drilled) setDetail(null);
       if (input === 'N' && state) setView({ kind: 'launch' });
       if (input === 'H' && tab === 'tasks' && !drilled) setHideFinished((hide) => !hide);
@@ -263,7 +362,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (input === 'c') converse();
       const cancels = selected ?? itemTask;
       if (input === 'x' && cancels) cancel({ type: 'cancel', taskId: cancels.id });
-      if (input === 'f') finishLoop();
+      if (input === 'F') finishLoop();
       if (input === 'y') retry();
       if (key.ctrl && input === 'h') handOff();
       if (input === 's') setUp();
@@ -286,7 +385,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     // On a full screen only the screen's pane gives way: squeezed, wrapped
     // text would draw its lines over the next ones.
     fixed(
-      h(Tabs, { tab, needsYou: state?.attentionQueue.length ?? 0 }),
+      condensed
+        ? h(Text, { key: 'condensed', dimColor: true }, 'Condensed · tab focus · f zoom · g group · : command · v screens · ? keys')
+        : h(Tabs, { tab, needsYou: state?.attentionQueue.length ?? 0 }),
       unregistered
         ? h(Text, { key: 'register' }, `${unregistered.repo} is not registered. `, h(Text, { bold: true }, 'r'), ' Register this repo')
         : null,
@@ -302,7 +403,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
               ' re-check',
             )
         : null,
+      group === null ? null : h(Text, { key: 'group' }, 'Group ', h(Text, { bold: true }, group), h(Text, { dimColor: true }, ' · g picks another')),
       refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
+      pickerCursor === null ? null : h(GroupPicker, { key: 'picker', groups, cursor: pickerCursor, current: group }),
       cancelSheet
         ? h(ChoosePrompt, { key: 'cancel', reason: `Cancel ${cancelSheet.taskId}: ${cancelSheet.reason}`, options: cancelSheet.options.map(({ label }) => label) })
         : null,
@@ -324,6 +427,14 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
         : help
           ? fixed(h(Help))
+        : condensed
+          ? h(Condensed, {
+              focus,
+              zoom,
+              sidebar: h(Sidebar, { state, cursor: at(cursors['needs-you'], queue.map(rowOf)), focused: focus === 'sidebar', groups, group }),
+              tree: h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
+              detail: followed ? h(TaskDetail, { connection, state, task: followed, from: null }) : h(Text, { dimColor: true }, 'Nothing selected.'),
+            })
         : drilled
           ? h(TaskDetail, { connection, state, task: drilled, from: TAB_NAMES[tab] })
         : tab === 'tasks'
@@ -337,6 +448,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     fixed(
       state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
       closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
+      command === null ? null : h(CommandLine, { draft: command }),
     ),
   );
 }
@@ -370,14 +482,30 @@ function Tabs({ tab, needsYou }: { tab: Tab; needsYou: number }) {
   );
 }
 
-function Row({ id, title, detail, selected = false, dim = false }: { id: string; title: string; detail: string; selected?: boolean; dim?: boolean }) {
+// A compact row, as the condensed view's tree has, gives its title whatever
+// room is left rather than a fixed column.
+function Row({
+  id,
+  title,
+  detail,
+  selected = false,
+  dim = false,
+  compact = false,
+}: {
+  id: string;
+  title: string;
+  detail: string;
+  selected?: boolean;
+  dim?: boolean;
+  compact?: boolean;
+}) {
   return h(
     Box,
     { gap: 1 },
-    h(Text, { color: 'cyan' }, selected ? '›' : ' '),
-    h(Text, { bold: true, dimColor: dim }, id.padEnd(4)),
-    h(Box, { width: 40 }, h(Text, { wrap: 'truncate', dimColor: dim }, title)),
-    h(Text, { dimColor: dim }, detail),
+    h(Box, { flexShrink: 0 }, h(Text, { color: 'cyan' }, selected ? '›' : ' ')),
+    h(Box, { flexShrink: 0 }, h(Text, { bold: true, dimColor: dim }, id.padEnd(4))),
+    h(Box, compact ? { flexGrow: 1, flexShrink: 1, flexBasis: 0 } : { width: 40 }, h(Text, { wrap: 'truncate', dimColor: dim }, title)),
+    compact ? h(Box, { flexShrink: 0 }, h(Text, { dimColor: dim }, detail)) : h(Text, { dimColor: dim }, detail),
   );
 }
 
@@ -390,33 +518,44 @@ function TaskList({
   tasks,
   hidden,
   cursor,
-  retries,
+  retries = false,
+  focused = true,
+  compact = false,
 }: {
   connection: FactoryConnection;
   state: FactoryState;
   tasks: TaskView[];
   hidden: number | null;
   cursor: number;
-  retries: boolean;
+  retries?: boolean;
+  // Whether the cursor shows: in the condensed view, only while the tree has the focus.
+  focused?: boolean;
+  // In the condensed view: the rows narrow, without the keys or the output,
+  // which the detail beside it shows.
+  compact?: boolean;
 }) {
   if (tasks.length === 0) return h(Text, { dimColor: true }, hidden ? `Every task is finished. H shows the ${hidden}.` : 'No tasks yet. N launches one.');
-  const finishes = finishable(tasks[cursor]) ? ' · f finish after this ticket' : '';
+  const rows = tasks.map((task, i) =>
+    h(Row, {
+      key: task.id,
+      id: task.id,
+      title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
+      detail: compact ? task.label : `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.progress ? ` · ${task.progress}` : ''}`,
+      selected: focused && i === cursor,
+      dim: finished(task),
+      compact,
+    }),
+  );
+  if (compact) {
+    return column([
+      h(CursorWindow, { key: 'tree', cursor, items: rows }),
+      hidden === null ? null : fixed(h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`)),
+    ]);
+  }
+  const finishes = finishable(tasks[cursor]) ? ' · F finish after this ticket' : '';
   const retry = retries ? ' · y retry' : '';
   return column([
-    h(CursorWindow, {
-      key: 'tree',
-      cursor,
-      items: tasks.map((task, i) =>
-        h(Row, {
-          key: task.id,
-          id: task.id,
-          title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
-          detail: `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.progress ? ` · ${task.progress}` : ''}`,
-          selected: i === cursor,
-          dim: finished(task),
-        }),
-      ),
-    }),
+    h(CursorWindow, { key: 'tree', cursor, items: rows }),
     fixed(
       h(Text, { key: 'keys', dimColor: true }, `enter detail · c converse or take over · t re-tier · x cancel${finishes}${retry} · N launch · ? keys`),
       hidden === null ? null : h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`),
@@ -441,13 +580,13 @@ function finished(task: TaskView): boolean {
   return task.state === 'done' || task.state === 'cancelled';
 }
 
-// The tree without its finished tasks, but for those above unfinished ones,
-// which keep the tree whole.
-function withoutFinished(tree: TaskView[]): TaskView[] {
+// The tree's tasks that `keep` keeps, and those above them, which keep the
+// tree whole: without its finished tasks, say, or only a group's.
+function keepingAncestors(tree: TaskView[], keep: (task: TaskView) => boolean): TaskView[] {
   const byId = new Map(tree.map((task) => [task.id, task]));
   const kept = new Set<string>();
   for (const task of tree) {
-    if (finished(task)) continue;
+    if (!keep(task)) continue;
     for (let at: TaskView | undefined = task; at && !kept.has(at.id); at = at.parent ? byId.get(at.parent) : undefined) kept.add(at.id);
   }
   return tree.filter((task) => kept.has(task.id));
