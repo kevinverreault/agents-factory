@@ -100,14 +100,16 @@ describe('the autonomy level', () => {
     expect(tui.state().tasks.T1?.autonomy).toBe('L1');
   });
 
-  test('L2 with no ceiling to clamp it is refused, as is a level for a HITL task', async () => {
+  test('a level changes between runs, L2 included, and a HITL task has none', async () => {
     const { factory, operator, tui } = await running(afk('id: draft, skill: to-spec, args: "{{prompt}}", exit: "artifact:spec"'));
     factory.executor.report('R1', { type: 'runCompleted' });
     await tui.until((state) => state.tasks.T1?.label === 'Needs you');
 
-    expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L2' })).toEqual({
+    expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L2' })).toEqual({ ok: true });
+    expect(tui.state().tasks.T1).toMatchObject({ autonomy: 'L2' });
+    expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L3' as never })).toEqual({
       ok: false,
-      reason: 'L2 runs in a sandbox, which the factory doesn’t have yet: stay at L1.',
+      reason: 'L3 is not an autonomy level (L1 or L2).',
     });
     expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L1' })).toEqual({ ok: true });
 

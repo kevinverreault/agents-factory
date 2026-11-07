@@ -1521,7 +1521,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (action.maxTurns !== null && !(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) {
         return 'Max turns must be a whole number of at least 1.';
       }
-      if (action.autonomy !== 'L1') return 'L2 runs in a sandbox, which the factory doesn’t have yet: launch at L1.';
+      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
       if (state.repositories[action.repo]!.missing) return `${action.repo} is missing, so its runs can’t start.`;
       return priorityRefusal(action.priority);
     case 'removeRepo': {
@@ -1567,7 +1567,6 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!tidyBrief(action.brief).goal) return 'The brief needs a goal.';
       if (!CONTINUE_AS.includes(action.continueAs)) return 'Continue as resume, or fresh from the brief.';
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
-      if (action.autonomy !== 'L1') return 'L2 runs in a sandbox, which the factory doesn’t have yet: hand off at L1.';
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       return Number.isInteger(action.maxTurns) && action.maxTurns >= 1 ? null : 'Max turns must be a whole number of at least 1.';
     }
@@ -1628,10 +1627,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
       // A run's containment never shifts under it.
       const run = liveRun(state, task);
-      if (run) return `${task.id}’s autonomy level changes only between runs, and its run ${run.id} is live.`;
-      return clampAutonomy(action.autonomy, stageOf(task, task.stage)) === 'L2'
-        ? 'L2 runs in a sandbox, which the factory doesn’t have yet: stay at L1.'
-        : null;
+      return run ? `${task.id}’s autonomy level changes only between runs, and its run ${run.id} is live.` : null;
     }
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';
@@ -1836,8 +1832,8 @@ export function keptChildBranches(tasks: Task[]): Task[] {
 // Queues each task waiting on children whose awaited children have all
 // reported (Done or Cancelled; a failed one still waits on the operator),
 // as continuing work whose next run resumes its session on one report per
-// awaited child. At L1 their branches are already in its worktree's clone;
-// fetching them into an L2 container arrives with the L2 sandbox (#64).
+// awaited child. Their branches are in its worktree's clone, and an L2
+// task's container fetches them in before its next run (ADR 0007).
 function wakeParents(state: Lifecycle): void {
   for (const task of Object.values(state.tasks)) {
     if (task.state === 'awaiting-children' && awaitedChildren(state, task).every(isTerminal)) task.state = 'queued';

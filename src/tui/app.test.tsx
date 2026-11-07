@@ -700,7 +700,7 @@ describe('launching and conversing', () => {
     );
   });
 
-  test('an AFK start stage shows the handoff fields, and the card sends the max turns and priority the operator set', async () => {
+  test('an AFK start stage shows the handoff fields, and the card sends the autonomy level, max turns and priority the operator set', async () => {
     const connection = inWidgets();
     connection.replyTo('listPresets', { ok: true, value: presetsView });
     connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
@@ -713,14 +713,16 @@ describe('launching and conversing', () => {
     await press(app, UP, RIGHT, RIGHT);
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/Autonomy\s+L1 \(L2 arrives with the sandbox\)/);
+      expect(frame).toMatch(/Autonomy\s+L1 \(on this machine\)/);
       expect(frame).toMatch(/Model tier\s+stage default \(sonnet\)/);
       expect(frame).toMatch(/Max turns\s+stage default \(300\)/);
       expect(frame).toMatch(/Priority\s+normal/);
     });
     await press(app, DOWN, DOWN);
     await type(app, '#12');
-    await press(app, DOWN, DOWN, DOWN);
+    await press(app, DOWN, DOWN, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Autonomy\s+‹ L2 \(in its own container\) ›/));
+    await press(app, DOWN, DOWN);
     await type(app, '4x0');
     await eventually(() => expect(app.lastFrame()).toMatch(/Max turns\s+40▏/));
     await press(app, DOWN, RIGHT);
@@ -736,6 +738,7 @@ describe('launching and conversing', () => {
         stage: 'implement',
         prompt: '',
         issues: ['#12'],
+        autonomy: 'L2',
         maxTurns: 40,
         priority: 'urgent',
       }),
@@ -1259,7 +1262,7 @@ describe('launching and conversing', () => {
     await eventually(() => expect(connection.sent).toEqual([{ type: 'openHandoff', taskId: 'T1' }, { type: 'openHandoff', taskId: 'T1' }]));
   });
 
-  test('the sheet waits on the agent’s brief, then the operator edits it, changes continue-as and max turns, and enter hands off', async () => {
+  test('the sheet waits on the agent’s brief, then the operator edits it, changes continue-as, autonomy level and max turns, and enter hands off', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([{ ...onLean, handoff: sheet }]), runs: { R1: run } }, { connection });
     await press(app, '\r', '\r');
@@ -1283,11 +1286,12 @@ describe('launching and conversing', () => {
     await press(app, DOWN, DOWN);
     await type(app, 'Never 4xx.');
     // Down to the fields, past done when's, out of scope's and links' lines.
-    await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, RIGHT, DOWN, DOWN, '\x7f', '\x7f', '\x7f', '5', '0');
+    await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, RIGHT, DOWN, RIGHT, DOWN, DOWN, '\x7f', '\x7f', '\x7f', '5', '0');
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
       expect(frame).toContain('- Never 4xx.');
       expect(frame).toContain('Continue as ‹ fresh ›');
+      expect(frame).toContain('Autonomy ‹ L2 (in its own container) ›');
       expect(frame).toContain('› Max turns 50');
     });
 
@@ -1299,7 +1303,7 @@ describe('launching and conversing', () => {
           taskId: 'T1',
           brief: { ...brief, goal: 'Failed webhook deliveries are retried. with backoff', decided: ['Retry 5xx and timeouts only.', 'Never 4xx.'] },
           continueAs: 'fresh',
-          autonomy: 'L1',
+          autonomy: 'L2',
           tier: 'sonnet',
           maxTurns: 50,
         },

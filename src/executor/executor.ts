@@ -4,6 +4,7 @@
 import type { Answers, AutonomyLevel, Mode, Report, RunEvent } from '../lifecycle/lifecycle.ts';
 import type { Tier } from '../models/routing.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
+import type { Container } from '../sandbox/sandbox.ts';
 
 export type RunStart = {
   runId: string;
@@ -21,6 +22,11 @@ export type RunStart = {
   // An AFK run's runaway guard: hitting it fails the run. Null for HITL.
   maxTurns: number | null;
   credential: CredentialProfile;
+  // The OAuth token the `subscription-token` profile hands the run, or null.
+  token: string | null;
+  // An L2 run's container (ADR 0007): the CLI runs in it, at its workdir,
+  // with its copy of the skill set. Null for a run on the host.
+  container: Container | null;
   // The directory of the skill set plugin the run loads (ADR 0005), or null
   // for a task that froze none.
   plugin: string | null;
@@ -51,9 +57,10 @@ export type RunGuards = {
 };
 
 // How a run authenticates: chosen per run, and only applied by the executor
-// (ADR 0001). For now the operator's own subscription login on the host; the
-// container and API-key profiles arrive with L2 and the fallback.
-export type CredentialProfile = 'subscription-host';
+// (ADR 0001). The operator's own subscription login on the host, or, in an
+// L2 container, a subscription OAuth token from the credential store, handed
+// to that run alone. The API-key profile arrives with the fallback.
+export type CredentialProfile = 'subscription-host' | 'subscription-token';
 
 // What a conversation shows: factory run events, never SDK message types. An
 // event's `id` is the same live and replayed from the session file.
@@ -122,4 +129,7 @@ export interface Executor {
   // replacing any copy there; a session with no transcript yet has nothing
   // to copy. Throws an `ArchiveError` when it can't.
   archive(session: Session, dir: string): Promise<void>;
+  // Where the CLI keeps the session transcripts of runs whose cwd is `cwd`:
+  // an L2 container mounts it, so its runs and the host's share sessions.
+  sessionsDir(cwd: string): string;
 }

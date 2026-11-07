@@ -1,14 +1,14 @@
 // The launch card (`N`): the repository, workflow preset, start stage, launch
 // inputs, groups and model tier a task launches with, and for an AFK start
-// stage the handoff fields: autonomy level (L1 until the sandbox arrives),
-// max turns and priority. The
+// stage the handoff fields: autonomy level (L2 runs in the task's own
+// container), max turns and priority. The
 // daemon resolves and freezes the preset; the card offers what it lists for
 // the repository. Where the factory's App isn't installed, a preset with
 // AFK stages shows why its launch is blocked, and `ctrl+o` opens the
 // App's installation settings.
 import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
-import { DEFAULT_MAX_TURNS, PRIORITIES, type Priority } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, PRIORITIES, type AutonomyLevel, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
 import { appBlock, type PresetChoice, type StartStage } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -29,13 +29,14 @@ type Props = {
 type Field = 'repo' | 'preset' | 'stage' | 'prompt' | 'issues' | 'groups' | 'autonomy' | 'tier' | 'maxTurns' | 'priority';
 // What the operator picked and typed. A null choice is the default: the
 // repository's preset, the preset's first start stage, the stage's tier,
-// normal priority. Empty max turns are the stage's.
+// L1, normal priority. Empty max turns are the stage's.
 type Draft = {
   field: Field;
   repo: string | null;
   preset: string | null;
   stage: string | null;
   tier: Tier | null;
+  autonomy: AutonomyLevel | null;
   priority: Priority | null;
   prompt: string;
   issues: string;
@@ -55,6 +56,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     preset: null,
     stage: null,
     tier: null,
+    autonomy: null,
     priority: null,
     prompt: '',
     issues: '',
@@ -161,8 +163,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     row('prompt', 'Prompt', draft.prompt, false),
     card.fields.includes('issues') ? row('issues', 'Issues', draft.issues, false) : null,
     row('groups', 'Groups', draft.groups, false),
-    // Never focused: L2 needs the sandbox, so there is nothing to choose yet.
-    afk ? row('autonomy', 'Autonomy', 'L1 (L2 arrives with the sandbox)') : null,
+    afk ? row('autonomy', 'Autonomy', autonomyText(draft.autonomy ?? 'L1')) : null,
     row('tier', 'Model tier', draft.tier ?? `stage default${start ? ` (${start.model ?? DEFAULT_TIER})` : ''}`),
     afk
       ? row(
@@ -201,6 +202,7 @@ function cardOf(draft: Draft, listing: Listing | undefined): Card {
   const fields: Field[] = ['repo', 'preset', 'stage', 'prompt'];
   if (start?.needs.includes('issues')) fields.push('issues');
   fields.push('groups');
+  if (start?.mode === 'AFK') fields.push('autonomy');
   fields.push('tier');
   if (start?.mode === 'AFK') fields.push('maxTurns', 'priority');
   return { listing, choice, start, presets, starts, fields };
@@ -224,6 +226,8 @@ function step(draft: Draft, card: Card, repositories: string[], input: string, k
         return { ...draft, stage: cycle(card.starts.map(({ id }) => id), card.start?.id ?? null, by) };
       case 'tier':
         return { ...draft, tier: cycle([null, ...TIERS], draft.tier, by) };
+      case 'autonomy':
+        return { ...draft, autonomy: cycle(AUTONOMY_LEVELS, draft.autonomy ?? 'L1', by) };
       case 'priority':
         return { ...draft, priority: cycle(PRIORITIES, draft.priority ?? 'normal', by) };
       default:
@@ -269,9 +273,15 @@ function launchCommand(draft: Draft, card: Card): LaunchCommand | null {
     ...(issues.length > 0 && { issues }),
     ...(groups.length > 0 && { groups }),
     ...(draft.tier && { tier: draft.tier }),
+    ...(afk && draft.autonomy && { autonomy: draft.autonomy }),
     ...(afk && draft.maxTurns && { maxTurns: Number(draft.maxTurns) }),
     ...(afk && draft.priority && { priority: draft.priority }),
   };
+}
+
+// An autonomy level, with where its runs execute (ADR 0007).
+export function autonomyText(level: AutonomyLevel): string {
+  return level === 'L2' ? 'L2 (in its own container)' : 'L1 (on this machine)';
 }
 
 function words(text: string): string[] {
