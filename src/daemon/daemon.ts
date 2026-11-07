@@ -1454,7 +1454,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Starts the step on GitHub of each loop between its iterations (ADR 0006):
-  // picking the next ticket, or closing the one the last iteration did; and
+  // picking the next ticket, pushing the task branch at L2 with what the last
+  // iteration did (ADR 0007), or closing that iteration's ticket; and
   // of each work loop between its tickets (ADR 0012): reading its map. Its outcome goes
   // through the Lifecycle like any other event.
   function driveLoops(): void {
@@ -1466,7 +1467,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const step = readingMap(lifecycle, task)
         ? readMap(task)
         : betweenIterations(lifecycle, task)
-          ? task.loop!.step === 'pick' ? pickTicket(task) : closeTicket(task)
+          ? task.loop!.step === 'pick' ? pickTicket(task) : task.loop!.step === 'push' ? pushIteration(task) : closeTicket(task)
           : null;
       if (!step) continue;
       stepsInFlight.add(task.id);
@@ -1522,6 +1523,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const tickets: Issue[] = [];
     for (const ref of refs) tickets.push(await github.readIssue(token, ref));
     return tickets;
+  }
+
+  // Pushes the task branch with the last L2 iteration's commits as the App,
+  // with a token narrowed to Contents (ADR 0004), before its ticket closes
+  // (ADR 0006). Like Push & open draft PR's push, it fetches the base first.
+  async function pushIteration(task: Task): Promise<LoopEvent> {
+    const ticket = task.loop!.ticket!;
+    const { branch } = task.worktree!;
+    const failed = (reason: string): LoopEvent => ({ type: 'iterationUnpushed', taskId: task.id, ticket, reason });
+    const repository = lifecycle.repositories[task.repo];
+    if (!repository) return failed(`${task.repo} isn’t registered any more.`);
+    const unfetched = await fetchBase(git, repository);
+    if (unfetched) return failed(unfetched);
+    try {
+      const { token } = await appToken(task.repo, PUSH);
+      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch });
+      if ('workflowFiles' in pushed) {
+        return failed(`${branch} changes workflow files (${pushed.workflowFiles.join(', ')}), which the factory’s App may not push: push it by hand (\`git push origin ${branch}\`).`);
+      }
+      // A task branch is never a research branch.
+      if ('outsideResearch' in pushed) return failed(`${branch} isn’t a task branch.`);
+      return { type: 'iterationPushed', taskId: task.id, ticket };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return failed(error.message);
+    }
   }
 
   // Closes the ticket the last iteration did as completed, as the App, with

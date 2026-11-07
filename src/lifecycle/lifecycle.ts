@@ -121,9 +121,10 @@ export type TaskWorktree = { branch: string; path: string };
 // A task's Ralph loop at its loop stage (ADR 0006).
 export type Loop = {
   // What the factory does before the next iteration: read the ticket set and
-  // pick a ticket, or close the ticket the last iteration did. Null while an
+  // pick a ticket, or close the ticket the last iteration did, at L2 once it
+  // pushed the task branch with that iteration's commits. Null while an
   // iteration works on `ticket`.
-  step: 'pick' | 'close' | null;
+  step: 'pick' | 'push' | 'close' | null;
   ticket: string | null;
   // The task branch's tip when the iteration on `ticket` began, and the
   // commits it made since, once it succeeded.
@@ -329,6 +330,9 @@ export type Task = {
   // True once the factory pushed the task branch, until a run starts and may
   // commit to it again: the PR has all its work, so there is nothing to push.
   pushed?: boolean;
+  // True once the factory pushed the task branch to GitHub at all, as an L2
+  // loop does before it has a PR: its cleanup deletes the branch there.
+  branchOnGitHub?: boolean;
   // While its cleanup (ADR 0011), once it ended Done or Cancelled, hasn't
   // finished. It is tried again when the daemon next starts.
   cleanup?: Cleanup | null;
@@ -722,6 +726,10 @@ export type LoopEvent =
   // read is `ticketsUnread`, like a ticket set.
   | { type: 'mapRead'; taskId: string; tickets: Issue[]; sessionId: string }
   | { type: 'ticketsUnread'; taskId: string; reason: string }
+  // At L2 it pushed the task branch with the commits the iteration on
+  // `ticket` made, or couldn't, saying why (ADR 0007).
+  | { type: 'iterationPushed'; taskId: string; ticket: string }
+  | { type: 'iterationUnpushed'; taskId: string; ticket: string; reason: string }
   // It closed the ticket an iteration did with its commits, or couldn't.
   | { type: 'ticketClosed'; taskId: string; ticket: string; commits: string[] }
   | { type: 'ticketUnclosed'; taskId: string; ticket: string; reason: string };
@@ -873,9 +881,9 @@ export function waitsOnPr(task: Task): boolean {
 }
 
 // The root's task branch, if the factory pushed it to GitHub: it has its
-// PR, or its Push & open draft PR got past the push.
+// PR, its Push & open draft PR got past the push, or its L2 loop pushed it.
 export function pushedBranch(task: Task): string | null {
-  return task.worktree && (task.pr || task.publishing?.step === 'open-pr') ? task.worktree.branch : null;
+  return task.worktree && (task.pr || task.publishing?.step === 'open-pr' || task.branchOnGitHub) ? task.worktree.branch : null;
 }
 
 // The registered repository the operator last launched a task in, if any.
@@ -1130,6 +1138,18 @@ function enterLoop(state: Lifecycle, task: Task, stage: Stage): boolean {
   return true;
 }
 
+// What a loop does once an iteration succeeded: at L2 it pushes the task
+// branch first, then closes the ticket (ADR 0006, ADR 0007).
+function stepAfterIteration(autonomy: AutonomyLevel | null | undefined): 'push' | 'close' {
+  return autonomy === 'L2' ? 'push' : 'close';
+}
+
+// Whether the loop still owes the ticket its last iteration did: pushing
+// the task branch with its commits, or closing it.
+function owesTicket(loop: Loop): boolean {
+  return loop.step === 'push' || loop.step === 'close';
+}
+
 // A loop about to pick its next ticket, unless it is `finishing`.
 function picking(finishing = false): Loop {
   return { step: 'pick', ticket: null, base: null, commits: [], finishing };
@@ -1148,7 +1168,18 @@ function advanceFrom(state: Lifecycle, task: Task, from: Stage, run: Run | undef
     return;
   }
   if (to.mode === 'HITL') return blocked(`The next stage, ${to.id}, is HITL: take ${task.id} over to start it.`);
-  if (to.kind === 'action') return blocked(`The next stage, ${to.id}, is a factory action, which the factory can’t run yet.`);
+  if (to.kind === 'action') {
+    if (to.id !== 'open-pr') return blocked(`The next stage, ${to.id}, is a factory action, which the factory can’t run yet.`);
+    // Only L2 publishes code unattended (ADR 0007): below it, the operator's
+    // Push & open draft PR does.
+    if (task.autonomy !== 'L2') return blocked(`The next stage, open-pr, publishes ${task.id}’s code, which the factory does unattended only at L2. Give the stage \`requires: L2\` in its preset, so that L1 skips it.`);
+    // The factory's own step, holding no slot: it pushes the task branch,
+    // then opens the draft PR, and the stage moves on once the PR is open.
+    enterStage(task, to, sessionId);
+    task.publishing = { step: 'push', problem: null };
+    task.state = 'running';
+    return;
+  }
   const filled = fillOpening(to, (variable) => argValue(state, task, variable));
   if ('missing' in filled) return blocked(cantFill(task, to, filled.missing));
   // Queued as work continuing something in flight, for the scheduler.
@@ -1735,6 +1766,11 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return cantStartRuns(state, task);
     case 'ticketsUnread':
       return readingMap(state, task) || (betweenIterations(state, task) && task.loop!.step === 'pick') ? null : `${task.id} isn’t picking a ticket.`;
+    case 'iterationPushed':
+    case 'iterationUnpushed':
+      return betweenIterations(state, task) && task.loop!.step === 'push' && task.loop!.ticket === action.ticket
+        ? null
+        : `${task.id} isn’t pushing the iteration on ${action.ticket}.`;
     case 'ticketUnclosed':
       return betweenIterations(state, task) && task.loop!.step === 'close' && task.loop!.ticket === action.ticket
         ? null
@@ -1790,10 +1826,25 @@ function prClosedReason(task: Task): string {
 }
 
 // The root's Push & open draft PR stopped on `problem`: a github-write
-// request asks the operator, and the root stays In review.
+// request asks the operator, and the root stays In review. At its open-pr
+// stage it needs the operator instead.
 function failPublishing(state: Lifecycle, task: Task, request: AttentionRequest | undefined, problem: string, at: number): void {
   task.publishing!.problem = problem;
-  if (!request) addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
+  if (request) return;
+  if (atActionStage(task)) raise(state, task, lastRun(state, task), 'github-write', false, problem, at);
+  else addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
+}
+
+// Whether the AFK task is at a factory action stage, while the factory
+// works it or a failed step of it needs the operator.
+function atActionStage(task: Task): boolean {
+  return task.mode === 'AFK' && stageOf(task, task.stage)?.kind === 'action' && (task.state === 'running' || task.state === 'waiting');
+}
+
+// The draft PR is open, or updated by the push: an open-pr stage moves on,
+// past its last stage to In review.
+function actionStagePublished(state: Lifecycle, task: Task, at: number): void {
+  if (atActionStage(task)) advanceFrom(state, task, stageOf(task, task.stage)!, lastRun(state, task), undefined, at);
 }
 
 // The operator moved the root on without finishing its Push & open draft
@@ -2701,15 +2752,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.brief = task.goal;
       const to = stageOf(task, sheet.stage);
       // A loop taken over before it closed its last ticket closes it first,
-      // and one finishing ends at its next pick.
+      // pushing the task branch before at L2, and one finishing ends at its next pick.
       const kept = to?.id === task.stage ? task.loop : null;
-      const closing = kept?.step === 'close' ? kept : null;
+      const owed = kept && owesTicket(kept) ? { ...kept, step: stepAfterIteration(action.autonomy) } : null;
       if (to) task.stage = to.id;
       // A loop with a ticket set starts from its tickets; one without runs
       // once from the brief.
       task.loop = null;
       const loops = !!to && enterLoop(state, task, to);
-      if (loops && closing) task.loop = closing;
+      if (loops && owed) task.loop = owed;
       else if (loops && kept?.finishing) task.loop = picking(true);
       const opening = to && fillOpening(to, (variable) => argValue(state, task, variable) ?? '');
       if (!loops) task.resumeWith = opening && 'opening' in opening && opening.opening ? `${stageOpening(task, to, opening.opening)}\n\n${task.goal}` : task.goal;
@@ -2731,12 +2782,14 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'takeOver':
       if (request) request.status = 'superseded';
       if (run) endRun(run, 'taken over', at);
+      // The factory stops publishing at an open-pr stage: HITL work is the operator's.
+      if (atActionStage(task)) task.publishing = null;
       task.mode = 'HITL';
       task.autonomy = null;
       // The operator works the ticket now: handing back off picks afresh. A
-      // ticket the loop did but hasn't closed yet still closes on hand-back,
-      // and a finishing loop still ends there.
-      if (task.loop?.step !== 'close') task.loop = task.loop?.finishing ? picking(true) : null;
+      // ticket the loop did but hasn't pushed or closed yet still closes on
+      // hand-back, and a finishing loop still ends there.
+      if (!(task.loop && owesTicket(task.loop))) task.loop = task.loop?.finishing ? picking(true) : null;
       // What an AFK run was to open on is the operator's to say now.
       task.resumeWith = null;
       // A fresh session no run has started yet gives way to the one the
@@ -2767,6 +2820,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // The daemon tries the failed step of its Push & open draft PR again; the root stays In review.
       if (task.state === 'in-review') {
         if (task.publishing) task.publishing.problem = null;
+        break;
+      }
+      // And at its open-pr stage, which carries on.
+      if (atActionStage(task) && task.publishing) {
+        task.publishing.problem = null;
+        task.state = 'running';
         break;
       }
       // Allow always's rules are the operator's file's, which the daemon added them to.
@@ -3027,8 +3086,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (run!.ticket) {
         // The factory judges the iteration (ADR 0006): its run completed and
         // committed, on a tree its git guards found clean. Its ticket closes
-        // next, the task holding its slot.
-        if (action.commits?.length) task.loop = { ...task.loop!, step: 'close', commits: [...action.commits] };
+        // next, the task holding its slot: at L2 once the factory pushed the
+        // task branch with its commits (ADR 0007).
+        if (action.commits?.length) task.loop = { ...task.loop!, step: stepAfterIteration(task.autonomy), commits: [...action.commits] };
         else {
           const why = `The iteration on ${run!.ticket} made no new commit on ${task.worktree?.branch}, so the ticket stays open.`;
           raise(state, task, run, 'failure', false, withDenials(why, run!.deniedHosts), at, { deniedHosts: run!.deniedHosts });
@@ -3220,6 +3280,22 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'ticketsUnread':
       raise(state, task, lastRun(state, task), 'failure', false, `The factory couldn’t read ${task.id}’s tickets from GitHub: ${action.reason}`, at);
       break;
+    case 'iterationPushed':
+      task.loop!.step = 'close';
+      task.branchOnGitHub = true;
+      break;
+    case 'iterationUnpushed':
+      // Retried once the operator answers, and never as the operator (ADR 0004).
+      raise(
+        state,
+        task,
+        lastRun(state, task),
+        'github-write',
+        false,
+        `The factory couldn’t push ${task.worktree!.branch} for ${action.ticket} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`,
+        at,
+      );
+      break;
     case 'ticketClosed':
       (task.closedTickets ??= []).push({ ref: action.ticket, commits: [...action.commits] });
       if (task.loop?.step === 'close' && task.loop.ticket === action.ticket) task.loop = picking(task.loop.finishing);
@@ -3248,10 +3324,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // A root with a draft PR already has it updated by the push.
       task.publishing = task.pr ? null : { step: 'open-pr', problem: null };
       task.pushed = true;
+      task.branchOnGitHub = true;
+      if (!task.publishing) actionStagePublished(state, task, at);
       break;
     case 'prOpened':
       task.pr = { ...action.pr };
       task.publishing = null;
+      actionStagePublished(state, task, at);
       break;
     case 'pushRefused': {
       // The App has no Workflows permission (ADR 0004): the operator pushes by
