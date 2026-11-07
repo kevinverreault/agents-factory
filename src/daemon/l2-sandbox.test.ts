@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
+import { BUILT_IN_EGRESS } from '../sandbox/sandbox.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
@@ -146,6 +147,138 @@ describe('an L2 AFK run', () => {
     const state = await tui.until((state) => state.attentionQueue.length === 1);
     expect(state.attentionQueue).toMatchObject([{ attention: 'failure', reason: 'The factory couldn’t prepare T1’s container: Cannot connect to the Docker daemon.' }]);
     expect(factory.executor.started).toEqual([]);
+  });
+});
+
+describe('an L2 run’s egress', () => {
+  test('is allowed only to the built-in hosts, through its container’s proxy', async () => {
+    const { factory, operator } = await attached();
+    await operator.send(implementAtL2('#39'));
+
+    await started(factory, 1);
+    expect(factory.sandbox.prepared[0]!.egress).toEqual(BUILT_IN_EGRESS);
+  });
+
+  test('denied is logged on the run, and a failed run’s request lists the hosts it was denied', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementAtL2('#39'));
+    await started(factory, 1);
+
+    expect(factory.sandbox.request('T1', 'api.anthropic.com')).toBe(true);
+    expect(factory.sandbox.request('T1', 'pypi.org')).toBe(false);
+    factory.sandbox.request('T1', 'files.pythonhosted.org');
+    factory.executor.report('R1', { type: 'runFailed', reason: 'pip install failed.' });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.runs.R1!.deniedHosts).toEqual(['pypi.org', 'files.pythonhosted.org']);
+    expect(state.attentionQueue).toMatchObject([
+      {
+        attention: 'failure',
+        reason: 'pip install failed. Its container’s egress proxy denied pypi.org and files.pythonhosted.org.',
+        deniedHosts: ['pypi.org', 'files.pythonhosted.org'],
+      },
+    ]);
+  });
+
+  test('denied to an iteration that completes with no new commit is listed on its failure request too, for the operator to allow', async () => {
+    const { factory, operator, tui } = await attached();
+    factory.github.addIssue('acme/widgets#10');
+    factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'], autonomy: 'L2' });
+    await started(factory, 1);
+
+    factory.sandbox.request('T1', 'pypi.org');
+    factory.executor.report('R1', { type: 'runCompleted' });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.attentionQueue).toMatchObject([
+      {
+        attention: 'failure',
+        reason: `The iteration on acme/widgets#11 made no new commit on ${state.tasks.T1!.branch}, so the ticket stays open. Its container’s egress proxy denied pypi.org.`,
+        deniedHosts: ['pypi.org'],
+      },
+    ]);
+    expect(await operator.send({ type: 'answer', taskId: 'T1', allowHosts: ['pypi.org'] })).toEqual({ ok: true });
+    await started(factory, 2);
+    expect(factory.sandbox.prepared.at(-1)!.egress).toContain('pypi.org');
+  });
+
+  test('a denied host the operator allows for the task joins its egress, and the run is retried, for that task only', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementAtL2('#39'));
+    await started(factory, 1);
+    factory.sandbox.request('T1', 'pypi.org');
+    factory.sandbox.request('T1', 'files.pythonhosted.org');
+    factory.executor.report('R1', { type: 'runFailed', reason: 'pip install failed.' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', allowHosts: ['pypi.org'] })).toEqual({ ok: true });
+
+    const retried = await started(factory, 2);
+    expect(retried).toMatchObject({ runId: 'R2', container: { taskId: 'T1' } });
+    expect(factory.sandbox.prepared.at(-1)!.egress).toEqual([...BUILT_IN_EGRESS, 'pypi.org']);
+    expect(factory.sandbox.request('T1', 'pypi.org')).toBe(true);
+    const state = await tui.until((state) => state.tasks.T1?.egressHosts.length === 1);
+    expect(state.tasks.T1!.egressHosts).toEqual(['pypi.org']);
+    expect(state.attentionQueue.filter((item) => item.kind === 'attention')).toEqual([]);
+
+    await operator.send(implementAtL2('#40'));
+    await started(factory, 3);
+    expect(factory.sandbox.prepared.at(-1)).toMatchObject({ taskId: 'T2', egress: BUILT_IN_EGRESS });
+  });
+
+  test('can be allowed only for hosts the failed run was denied', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementAtL2('#39'));
+    await started(factory, 1);
+    factory.executor.report('R1', { type: 'runFailed', reason: 'The run hit its max turns (300) before it finished.' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', allowHosts: ['pypi.org'] })).toEqual({
+      ok: false,
+      reason: 'T1’s run was denied no egress: there is no host to allow.',
+    });
+
+    await operator.send({ type: 'answer', taskId: 'T1' });
+    await started(factory, 2);
+    factory.sandbox.request('T1', 'pypi.org');
+    factory.executor.report('R2', { type: 'runFailed', reason: 'pip install failed.' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', allowHosts: ['evil.example'] })).toEqual({
+      ok: false,
+      reason: 'T1’s run wasn’t denied evil.example: allow only pypi.org.',
+    });
+    expect(await operator.send({ type: 'answer', taskId: 'T1', allowHosts: [] })).toMatchObject({ ok: false });
+  });
+
+  test('a child of an L2 task gets a frozen copy of its parent’s hosts', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementAtL2('#39'));
+    await started(factory, 1);
+    factory.sandbox.request('T1', 'pypi.org');
+    factory.executor.report('R1', { type: 'runFailed', reason: 'pip install failed.' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    await operator.send({ type: 'answer', taskId: 'T1', allowHosts: ['pypi.org'] });
+    await started(factory, 2);
+
+    await factory.executor.delegate('R2', { type: 'spawnChild', toolUseId: 'toolu_1', goal: 'Survey sign-out.', autonomy: 'L2', await: false });
+
+    await started(factory, 3);
+    expect(factory.sandbox.prepared.at(-1)).toMatchObject({ taskId: 'T2', egress: [...BUILT_IN_EGRESS, 'pypi.org'] });
+  });
+
+  test('denied to a run that completes is logged on the run, and asks nothing', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementAtL2('#39'));
+    await started(factory, 1);
+
+    factory.sandbox.request('T1', 'statsig.anthropic.com');
+    factory.executor.report('R1', { type: 'runCompleted' });
+
+    const state = await tui.until((state) => state.tasks.T1?.stage === 'review');
+    expect(state.runs.R1!.deniedHosts).toEqual(['statsig.anthropic.com']);
+    expect(state.attentionQueue.filter((item) => item.kind === 'attention')).toEqual([]);
   });
 });
 

@@ -296,6 +296,9 @@ export type Task = {
   // The rules the operator allowed once while its run was parked, which its
   // next run takes.
   allowOnce?: string[];
+  // The hosts the operator allowed this task's L2 runs to reach, besides the
+  // built-in ones (ADR 0007). Tasks stored before them have none.
+  egressHosts?: string[];
   // Its open handoff sheet, if any. Tasks stored before handoffs have none.
   handoff?: HandoffSheet | null;
   // How much of the context window its session fills, once a turn said.
@@ -387,6 +390,9 @@ export type Run = {
   // The rules the operator allowed once for it: each lets one call with that
   // rule through. Runs stored before them have none.
   allowOnce?: string[];
+  // The hosts its container's egress proxy denied it, for an L2 run that
+  // ended (ADR 0007). Runs stored before them have none.
+  deniedHosts?: string[];
   // What it used, per model (ADR 0008): its API messages as they streamed,
   // brought into line by its session's totals. Runs stored before metering
   // have none.
@@ -422,6 +428,9 @@ export type AttentionRequest = {
   permission?: Permission | null;
   // What a `recovery-report` says recovery did.
   recovery?: Recovery | null;
+  // The hosts a failed L2 run was denied egress to (ADR 0007), which the
+  // operator can allow for the task and retry. Requests stored before them have none.
+  deniedHosts?: string[] | null;
   raisedAt: number;
 };
 
@@ -508,8 +517,10 @@ export type OperatorCommand =
   | { type: 'finishLoop'; taskId: string }
   // Answers the task's open attention request: a question's with `answers`,
   // a permission request's with `permission`. A failed iteration's is
-  // retried, unless `skip` moves its loop on past its ticket.
-  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; skip?: boolean }
+  // retried, unless `skip` moves its loop on past its ticket. A failed L2
+  // run's is retried with `allowHosts`, hosts it was denied, allowed for the
+  // task from now on (ADR 0007).
+  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; skip?: boolean; allowHosts?: string[] }
   // Resumes the root's session on the operator's review comments.
   | { type: 'requestChanges'; taskId: string; comments: string }
   // Publishes an L1 root in review as the factory's App, without raising its
@@ -543,9 +554,10 @@ export type RunEvent =
   // since its iteration began.
   // A child task's run carries the commits on its branch since it was cut,
   // and the agent's final result text, its report's summary if it reported none.
-  | { type: 'runCompleted'; runId: string; sessionId?: string; commits?: string[]; result?: string }
+  // An L2 run's end carries the hosts its container's egress proxy denied it.
+  | { type: 'runCompleted'; runId: string; sessionId?: string; commits?: string[]; result?: string; deniedHosts?: string[] }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
-  | { type: 'runFailed'; runId: string; reason: string }
+  | { type: 'runFailed'; runId: string; reason: string; deniedHosts?: string[] }
   // The agent finished answering: the conversation is the operator's again.
   // `context` is how full the session is now, when the executor knows.
   | { type: 'turnEnded'; runId: string; context?: ContextUse }
@@ -1432,11 +1444,12 @@ export type AttentionQueueItem =
       question: Question | null;
       permission: Permission | null;
       recovery: Recovery | null;
+      deniedHosts: string[] | null;
     }
   | { kind: 'ready'; taskId: string }
   | { kind: 'review'; taskId: string };
 
-const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null, recovery = null }: AttentionRequest): AttentionQueueItem => ({
+const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null, recovery = null, deniedHosts = null }: AttentionRequest): AttentionQueueItem => ({
   kind: 'attention',
   taskId,
   repo,
@@ -1447,6 +1460,7 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = nu
   question,
   permission,
   recovery: structuredClone(recovery),
+  deniedHosts: deniedHosts && [...deniedHosts],
 });
 
 // Whether the task's open request, if any, waits on the operator: a task
@@ -1592,6 +1606,13 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       }
       if (request.kind === 'pr-closed-unmerged') return `${task.id}’s PR was closed without merging: cancel the task, or reopen its PR.`;
       if (action.skip && !(request.kind === 'failure' && failedIteration(task))) return 'Only a failed iteration’s ticket can be skipped.';
+      if (action.allowHosts !== undefined) {
+        const hosts = request.kind === 'failure' ? (request.deniedHosts ?? []) : [];
+        if (hosts.length === 0) return `${task.id}’s run was denied no egress: there is no host to allow.`;
+        if (!Array.isArray(action.allowHosts) || action.allowHosts.length === 0) return `Name the hosts to allow: ${hosts.join(', ')}.`;
+        const other = action.allowHosts.find((host) => !hosts.includes(host));
+        if (other !== undefined) return `${task.id}’s run wasn’t denied ${String(other)}: allow only ${hosts.join(', ')}.`;
+      }
       const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
       return answered ? null : 'Answer every question on the card.';
     }
@@ -2442,10 +2463,22 @@ function raise(
   holdsRun: boolean,
   reason: string | null,
   at: number,
-  extra: { question?: Question | null; permission?: Permission | null } = {},
+  extra: RequestExtra = {},
 ): void {
   addRequest(state, task, run, kind, holdsRun, reason, at, extra);
   task.state = 'waiting';
+}
+
+// Logs on the run the hosts its container's egress proxy denied it (ADR 0007).
+function logDenials(run: Run, hosts: string[] | undefined): void {
+  if (hosts?.length) run.deniedHosts = [...hosts];
+}
+
+// A failure's reason, saying which hosts its run was denied, if any.
+function withDenials(reason: string, hosts: string[] | undefined): string {
+  if (!hosts?.length) return reason;
+  const named = hosts.length === 1 ? hosts[0] : `${hosts.slice(0, -1).join(', ')} and ${hosts.at(-1)}`;
+  return `${reason} Its container’s egress proxy denied ${named}.`;
 }
 
 // A request about the task that leaves its state as it is, such as one a
@@ -2458,7 +2491,7 @@ function addRequest(
   holdsRun: boolean,
   reason: string | null,
   at: number,
-  { question = null, permission = null }: { question?: Question | null; permission?: Permission | null } = {},
+  { question = null, permission = null, deniedHosts = null }: RequestExtra = {},
 ): void {
   const request: AttentionRequest = {
     id: nextId(state, 'request'),
@@ -2471,10 +2504,14 @@ function addRequest(
     reason,
     question,
     permission,
+    ...(deniedHosts?.length ? { deniedHosts: [...deniedHosts] } : {}),
     raisedAt: at,
   };
   state.requests[request.id] = request;
 }
+
+// What a request holds besides its kind and reason.
+type RequestExtra = { question?: Question | null; permission?: Permission | null; deniedHosts?: string[] | null };
 
 function addArtifact(state: Lifecycle, artifact: DistributiveOmit<Artifact, 'id'>): void {
   const id = nextId(state, 'artifact');
@@ -2736,6 +2773,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (request!.permission && allowsByRules(action.permission) && action.permission.allow === 'task') {
         addTaskRules(task, request!.permission, action.permission);
       }
+      // The task's next L2 runs may reach them too.
+      for (const host of action.allowHosts ?? []) if (!(task.egressHosts ??= []).includes(host)) task.egressHosts.push(host);
       if (request!.holdsRun) {
         // Resumes at once, even over the slot cap.
         run!.status = 'active';
@@ -2853,8 +2892,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         runIds: [],
         state: 'queued',
         createdAt: at,
-        // A frozen copy of the parent's per-task rules.
+        // A frozen copy of the parent's per-task rules and egress hosts.
         allowRules: [...(task.allowRules ?? [])],
+        egressHosts: [...(task.egressHosts ?? [])],
       };
       child.goal = childOpening(state, task, child, action);
       state.tasks[child.id] = child;
@@ -2961,6 +3001,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       else run!.turn = 'operator';
       break;
     case 'runCompleted': {
+      logDenials(run!, action.deniedHosts);
       // Whatever the agent said, a run that ends with awaited children it
       // hasn't had the reports of waits on them, holding no slot (ADR 0009).
       // A loop's iteration keeps its ticket, which its next run resumes.
@@ -2988,7 +3029,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         // committed, on a tree its git guards found clean. Its ticket closes
         // next, the task holding its slot.
         if (action.commits?.length) task.loop = { ...task.loop!, step: 'close', commits: [...action.commits] };
-        else raise(state, task, run, 'failure', false, `The iteration on ${run!.ticket} made no new commit on ${task.worktree?.branch}, so the ticket stays open.`, at);
+        else {
+          const why = `The iteration on ${run!.ticket} made no new commit on ${task.worktree?.branch}, so the ticket stays open.`;
+          raise(state, task, run, 'failure', false, withDenials(why, run!.deniedHosts), at, { deniedHosts: run!.deniedHosts });
+        }
         break;
       }
       if (task.findings?.found.length && !task.findings.fixPass && stageReports(from).includes('findings')) {
@@ -3039,7 +3083,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // The request a suspended run waited on can't resume it any more.
       if (request?.holdsRun) request.status = 'superseded';
       endRun(run!, 'failed', at);
-      raise(state, task, run!, 'failure', false, action.reason, at);
+      logDenials(run!, action.deniedHosts);
+      raise(state, task, run!, 'failure', false, withDenials(action.reason, action.deniedHosts), at, { deniedHosts: action.deniedHosts });
       break;
     case 'attentionRaised': {
       suspend(run!, at);

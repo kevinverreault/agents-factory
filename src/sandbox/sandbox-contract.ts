@@ -18,6 +18,13 @@ export type SandboxFixture = {
   hostTip(spec: ContainerSpec, branch: string): Promise<string>;
   // A branch's tip in the container's clone, which must be running.
   containerTip(container: Container, branch: string): Promise<string>;
+  // Makes an HTTPS request from the container to `host`, as a run would,
+  // and says whether it got through. `host` is one the fixture's specs
+  // allow, or one they don't; both answer from outside.
+  reach(container: Container, host: string): Promise<boolean>;
+  // A host each spec's egress allows, and one none does.
+  allowedHost: string;
+  deniedHost: string;
   dispose(): Promise<void>;
 };
 
@@ -149,6 +156,24 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
 
         expect(await running(sandbox, 'T2')).toBe(true);
         expect(await containerTip(two, second.spec.branch)).toBe(await hostTip(second.spec, second.spec.branch));
+      }));
+
+    test('egress reaches only the spec’s hosts, and the container lists the ones it denied since it was prepared', () =>
+      withFixture(async ({ sandbox, task, reach, allowedHost, deniedHost }) => {
+        const { spec } = await task('T1');
+        const container = await sandbox.prepare(spec);
+        expect(await container.deniedHosts()).toEqual([]);
+
+        expect(await reach(container, allowedHost)).toBe(true);
+        expect(await reach(container, deniedHost)).toBe(false);
+        expect(await reach(container, deniedHost)).toBe(false);
+
+        expect(await container.deniedHosts()).toEqual([deniedHost]);
+        // A host the next prepare allows goes through, and its list starts afresh.
+        const again = await sandbox.prepare({ ...spec, egress: [...spec.egress, deniedHost] });
+        expect(await again.deniedHosts()).toEqual([]);
+        expect(await reach(again, deniedHost)).toBe(true);
+        expect(await again.deniedHosts()).toEqual([]);
       }));
 
     test('a task branch changed on both sides is refused, by prepare and by bringing it out', () =>

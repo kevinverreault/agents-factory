@@ -18,7 +18,8 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | `gh` re-reads a refreshed `hosts.yml` | Holds | `src/github/gh-config.contract.test.ts` |
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
 | L2 sandbox: bundle round trip, restart, no credentials (#64) | Holds on Docker Desktop 27 (WSL 2 engine) | `src/sandbox/docker.contract.test.ts` |
-| A real L2 run in its container: commits on the subscription token, guards checked there, commit brought out, questions reach the operator despite `bypassPermissions` (#64) | Holds. Needs `agents-factory setup token` | `src/executor/l2-run.contract.test.ts` |
+| A real L2 run in its container: commits on the subscription token, guards checked there, commit brought out, questions reach the operator despite `bypassPermissions` (#64), through the egress proxy with nothing denied (#65) | Holds. Needs `agents-factory setup token` | `src/executor/l2-run.contract.test.ts` |
+| L2 egress: default-deny through a proxy of the task's own (#65) | Holds on Docker Desktop 27 | `src/sandbox/docker.contract.test.ts` |
 | Ink tells `ctrl+h` from Backspace | No. Windows Terminal sends `08` for ctrl+h (and for ctrl+Backspace), `7f` for Backspace, and no kitty sequences. `/handoff` is the primary path | `src/tui/keys.contract.test.tsx`, `npm run probe:keys` |
 
 ## Agent SDK on Windows (SDK #359, #444)
@@ -119,7 +120,7 @@ To re-check after a Windows Terminal or Ink upgrade, run `npm run probe:keys` an
 
 ## L2 sandbox on Docker (ADR 0007, ADR 0011)
 
-`dockerSandbox()` (`src/sandbox/docker.ts`) runs each L2 task in a container of its own, from an image it builds on first use: `node:24-bookworm-slim` with git, `gh`, and the Linux CLI of the pinned SDK (`@anthropic-ai/claude-agent-sdk-linux-x64`). The shared contract (`src/sandbox/sandbox-contract.ts`) runs against the fake and against Docker Desktop 27.0.3 on Windows 10, recorded on 2026-11-07:
+`dockerSandbox()` (`src/sandbox/docker.ts`) runs each L2 task in a container of its own, from an image it builds on first use: `node:24-bookworm-slim` with git, `gh`, curl, and the Linux CLI of the pinned SDK (`@anthropic-ai/claude-agent-sdk-linux-x64`). The shared contract (`src/sandbox/sandbox-contract.ts`) runs against the fake and against Docker Desktop 27.0.3 on Windows 10, recorded on 2026-11-07:
 
 - Commits made in the container reach the host task branch through a `git bundle`, as a fast-forward, and the host branch's new commits reach the container at the next prepare. A branch changed on both sides is refused either way.
 - `docker restart` kills a turn still running in the container (a `sleep` that would have written a file never did), and the `docker exec` that started it ends. The clone keeps commits not yet brought out.
@@ -128,5 +129,7 @@ To re-check after a Windows Terminal or Ink upgrade, run `npm run probe:keys` an
 - The sessions mount is the CLI's project directory for `/work`, shared with the host.
 - `claude --version` in the container reports the version the pinned SDK bundles.
 
-Not proven here: a real Claude run inside the container, which needs a subscription token from `claude setup-token`, and egress denial, which arrives with #65.
+- Egress is default-deny (#65). The container shares an internal network with its task's egress proxy alone (`src/sandbox/egress-proxy.ts`, run by the image's Node). On that network no outside name resolves and no outside address routes: `curl --noproxy '*'` fails to the allowed host by name and to `1.1.1.1` by address. Through the proxy, HTTPS to the allowed host goes through, and HTTPS and plain HTTP to any other host get a 403. The container lists each denied host once, and the next prepare starts the list afresh with its new allowlist.
+
+A real L2 run (`src/executor/l2-run.contract.test.ts`, on the token from `agents-factory setup token`) runs Claude Code in the container through the proxy on the built-in hosts alone, with nothing denied, recorded on 2026-11-07. Its CLI runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so its telemetry never shows among the denied hosts.
 

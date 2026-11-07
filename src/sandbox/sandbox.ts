@@ -32,7 +32,22 @@ export type ContainerSpec = {
   // container's workdir: the session transcripts, which runs on the host
   // resume too.
   sessionsDir: string;
+  // The hosts the container may reach (ADR 0007): its egress is denied
+  // anywhere else. Each prepare sets them afresh.
+  egress: string[];
 };
+
+// The hosts every L2 run may reach (ADR 0007): the Claude API its CLI runs
+// on, GitHub's API and site for reading issues and PRs with the run's
+// read-only bot token, and the npm registry for installs from the lockfile.
+// A task's own hosts join them.
+export const BUILT_IN_EGRESS: readonly string[] = ['api.anthropic.com', 'api.github.com', 'github.com', 'registry.npmjs.org'];
+
+// The hosts a task's container may reach: the built-in ones, then the
+// task's own that aren't among them.
+export function egressFor(taskHosts: readonly string[]): string[] {
+  return [...BUILT_IN_EGRESS, ...taskHosts.filter((host) => !BUILT_IN_EGRESS.includes(host))];
+}
 
 // Where the run's own git config, hooks and gh config are, in the container.
 export const RUN_DIR = '/factory/run';
@@ -64,6 +79,9 @@ export type Container = {
   checks: Pick<Git, 'snapshot' | 'violations'>;
   // Runs git in the container's clone, as its non-root user.
   git(args: string[]): Promise<GitResult>;
+  // The hosts outside its egress that the container tried to reach since it
+  // was last prepared, each once, in the order first denied.
+  deniedHosts(): Promise<string[]>;
   // Starts `command` in the container, as its non-root user, in `workdir`,
   // with exactly `env` set besides the image's own, its stdin and stdout piped.
   spawn(command: string, args: string[], options: { env: Record<string, string | undefined>; signal?: AbortSignal }): ChildProcessByStdio<Writable, Readable, null>;

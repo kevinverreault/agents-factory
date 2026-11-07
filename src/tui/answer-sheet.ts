@@ -96,7 +96,7 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
       // AFK iteration's ticket can be skipped too.
       const ticket = task?.mode === 'AFK' ? task.loop?.ticket : null;
       const skip: Choice[] = ticket ? [{ label: `Skip ${ticket}`, command: { type: 'answer', taskId, skip: true } }] : [];
-      return [{ label: 'Retry', command: answer }, ...skip, ...takeOver, cancel];
+      return [{ label: 'Retry', command: answer }, ...allowHosts(taskId, item.deniedHosts ?? []), ...skip, ...takeOver, cancel];
     }
     case 'permission': {
       // Requests stored before they named their call allow it for the task
@@ -129,6 +129,18 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
     default:
       return [];
   }
+}
+
+// How many denied hosts a failed L2 run's sheet offers a digit each: past
+// that, the digits would run out, and the hosts are allowed all together.
+const MAX_HOST_CHOICES = 4;
+
+// A failed L2 run's denied hosts (ADR 0007): each allowed for its task, and
+// the run retried, by a digit, and all of them by one when there are several.
+function allowHosts(taskId: string, hosts: string[]): Choice[] {
+  const allow = (label: string, allowHosts: string[]): Choice => ({ label: `Allow ${label} for this task and retry`, command: { type: 'answer', taskId, allowHosts } });
+  const each = hosts.length <= MAX_HOST_CHOICES ? hosts.map((host) => allow(host, [host])) : [];
+  return hosts.length > 1 ? [allow(hosts.length === 2 ? 'both hosts' : `all ${hosts.length} hosts`, hosts), ...each] : each;
 }
 
 // A work loop over a map (wayfinder) Ready for you between its tickets: a
@@ -171,6 +183,7 @@ export function cardItem(task: TaskView, permission: Permission): AttentionQueue
     question: null,
     permission,
     recovery: null,
+    deniedHosts: null,
   };
 }
 

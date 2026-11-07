@@ -209,6 +209,7 @@ describe('skipping optional stages', () => {
         question: null,
         permission: null,
         recovery: null,
+        deniedHosts: null,
       },
     ]);
     expect(factory.executor.started).toHaveLength(1);

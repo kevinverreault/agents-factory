@@ -33,6 +33,8 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
 
 - **L2 asks no permissions.** Questions still reach the operator, because `AskUserQuestion` goes through `canUseTool` in every mode. Egress denials are logged on the run. When a run fails, its failure request lists the denied hosts, with "allow host for this task and retry".
 
+- **L2 egress goes through a proxy of the task's own.** Since #65 the task's container sits alone with its egress proxy on an internal Docker network, where no outside name resolves and no outside address routes. The proxy is a container of its own, also joined to Docker's bridge, so it is the only way out. It forwards HTTPS `CONNECT` and plain HTTP only to the allowed hosts and refuses the rest with a 403, logging each one. The container's environment points every client at it: Claude Code, git, `gh`, curl, npm and Node's fetch. The allowed hosts are the built-in ones (the Claude API, GitHub's API and site for reading with the bot token, and the npm registry), plus the task's own. Each prepare sets them afresh. The user file holds no egress hosts yet, though the rule above leaves room for them. Allow host for this task and retry adds a host to the task alone and requeues the run. The proxy runs outside the task's container, so nothing a run does there can change what it allows. Hosts match exactly, with no wildcards. L2 runs send no telemetry, which would only fill the denied list.
+
 - **Hard denies at every AFK level.** Deny rules plus a PreToolUse hook refuse the following, with a message ("the factory pushes for you"), and raise no attention request:
   - `git push`
   - remote changes

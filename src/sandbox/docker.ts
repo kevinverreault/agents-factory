@@ -6,12 +6,18 @@
 // stay out), gets the
 // skill set copied in read-only, and holds no credential: whatever a run
 // needs, it is handed through `docker exec`'s environment for that run alone.
+// Its egress is default-deny (ADR 0007): it sits alone on an internal
+// network of its task's, where no outside name resolves and no outside
+// address routes, with the task's egress proxy (`egress-proxy.ts`), a
+// container of its own that also has a route out and forwards only to the
+// hosts the spec allows.
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { GitError, guardChecks } from '../git/git.ts';
 import { RUN_DIR, SandboxError, type Container, type ContainerListing, type ContainerSpec, type GitResult, type Sandbox } from './sandbox.ts';
 
@@ -26,6 +32,24 @@ const IMAGE_LABEL = 'agents-factory.sandbox';
 const REPOSITORY = 'agents-factory-sandbox';
 // How long a stopped container's processes get before they are killed.
 const STOP_SECONDS = '3';
+// The egress proxy: its address on the task's network, and its files.
+const PROXY_ALIAS = 'egress';
+const PROXY_PORT = '3128';
+const PROXY_SCRIPT = '/opt/factory/egress-proxy.ts';
+const ALLOWLIST = '/tmp/egress-allowed';
+const DENIALS = '/tmp/egress-denied';
+const PROXY_URL = `http://${PROXY_ALIAS}:${PROXY_PORT}`;
+// Every run in the container goes out through the proxy: Claude Code, git,
+// gh, curl, npm, and Node's own fetch.
+const PROXY_ENV = {
+  HTTPS_PROXY: PROXY_URL,
+  HTTP_PROXY: PROXY_URL,
+  https_proxy: PROXY_URL,
+  http_proxy: PROXY_URL,
+  NO_PROXY: 'localhost,127.0.0.1',
+  no_proxy: 'localhost,127.0.0.1',
+  NODE_USE_ENV_PROXY: '1',
+};
 
 // The image's recipe. The CLI is the Linux build of the one the pinned SDK
 // bundles, so a run in the container is the same Claude Code as on the host.
@@ -33,7 +57,7 @@ export function sandboxDockerfile(sdkVersion: string): string {
   return [
     'FROM node:24-bookworm-slim',
     'RUN apt-get update \\',
-    ' && apt-get install --yes --no-install-recommends git ca-certificates gh \\',
+    ' && apt-get install --yes --no-install-recommends git ca-certificates gh curl \\',
     ' && rm -rf /var/lib/apt/lists/*',
     `RUN npm install --global @anthropic-ai/claude-agent-sdk-linux-x64@${sdkVersion} \\`,
     ' && ln -s "$(npm root --global)/@anthropic-ai/claude-agent-sdk-linux-x64/claude" /usr/local/bin/claude',
@@ -58,6 +82,9 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
   const image = `${REPOSITORY}:${createHash('sha256').update(dockerfile).digest('hex').slice(0, 12)}`;
   let built: Promise<void> | null = null;
   const nameOf = (taskId: string) => `${namespace}-${taskId}`.toLowerCase();
+  // The task's egress proxy, and the internal network it shares with the task's container.
+  const proxyOf = (taskId: string) => `${nameOf(taskId)}-egress`;
+  const networkOf = (taskId: string) => `${nameOf(taskId)}-net`;
 
   // Builds the image unless it exists, then removes older factory images no
   // container uses (ADR 0011). Images the factory didn't build carry no label.
@@ -75,9 +102,14 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
   }
 
   // Whether the task's container runs, or null when there is none.
-  async function stateOf(taskId: string): Promise<boolean | null> {
+  function stateOf(taskId: string): Promise<boolean | null> {
+    return runningOf(nameOf(taskId));
+  }
+
+  // Whether the named container runs, or null when there is none.
+  async function runningOf(name: string): Promise<boolean | null> {
     try {
-      return (await docker(['container', 'inspect', '--format', '{{.State.Running}}', nameOf(taskId)])).trim() === 'true';
+      return (await docker(['container', 'inspect', '--format', '{{.State.Running}}', name])).trim() === 'true';
     } catch (error) {
       if (/no such (container|object)/i.test((error as Error).message)) return null;
       throw error;
@@ -92,6 +124,71 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     const result = await gitIn(taskId, args);
     if (result.code !== 0) throw new SandboxError(result.stderr.trim() || `git ${args[0]} failed in ${taskId}’s container.`);
     return result.stdout.trim();
+  }
+
+  // The task's internal network and egress proxy, made unless they exist,
+  // and the proxy running.
+  async function ensureEgress(taskId: string): Promise<void> {
+    const network = networkOf(taskId);
+    const proxy = proxyOf(taskId);
+    if (!(await networkExists(network))) {
+      await docker(['network', 'create', '--internal', '--label', `${NAMESPACE_LABEL}=${namespace}`, network]);
+    }
+    const running = await runningOf(proxy);
+    if (running === null) {
+      // No task label: the proxy is no task's container.
+      await docker([
+        'create',
+        '--name',
+        proxy,
+        '--label',
+        `${NAMESPACE_LABEL}=${namespace}`,
+        '--init',
+        '--user',
+        USER,
+        '--network',
+        network,
+        '--network-alias',
+        PROXY_ALIAS,
+        image,
+        'node',
+        PROXY_SCRIPT,
+        ALLOWLIST,
+        DENIALS,
+        PROXY_PORT,
+      ]);
+      try {
+        await docker(['cp', fileURLToPath(new URL('./egress-proxy.ts', import.meta.url)), `${proxy}:${PROXY_SCRIPT}`]);
+        // Its route out: the task's container has none.
+        await docker(['network', 'connect', 'bridge', proxy]);
+        await docker(['start', proxy]);
+      } catch (error) {
+        await docker(['rm', '--force', proxy]).catch(() => {});
+        throw error;
+      }
+    } else if (!running) {
+      await docker(['start', proxy]);
+    }
+  }
+
+  // Sets the proxy's allowlist to the spec's egress, starts its denial log
+  // afresh, and waits until it listens.
+  async function configureEgress(spec: ContainerSpec): Promise<void> {
+    const listens = `node -e "require('net').connect(${PROXY_PORT}, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"`;
+    const script = [
+      `cat > ${ALLOWLIST}`,
+      `: > ${DENIALS}`,
+      'i=0',
+      `until ${listens}; do`,
+      '  i=$((i + 1)); [ "$i" -ge 100 ] && exit 1; sleep 0.1',
+      'done',
+    ].join('\n');
+    const allowlist = spec.egress.map((host) => `${host}\n`).join('');
+    try {
+      await docker(['exec', '--interactive', '--user', USER, proxyOf(spec.taskId), 'sh', '-c', script], { input: allowlist });
+    } catch (error) {
+      throw new SandboxError(`${spec.taskId}’s egress proxy didn’t start: ${(error as Error).message || 'it never listened.'}`);
+    }
   }
 
   async function create(spec: ContainerSpec): Promise<void> {
@@ -113,6 +210,9 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       USER,
       '--workdir',
       WORKDIR,
+      '--network',
+      networkOf(spec.taskId),
+      ...Object.entries(PROXY_ENV).flatMap(([key, value]) => ['--env', `${key}=${value}`]),
       ...mount(gitDir, '/mnt/repo', true),
       ...mount(spec.runDir, RUN_DIR, true),
       ...mount(spec.sessionsDir, SESSIONS_DIR, false),
@@ -165,6 +265,10 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
         join: posix.join,
       }),
       git: (args) => gitIn(spec.taskId, args),
+      async deniedHosts() {
+        const log = await docker(['exec', '--user', USER, proxyOf(spec.taskId), 'sh', '-c', `cat ${DENIALS} 2>/dev/null; exit 0`]);
+        return [...new Set(log.split('\n').map((line) => line.trim()).filter(Boolean))];
+      },
       spawn(command, args, { env, signal }) {
         // Values travel in docker's own environment, never on its command line.
         const names = Object.keys(env).filter((key) => env[key] !== undefined);
@@ -196,6 +300,8 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
   return {
     async prepare(spec) {
       await ensureImage();
+      await ensureEgress(spec.taskId);
+      await configureEgress(spec);
       const running = await stateOf(spec.taskId);
       if (running === null) await create(spec);
       else if (!running) await docker(['start', nameOf(spec.taskId)]);
@@ -204,15 +310,20 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     },
 
     async start(taskId) {
-      if ((await stateOf(taskId)) === false) await docker(['start', nameOf(taskId)]);
+      if ((await stateOf(taskId)) === false) {
+        await ensureEgress(taskId);
+        await docker(['start', nameOf(taskId)]);
+      }
     },
 
     async stop(taskId) {
       if (await stateOf(taskId)) await docker(['stop', '--time', STOP_SECONDS, nameOf(taskId)]);
+      if (await runningOf(proxyOf(taskId))) await docker(['stop', '--time', STOP_SECONDS, proxyOf(taskId)]);
     },
 
     async restart(taskId) {
       if ((await stateOf(taskId)) === null) return false;
+      await ensureEgress(taskId);
       await docker(['restart', '--time', STOP_SECONDS, nameOf(taskId)]);
       return true;
     },
@@ -244,6 +355,8 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
 
     async remove(taskId) {
       if ((await stateOf(taskId)) !== null) await docker(['rm', '--force', nameOf(taskId)]);
+      if ((await runningOf(proxyOf(taskId))) !== null) await docker(['rm', '--force', proxyOf(taskId)]);
+      if (await networkExists(networkOf(taskId))) await docker(['network', 'rm', networkOf(taskId)]);
     },
 
     async list() {
@@ -264,6 +377,13 @@ function diverged(branch: string): string {
 function pinnedSdkVersion(): string {
   const entry = createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk');
   return (JSON.parse(readFileSync(join(dirname(entry), 'package.json'), 'utf8')) as { version: string }).version;
+}
+
+function networkExists(network: string): Promise<boolean> {
+  return docker(['network', 'inspect', network]).then(
+    () => true,
+    () => false,
+  );
 }
 
 // Docker's output. Throws a `SandboxError` with Docker's own message when it fails.

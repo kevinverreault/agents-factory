@@ -70,6 +70,8 @@ export type TaskView = {
   tier: Tier;
   // The rules the operator allowed for the task.
   allowRules: string[];
+  // The hosts the operator allowed its L2 runs to reach, besides the built-in ones.
+  egressHosts: string[];
   // What its runs work towards: its first run's first message, or the brief
   // once handed off.
   goal: string | null;
@@ -105,7 +107,7 @@ export type HandoffView = Omit<HandoffSheet, 'asked'>;
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'interruption' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
-> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage; permission: Permission | null };
+> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage; permission: Permission | null; deniedHosts: string[] };
 
 // `app` is null until the daemon has checked the App's installation, and
 // `skills` until it has checked the skill set's setup.
@@ -158,6 +160,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       stage: task.stage ?? null,
       tier: nextTier(task),
       allowRules: [...(task.allowRules ?? [])],
+      egressHosts: [...(task.egressHosts ?? [])],
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
       closedTickets: structuredClone(task.closedTickets ?? []),
@@ -202,6 +205,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       queued,
       question,
       permission: run.permission ?? null,
+      deniedHosts: [...(run.deniedHosts ?? [])],
       stage,
       proposal,
       tier,
