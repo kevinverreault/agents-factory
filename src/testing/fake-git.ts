@@ -357,7 +357,7 @@ export class FakeGit implements Git {
 
   async snapshot(worktreePath: string): Promise<RunSnapshot> {
     const worktree = this.worktreeAt(worktreePath);
-    return { branch: worktree.branch, head: worktree.head, refs: [], remotes: [], config: [], hooks: {} };
+    return { branch: worktree.branch, head: worktree.head, refs: [], remotes: [], config: [], hooks: {}, checkout: [] };
   }
 
   async violations(worktreePath: string, _before: RunSnapshot, branches: string[], committer: string): Promise<string[]> {

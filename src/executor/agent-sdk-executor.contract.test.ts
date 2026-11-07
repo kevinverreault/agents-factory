@@ -255,6 +255,57 @@ test('AskUserQuestion holds the turn until answered, an interrupt ends only the 
   expect(stdout).toContain('BLUE');
 });
 
+test('a HITL run’s call that would prompt goes to the factory’s gate, and runs or is refused by its verdict', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'factory-hitl-'));
+  writeFileSync(join(cwd, 'package.json'), JSON.stringify({ name: 'owls', version: '1.0.0' }, null, 2));
+  const executor = agentSdkExecutor();
+  const reported: RunEvent[] = [];
+  const live: ConversationEvent[] = [];
+  const asked: ToolCall[] = [];
+  const run: RunStart = {
+    runId: 'R1',
+    taskId: 'T1',
+    mode: 'HITL',
+    autonomy: null,
+    sessionId: randomUUID(),
+    resumesSession: false,
+    cwd,
+    firstMessage:
+      'Use the Bash tool to run exactly `npm pkg set description=owls`. Then use the Bash tool to run exactly `npm pkg set version=9.9.9`. ' +
+      'If a command is refused, quote the refusal message word for word in your reply. Then reply DONE.',
+    model: 'claude-haiku-5-5',
+    maxTurns: null,
+    credential: 'subscription-host',
+    token: null,
+    container: null,
+    plugin: null,
+    guards: null,
+    allowRules: [],
+    reports: [],
+    child: false,
+    spawns: false,
+  };
+
+  executor.start(run, {
+    report: (event) => reported.push(event),
+    converse: (event) => live.push(event),
+    askPermission: (call) => {
+      asked.push(call);
+      const describes = String(call.input.command).includes('description=');
+      executor.permit('R1', call.id, describes ? { allow: true } : { allow: false, message: 'NOTE-OWL-23: the version is the release job’s.' });
+    },
+  });
+  await waitFor(() => reported.some((event) => event.type === 'turnEnded' || event.type === 'runFailed'), 120_000);
+
+  expect(asked.map(({ tool, summary }) => `${tool}: ${summary}`)).toEqual(
+    expect.arrayContaining(['Bash: npm pkg set description=owls', 'Bash: npm pkg set version=9.9.9']),
+  );
+  expect(JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'))).toMatchObject({ description: 'owls', version: '1.0.0' });
+  expect(live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes('NOTE-OWL-23'))).toBe(true);
+  expect(typesOf(reported)).toEqual(['runStarted', 'turnEnded']);
+  executor.stop('R1');
+});
+
 test('an L1 AFK run edits in its worktree without asking, takes no chat, and completes on its own when its turn ends', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'factory-afk-'));
   const executor = agentSdkExecutor();

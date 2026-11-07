@@ -69,10 +69,10 @@ async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void
   const sandbox = dockerSandbox({ namespace: `agents-factory-contract-${randomBytes(4).toString('hex')}` });
   const sessionsDir = executor.sessionsDir(worktree);
   const runDir = join(root, 'run');
-  const env = prepareRunGit(runDir, FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' });
   try {
     const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir });
     const snapshot = await container.checks.snapshot(container.workdir);
+    const env = prepareRunGit(runDir, FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
     const run: RunStart = {
       ...afkRun(worktree, firstMessage, 10),
       autonomy: 'L2',

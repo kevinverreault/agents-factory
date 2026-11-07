@@ -27,6 +27,8 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
 
   Allow always proposes the same rules, and the factory appends the confirmed ones to `~/.agent-factory/permissions.yaml`, keeping the file's rules and comments and skipping rules it already holds. The file is read for every call, so they cover every run from its next call on, and the factory lets through the other waiting permission requests they now cover. If the file is invalid or can't be written, the answer fails with the reason and the request stays open.
 
+- **HITL runs ask through the same gate, with a card.** A HITL run loads every settings source (ADR 0005), so Claude Code lets most of its calls through itself. A call that still reaches `canUseTool` is matched against the same rules as an L1 run's, in the task's worktree. One no rule covers shows as a **permission card** in the conversation, never an attention request, and is answered the same four ways. The run stays live and holds no slot. Its other calls wait behind the card, and the card ends with its turn. Left unanswered, it parks the run like any other wait on the operator.
+
 - **No repo scope for permissions.** Allow rules and extra L2 egress hosts come from the built-in list, the user file and the task, never from the target repo. A repo you clone could otherwise grant its own runs permissions. A child task gets a frozen copy of its parent's task rules and egress hosts at spawn, and its level stays ≤ its parent's.
 
 - **L2 asks no permissions.** Questions still reach the operator, because `AskUserQuestion` goes through `canUseTool` in every mode. Egress denials are logged on the run. When a run fails, its failure request lists the denied hosts, with "allow host for this task and retry".
@@ -48,11 +50,11 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
   - no refs or remotes were added;
   - `.git/config` and `.git/hooks/` match their snapshot from before the run.
 
-  A violation is a run or iteration failure. The clone is the operator's too (ADR 0010), and their own sessions and editors change it while a run works, so the check counts only what the run could have done. A run logs every ref it updates under the bot's identity, so an added ref whose reflog names someone else is not the run's. A ref with no reflog still counts, unless the factory cut it for another task. In the config, other branches' `branch.*` settings don't count, and neither do the task branch's settings other than `remote`, `pushRemote` and `merge`. Tools such as `git push -u` and VS Code write those settings for the operator.
+  A violation is a run or iteration failure. The clone is the operator's too (ADR 0010), and their own sessions and editors change it while a run works, so the check counts only what the run could have done. A run logs every ref it updates under the bot's identity, so an added ref whose reflog names someone else is not the run's. A ref with no reflog still counts, unless the factory cut it for another task, or another worktree has it checked out: a run can't add worktrees, and tools such as Claude Desktop make their worktrees' branches without a reflog. In the config, other branches' `branch.*` settings don't count, and neither do the task branch's settings other than `remote`, `pushRemote` and `merge`. Tools such as `git push -u` and VS Code write those settings for the operator.
 
 - **A cleaned environment makes pushes fail in git itself.** Each AFK run gets:
   - `GIT_CONFIG_NOSYSTEM=1`, because Git for Windows's system config sets `credential.helper=manager`;
-  - `GIT_CONFIG_GLOBAL` pointing at a per-run gitconfig, with the bot as author, no credential helper, and `pushInsteadOf` rewriting GitHub push URLs to an unreachable scheme, so fetch still works;
+  - `GIT_CONFIG_GLOBAL` pointing at a per-run gitconfig, with the bot as author, no credential helper, and `pushInsteadOf` rewriting GitHub push URLs to an unreachable scheme, so fetch still works. It also carries the operator's system and global settings that decide how the worktree's files map to the repository's (`core.autocrlf`, `core.eol`, `core.symlinks`, filters such as Git LFS's, and the like). The factory checked the worktree out under them, so without them every file would look changed to the run;
   - the read-only `GH_CONFIG_DIR` from ADR 0004;
   - `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY` and `SSH_AUTH_SOCK` unset;
   - `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, and an ssh command that fails;

@@ -49,8 +49,11 @@ const HOOKS = [
 ];
 
 // Writes the run's gitconfig and hooks into `dir`, and returns the
-// environment variables that point git at them.
-export function prepareRunGit(dir: string, identity: FactoryIdentity, trailers: CommitTrailers): Record<string, string> {
+// environment variables that point git at them. `checkout` holds the
+// operator's settings the worktree was checked out under, as `key\nvalue`
+// (`RunSnapshot.checkout`): the run's git reads no system or global config of
+// the operator's, so its own keeps them.
+export function prepareRunGit(dir: string, identity: FactoryIdentity, trailers: CommitTrailers, checkout: string[] = []): Record<string, string> {
   const hooks = join(dir, 'hooks');
   mkdirSync(hooks, { recursive: true });
   const gitconfig = join(dir, 'gitconfig');
@@ -66,6 +69,7 @@ export function prepareRunGit(dir: string, identity: FactoryIdentity, trailers: 
       // An empty prefix matches every URL, so no push goes anywhere; fetch is untouched.
       `[url "${NO_PUSH}"]`,
       '\tpushInsteadOf =',
+      ...checkout.flatMap(configLines),
       '',
     ].join('\n'),
   );
@@ -117,6 +121,23 @@ export function prepareRunGit(dir: string, identity: FactoryIdentity, trailers: 
     GCM_INTERACTIVE: 'never',
     GIT_SSH_COMMAND: 'false',
   };
+}
+
+// A `key\nvalue` setting as gitconfig lines: its section, then the key. A
+// subsection sits between the key's first and last dots, as `lfs` does in
+// `filter.lfs.clean`.
+function configLines(setting: string): string[] {
+  const [key = '', ...rest] = setting.split('\n');
+  const [first, last] = [key.indexOf('.'), key.lastIndexOf('.')];
+  if (first < 0) return [];
+  const section = key.slice(0, first);
+  const header = first === last ? `[${section}]` : `[${section} ${configQuoted(key.slice(first + 1, last))}]`;
+  return [header, `\t${key.slice(last + 1)} = ${configQuoted(rest.join('\n'))}`];
+}
+
+// The text as a gitconfig quoted string.
+function configQuoted(text: string): string {
+  return `"${text.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n').replaceAll('\t', '\\t')}"`;
 }
 
 // The text as one word for `sh`.

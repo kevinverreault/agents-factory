@@ -6,7 +6,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
-import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart } from '../executor/executor.ts';
+import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart, type Verdict } from '../executor/executor.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   GitHubError,
@@ -40,6 +40,8 @@ import {
   label,
   liveRun,
   nextTaskId,
+  openCard,
+  openPermission,
   openRequest,
   overdueRuns,
   pullRequestOf,
@@ -61,6 +63,7 @@ import {
   type Readiness,
   type LifecycleAction,
   type LoopEvent,
+  type PermissionAnswer,
   type PrReadEvent,
   type PublishEvent,
   type ResearchEvent,
@@ -1063,7 +1066,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const answer = { type: 'answer', taskId, permission } as const;
     const { refusal } = reduce(lifecycle, answer, clock.now(), routes(), { holdRuns });
     if (refusal) return { ok: false, reason: refusal };
-    const rules = allowedRules(openRequest(lifecycle, lifecycle.tasks[taskId]!)!.permission!, permission);
+    const rules = allowedRules(openPermission(lifecycle, lifecycle.tasks[taskId]!)!, permission);
     const problem = addOperatorRules(options.permissionsPath, rules);
     if (problem) return { ok: false, reason: `Allow always added no rules: ${problem}` };
     const refused = await settle(answer, new Set());
@@ -1587,33 +1590,36 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       executor.interrupt(run!.id);
     } else if (action.type === 'answerQuestion') {
       executor.answer(run!.id, action.questionId, action.answers);
+    } else if (action.type === 'answer' && openCard(before, before.tasks[action.taskId]!)) {
+      // A HITL run's card: its call gets the operator's verdict, then the
+      // calls it held go to the gate in turn.
+      const asking = liveRun(before, before.tasks[action.taskId]!)!;
+      executor.permit(asking.id, asking.permission!.id, verdictOf(action.permission!));
+      const waiting = held.get(asking.id) ?? [];
+      held.delete(asking.id);
+      for (const call of waiting) gate(asking.id, call);
     } else if (action.type === 'answer') {
       // A suspended run's question gets its answers as the card's would, and
       // its tool call the operator's verdict.
       const request = openRequest(before, before.tasks[action.taskId]!)!;
       if (request.holdsRun && request.question) executor.answer(request.runId!, request.question.id, action.answers!);
-      if (request.holdsRun && request.permission) {
-        const answer = action.permission!;
-        executor.permit(
-          request.runId!,
-          request.permission.id,
-          'deny' in answer ? { allow: false, message: `The operator denied this: ${answer.deny.trim()}` } : { allow: true },
-        );
-      }
+      if (request.holdsRun && request.permission) executor.permit(request.runId!, request.permission.id, verdictOf(action.permission!));
       // The run is back: the calls it held go to the gate in turn.
       const waiting = request.holdsRun ? (held.get(request.runId!) ?? []) : [];
       held.delete(request.runId!);
       for (const call of waiting) gate(request.runId!, call);
     } else if (action.type === 'permissionAsked') {
-      // Unless it raised a request, the operator's earlier answers allowed the call.
+      // Unless it raised a request or a card, the operator's earlier answers allowed the call.
       const { taskId } = lifecycle.runs[action.runId]!;
-      if (openRequest(lifecycle, lifecycle.tasks[taskId]!)?.permission?.id !== action.call.id) executor.permit(action.runId, action.call.id, { allow: true });
+      if (openPermission(lifecycle, lifecycle.tasks[taskId]!)?.id !== action.call.id) executor.permit(action.runId, action.call.id, { allow: true });
     } else if (action.type === 'handoffOpened' && run) {
       // A run started for the brief opens on the request itself.
       const was = before.runs[run.id];
       if (was?.turn === 'operator' && run.turn === 'agent') executor.send(run.id, BRIEF_REQUEST);
       else if (was?.turn === 'agent' && !before.tasks[action.taskId]!.handoff) executor.interrupt(run.id);
     } else if (action.type === 'turnEnded') {
+      // The calls a HITL run's card held ended with its turn.
+      if (lifecycle.runs[action.runId]!.mode === 'HITL') held.delete(action.runId);
       const { queued } = before.runs[action.runId]!;
       const { taskId } = lifecycle.runs[action.runId]!;
       // The brief, asked for once the turn a handoff interrupted has ended.
@@ -1679,13 +1685,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (lifecycle.runs[run.id]?.status !== 'active') return;
       // An L2 run's are where its container mounts them, read-only.
       const dir = l2 ? containerRunDir(task.id) : join(options.runsRoot, run.id);
-      const env = prepareRunGit(dir, FACTORY_IDENTITY, {
-        task: task.id,
-        run: run.id,
-        model: run.model,
-      });
-      const ghConfigDir = join(dir, 'gh');
-      Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
       if (l2) {
         try {
           container = await prepareContainer(task, run, dir);
@@ -1697,6 +1696,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         // Ended while its container was prepared: the container is settled again.
         if (lifecycle.runs[run.id]?.status !== 'active') return settleContainer(task.id);
       }
+      // The run's git keeps the settings its worktree was checked out under:
+      // the operator's on the host, the image's in a container.
+      const env = prepareRunGit(dir, FACTORY_IDENTITY, { task: task.id, run: run.id, model: run.model }, snapshot!.checkout);
+      const ghConfigDir = join(dir, 'gh');
+      Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
       guarded.set(run.id, { worktree: container?.workdir ?? cwd, host: cwd, dir, checks: container?.checks ?? git, container, snapshot: snapshot!, scripts: new Set() });
       botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
       guards = { start: snapshot!.head, env: l2 ? inRunDir(env, dir) : env };
@@ -2043,26 +2047,31 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // The L1 gate (ADR 0007), for the calls Claude Code still asks about once
-  // it has matched the rules the run started with. A call the factory's allow
+  // it has matched the rules the run started with. A HITL run's calls go
+  // through it too, and ask with a card in its conversation instead of a
+  // permission request (`run.permission`). A call the factory's allow
   // list or the operator's permissions file covers runs at once. The file is
   // read afresh for every call, so a rule the operator adds holds from their
   // next one, even in a run already under way. The Lifecycle decides the
   // parts they leave uncovered: by the operator's earlier answers, or with a
-  // permission request. A call asked about while another request holds its
-  // run is held until that one is answered; one the Lifecycle won't ask about
+  // permission request. A call asked about while another request or card
+  // holds its run is held until that one is answered; one the Lifecycle won't ask about
   // otherwise is refused, with its reason. The run's later calls may run the
   // temp scripts a call the rules cover writes, but none a call overwrote.
   function gate(runId: string, call: ToolCall): void {
     const { rules, error } = readAllowRules(options.permissionsPath);
     const guard = guarded.get(runId);
-    const parts = uncovered(rules, call, guard?.worktree ?? null, guard?.scripts);
+    // A HITL run is unguarded, but works in its task's worktree all the same.
+    const worktree = guard?.worktree ?? lifecycle.tasks[lifecycle.runs[runId]?.taskId ?? '']?.worktree?.path ?? null;
+    const parts = uncovered(rules, call, worktree, guard?.scripts);
     if (guard) trackScripts(call, guard.scripts, parts.length === 0);
     if (parts.length === 0) {
       return executor.permit(runId, call.id, { allow: true });
     }
     void dispatch({ type: 'permissionAsked', runId, call, parts, rulesProblem: error }).then((reply) => {
       if (reply.ok) return;
-      if (lifecycle.runs[runId]?.status === 'suspended') held.set(runId, [...(held.get(runId) ?? []), call]);
+      const run = lifecycle.runs[runId];
+      if (run?.status === 'suspended' || (run?.status === 'active' && run.permission)) held.set(runId, [...(held.get(runId) ?? []), call]);
       else executor.permit(runId, call.id, { allow: false, message: reply.reason });
     });
   }
@@ -2132,6 +2141,11 @@ type Guarded = {
   snapshot: RunSnapshot;
   scripts: Set<string>;
 };
+
+// What the executor hands a call the operator answered.
+function verdictOf(answer: PermissionAnswer): Verdict {
+  return 'deny' in answer ? { allow: false, message: `The operator denied this: ${answer.deny.trim()}` } : { allow: true };
+}
 
 // What closing a ticket says on it (ADR 0006): its work is on the task
 // branch, not yet on the base branch, and at L1 only on the operator's machine.
