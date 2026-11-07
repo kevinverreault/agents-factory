@@ -2,9 +2,10 @@
 // agent calls as `mcp__factory__<tool>`. Each reports a run event; the daemon
 // decides what it means. A HITL run gets `propose_advance`, `propose_handoff`
 // and `write_handoff_brief`, and an AFK run `report_findings` or
-// `write_pr_body` when its stage reports through them, and the delegation
-// tools: `spawn_child`, `list_children`, `cancel_child` and
-// `report_progress`, and `report_result` on a child's run (ADR 0009).
+// `write_pr_body` when its stage reports through them. Both get the
+// delegation tools (ADR 0009): `spawn_child`, `list_children` and
+// `cancel_child`, a HITL run spawning fire-and-forget children only; an AFK
+// run also `report_progress`, and `report_result` on a child's run.
 import { randomUUID } from 'node:crypto';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
@@ -20,7 +21,8 @@ export type FactoryTools = {
   allowed: string[];
 };
 
-export function hitlFactoryTools(runId: string, sink: RunSink): FactoryTools {
+// The HITL run's tools, with `spawn_child` only while its tree `spawns` deeper.
+export function hitlFactoryTools(runId: string, sink: RunSink, { spawns }: { spawns: boolean }): FactoryTools {
   const proposeAdvance = tool(
     'propose_advance',
     'Propose moving on to the next stage of the workflow, once this stage’s work is done. ' +
@@ -58,7 +60,8 @@ export function hitlFactoryTools(runId: string, sink: RunSink): FactoryTools {
       return { content: [{ type: 'text', text: 'The brief is on the operator’s handoff sheet. End your turn now.' }] };
     },
   );
-  return factoryTools([proposeAdvance, proposeHandoff, writeHandoffBrief]);
+  const [spawnChild, listChildren, cancelChild] = childTools(sink, 'HITL');
+  return factoryTools([proposeAdvance, proposeHandoff, writeHandoffBrief, ...(spawns ? [spawnChild] : []), listChildren, cancelChild]);
 }
 
 // The tools of what the AFK run reports, and the delegation tools: with
@@ -94,22 +97,47 @@ export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly 
   return factoryTools(tools);
 }
 
-// The tools an AFK run delegates with (ADR 0009). Spawning, listing and
-// cancelling are answered by the daemon; progress and results are run events.
-function delegationTools(runId: string, sink: RunSink, child: boolean, spawns: boolean): SdkTool[] {
+// How `spawn_child` explains waiting, by the mode of the run it is on.
+const WAITING = {
+  AFK:
+    'You wait for an awaited child (the default): keep doing what doesn’t depend on it, then end your turn, and the factory resumes you with each ' +
+    'awaited child’s report once they all reported, its branch ready for you to `git merge`. A fire-and-forget child’s code never joins your branch: ' +
+    'its output is its report and any issues it opens.',
+  HITL:
+    'From this conversation a child is always fire-and-forget: you don’t wait for it, its code never joins your branch, and its report reaches this ' +
+    'conversation as a factory note once it ends. Its output is its report and any issues it opens.',
+};
+
+// The tools both modes delegate with (ADR 0009), which the daemon answers:
+// spawning, listing and cancelling children.
+function childTools(sink: RunSink, mode: keyof typeof WAITING): [SdkTool, SdkTool, SdkTool] {
   const spawnChild = tool(
     'spawn_child',
     'Hand a self-contained piece of work to a child task: its own AFK run on its own branch, cut from your branch’s tip, which the operator can watch and steer. ' +
-      'The child doesn’t see this conversation, so the goal must stand on its own. You wait for an awaited child (the default): keep doing what doesn’t ' +
-      'depend on it, then end your turn, and the factory resumes you with each awaited child’s report once they all reported, its branch ready for you to ' +
-      '`git merge`. A fire-and-forget child’s code never joins your branch: its output is its report and any issues it opens. ' +
+      `The child doesn’t see this conversation, so the goal must stand on its own. ${WAITING[mode]} ` +
+      'For a research ticket, name it in `research`: the child works on `research/<name>`, cut from the base branch, and once it reports the factory ' +
+      'pushes that branch (only if its commits touch nothing but docs/research/**) and closes the ticket. ' +
       'Returns the child’s id, or why it can’t be spawned (such as a depth or fan-out limit): then do the work yourself.',
     {
       goal: z.string().min(1).describe('What the child must achieve, standing on its own.'),
       skill: z.string().optional().describe('A skill of the factory’s skill set to invoke on the goal.'),
       tier: z.enum(TIERS).optional().describe('The model tier: yours or a lower one. A higher one is lowered to yours.'),
       autonomy: z.enum(['L1', 'L2']).optional().describe('The autonomy level: yours or a lower one.'),
-      await: z.boolean().optional().describe('Whether you wait for its report and merge its branch (the default), or not: a fire-and-forget child (false).'),
+      await: z
+        .boolean()
+        .optional()
+        .describe(
+          mode === 'AFK'
+            ? 'Whether you wait for its report and merge its branch (the default), or not: a fire-and-forget child (false).'
+            : 'Leave it out: a HITL run spawns fire-and-forget children only.',
+        ),
+      research: z
+        .object({
+          ticket: z.string().min(1).describe('The research ticket it resolves, as owner/name#n or #n.'),
+          name: z.string().min(1).describe('Its branch’s name after research/, such as oauth-scopes.'),
+        })
+        .optional()
+        .describe('The research ticket a fire-and-forget research child resolves, at L1.'),
     },
     async (args, extra) => ask(sink, { type: 'spawnChild', toolUseId: toolUseIdOf(extra), ...args }),
   );
@@ -125,6 +153,13 @@ function delegationTools(runId: string, sink: RunSink, child: boolean, spawns: b
     { id: z.string().describe('The child task’s id, such as T7.') },
     async ({ id }) => ask(sink, { type: 'cancelChild', id }),
   );
+  return [spawnChild, listChildren, cancelChild];
+}
+
+// The tools an AFK run delegates with (ADR 0009): the child tools, and its
+// progress and results, which are run events.
+function delegationTools(runId: string, sink: RunSink, child: boolean, spawns: boolean): SdkTool[] {
+  const [spawnChild, listChildren, cancelChild] = childTools(sink, 'AFK');
   const reportProgress = tool(
     'report_progress',
     'Set a one-line status the operator sees on your task’s row, such as what you are working on now. It never reaches your parent.',

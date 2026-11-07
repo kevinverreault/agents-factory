@@ -87,7 +87,7 @@ export function agentSdkExecutor(): Executor {
       };
       const options: Options = {
         ...(start.mode === 'HITL'
-          ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink))
+          ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink, start))
           : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)), afkFactoryTools(start.runId, sink, start.reports, start))),
         cwd: start.cwd!,
         model: start.model,
