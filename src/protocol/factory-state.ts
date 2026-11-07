@@ -28,6 +28,7 @@ import {
   type Artifact,
   type Reopening,
   type Repository,
+  type Permission,
   type Run,
   type SkillsSetup,
   type TaskState,
@@ -91,6 +92,8 @@ export type TaskView = {
   // and the draft PR it opened.
   publishing: Publishing | null;
   pr: PullRequest | null;
+  // Whether the factory pushed the task branch since its last run started.
+  pushed: boolean;
   // While its cleanup, once it ended Done or Cancelled, hasn't finished, and why it last failed.
   cleanup: Cleanup | null;
   // Where its transcripts were archived once it ended.
@@ -102,7 +105,7 @@ export type HandoffView = Omit<HandoffSheet, 'asked'>;
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'interruption' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
-> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage };
+> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage; permission: Permission | null };
 
 // `app` is null until the daemon has checked the App's installation, and
 // `skills` until it has checked the skill set's setup.
@@ -171,6 +174,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       prBody: task.prBody ?? null,
       publishing: task.publishing ? { ...task.publishing } : null,
       pr: task.pr ? { ...task.pr } : null,
+      pushed: task.pushed ?? false,
       cleanup: task.cleanup ? { ...task.cleanup } : null,
       transcripts: task.transcripts ?? null,
     };
@@ -180,7 +184,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
     const { id, taskId, mode, autonomy, status, outcome, turn, queued, question, model, cli, skillSet, startedAt, endedAt } = run;
     // Runs stored before interruptions were flagged have none.
     const interruption = run.interruption ?? null;
-    // Runs stored before stages, proposals, max turns and tiers have none,
+    // Runs stored before stages, proposals, max turns, tiers and permission cards have none,
     // and proposals stored before handoffs proposed advancing.
     const stage = run.stage ?? null;
     const proposal = run.proposal ? { ...run.proposal, kind: run.proposal.kind ?? 'advance' } : null;
@@ -197,6 +201,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       turn,
       queued,
       question,
+      permission: run.permission ?? null,
       stage,
       proposal,
       tier,
