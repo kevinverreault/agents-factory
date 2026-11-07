@@ -222,13 +222,13 @@ describe('cancelling', () => {
 });
 
 describe('finishing a loop', () => {
-  test('f finishes the selected loop after its ticket, and its row says so', async () => {
+  test('F finishes the selected loop after its ticket, and its row says so', async () => {
     const looping = { ...task('T1', 'Implement the spec', 'running', 'Running'), loop: { ticket: 'acme/widgets#11', finishing: false, frontier: null, cleared: false } };
     const { app, connection } = await started(factoryState([looping]));
     await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Implement the spec\s+Running · sonnet · on acme\/widgets#11/));
-    expect(app.lastFrame()).toContain('f finish after this ticket');
+    expect(app.lastFrame()).toContain('F finish after this ticket');
 
-    await press(app, 'f');
+    await press(app, 'F');
 
     await eventually(() => expect(connection.sent).toEqual([{ type: 'finishLoop', taskId: 'T1' }]));
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'loop'], value: { ticket: 'acme/widgets#11', finishing: true } }]);
@@ -2566,7 +2566,7 @@ describe('the screens view', () => {
     await press(app, '?');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', '\\?']) expect(frame).toMatch(new RegExp(`^\\s*${key}\\s{2,}\\S`, 'm'));
+      for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', 'v', 'tab', 'f', 'F', ':', 'g', '\\?']) expect(frame).toMatch(new RegExp(`^\\s*${key}\\s{2,}\\S`, 'm'));
     });
     await press(app, '3', '\x1b');
     await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me about the docs/));
@@ -2709,5 +2709,237 @@ describe('a stalled work loop', () => {
     await press(app, '2');
 
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('has no map. 1 Dismiss a answer'));
+  });
+});
+
+describe('the condensed view', () => {
+  const failure = (taskId: string, requestId: string): FactoryState['attentionQueue'][number] => ({
+    kind: 'attention', recovery: null, deniedHosts: null, taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+  });
+  const billing = { ...task('T1', 'Grill me about invoices', 'queued', 'Ready for you', 'HITL'), groups: ['billing'] };
+  const failing = { ...task('T2', 'Implement the store', 'waiting', 'Needs you'), groups: ['billing', 'store'] };
+  const docs = { ...task('T3', 'Write the docs', 'running', 'Running'), groups: ['docs'] };
+  const condensed = () => factoryState([billing, failing, docs], [failure('T2', 'A2'), { kind: 'ready', taskId: 'T1' }]);
+
+  test('v toggles between the screens and the condensed view over the same state: sidebar, task tree and the selected task’s detail', async () => {
+    const { app } = await started(condensed());
+    await press(app, '\x1b[B', 'v');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).not.toMatch(/1 Tasks\s+2 Needs you/);
+      // The sidebar: Needs you, then each group with its tasks counted.
+      expect(frame).toMatch(/Needs you \(2\)/);
+      expect(frame).toMatch(/Groups/);
+      expect(frame).toMatch(/billing\s+2/);
+      expect(frame).toMatch(/docs\s+1/);
+      expect(frame).toMatch(/store\s+1/);
+      // The tree, the cursor still on T2, and T2's detail beside it.
+      expect(frame).toMatch(/›\s+T2\s+Implement the/);
+      expect(frame).toContain('Write the docs');
+      expect(frame).toContain('Output · T2');
+    });
+
+    await press(app, '\x1b[B');
+    await eventually(() => expect(app.lastFrame()).toContain('Output · T3'));
+
+    await press(app, 'v');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/1 Tasks\s+2 Needs you \(2\)/);
+      expect(frame).toMatch(/›\s+T3\s+Write the docs/);
+      expect(frame).not.toMatch(/^\s*Groups/m);
+    });
+  });
+
+  test('tab moves the focus from the tree to the detail, then the sidebar, the verbs acting on the focused pane’s task; f zooms the detail', async () => {
+    const { app, connection } = await started(condensed());
+    await press(app, 'v');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me/));
+
+    // The detail: the cursor leaves the tree, and x cancels the task it shows.
+    await press(app, '\t');
+    await eventually(() => expect(app.lastFrame()).not.toContain('›'));
+    await press(app, 'x');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T1' }]));
+
+    // The sidebar: its cursor on the first item, and the detail follows it.
+    await press(app, '\t');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/›\s+T2\s+failure/);
+      expect(frame).toMatch(/T2\s+Implement the store\s+│\s*$/m);
+    });
+    await press(app, '\x1b[B');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Ready for you/));
+
+    // Back to the tree, where the cursor was.
+    await press(app, '\t');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me/));
+
+    await press(app, 'f');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).not.toContain('Groups');
+      expect(frame).not.toContain('Write the docs');
+      expect(frame).toContain('Output · T1');
+    });
+    await press(app, 'f');
+    await eventually(() => expect(app.lastFrame()).toContain('Groups'));
+    await press(app, 'f', '\x1b');
+    await eventually(() => expect(app.lastFrame()).toContain('Groups'));
+  });
+
+  test('g picks a group and the task tree shows only its tasks, in both views; All tasks clears it and esc backs out', async () => {
+    const { app } = await started(condensed());
+
+    await press(app, 'g');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/Pick a group/);
+      expect(frame).toMatch(/›\s+All tasks/);
+      expect(frame).toMatch(/billing\s+2/);
+      expect(frame).toMatch(/docs\s+1/);
+    });
+    // Meanwhile the keys do nothing else.
+    await press(app, '3');
+    await press(app, '\x1b[B', '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).not.toContain('Pick a group');
+      expect(frame).toContain('1 Tasks');
+      expect(frame).toContain('Group billing');
+      expect(frame).toContain('Grill me about invoices');
+      expect(frame).toContain('Implement the store');
+      expect(frame).not.toContain('Write the docs');
+    });
+
+    await press(app, 'v');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/•\s+billing/);
+      expect(frame).not.toContain('Write the docs');
+    });
+
+    await press(app, 'g', '\x1b[B', '\x1b[B', '\x1b');
+    await eventually(() => expect(app.lastFrame()).not.toContain('Pick a group'));
+    expect(app.lastFrame()).not.toContain('Write the docs');
+
+    // The picker opens on the current group: All tasks is above it.
+    await press(app, 'g', '\x1b[A', '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Write the docs');
+      expect(frame).not.toContain('Group billing');
+    });
+  });
+
+  test('a group keeps a child’s parent in its tree, and a factory without groups says so', async () => {
+    const { app } = await started(factoryState([task('T1', 'Write the spec', 'running', 'Running'), { ...task('T2', 'Check the links', 'running', 'Running'), parent: 'T1', depth: 1, groups: ['links'] }, task('T3', 'Ship it', 'queued', 'Queued')]));
+    await press(app, 'g', '\x1b[B', '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Write the spec');
+      expect(frame).toContain('Check the links');
+      expect(frame).not.toContain('Ship it');
+    });
+
+    const { app: bare } = await started(factoryState([task('T1', 'Write the spec', 'running', 'Running')]));
+    await press(bare, 'g');
+    await eventually(() => expect(bare.lastFrame()).toContain('No task has a group yet.'));
+  });
+
+  test(': opens the command line: :task <id> drills into a task’s detail, :group <name> filters by it and :group alone clears it', async () => {
+    const { app, connection } = await started(condensed());
+
+    // Typed on the command line, keys do nothing else: x cancels nothing.
+    await press(app, ':', 't', 'a', 's', 'x', '\x7f', 'k', ' ', '3');
+    await eventually(() => expect(app.lastFrame()).toMatch(/^:task 3/m));
+    expect(connection.sent).toEqual([]);
+    await press(app, '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Tasks › T3 Write the docs');
+      expect(frame).not.toMatch(/^:/m);
+    });
+
+    await press(app, ':');
+    for (const key of 'group billing') await press(app, key);
+    await press(app, '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Group billing');
+      expect(frame).not.toContain('Tasks ›');
+      expect(frame).not.toContain('Write the docs');
+    });
+
+    await press(app, ':');
+    for (const key of 'group') await press(app, key);
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Write the docs'));
+    expect(app.lastFrame()).not.toContain('Group billing');
+
+    // esc sets the line aside.
+    await press(app, ':', 'q', '\x1b');
+    await eventually(() => expect(app.lastFrame()).not.toMatch(/^:q/m));
+    // The cursor stayed on the task :task jumped to.
+    await press(app, 'x');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T3' }]));
+  });
+
+  test('the command line says what it can’t do: an unknown command, a task or a group that isn’t there', async () => {
+    const { app } = await started(condensed());
+    const run = async (line: string) => {
+      await press(app, ':');
+      for (const key of line) await press(app, key);
+      await press(app, '\r');
+    };
+
+    await run('frobnicate');
+    await eventually(() => expect(app.lastFrame()).toContain('Unknown command :frobnicate. Try :task <id> or :group <name>.'));
+    await run('task 9');
+    await eventually(() => expect(app.lastFrame()).toContain('No task T9.'));
+    await run('group payroll');
+    await eventually(() => expect(app.lastFrame()).toContain('No group payroll.'));
+    await run('task t2');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T2 Implement the store'));
+    expect(app.lastFrame()).not.toContain('No group payroll.');
+  });
+
+  test('in the condensed view :task focuses the detail on the task, the tree’s cursor on it', async () => {
+    const { app } = await started(condensed());
+    await press(app, 'v', ':');
+    for (const key of 'task 3') await press(app, key);
+    await press(app, '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/T3\s+Write the docs\s+│\s*$/m);
+      expect(frame).not.toContain('›');
+    });
+    await press(app, '\t', '\t');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T3\s+Write the docs/));
+  });
+
+  test('the group picker takes keys typed in one burst, opens on the current group, and shows the Tasks screen it filters', async () => {
+    const { app } = await started(condensed());
+    await press(app, '3');
+    app.stdin.write('g');
+    app.stdin.write('\x1b[B');
+    app.stdin.write('\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Group billing');
+      expect(frame).toMatch(/›\s+T1\s+Grill me about invoices/);
+      expect(frame).not.toContain('Write the docs');
+    });
+    expect(app.lastFrame()).not.toContain('Tasks ›');
+
+    await press(app, 'g');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+billing\s+2/));
+  });
+
+  test('with no task to show, tab skips the detail', async () => {
+    const { app } = await started(factoryState([], [failure('T2', 'A2')]));
+    await press(app, 'v', '\t');
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T2\s+failure/));
   });
 });
