@@ -3,6 +3,7 @@
 // global worktree root.
 import { join } from 'node:path';
 import { GitError, type Git } from '../git/git.ts';
+import { researchBranch } from '../github/research-branch.ts';
 import type { Repository, TaskWorktree } from '../lifecycle/lifecycle.ts';
 
 const TITLE_LENGTH = 72;
@@ -28,6 +29,11 @@ export function taskWorktree(root: string, repository: Repository, taskId: strin
 // `<parent branch>--c<n>`, in its own worktree beside the task worktrees.
 export function childWorktree(root: string, repository: Repository, parent: TaskWorktree, childId: string, n: number): TaskWorktree {
   return { branch: `${parent.branch}--c${n}`, path: worktreePath(root, repository, childId) };
+}
+
+// A research child's worktree (ADR 0007): its own path, on `research/<name>`.
+export function researchWorktree(root: string, repository: Repository, childId: string, name: string): TaskWorktree {
+  return { branch: researchBranch(name), path: worktreePath(root, repository, childId) };
 }
 
 // Where task `taskId` of `repository` has its worktree: `<root>/<owner>-<name>/<id>`.

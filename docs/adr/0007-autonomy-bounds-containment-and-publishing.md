@@ -62,7 +62,7 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
 
   `pushInsteadOf` is ignored when a remote has an explicit `pushurl`, which is why the handoff sheet and the check after each run look for one.
 
-- **Research children push at L1, narrowly.** A wayfinder research child runs at L1, because it needs open web access, which L2's egress allowlist would block. Its `research/<name>` branch is the one exception to "no code leaves this machine". The `push` action pushes it only when its commits touch nothing but `docs/research/**`, and never the task branch. Anything else raises an attention request.
+- **Research children push at L1, narrowly.** A wayfinder research child runs at L1, because it needs open web access, which L2's egress allowlist would block. Its `research/<name>` branch is the one exception to "no code leaves this machine". The `push` action pushes it only when its commits touch nothing but `docs/research/**`, and never the task branch. Anything else raises an attention request. The GitHub port enforces the path rule itself, next to its refspec guard. Once the branch is pushed, the factory closes the research ticket with a comment pointing at the branch. A child that committed nothing only has its ticket closed.
 
 - **L1 tasks reach a PR through the operator.** An L1 root task in review offers **Push & open draft PR**. The operator's click authorizes the `push` and `open-pr` actions as the bot, without raising the level or starting a run.
 

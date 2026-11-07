@@ -153,34 +153,18 @@ describe('the HITL idle park', () => {
   });
 });
 
-// Until restart reconciliation parks every live HITL run (ADR 0002, #61),
-// the run stays live across a restart, and only its deadline parks it.
-describe('deadlines across a daemon restart', () => {
-  test('a daemon restart keeps a pending deadline, which fires when it falls due', async () => {
+// No run outlives its daemon (ADR 0002): a restart parks a live HITL run
+// when the daemon stops, without waiting for its deadline.
+describe('a daemon restart', () => {
+  test('parks a HITL run waiting on the operator as the daemon stops, and its task is Ready for you', async () => {
     const { factory } = await waitingOnTheOperator();
     factory.clock.advance(minutes(10));
+    const stoppedAt = factory.clock.now();
 
     await factory.restart();
-    const operator = await factory.attach();
-    const tui = watch(operator);
-    factory.clock.advance(minutes(19));
-    await settled(operator);
-    expect(tui.state().runs.R1).toMatchObject({ status: 'active', outcome: null });
 
-    factory.clock.advance(minutes(1.5));
-    expect((await tui.until((state) => state.runs.R1?.status === 'ended')).runs.R1).toMatchObject({ outcome: 'parked' });
-  });
-
-  test('a deadline that passed while the daemon was down fires as soon as it starts', async () => {
-    const { factory } = await waitingOnTheOperator();
-    await factory.daemon().stop();
-    factory.clock.advance(minutes(45));
-
-    await factory.startDaemon();
-    const tui = watch(await factory.attach());
-
-    const state = await tui.until((state) => state.runs.R1?.status === 'ended');
-    expect(state.runs.R1).toMatchObject({ outcome: 'parked', endedAt: factory.clock.now() });
-    expect(state.tasks.T1).toMatchObject({ label: 'Ready for you' });
+    const state = await watch(await factory.attach()).until(() => true);
+    expect(state.runs.R1).toMatchObject({ status: 'ended', outcome: 'parked', endedAt: stoppedAt });
+    expect(state.tasks.T1).toMatchObject({ label: 'Ready for you', liveRunId: null });
   });
 });

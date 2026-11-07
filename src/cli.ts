@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // agents-factory: with no arguments, opens the TUI (starting the daemon if
-// none is running). `daemon status` and `daemon stop` inspect and stop it;
+// none is running, and offering to restart one of another version).
+// `daemon status` and `daemon stop` inspect and stop it;
 // `repo add`, `repo move` and `repo remove` register, re-point and unregister
 // the operator's clones; `skills update` and `skills status` move and inspect
 // the skill set pin; `models update` moves each model tier to the model this
@@ -12,8 +13,8 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createElement as h } from 'react';
 import { render } from 'ink';
-import { connectOrStart } from './daemon/auto-start.ts';
-import { factoryPaths } from './daemon/paths.ts';
+import { connectOrStart, restartDaemon, VersionSkew } from './daemon/auto-start.ts';
+import { factoryPaths, type FactoryPaths } from './daemon/paths.ts';
 import { setUpGitHub } from './github/setup-command.ts';
 import { relayHook } from './hooks/relay.ts';
 import { modelsCommand } from './models/models-command.ts';
@@ -23,6 +24,7 @@ import type { RepositoryView } from './protocol/factory-state.ts';
 import type { Command, DaemonStatus } from './protocol/protocol.ts';
 import { skillsCommand } from './skills/skills-command.ts';
 import { App } from './tui/app.ts';
+import { RestartPrompt } from './tui/restart-prompt.ts';
 
 const USAGE = [
   'Usage: agents-factory',
@@ -41,7 +43,8 @@ const SETUP_TIMEOUT_MS = 60 * 60_000;
 async function main(args: string[]): Promise<number> {
   const paths = factoryPaths();
   if (args.length === 0) {
-    const connection = await connectOrStart(paths);
+    const connection = await attachTui(paths);
+    if (!connection) return 0;
     // Closing the TUI closes only this connection; the daemon keeps running.
     await render(h(App, { connection, cwd: process.cwd() })).waitUntilExit();
     connection.close();
@@ -117,6 +120,31 @@ async function main(args: string[]): Promise<number> {
   return 2;
 }
 
+// The TUI's connection to its daemon, started if none runs. A daemon of
+// another version is restarted first, now or once idle, as the operator
+// chooses (ADR 0002); null if they quit instead.
+async function attachTui(paths: FactoryPaths): Promise<FactoryConnection | null> {
+  try {
+    return await connectOrStart(paths);
+  } catch (error) {
+    if (!(error instanceof VersionSkew)) throw error;
+    let attached: FactoryConnection | null = null;
+    const prompt = render(
+      h(RestartPrompt, {
+        daemonVersion: error.daemonVersion,
+        restart: (when, onWaiting) => restartDaemon(error, when, paths, undefined, { onWaiting }),
+        onAttached: (connection) => {
+          attached = connection;
+          prompt.unmount();
+        },
+        onQuit: () => prompt.unmount(),
+      }),
+    );
+    await prompt.waitUntilExit();
+    return attached;
+  }
+}
+
 // `repo add [path] [--base-branch b] [--default-preset p]`,
 // `repo move <new-path>` or `repo remove <owner/name>`, or null when the
 // arguments don't fit.
@@ -175,6 +203,7 @@ function describe(status: DaemonStatus): string {
     `The daemon is running (pid ${status.pid}, protocol ${status.protocolVersion}), up since ${new Date(status.startedAt).toISOString()}.`,
     `${plural(status.attachedTuis, 'TUI')} attached, ${plural(status.activeRuns, 'active run')}, ` +
       `${plural(status.suspendedRuns, 'suspended run')}, ${plural(status.queuedTasks, 'queued task')}.`,
+    ...(status.restartsWhenIdle ? ['It starts no new run, and restarts once no run is active.'] : []),
   ].join('\n');
 }
 

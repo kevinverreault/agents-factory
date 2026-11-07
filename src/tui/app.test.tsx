@@ -71,6 +71,7 @@ describe('the bare TUI', () => {
         [
           {
             kind: 'attention',
+            recovery: null,
             taskId: 'T2',
             repo: 'acme/widgets',
             requestId: 'A1',
@@ -237,6 +238,7 @@ describe('finishing a loop', () => {
 describe('the task tree', () => {
   const failure = (taskId: string): FactoryState['attentionQueue'][number] => ({
     kind: 'attention',
+    recovery: null,
     taskId,
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -431,6 +433,7 @@ describe('repositories', () => {
         [
           {
             kind: 'attention',
+            recovery: null,
             taskId: null,
             repo: 'acme/widgets',
             requestId: 'A1',
@@ -448,6 +451,31 @@ describe('repositories', () => {
     await settle();
 
     await eventually(() => expect(app.lastFrame()).toMatch(/acme\/widgets\s+repo-missing: The clone of acme\/widgets is no longer at/));
+  });
+
+  test('the Factory recovered report shows in Needs you under that name, and 1 on its sheet dismisses it', async () => {
+    const connection = new FakeConnection();
+    const report = {
+      kind: 'attention' as const,
+      taskId: null,
+      repo: null,
+      requestId: 'A3',
+      attention: 'recovery-report' as const,
+      holdsRun: false,
+      reason: 'The factory restarted after it stopped uncleanly. Requeued T1 (R1).',
+      question: null,
+      permission: null,
+      recovery: { requeued: [{ taskId: 'T1', runId: 'R1' }], parked: [], failed: [] },
+    };
+    const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running')], [report]), { connection });
+
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› Factory recovered The factory restarted after it stopped uncleanly. Requeued T1 (R1).'));
+    await press(app, '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('── Factory recovered ── The factory restarted after it stopped uncleanly. Requeued T1 (R1). 1 Dismiss'));
+    await press(app, '1');
+
+    await eventually(() => expect(connection.sent).toContainEqual({ type: 'dismiss', requestId: 'A3' }));
   });
 });
 
@@ -483,6 +511,7 @@ describe('launching and conversing', () => {
     autonomy: null,
     status: 'active' as const,
     outcome: null,
+    interruption: null,
     turn: 'agent' as const,
     queued: [] as string[],
     question: null,
@@ -955,6 +984,7 @@ describe('launching and conversing', () => {
   const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
   const failure = {
     kind: 'attention' as const,
+    recovery: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -1343,6 +1373,7 @@ describe('answering from Needs you', () => {
   };
   const asked = {
     kind: 'attention' as const,
+    recovery: null,
     taskId: 'T1',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -1354,6 +1385,7 @@ describe('answering from Needs you', () => {
   };
   const failure = {
     kind: 'attention' as const,
+    recovery: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A2',
@@ -1775,6 +1807,7 @@ describe('answering in the conversation', () => {
     autonomy: 'L1' as const,
     status: 'suspended' as const,
     outcome: null,
+    interruption: null,
     turn: 'agent' as const,
     queued: [] as string[],
     question: null,
@@ -1793,6 +1826,7 @@ describe('answering in the conversation', () => {
   };
   const permission = {
     kind: 'attention' as const,
+    recovery: null,
     taskId: 'T1',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -1991,6 +2025,7 @@ describe('taking over with c', () => {
     autonomy: 'L1' as const,
     status: 'active' as const,
     outcome: null,
+    interruption: null,
     turn: 'agent' as const,
     queued: [] as string[],
     question: null,
@@ -2009,6 +2044,7 @@ describe('taking over with c', () => {
   };
   const permission = {
     kind: 'attention' as const,
+    recovery: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -2101,7 +2137,7 @@ describe('the conversation of an AFK task that is no longer live', () => {
     const connection = new FakeConnection();
     const reviewed = task('T1', 'Implement acme/widgets#12', 'in-review', 'In review');
     const ended = {
-      id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const,
+      id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const, interruption: null,
       turn: 'agent' as const, queued: [] as string[], question: null, permission: null, stage: 'implement', ticket: null, proposal: null,
       tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {},
     };
@@ -2121,7 +2157,7 @@ describe('usage', () => {
   const usage = (input: number, output: number, cacheRead = 0, cacheWrite = 0, cost = 0) => ({ input, output, cacheRead, cacheWrite, cost });
   function metered(id: string, taskId: string, stage: string | null, ticket: string | null, used: RunView['usage']): RunView {
     return {
-      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', turn: 'agent', queued: [], question: null, permission: null, stage, ticket,
+      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage, ticket,
       proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used,
     };
   }
@@ -2184,7 +2220,7 @@ describe('the screens view', () => {
   const SONNET = 'claude-sonnet-5-5';
   function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
     return {
-      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
+      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
       ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, ...fields,
     };
   }
@@ -2449,7 +2485,7 @@ describe('the screens view', () => {
 
   test('a answers the selected task’s request: from the Tasks screen or a task’s detail it goes to Needs you, the digits on that request', async () => {
     const failure = (taskId: string, requestId: string): FactoryState['attentionQueue'][number] => ({
-      kind: 'attention', taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+      kind: 'attention', recovery: null, taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
     });
     const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
     const { app, connection } = await started(factoryState([{ ...grilling, state: 'waiting', label: 'Needs you' }, failing], [failure('T1', 'A1'), failure('T2', 'A2')]));
@@ -2590,7 +2626,7 @@ describe('the wayfinder work loop', () => {
     const connection = new FakeConnection();
     const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', finishing: false, frontier: null, cleared: false } };
     const run = {
-      id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, turn: 'operator' as const, queued: [] as string[],
+      id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, interruption: null, turn: 'operator' as const, queued: [] as string[],
       question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {},
     };
     const { app } = await started({ ...factoryState([working]), runs: { R1: run } }, { connection });
@@ -2610,7 +2646,7 @@ describe('a stalled work loop', () => {
     const connection = new FakeConnection();
     const stalled: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: false } };
     const blocked = {
-      kind: 'attention' as const, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      kind: 'attention' as const, recovery: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
       reason: 'work’s map has no frontier: every open ticket is blocked (acme/widgets#31 by acme/widgets#39).', question: null, permission: null,
     };
     const { app } = await started(factoryState([stalled], [blocked]), { connection });
@@ -2626,7 +2662,7 @@ describe('a stalled work loop', () => {
     const connection = new FakeConnection();
     const blockedNext: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: true } };
     const blocked = {
-      kind: 'attention' as const, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      kind: 'attention' as const, recovery: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
       reason: 'spec can’t start: its args need {{artifacts.map}}, and T1 has no map.', question: null, permission: null,
     };
     const { app } = await started(factoryState([blockedNext], [blocked]), { connection });

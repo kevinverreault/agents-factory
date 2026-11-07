@@ -79,7 +79,17 @@ export type RunSink = {
 // What an agent asks of the factory about its children. `toolUseId` is the
 // spawning call's, so a replay finds the child it spawned.
 export type Delegation =
-  | { type: 'spawnChild'; toolUseId: string; goal: string; skill?: string; tier?: Tier; autonomy?: AutonomyLevel; await?: boolean }
+  | {
+      type: 'spawnChild';
+      toolUseId: string;
+      goal: string;
+      skill?: string;
+      tier?: Tier;
+      autonomy?: AutonomyLevel;
+      await?: boolean;
+      // The research ticket a research child resolves, and its branch's name after `research/`.
+      research?: { ticket: string; name: string };
+    }
   | { type: 'listChildren' }
   | { type: 'cancelChild'; id: string };
 export type DelegationReply = { ok: true; text: string } | { ok: false; error: string };

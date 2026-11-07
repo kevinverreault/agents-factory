@@ -9,7 +9,7 @@ import { GITHUB_APP_SECRET, startDaemon, type Daemon, type DaemonOptions } from 
 import { factoryPaths, type FactoryPaths } from '../daemon/paths.ts';
 import { routingTable } from '../models/routing-table.ts';
 import { connect, type FactoryConnection } from '../protocol/client.ts';
-import { openStore } from '../store/store.ts';
+import { openStore, type Store } from '../store/store.ts';
 import { FakeClock } from './fake-clock.ts';
 import { FakeExecutor } from './fake-executor.ts';
 import { FakeGit } from './fake-git.ts';
@@ -36,6 +36,10 @@ export type TestFactory = {
   startDaemon(overrides?: Partial<DaemonOptions>): Promise<Daemon>;
   // Stops the daemon and starts a new one over the same store.
   restart(): Promise<void>;
+  // The daemon dies without a graceful stop: nothing it does from now on
+  // reaches the store, which stays as the crash left it, with no
+  // clean-shutdown marker.
+  crash(): Promise<void>;
   dispose(): Promise<void>;
 };
 
@@ -55,16 +59,27 @@ export async function startTestFactory({
   if (!withoutApp) await secrets.write(GITHUB_APP_SECRET, JSON.stringify(await github.createApp(github.manifestCode())));
   const connections: FactoryConnection[] = [];
   const daemons: Daemon[] = [];
+  // Cuts each daemon off from its store, as a crash would: nothing it writes after that lands.
+  const crashes = new Map<Daemon, () => void>();
 
   async function start(more: Partial<DaemonOptions> = {}): Promise<Daemon> {
-    const store = openStore(paths.storePath);
+    const opened = openStore(paths.storePath);
+    let dead = false;
+    const store: Store = {
+      loadLifecycle: () => opened.loadLifecycle(),
+      saveLifecycle: (lifecycle) => void (dead || opened.saveLifecycle(lifecycle)),
+      takeCleanShutdown: () => opened.takeCleanShutdown(),
+      markCleanShutdown: () => void (dead || opened.markCleanShutdown()),
+      close: () => opened.close(),
+    };
     try {
       const table = routingTable(paths.modelsTable);
       const daemon = await startDaemon({ ...paths, store, clock, executor, git, github, secrets, skillSets, routingTable: table, ...overrides, ...more });
       daemons.push(daemon);
+      crashes.set(daemon, () => (dead = true));
       return daemon;
     } catch (error) {
-      store.close();
+      opened.close();
       throw error;
     }
   }
@@ -98,6 +113,11 @@ export async function startTestFactory({
     async restart() {
       await daemons.at(-1)!.stop();
       await start();
+    },
+    async crash() {
+      const daemon = daemons.at(-1)!;
+      crashes.get(daemon)!();
+      await daemon.stop();
     },
     async dispose() {
       for (const connection of connections) connection.close();

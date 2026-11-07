@@ -103,6 +103,7 @@ describe('an AFK question', () => {
         reason: 'Which identity provider times out?',
         question,
         permission: null,
+        recovery: null,
       },
     ]);
   });
@@ -141,10 +142,9 @@ describe('an AFK question', () => {
   });
 });
 
-// Until restart reconciliation parks every suspended run (ADR 0003, #61), the
-// run stays suspended across a restart, and only its deadline parks it.
+// A daemon restart parks a suspended run at once (ADR 0003): see recovery.test.ts.
 describe('a request that waits too long', () => {
-  test('parks its run after an hour, a deadline that outlasts a daemon restart, and stays in Needs you', async () => {
+  test('parks its run after an hour, and stays in Needs you', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(afk('Fix the login bug'));
     factory.executor.report('R1', { type: 'attentionRaised', kind: 'question', question });
@@ -155,12 +155,9 @@ describe('a request that waits too long', () => {
     expect(tui.state().runs.R1?.status).toBe('suspended');
     expect(factory.executor.stopped).toEqual([]);
 
-    await factory.restart();
-    const again = await factory.attach();
-    const reattached = watch(again);
     factory.clock.advance(minutes(1.5));
 
-    const state = await reattached.until((state) => state.runs.R1?.status === 'ended');
+    const state = await tui.until((state) => state.runs.R1?.status === 'ended');
     expect(state.runs.R1?.outcome).toBe('parked');
     expect(state.tasks.T1).toMatchObject({ label: 'Needs you', liveRunId: null });
     expect(state.attentionQueue).toMatchObject([{ attention: 'question', holdsRun: false, question }]);

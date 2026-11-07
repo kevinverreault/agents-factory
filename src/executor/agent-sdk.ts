@@ -90,7 +90,7 @@ export function agentSdkExecutor(): Executor {
       const canUseTool = askTheOperator(start.runId, spawning, gateCall(spawning));
       const options: Options = {
         ...(start.mode === 'HITL'
-          ? hitlOptions(start.credential, canUseTool, hitlFactoryTools(start.runId, sink))
+          ? hitlOptions(start.credential, canUseTool, hitlFactoryTools(start.runId, sink, start))
           : l1Options(start, canUseTool, afkFactoryTools(start.runId, sink, start.reports, start))),
         cwd: start.cwd!,
         model: start.model,

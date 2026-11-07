@@ -583,6 +583,7 @@ describe('a tool call no rule covers', () => {
           rule: 'Bash(npm publish)',
           proposed: [{ part: 'npm publish', rule: 'Bash(npm publish *)' }],
         },
+        recovery: null,
       },
     ]);
     expect(factory.executor.verdicts('R1')).toEqual({});

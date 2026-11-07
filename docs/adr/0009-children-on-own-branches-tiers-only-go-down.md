@@ -35,7 +35,7 @@ Agents in a run can hand work to a **child task** through the factory's MCP tool
 
 - **Children work on their own branch, and the parent merges it.**
   - Every child gets a branch `<task-branch>--c<n>` and its own worktree, created even if it may not write code.
-  - The branch is cut from the parent's tip at spawn. An L2 parent's commits are bundled out first.
+  - The branch is cut from the parent's tip at spawn. An L2 parent's commits are bundled out first. A **research child**'s `research/<name>` is cut from the fetched base branch instead, so none of the parent's unpushed commits go out with it when the factory pushes it (ADR 0007).
   - An L2 child clones its branch into its own container and bundles back after each run.
   - Child branches are never pushed.
   - Before an awaited parent resumes, the factory fetches each child branch into the parent's worktree or container. The parent run merges it with a local `git merge`, which passes the ancestor check after the run (ADR 0007).

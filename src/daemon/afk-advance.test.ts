@@ -154,6 +154,7 @@ describe('when the next stage can’t start', () => {
         reason: 'draft’s exit, artifact:spec, doesn’t hold: T1 has no spec yet.',
         question: null,
         permission: null,
+        recovery: null,
       },
     ]);
     expect(factory.executor.started).toHaveLength(1);

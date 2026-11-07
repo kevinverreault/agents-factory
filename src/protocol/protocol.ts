@@ -9,9 +9,15 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 20;
+export const PROTOCOL_VERSION = 21;
 
-export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' };
+// The daemon's own verbs, which a client of another protocol version may
+// still send (ADR 0002): their shapes never change. `daemon.stop` stops it
+// gracefully at once; `daemon.restartWhenIdle` has it start no new run and
+// stop gracefully once no run is active, replying with how many are now. A
+// daemon older than it replies with no count.
+export type DaemonCommand = { type: 'daemon.status' } | { type: 'daemon.stop' } | { type: 'daemon.restartWhenIdle' };
+export type RestartWhenIdle = { activeRuns: number };
 // Repository verbs the daemon answers by reading the clone first. `path` is
 // absolute: the daemon's working directory is not the client's.
 export type RepoCommand =
@@ -103,6 +109,8 @@ export type DaemonStatus = {
   activeRuns: number;
   suspendedRuns: number;
   queuedTasks: number;
+  // Whether it stops once no run is active, to be restarted (`daemon.restartWhenIdle`).
+  restartsWhenIdle: boolean;
 };
 
 // A refusal with `confirm` asks the operator whether to go ahead anyway, as
