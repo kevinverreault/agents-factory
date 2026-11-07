@@ -2,7 +2,6 @@ import {
   GitHubError,
   deleteRefusal,
   goneHead,
-  outsideResearch,
   pushRefusal,
   workflowFiles,
   type BranchPush,
@@ -16,6 +15,7 @@ import {
   type PrState,
   type PullRequest,
 } from '../github/github.ts';
+import { outsideResearch } from '../github/research-branch.ts';
 import type { FakeClock } from './fake-clock.ts';
 import type { FakeGit } from './fake-git.ts';
 

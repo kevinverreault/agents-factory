@@ -214,8 +214,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // tried again once the operator answers, or by the next daemon.
   const publishesStarted = new Set<string>();
   const publishesInFlight = new Set<string>();
-  // The research children's steps on GitHub under way, as `<task> <step>`.
+  // The research children's steps on GitHub this daemon has started, and
+  // those still under way, as `<task> <step>`. One that failed is tried
+  // again once the operator answers, or by the next daemon.
+  const researchStarted = new Set<string>();
   const researchInFlight = new Set<string>();
+  // The HITL tasks whose held factory notes are being delivered.
+  const notesInFlight = new Set<string>();
   // The In review roots whose PR this daemon is reading on GitHub, and when
   // it next reads them all.
   const prReadsInFlight = new Set<string>();
@@ -919,12 +924,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await checkEverySetup();
     // A loop the daemon stopped between iterations carries on, and so do a
     // cleanup, a cancelled task's reopening and a Push & open draft PR it
-    // didn't finish, and a research child's publishing.
+    // didn't finish, and a research child's publishing. Factory notes a
+    // conversation on the operator's turn holds are delivered.
     driveLoops();
     driveCleanups();
     driveReopens();
     drivePublishes();
     driveResearch();
+    driveNotes();
   });
 
   // Deadlines are wall-clock times persisted in the store (ADR 0003), never
@@ -1046,8 +1053,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Takes each research child that reported its next step on GitHub (ADR
   // 0007): once per daemon, and again once the operator answers the request
   // a failure raised. Its outcome goes through the Lifecycle like any other event.
-  // The research steps this daemon has started, as `<task> <step>`.
-  const researchStarted = new Set<string>();
   function driveResearch(): void {
     for (const task of Object.values(lifecycle.tasks)) {
       const research = task.child?.research;
@@ -1083,8 +1088,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const { token } = await appToken(task.repo, PUSH);
       const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch });
       if ('outsideResearch' in pushed) return { type: 'researchPushRefused', taskId: task.id, paths: pushed.outsideResearch };
-      if ('workflowFiles' in pushed) return { type: 'researchPushRefused', taskId: task.id, paths: pushed.workflowFiles };
-      return { type: 'researchPushed', taskId: task.id, commit: pushed.pushed };
+      // Workflow files are outside docs/research/, so the port refuses them as that first.
+      if ('workflowFiles' in pushed) return failed(`${task.worktree!.branch} changes workflow files (${pushed.workflowFiles.join(', ')}), which the factory’s App may not push.`);
+      return { type: 'researchPushed', taskId: task.id };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
       return failed(error.message);
@@ -1106,7 +1112,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // Delivers the factory notes each HITL task holds once its live run is on
   // the operator's turn (ADR 0009): `notesDelivered` sends them.
-  const notesInFlight = new Set<string>();
   function driveNotes(): void {
     for (const task of Object.values(lifecycle.tasks)) {
       if (stopping || !task.factoryNotes?.length || notesInFlight.has(task.id)) continue;
@@ -1609,8 +1614,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (replayed) return { ok: true, text: spawnedText(replayed) };
       const goal = typeof request.goal === 'string' ? request.goal : '';
       const parentTask = lifecycle.tasks[lifecycle.runs[runId]?.taskId ?? ''];
+      if (!parentTask) return { ok: false, error: `There is no run ${runId}.` };
       let research: ChildSpawned['research'] = null;
-      if (request.research && parentTask) {
+      if (request.research) {
         const refs = issueRefs([String(request.research.ticket).trim()], parentTask.repo);
         if ('error' in refs) return { ok: false, error: refs.error };
         research = { ticket: refs.issues[0]!, name: String(request.research.name).trim() };

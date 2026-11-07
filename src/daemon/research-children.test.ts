@@ -169,6 +169,24 @@ describe('a HITL parent hears its child’s report as a factory note', () => {
     expect(next.firstMessage).toContain('Sign-in uses the device flow.');
   });
 
+  test('mid-turn, held through a run that fails before its turn ends, into the next run’s opening', async () => {
+    const { factory, operator, tui } = await withChild();
+
+    childReports(factory);
+    await tui.until((state) => state.tasks.T2?.label === 'Done');
+    factory.executor.report('R1', { type: 'runFailed', reason: 'The CLI crashed.' });
+    await tui.until((state) => state.runs.R1?.status === 'ended');
+    // Answering the failure request makes it Ready for you again.
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+    expect(await operator.send({ type: 'open', taskId: 'T1' })).toEqual({ ok: true });
+
+    await tui.until((state) => !!state.tasks.T1?.liveRunId);
+    const next = factory.executor.started.find((run) => run.taskId === 'T1' && run.runId !== 'R1')!;
+    expect(next.firstMessage).toContain('## Factory note');
+    expect(next.firstMessage).toContain('Sign-in uses the device flow.');
+    expect(notesTo(factory, 'R1')).toHaveLength(0);
+  });
+
   test('a cancelled child’s note says so', async () => {
     const { factory, operator, tui } = await withChild();
     factory.executor.report('R1', { type: 'turnEnded' });
@@ -227,10 +245,27 @@ describe('a research child that reports', () => {
     expect(factory.github.issueState(TICKET).open).toBe(true);
     expect(asked.tasks.T2!.label).toBe('Done');
     // The conversation that spawned it hears so, after the report's own note.
-    expect(asked.runs.R1!.queued).toHaveLength(2);
-    expect(asked.runs.R1!.queued[1]).toMatch(/^## Factory note/);
-    expect(asked.runs.R1!.queued[1]).toContain('src/sign-in.ts');
-    expect(asked.runs.R1!.queued[1]).toContain(`${TICKET} stays open`);
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await tui.until(() => factory.executor.sent.some((sent) => sent.runId === 'R1'));
+    const [note] = factory.executor.sent.filter((sent) => sent.runId === 'R1');
+    expect(note!.text.split('## Factory note')).toHaveLength(3);
+    expect(note!.text).toContain('didn’t push research/oauth-scopes');
+    expect(note!.text).toContain(`${TICKET} stays open`);
+  });
+
+  test('refused again after the operator answers, raises a request again, but its parent hears of the refusal once', async () => {
+    const { factory, operator, tui } = await researched(['docs/research/oauth-scopes.md', 'src/sign-in.ts']);
+    await tui.until((state) => state.attentionQueue.some((item) => 'attention' in item));
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await tui.until(() => factory.executor.sent.some((sent) => sent.runId === 'R1'));
+
+    expect(await operator.send({ type: 'answer', taskId: 'T2' })).toEqual({ ok: true });
+
+    await tui.until((state) => state.attentionQueue.some((item) => 'attention' in item));
+    expect(factory.github.pushes).toEqual([]);
+    const refusals = factory.executor.sent.filter((sent) => sent.runId === 'R1' && sent.text.includes('didn’t push'));
+    expect(refusals).toHaveLength(1);
+    expect(tui.state().tasks.T1!.liveRunId).toBe('R1');
   });
 
   test('with no findings committed, has its ticket closed with its report, and nothing pushed', async () => {

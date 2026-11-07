@@ -9,6 +9,7 @@
 import { execFile } from 'node:child_process';
 import { sign } from 'node:crypto';
 import { issueRef } from '../artifacts/capture.ts';
+import { isResearchBranch, outsideResearch } from './research-branch.ts';
 
 // The factory identity's App as the daemon keeps it, private key included, in
 // the credential store.
@@ -125,7 +126,7 @@ export class GitHubError extends Error {}
 // 0007) and nothing else, so a token that could write any branch never
 // writes the base branch. Why `branch` can't be pushed, or null.
 export function pushRefusal(branch: string): string | null {
-  return TASK_BRANCH.test(branch) || RESEARCH_BRANCH.test(branch)
+  return TASK_BRANCH.test(branch) || isResearchBranch(branch)
     ? null
     : `The factory pushes only task branches (factory/…) and research branches (research/…), not ${branch}.`;
 }
@@ -137,16 +138,8 @@ export function deleteRefusal(branch: string): string | null {
   return TASK_BRANCH.test(branch) ? null : `The factory deletes only task branches (factory/…) on GitHub, not ${branch}.`;
 }
 
-// A task branch, `factory/<id>-<slug>`, and a research branch, `research/<name>`.
-const TASK_BRANCH =/^factory\/[\w.-]+$/;
-const RESEARCH_BRANCH = /^research\/[\w.-]+$/;
-
-// The research branch's push is the one exception to "no code leaves this
-// machine" (ADR 0007): the paths its outgoing commits change outside
-// `docs/research/`, which block it. None for any other branch.
-export function outsideResearch(branch: string, paths: string[]): string[] {
-  return RESEARCH_BRANCH.test(branch) ? paths.filter((path) => !path.startsWith('docs/research/')) : [];
-}
+// A task branch, `factory/<id>-<slug>`.
+const TASK_BRANCH = /^factory\/[\w.-]+$/;
 
 // Where the operator installs the App, or changes which repositories an
 // installation covers.

@@ -9,6 +9,7 @@
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import type { Issue, PrState, PullRequest } from '../github/github.ts';
+import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { correction, grown, merged, NO_USAGE, overall, plus, tokensOf, type ModelUsage, type Usage } from '../usage/usage.ts';
@@ -201,7 +202,8 @@ export type Child = {
 // once it reported, the factory's next step for it: pushing its
 // `research/<name>` branch, then closing the ticket, null once both are
 // done. `problem` is why the step last failed, until the operator answers.
-export type Research = { ticket: string; step: 'push' | 'close' | null; problem: string | null };
+// `refusalNoted` is true once its parent heard its push was refused.
+export type Research = { ticket: string; step: 'push' | 'close' | null; problem: string | null; refusalNoted?: boolean };
 
 // The tickets a cancelled task closed that the factory hasn't reopened yet
 // (ADR 0006), and why it last failed to, if it did. They are tried again
@@ -705,7 +707,7 @@ export type PublishEvent =
 // `docs/research/` it may not push, closed its research ticket, or failed a
 // step, saying why.
 export type ResearchEvent =
-  | { type: 'researchPushed'; taskId: string; commit: string }
+  | { type: 'researchPushed'; taskId: string }
   | { type: 'researchPushRefused'; taskId: string; paths: string[] }
   | { type: 'researchClosed'; taskId: string }
   | { type: 'researchFailed'; taskId: string; step: NonNullable<Research['step']>; reason: string };
@@ -1681,7 +1683,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.child?.research?.step === action.step ? null : `${task.id} isn’t at ${action.step}.`;
     case 'notesDelivered':
       if (!task.factoryNotes?.length) return `${task.id} holds no factory notes.`;
-      return liveRun(state, task)?.turn === 'operator' ? null : `${task.id}’s conversation isn’t on the operator’s turn.`;
+      const live = liveRun(state, task);
+      return live?.status === 'active' && live.turn === 'operator' ? null : `${task.id}’s conversation isn’t on the operator’s turn.`;
     case 'childBranchDeleted':
       return keptChildBranches([task]).length ? null : `${task.id} keeps no child branch.`;
   }
@@ -1732,9 +1735,8 @@ function spawnRefusal(state: Lifecycle, task: Task, run: Run, spawn: ChildSpawne
   }
   if (spawn.research) {
     if (spawn.awaited === true) return 'A research child is fire-and-forget: its findings go to its research branch, never into yours.';
-    if (!RESEARCH_NAME.test(spawn.research.name) || spawn.research.name.includes('..') || spawn.research.name.endsWith('.lock')) {
-      return `research/${spawn.research.name} can’t be a research branch: name it with letters, digits, dots, dashes and underscores, such as oauth-scopes.`;
-    }
+    const badName = researchNameRefusal(spawn.research.name);
+    if (badName) return badName;
     const ticket = spawn.research.ticket.split('#')[0];
     if (ticket !== task.repo) return `${spawn.research.ticket} isn’t a ticket of ${task.repo}, where the factory closes research tickets.`;
   }
@@ -1757,9 +1759,6 @@ export function awaitedChildren(state: Lifecycle, task: Task): Task[] {
 function awaitsChild(run: Run, spawn: ChildSpawned): boolean {
   return run.mode === 'AFK' && !spawn.research && (spawn.awaited ?? true);
 }
-
-// What may follow `research/` in a research branch's name.
-const RESEARCH_NAME = /^[\w][\w.-]*$/;
 
 // Those of `tasks` that are ended children whose local branch is still
 // kept once their worktree is gone: awaited children that ended Done. The
@@ -1895,24 +1894,27 @@ function failResearch(state: Lifecycle, task: Task, request: AttentionRequest | 
 }
 
 // A factory note about the fire-and-forget child to its HITL parent's
-// conversation (ADR 0009), by default its report once it ended: queued
-// behind the agent's turn, or held for the operator's turn or the parent's
-// next run. An AFK parent reads its report through list_children, and an
-// ended one hears nothing.
+// conversation (ADR 0009), by default its report once it ended. The parent
+// holds it until it is delivered: on the operator's turn, which the daemon
+// waits for, or in the parent's next run's opening, whatever ended its
+// run meanwhile. An AFK parent reads its report through list_children,
+// and an ended one hears nothing.
 function noteParent(state: Lifecycle, child: Task, note = childNote(child)): void {
   const parent = state.tasks[child.parent!];
   if (!parent || parent.mode !== 'HITL' || isTerminal(parent) || child.child!.awaited) return;
-  const run = liveRun(state, parent);
-  if (run?.status === 'active' && run.turn === 'agent') run.queued.push(note);
-  else (parent.factoryNotes ??= []).push(note);
+  (parent.factoryNotes ??= []).push(note);
+}
+
+// A factory note saying what `paragraphs` say, in the conversation's Markdown.
+function factoryNote(...paragraphs: string[]): string {
+  return ['## Factory note', ...paragraphs].join('\n\n');
 }
 
 // What the factory note of a child's report says.
 function childNote(child: Task): string {
   const report = child.child!.report!;
   const research = child.child!.research;
-  return [
-    '## Factory note',
+  return factoryNote(
     `Your fire-and-forget child ${child.id} (${child.title}) has reported: ${report.status}; its run ended ${report.outcome ?? 'without a run'}.`,
     ...(research && report.status !== 'cancelled'
       ? [
@@ -1923,7 +1925,7 @@ function childNote(child: Task): string {
       : []),
     report.summary,
     ...(report.notes ? [`Notes: ${report.notes}`] : []),
-  ].join('\n\n');
+  );
 }
 
 // Settles the ended child's report: what its agent reported through
@@ -2446,10 +2448,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const paths = action.paths.join(', ');
       failResearch(state, task, request, `${branch} changes ${paths}, outside docs/research/, so the factory won’t push it ` +
         `or close ${ticket}. Rewrite the branch to touch docs/research/** alone, then answer to try again.`, at);
-      // The conversation that spawned it was told the push comes next.
-      if (!request) {
-        noteParent(state, task, `## Factory note\n\nThe factory didn’t push ${branch} of your child ${task.id}: it changes ${paths}, outside ` +
-          `docs/research/. ${ticket} stays open until the operator answers the attention request this raised.`);
+      // The conversation that spawned it was told the push comes next: it
+      // hears of the first refusal, never again of a retry refused the same.
+      const research = task.child!.research!;
+      if (!research.refusalNoted) {
+        research.refusalNoted = true;
+        const why = `The factory didn’t push ${branch} of your child ${task.id}: it changes ${paths}, outside docs/research/.`;
+        noteParent(state, task, factoryNote(`${why} ${ticket} stays open until the operator answers the attention request this raised.`));
       }
       break;
     }
