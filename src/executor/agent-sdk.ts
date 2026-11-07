@@ -331,7 +331,9 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
 // operator through `canUseTool`. The environment is the container's alone:
 // the run's subscription token, and its git and gh config, at their paths
 // in the container. Nothing of the daemon's environment goes in. Artifact
-// capture's relay hook runs on the host, so an L2 run has none.
+// capture's relay hook runs on the host, so an L2 run has none. The SDK
+// warns that `canUseTool` is never invoked under `bypassPermissions`, but
+// AskUserQuestion still reaches it, as the L2 run contract test shows.
 function l2Options({ maxTurns, guards, token, container }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
   return {
     env: { CLAUDE_CODE_OAUTH_TOKEN: token!, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards!.env },

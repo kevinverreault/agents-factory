@@ -18,6 +18,7 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | `gh` re-reads a refreshed `hosts.yml` | Holds | `src/github/gh-config.contract.test.ts` |
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
 | L2 sandbox: bundle round trip, restart, no credentials (#64) | Holds on Docker Desktop 27 (WSL 2 engine) | `src/sandbox/docker.contract.test.ts` |
+| A real L2 run in its container: commits on the subscription token, guards checked there, commit brought out, questions reach the operator despite `bypassPermissions` (#64) | Holds. Needs `agents-factory setup token` | `src/executor/l2-run.contract.test.ts` |
 | Ink tells `ctrl+h` from Backspace | No. Windows Terminal sends `08` for ctrl+h (and for ctrl+Backspace), `7f` for Backspace, and no kitty sequences. `/handoff` is the primary path | `src/tui/keys.contract.test.tsx`, `npm run probe:keys` |
 
 ## Agent SDK on Windows (SDK #359, #444)
