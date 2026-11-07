@@ -66,7 +66,7 @@ For the autonomy gate (later tickets):
 `holdAwake()` (`src/os/keep-awake.ts`) starts a PowerShell helper that calls `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` and holds it until its stdin closes. The block is observed through `CallNtPowerInformation(SystemExecutionState)`, which needs no elevation. `powercfg /requests` needs an elevated prompt, so it can't be used in tests or by the daemon.
 
 - The block is set while the helper lives. It is released when the daemon stops the helper, and also when the helper is killed.
-- The test refuses to run if another process already holds `ES_SYSTEM_REQUIRED`, because the readout is system-wide. Since #62 it is part of the OS process contract, which the daemon's keep-awake uses. When #62 landed (2026-11-07), another process on the operator's machine held the block, so the keep-awake checks weren't re-run then. The helper itself didn't change.
+- The test refuses to run if another process already holds `ES_SYSTEM_REQUIRED`, because the readout is system-wide. Since #62 it is part of the OS process contract, which the daemon's keep-awake uses. The operator ran the whole contract on 2026-11-07, once nothing else held the block, and every check passed: the sweep's, and the keep-awake block holding, being released, and ending when its holder dies. While a Claude Code session works, the desktop app's "Keep computer awake while Claude works" holds the block, so run the contract from your own terminal while no session is working.
 
 ## Factory skill set as a local plugin (ADR 0005)
 
