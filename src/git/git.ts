@@ -77,7 +77,9 @@ export interface Git {
   // changed, and no remote has a `pushurl`, which `pushInsteadOf` would
   // leave alone. The clone is the operator's too (ADR 0010), so only what
   // the run could have done counts. An added ref counts unless its reflog
-  // says someone other than the run's `committer` (an email) made it.
+  // says someone other than the run's `committer` (an email) made it, or it
+  // has no reflog and another worktree, which no run can add, has it
+  // checked out.
   // Remote-tracking refs, which fetches add, and the `branches` the factory
   // cut for other tasks meanwhile don't count either. Other branches'
   // settings in the config don't count, nor the task branch's beyond where
@@ -107,7 +109,17 @@ export type RunSnapshot = {
   config: string[];
   // Each hook's name, with a hash of its content.
   hooks: Record<string, string>;
+  // The operator's system and global settings that decide how the
+  // worktree's files map to the repository's, as `key\nvalue`. The run's own
+  // git reads neither scope, so it keeps these, or the files the factory
+  // checked out would look changed to it: line endings first.
+  checkout: string[];
 };
+
+// The settings `checkout` holds: line endings, symlinks, long paths, case,
+// the operator's own attributes file, and filters such as Git LFS's.
+const CHECKOUT_SETTINGS =
+  '^(core\\.(autocrlf|eol|safecrlf|symlinks|longpaths|ignorecase|precomposeunicode|checkroundtripencoding|attributesfile)|filter\\..+)$';
 
 export class GitError extends Error {}
 
@@ -221,14 +233,21 @@ export const gitCli: Git = {
   },
 
   async snapshot(worktreePath) {
-    const [branch, head, refs, remotes, gitDir, commonDir] = await Promise.all([
+    const [branch, head, refs, remotes, gitDir, commonDir, scoped] = await Promise.all([
       git(worktreePath, 'symbolic-ref', '--quiet', '--short', 'HEAD'),
       run(worktreePath, 'rev-parse', 'HEAD'),
       run(worktreePath, 'for-each-ref', '--format=%(refname)'),
       run(worktreePath, 'remote'),
       run(worktreePath, 'rev-parse', '--path-format=absolute', '--git-dir'),
       run(worktreePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
+      // Each setting as `scope NUL key LF value NUL`; none found fails.
+      git(worktreePath, 'config', '--show-scope', '-z', '--get-regexp', CHECKOUT_SETTINGS),
     ]);
+    const fields = (scoped ?? '').split('\0');
+    const checkout: string[] = [];
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      if (fields[i] === 'system' || fields[i] === 'global') checkout.push(fields[i + 1]!);
+    }
     // `-z` ends each setting with NUL, its key and value split by a newline.
     const config = await Promise.all(
       [join(commonDir, 'config'), join(gitDir, 'config.worktree')].map(async (file) =>
@@ -242,6 +261,7 @@ export const gitCli: Git = {
       remotes: lines(remotes),
       config: config.flat(),
       hooks: hooksIn(join(commonDir, 'hooks')),
+      checkout,
     };
   },
 
@@ -265,7 +285,8 @@ export const gitCli: Git = {
     const known = new Set([...before.refs, ...branches.map((branch) => `refs/heads/${branch}`)]);
     const added = after.refs.filter((ref) => !known.has(ref) && !ref.startsWith('refs/remotes/'));
     const makers = await Promise.all(added.map((ref) => makerOf(worktreePath, ref)));
-    const refs = added.filter((_, i) => makers[i] === null || makers[i] === committer);
+    const elsewhere = await checkedOutElsewhere(worktreePath);
+    const refs = added.filter((ref, i) => makers[i] === committer || (makers[i] === null && !elsewhere.has(ref)));
     if (refs.length) found.push(`The run added refs: ${listed(refs)}.`);
     const remotes = after.remotes.filter((remote) => !before.remotes.includes(remote));
     if (remotes.length) found.push(`The run added remotes: ${listed(remotes)}.`);
@@ -301,6 +322,25 @@ function lines(text: string): string[] {
 // The first few, and how many more.
 function listed(items: string[]): string {
   return items.length > 5 ? `${items.slice(0, 5).join(', ')} and ${items.length - 5} more` : items.join(', ');
+}
+
+// The branches the clone's other worktrees have checked out, as refs. A run
+// adds no worktree (`git worktree` and edits in the git directory are hard
+// denies), so these are the operator's tools', such as Claude Desktop's,
+// which may make their branches without a reflog.
+async function checkedOutElsewhere(worktreePath: string): Promise<Set<string>> {
+  const [listing, own] = await Promise.all([
+    git(worktreePath, 'worktree', 'list', '--porcelain', '-z'),
+    git(worktreePath, 'rev-parse', '--show-toplevel'),
+  ]);
+  const branches = new Set<string>();
+  // Each field NUL-ended: `worktree <path>` starts a worktree's, `branch <ref>` names what it has checked out.
+  let path: string | null = null;
+  for (const field of (listing ?? '').split('\0')) {
+    if (field.startsWith('worktree ')) path = field.slice('worktree '.length);
+    else if (field.startsWith('branch ') && path !== own) branches.add(field.slice('branch '.length));
+  }
+  return branches;
 }
 
 // The email of whoever made the ref, from the oldest entry of its reflog, or

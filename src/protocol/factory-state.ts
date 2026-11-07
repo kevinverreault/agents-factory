@@ -92,6 +92,8 @@ export type TaskView = {
   // and the draft PR it opened.
   publishing: Publishing | null;
   pr: PullRequest | null;
+  // Whether the factory pushed the task branch since its last run started.
+  pushed: boolean;
   // While its cleanup, once it ended Done or Cancelled, hasn't finished, and why it last failed.
   cleanup: Cleanup | null;
   // Where its transcripts were archived once it ended.
@@ -172,6 +174,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       prBody: task.prBody ?? null,
       publishing: task.publishing ? { ...task.publishing } : null,
       pr: task.pr ? { ...task.pr } : null,
+      pushed: task.pushed ?? false,
       cleanup: task.cleanup ? { ...task.cleanup } : null,
       transcripts: task.transcripts ?? null,
     };

@@ -1453,11 +1453,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
       if (lifecycle.runs[run.id]?.status !== 'active') return;
       const dir = join(options.runsRoot, run.id);
-      const env = prepareRunGit(dir, FACTORY_IDENTITY, {
-        task: task.id,
-        run: run.id,
-        model: run.model,
-      });
+      const env = prepareRunGit(dir, FACTORY_IDENTITY, { task: task.id, run: run.id, model: run.model }, snapshot.checkout);
       const ghConfigDir = join(dir, 'gh');
       Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
       guarded.set(run.id, { worktree: cwd, snapshot, scripts: new Set() });

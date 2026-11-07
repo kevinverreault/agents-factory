@@ -219,10 +219,14 @@ describe('Push & open draft PR', () => {
 
   test('again once the root has its draft PR pushes the new commits to it, opening no other', async () => {
     const { factory, operator, tui } = await inReview();
+    expect(tui.state().tasks.T1?.pushed).toBe(false);
     await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' });
     await tui.until((state) => state.tasks.T1?.pr !== null);
+    // Its PR has all its work, until a run may commit more.
+    expect(tui.state().tasks.T1?.pushed).toBe(true);
     await operator.send({ type: 'requestChanges', taskId: 'T1', comments: 'Bold it.' });
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R3');
+    expect(tui.state().tasks.T1?.pushed).toBe(false);
     const worktree = tui.state().tasks.T1!.worktree!;
     factory.git.editFile(worktree, 'src/logout.ts', 'export const bold = true;\n');
     factory.git.commitAll(worktree);
@@ -232,6 +236,7 @@ describe('Push & open draft PR', () => {
     await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' });
 
     await tui.until((state) => state.tasks.T1?.publishing === null && factory.github.pushes.length === 2);
+    expect(tui.state().tasks.T1?.pushed).toBe(true);
     expect(factory.git.originTip(clone, branch)).toBe(factory.git.branchTip(clone, branch));
     expect(factory.github.pullRequests).toHaveLength(1);
     expect(tui.state().tasks.T1?.pr).toEqual({ number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: true });

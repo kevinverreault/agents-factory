@@ -1,6 +1,6 @@
 // Seam 3: the real git adapter on throwaway clones in a temp directory.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -196,11 +196,21 @@ describe('git: the check after an AFK run', () => {
 
   // Unlogged, the branch could be the run's but for the factory's word.
   test('a branch the factory cut for another task meanwhile, even unlogged, is no ref the run added', () =>
-    started(async ({ root, clone, check }) => {
-      git(clone, '-c', 'core.logAllRefUpdates=false', 'worktree', 'add', '--quiet', '-b', 'factory/T2-b', join(root, 'worktrees', 'T2'), 'origin/main');
+    started(async ({ clone, check }) => {
+      git(clone, '-c', 'core.logAllRefUpdates=false', 'branch', 'factory/T2-b', 'origin/main');
 
       expect(await check(['factory/T2-b'])).toEqual([]);
       expect(await check()).toEqual(['The run added refs: refs/heads/factory/T2-b.']);
+    }));
+
+  // Claude Desktop makes its worktrees' branches without a reflog. No run
+  // adds a worktree, so another one's branch is never the run's.
+  test('an unlogged branch another worktree has checked out is no ref the run added', () =>
+    started(async ({ root, clone, check }) => {
+      git(clone, '-c', 'core.logAllRefUpdates=false', 'worktree', 'add', '--quiet', '-b', 'claude/impl-bf300c', join(root, 'desktop'), 'origin/main');
+      git(clone, '-c', 'core.logAllRefUpdates=false', 'branch', 'spike', 'origin/main');
+
+      expect(await check()).toEqual(['The run added refs: refs/heads/spike.']);
     }));
 
   // The task worktree shares its clone with the operator's own work (ADR 0010).
@@ -214,4 +224,42 @@ describe('git: the check after an AFK run', () => {
 
       expect(await check()).toEqual([]);
     }));
+});
+
+// Git for Windows sets core.autocrlf in its system config, which a run's git
+// doesn't read: the worktree checked out with CRLF would look changed to it
+// throughout, once git compares the files' content.
+test('git: a run’s git keeps the operator’s line endings, which the worktree was checked out under', async () => {
+  const { root, cloneWithOrigin, advanceOrigin, dispose } = await fixture();
+  const operatorConfig = join(root, 'operator.gitconfig');
+  writeFileSync(operatorConfig, '[core]\n\tautocrlf = true\n[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
+  const was = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = operatorConfig;
+  try {
+    const clone = await cloneWithOrigin('widgets', 'main');
+    await advanceOrigin(clone, 'main', { 'login.ts': 'export {};\nexport const a = 1;\n' });
+    const path = join(root, 'worktrees', 'T1');
+    await gitCli.fetch(clone, 'main');
+    await gitCli.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+    const before = await gitCli.snapshot(path);
+    expect(before.checkout).toEqual(expect.arrayContaining(['core.autocrlf\ntrue', 'filter.lfs.clean\ngit-lfs clean -- %f']));
+
+    const inRun = (checkout: string[], ...args: string[]) =>
+      execFileSync('git', args, {
+        cwd: path,
+        env: { ...process.env, ...prepareRunGit(join(root, `run-${checkout.length}`), FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'sonnet' }, checkout) },
+        encoding: 'utf8',
+        windowsHide: true,
+      }).trim();
+    // Touched, so git compares the content.
+    utimesSync(join(path, 'login.ts'), new Date(), new Date(Date.now() + 5_000));
+
+    expect(inRun([], 'status', '--porcelain')).toBe('M login.ts');
+    expect(inRun(before.checkout, 'status', '--porcelain')).toBe('');
+    expect(inRun(before.checkout, 'config', 'filter.lfs.clean')).toBe('git-lfs clean -- %f');
+  } finally {
+    if (was === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = was;
+    await dispose();
+  }
 });

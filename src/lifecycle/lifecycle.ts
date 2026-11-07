@@ -308,6 +308,9 @@ export type Task = {
   // Its Push & open draft PR while under way, and the draft PR it opened.
   publishing?: Publishing | null;
   pr?: PullRequest | null;
+  // True once the factory pushed the task branch, until a run starts and may
+  // commit to it again: the PR has all its work, so there is nothing to push.
+  pushed?: boolean;
   // While its cleanup (ADR 0011), once it ended Done or Cancelled, hasn't
   // finished. It is tried again when the daemon next starts.
   cleanup?: Cleanup | null;
@@ -2059,6 +2062,7 @@ function startRun(
   if (reported.length) opening = [reportsOpening(task, reported), opening].filter(Boolean).join('\n\n');
   task.resumeWith = null;
   task.newSession = false;
+  task.pushed = false;
   const tier = nextTier(task);
   const allowOnce = task.allowOnce ?? [];
   task.allowOnce = [];
@@ -2916,6 +2920,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'branchPushed':
       // A root with a draft PR already has it updated by the push.
       task.publishing = task.pr ? null : { step: 'open-pr', problem: null };
+      task.pushed = true;
       break;
     case 'prOpened':
       task.pr = { ...action.pr };

@@ -44,7 +44,7 @@ const ALWAYS: ByRules = { label: 'Allow always', enter: 'allows always', answer:
 function byRules(taskId: string, permission: Permission, { label, enter, answer }: ByRules): Choice {
   const proposed = permission.proposed ?? [{ part: permission.summary, rule: permission.rule }];
   return {
-    label: `${label}: ${proposed.map(({ rule }) => rule).join(', ')}`,
+    label: `${label}: ${proposed.map(({ rule }) => shownRule(rule)).join(', ')}`,
     fields: proposed.map(({ part, rule }) => ({ prompt: part, value: rule })),
     send: (values) => {
       const rules = values.map((rule) => rule.trim()).filter(Boolean);
@@ -54,6 +54,15 @@ function byRules(taskId: string, permission: Permission, { label, enter, answer 
   };
 }
 
+// A rule as the sheet shows it, on one line: a heredoc's exact rule holds its
+// whole script, so its lines are joined by ↵, and a long rule keeps its start
+// and its end, where the operator types, around an ellipsis.
+function shownRule(rule: string): string {
+  const line = rule.replace(/[ \t]*\r?\n[ \t]*/g, ' ↵ ');
+  return line.length <= SHOWN_RULE ? line : `${line.slice(0, SHOWN_RULE / 2)} … ${line.slice(-SHOWN_RULE / 2)}`;
+}
+const SHOWN_RULE = 120;
+
 // The digits' choices on a request other than a question with its card, or
 // on a root in review.
 export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined): Choice[] {
@@ -62,9 +71,9 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
     const { taskId } = item;
     // An L1 root publishes as the factory's App on the operator's say (ADR
     // 0007): once it has its PR (a regular one where GitHub offers no
-    // drafts), a push updates it.
+    // drafts), a push updates it, which only a run's new work calls for.
     const publish: Choice[] =
-      task?.autonomy === 'L1' && !task.publishing
+      task?.autonomy === 'L1' && !task.publishing && !(task.pr && task.pushed)
         ? [{ label: task.pr ? `Push to ${task.pr.draft ? 'draft ' : ''}PR #${task.pr.number}` : 'Push & open draft PR', command: { type: 'pushAndOpenPr', taskId } }]
         : [];
     return [
@@ -348,7 +357,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
     ),
     // With more than one field, › marks the one being typed into.
     ...(form?.fields ?? []).map(({ prompt, value }, i) =>
-      h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? '› ' : '  ') : '', h(Text, { bold: true }, `${prompt}: `), value),
+      h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? '› ' : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(value)),
     ),
     confirm?.options ? h(ChoosePrompt, { reason: confirm.reason, options: confirm.options }) : null,
     confirm && !confirm.options ? h(Text, { color: 'yellow' }, confirm.reason) : null,

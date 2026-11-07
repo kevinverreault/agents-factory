@@ -20,7 +20,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], goal: null, handoff: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -1684,6 +1684,11 @@ describe('answering from Needs you', () => {
     const underWay = await started(factoryState([{ ...reviewing, publishing: { step: 'push' as const, problem: null } }], [review]));
     await press(underWay.app, '2');
     await eventually(() => expect(unwrapped(underWay.app.lastFrame()!)).toContain('3 Cancel a answer'));
+
+    // Pushed since its last run started, its PR has all its work.
+    const pushed = await started(factoryState([{ ...opened, pushed: true }], [review]));
+    await press(pushed.app, '2');
+    await eventually(() => expect(unwrapped(pushed.app.lastFrame()!)).toContain('3 Cancel a answer'));
   });
 
   test('a root still in review once its choice went through takes the digits again: a later push, or Mark done', async () => {
@@ -1876,6 +1881,37 @@ describe('answering in the conversation', () => {
       expect(frame).toContain('Step 29.');
       expect(frame).not.toContain('Step 0.');
     });
+  });
+
+  test('a heredoc’s exact rule takes one line on the sheet, so a full screen keeps every choice in view', async () => {
+    const script = ["cat > /tmp/edit.py <<'EOF'", ...Array.from({ length: 41 }, (_, i) => `print(${i})`), 'EOF'].join('\n');
+    const flat = script.replace(/\s+/g, ' ').slice(0, 200);
+    const heredoc = {
+      ...permission,
+      reason: `Bash: ${flat}…`,
+      permission: { id: 'toolu_1', tool: 'Bash', summary: `${flat}…`, rule: `Bash(${script})`, proposed: [{ part: `${flat}…`, rule: `Bash(${script})` }] },
+    };
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([waiting], [heredoc]), runs: { R1: suspended } }, { connection });
+    Object.defineProperty(app.stdout, 'rows', { value: 30 });
+    await press(app, ENTER, ENTER);
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain("2 Allow for this task: Bash(cat > /tmp/edit.py <<'EOF' ↵ print(0) ↵");
+      expect(frame).toContain('print(40) ↵ EOF) 3 Allow always');
+      expect(frame).not.toContain('print(20)');
+      expect(frame).toContain('4 Deny with a note');
+      expect(frame).toContain('digits answer · c take over · ctrl+b back');
+    });
+
+    // Its field shows the rule as the label does, and allows it whole.
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('print(40) ↵ EOF) enter allows for this task · esc back'));
+    await press(app, ENTER);
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: [`Bash(${script})`] } }),
+    );
   });
 
   test('a question request shows its card in the conversation, and a digit answers it', async () => {
