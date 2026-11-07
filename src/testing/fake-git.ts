@@ -132,6 +132,43 @@ export class FakeGit implements Git {
     for (const clone of this.clonesOf(repo)) clone.origin.delete(branch);
   }
 
+  // A clone at `path` of the clone at `from`, with its local branches, and
+  // `branch` checked out in a worktree at `worktreePath`, as `git clone`
+  // from a local path makes one.
+  cloneOf(from: string, path: string, worktreePath: string, branch: string): void {
+    const source = this.cloneAt(from);
+    const head = source.branches.get(branch);
+    if (!head) throw new GitError(`fatal: Remote branch ${branch} not found in upstream origin`);
+    this.clones.set(path, {
+      path,
+      originUrl: from,
+      defaultBranch: null,
+      origin: new Map(source.branches),
+      fetched: new Map(source.branches),
+      branches: new Map([[branch, head]]),
+      worktrees: [{ path: worktreePath, branch, head, linkedTo: path }],
+      unreachable: null,
+    });
+  }
+
+  removeClone(path: string): void {
+    this.clones.delete(path);
+  }
+
+  // Whether `ancestor` is `commit` or in its history.
+  inHistory(ancestor: string, commit: string): boolean {
+    for (let at: string | undefined = commit; at; at = this.parents.get(at)) if (at === ancestor) return true;
+    return false;
+  }
+
+  // Moves (or makes) the clone's `branch` at `tip`, with the worktree it is
+  // checked out in, if any.
+  moveBranch(clonePath: string, branch: string, tip: string): void {
+    const clone = this.cloneAt(clonePath);
+    clone.branches.set(branch, tip);
+    for (const worktree of clone.worktrees) if (worktree.branch === branch) worktree.head = tip;
+  }
+
   // The clones whose origin is the repository on GitHub.
   // Whether GitHub has the repository's `branch`.
   onOrigin(repo: string, branch: string): boolean {

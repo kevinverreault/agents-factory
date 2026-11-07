@@ -14,6 +14,7 @@ import { FakeClock } from './fake-clock.ts';
 import { FakeExecutor } from './fake-executor.ts';
 import { FakeGit } from './fake-git.ts';
 import { FakeGitHub } from './fake-github.ts';
+import { FakeSandbox } from './fake-sandbox.ts';
 import { FakeSecrets } from './fake-secrets.ts';
 import { FakeSkillSets } from './fake-skill-sets.ts';
 
@@ -23,6 +24,7 @@ export type TestFactory = {
   executor: FakeExecutor;
   git: FakeGit;
   github: FakeGitHub;
+  sandbox: FakeSandbox;
   secrets: FakeSecrets;
   skillSets: FakeSkillSets;
   // The daemon currently running, if any.
@@ -54,6 +56,7 @@ export async function startTestFactory({
   const executor = new FakeExecutor();
   const git = new FakeGit();
   const skillSets = new FakeSkillSets();
+  const sandbox = new FakeSandbox(git);
   const github = new FakeGitHub(clock, git);
   const secrets = new FakeSecrets();
   if (!withoutApp) await secrets.write(GITHUB_APP_SECRET, JSON.stringify(await github.createApp(github.manifestCode())));
@@ -74,7 +77,7 @@ export async function startTestFactory({
     };
     try {
       const table = routingTable(paths.modelsTable);
-      const daemon = await startDaemon({ ...paths, store, clock, executor, git, github, secrets, skillSets, routingTable: table, ...overrides, ...more });
+      const daemon = await startDaemon({ ...paths, store, clock, executor, git, github, sandbox, secrets, skillSets, routingTable: table, ...overrides, ...more });
       daemons.push(daemon);
       crashes.set(daemon, () => (dead = true));
       return daemon;
@@ -92,6 +95,7 @@ export async function startTestFactory({
     executor,
     git,
     github,
+    sandbox,
     secrets,
     skillSets,
     daemon: () => daemons.at(-1)!,

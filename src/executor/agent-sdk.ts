@@ -6,6 +6,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -88,14 +89,21 @@ export function agentSdkExecutor(): Executor {
       const options: Options = {
         ...(start.mode === 'HITL'
           ? hitlOptions(start.credential, askTheOperator(start.runId, spawning, hitlRefusal), hitlFactoryTools(start.runId, sink, start))
-          : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)), afkFactoryTools(start.runId, sink, start.reports, start))),
+          : start.container
+            ? l2Options(start, askTheOperator(start.runId, spawning, allowInContainer), afkFactoryTools(start.runId, sink, start.reports, start))
+            : l1Options(start, askTheOperator(start.runId, spawning, gateCall(spawning)), afkFactoryTools(start.runId, sink, start.reports, start))),
         cwd: start.cwd!,
         model: start.model,
-        // Skills dispatch as `/factory:<skill>`, so no other copy can shadow them.
-        ...(start.plugin !== null && { plugins: [{ type: 'local', path: start.plugin }] }),
+        // Skills dispatch as `/factory:<skill>`, so no other copy can shadow
+        // them. An L2 run loads the container's copy.
+        ...(start.plugin !== null && { plugins: [{ type: 'local', path: start.container?.plugin ?? start.plugin }] }),
         ...(start.resumesSession ? { resume: start.sessionId } : { sessionId: start.sessionId }),
         spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) => {
-          const child = spawnCli(spawnOptions);
+          // In a container, its own Linux CLI takes the same arguments; the
+          // PID recorded is `docker exec`'s, which the descendant sweep reaches.
+          const child = start.container
+            ? start.container.spawn('claude', spawnOptions.args, { env: spawnOptions.env, signal: spawnOptions.signal })
+            : spawnCli(spawnOptions);
           const spawnedAt = Date.now();
           const pid = child.pid!;
           spawning.cli = processCreatedAt(pid).then(
@@ -143,6 +151,10 @@ export function agentSdkExecutor(): Executor {
       return messages.flatMap((message) =>
         message.type === 'system' || message.parent_tool_use_id ? [] : eventsOf(message.type, message.uuid, message.message),
       );
+    },
+
+    sessionsDir(cwd) {
+      return claudeProjectDir(cwd);
     },
 
     async archive({ sessionId, cwd }, dir) {
@@ -214,6 +226,16 @@ export function agentSdkExecutor(): Executor {
       runs.delete(runId);
     }
   }
+}
+
+// The directory Claude Code keeps the sessions of runs in `cwd` in: under
+// its config directory's `projects`, named for `cwd` with every character
+// but letters and digits turned into `-` (as `claude.exe` 2.1.312 names it).
+// A name it would shorten with a hash, past 200 characters, isn't matched.
+export function claudeProjectDir(cwd: string): string {
+  const name = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+  if (name.length > 200) throw new Error(`The worktree path ${cwd} is too long for an L2 container to share its sessions.`);
+  return join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects', name);
 }
 
 // The session transcripts archived in `dir` (ADR 0011), one JSONL file per
@@ -302,9 +324,38 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
   };
 }
 
-// The PreToolUse hook that refuses the hard denies, whatever the gate would say.
-function hardDenies(cwd: string, start: string): HookCallback {
-  const history = runHistoryIn(cwd, start);
+// L2 AFK runs (ADR 0007) execute in their task's container, where nothing
+// they do reaches the operator's machine or GitHub, so they ask no
+// permissions: `bypassPermissions` lets every call run but what the hard
+// denies refuse, which hold here as at L1, and questions still reach the
+// operator through `canUseTool`. The environment is the container's alone:
+// the run's subscription token, and its git and gh config, at their paths
+// in the container. Nothing of the daemon's environment goes in. Artifact
+// capture's relay hook runs on the host, so an L2 run has none.
+function l2Options({ maxTurns, guards, token, container }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
+  return {
+    env: { CLAUDE_CODE_OAUTH_TOKEN: token!, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...guards!.env },
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
+    settingSources: ['project'],
+    mcpServers: { factory: factory.server },
+    strictMcpConfig: true,
+    managedSettings: { allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
+    settings: { attribution: { commit: '', pr: '' } },
+    hooks: { PreToolUse: [{ hooks: [hardDenies(container!.workdir, guards!.start, (args) => container!.git(args).then(({ code }) => code))] }] },
+    ...(maxTurns !== null && { maxTurns }),
+    canUseTool,
+  };
+}
+
+// In a container, `bypassPermissions` asks about nothing but questions; any
+// other call that reaches the gate anyway runs.
+const allowInContainer: CanUseTool = async (_toolName, input) => ({ behavior: 'allow', updatedInput: input });
+
+// The PreToolUse hook that refuses the hard denies, whatever the gate would
+// say, reading the run's history with `git`: on the host, or in the container.
+function hardDenies(cwd: string, start: string, git?: (args: string[]) => Promise<number>): HookCallback {
+  const history = runHistoryIn(cwd, start, git);
   return async (input) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
     const refused = await refusal({ tool: input.tool_name, input: (input.tool_input ?? {}) as Record<string, unknown> }, history);
@@ -313,11 +364,14 @@ function hardDenies(cwd: string, start: string): HookCallback {
 }
 
 // Why the executor can't start the run, or null.
-function whyUnstartable({ mode, autonomy, cwd, firstMessage, guards }: RunStart): string | null {
+function whyUnstartable({ mode, autonomy, cwd, firstMessage, guards, container, credential, token }: RunStart): string | null {
   if (cwd === null) return 'The task has no worktree to run in.';
   if (mode === 'HITL') return null;
-  if (autonomy !== 'L1') return 'L2 runs arrive with the sandbox.';
   if (guards === null) return 'An AFK run never starts without its git guards.';
+  if (autonomy === 'L2' && (container === null || credential !== 'subscription-token' || !token)) {
+    return 'An L2 run starts only in its task’s container, with its subscription token.';
+  }
+  if (autonomy !== 'L2' && container !== null) return 'Only an L2 run starts in a container.';
   // An AFK run takes no chat, so with nothing to start on it would wait forever.
   return firstMessage === null ? 'The AFK run has no first message to work on.' : null;
 }
@@ -396,6 +450,9 @@ function runEnv(credential: CredentialProfile): Record<string, string | undefine
       const { ANTHROPIC_API_KEY, ...env } = process.env;
       return env;
     }
+    case 'subscription-token':
+      // Only an L2 run, in its container, has this profile: `l2Options` builds its environment.
+      throw new Error('A run on the host never uses the subscription-token profile.');
   }
 }
 

@@ -56,6 +56,8 @@ describe('launching a HITL task', () => {
         model: 'claude-opus-5-5',
         maxTurns: null,
         credential: 'subscription-host',
+        token: null,
+        container: null,
         plugin: factory.skillSets.pathOf('a1a1a1a1a1a1a1a1'),
         guards: null,
         // A HITL run acts as the operator, under their own settings.

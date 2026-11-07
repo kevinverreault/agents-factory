@@ -111,6 +111,94 @@ export type RunSnapshot = {
 
 export class GitError extends Error {}
 
+// How a run's git checks reach a clone: git's output in a working tree, as
+// git wrote it (throwing a `GitError` with git's message when it fails),
+// each hook file in a directory with a hash of its content, and paths
+// joined as that clone's machine joins them. The host's runs `git` here; a
+// container's runs it inside the container.
+export type GitRunner = {
+  output(cwd: string, args: string[]): Promise<string>;
+  hooks(dir: string): Promise<Record<string, string>>;
+  join(...parts: string[]): string;
+};
+
+// The git checks of an AFK run (ADR 0007), made through `runner`.
+export function guardChecks(runner: GitRunner): Pick<Git, 'snapshot' | 'violations'> {
+  const run = (cwd: string, ...args: string[]) => runner.output(cwd, args).then((stdout) => stdout.trim());
+  const output = (cwd: string, ...args: string[]) => runner.output(cwd, args);
+  const git = (cwd: string, ...args: string[]) => run(cwd, ...args).catch(() => null);
+  // The email of whoever made the ref, from the oldest entry of its reflog, or
+  // null when it has none. An AFK run logs every ref it updates (ADR 0007).
+  async function makerOf(worktreePath: string, ref: string): Promise<string | null> {
+    const emails = lines((await git(worktreePath, 'log', '--walk-reflogs', '--format=%ge', '--end-of-options', ref)) ?? '');
+    return emails.at(-1) ?? null;
+  }
+
+  const checks: Pick<Git, 'snapshot' | 'violations'> = {
+    async snapshot(worktreePath) {
+      const [branch, head, refs, remotes, gitDir, commonDir] = await Promise.all([
+        git(worktreePath, 'symbolic-ref', '--quiet', '--short', 'HEAD'),
+        run(worktreePath, 'rev-parse', 'HEAD'),
+        run(worktreePath, 'for-each-ref', '--format=%(refname)'),
+        run(worktreePath, 'remote'),
+        run(worktreePath, 'rev-parse', '--path-format=absolute', '--git-dir'),
+        run(worktreePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
+      ]);
+      // `-z` ends each setting with NUL, its key and value split by a newline.
+      const config = await Promise.all(
+        [runner.join(commonDir, 'config'), runner.join(gitDir, 'config.worktree')].map(async (file) =>
+          ((await git(worktreePath, 'config', '--file', file, '--list', '-z')) ?? '').split('\0').filter(Boolean),
+        ),
+      );
+      return {
+        branch: branch ?? '',
+        head,
+        refs: lines(refs),
+        remotes: lines(remotes),
+        config: config.flat(),
+        hooks: await runner.hooks(runner.join(commonDir, 'hooks')),
+      };
+    },
+
+    async violations(worktreePath, before, branches, committer) {
+      const after = await checks.snapshot(worktreePath);
+      const found: string[] = [];
+      if (after.branch !== before.branch) {
+        found.push(`The run left ${after.branch ? `branch ${after.branch}` : 'a detached HEAD'} checked out instead of ${before.branch}.`);
+      }
+      // A run that started detached is held to its HEAD.
+      const tip = await git(worktreePath, 'rev-parse', '--verify', '--quiet', before.branch ? `refs/heads/${before.branch}` : 'HEAD');
+      if (!tip || (await git(worktreePath, 'merge-base', '--is-ancestor', before.head, tip)) === null) {
+        found.push(`The run rewrote ${before.branch || 'HEAD'}: ${before.head.slice(0, 7)}, its tip before the run, is no longer in its history.`);
+      }
+      const dirty = lines(await output(worktreePath, 'status', '--porcelain=v1', '--untracked-files=all')).map((line) => line.slice(3));
+      if (dirty.length) found.push(`The run left uncommitted changes: ${listed(dirty)}.`);
+      const known = new Set([...before.refs, ...branches.map((branch) => `refs/heads/${branch}`)]);
+      const added = after.refs.filter((ref) => !known.has(ref) && !ref.startsWith('refs/remotes/'));
+      const makers = await Promise.all(added.map((ref) => makerOf(worktreePath, ref)));
+      const refs = added.filter((_, i) => makers[i] === null || makers[i] === committer);
+      if (refs.length) found.push(`The run added refs: ${listed(refs)}.`);
+      const remotes = after.remotes.filter((remote) => !before.remotes.includes(remote));
+      if (remotes.length) found.push(`The run added remotes: ${listed(remotes)}.`);
+      if (heldTo(after.config, before.branch) !== heldTo(before.config, before.branch)) found.push('The run changed the git config.');
+      const pushUrls = lines((await git(worktreePath, 'config', '--name-only', '--get-regexp', '^remote\\..*\\.pushurl$')) ?? '');
+      if (pushUrls.length) found.push(`A remote has a pushurl, which the run's push guard can't cover: ${listed(pushUrls)}.`);
+      const hooks = [...new Set([...Object.keys(before.hooks), ...Object.keys(after.hooks)])].filter((hook) => before.hooks[hook] !== after.hooks[hook]);
+      if (hooks.length) found.push(`The run changed git hooks: ${listed(hooks.sort())}.`);
+      return found;
+    },
+  };
+  return checks;
+}
+
+// The host's git.
+const hostRunner: GitRunner = {
+  output: (cwd, args) => output(cwd, ...args),
+  hooks: async (dir) => hooksIn(dir),
+  join,
+};
+const hostChecks = guardChecks(hostRunner);
+
 export const gitCli: Git = {
   async inspectClone(path) {
     // The listing starts with the main worktree, wherever it is run from.
@@ -220,62 +308,12 @@ export const gitCli: Git = {
     return readTree(clonePath, ref, paths);
   },
 
-  async snapshot(worktreePath) {
-    const [branch, head, refs, remotes, gitDir, commonDir] = await Promise.all([
-      git(worktreePath, 'symbolic-ref', '--quiet', '--short', 'HEAD'),
-      run(worktreePath, 'rev-parse', 'HEAD'),
-      run(worktreePath, 'for-each-ref', '--format=%(refname)'),
-      run(worktreePath, 'remote'),
-      run(worktreePath, 'rev-parse', '--path-format=absolute', '--git-dir'),
-      run(worktreePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
-    ]);
-    // `-z` ends each setting with NUL, its key and value split by a newline.
-    const config = await Promise.all(
-      [join(commonDir, 'config'), join(gitDir, 'config.worktree')].map(async (file) =>
-        ((await git(worktreePath, 'config', '--file', file, '--list', '-z')) ?? '').split('\0').filter(Boolean),
-      ),
-    );
-    return {
-      branch: branch ?? '',
-      head,
-      refs: lines(refs),
-      remotes: lines(remotes),
-      config: config.flat(),
-      hooks: hooksIn(join(commonDir, 'hooks')),
-    };
-  },
-
   async commitsSince(worktreePath, base) {
     return lines(await run(worktreePath, 'rev-list', '--reverse', `${base}..HEAD`));
   },
 
-  async violations(worktreePath, before, branches, committer) {
-    const after = await gitCli.snapshot(worktreePath);
-    const found: string[] = [];
-    if (after.branch !== before.branch) {
-      found.push(`The run left ${after.branch ? `branch ${after.branch}` : 'a detached HEAD'} checked out instead of ${before.branch}.`);
-    }
-    // A run that started detached is held to its HEAD.
-    const tip = await git(worktreePath, 'rev-parse', '--verify', '--quiet', before.branch ? `refs/heads/${before.branch}` : 'HEAD');
-    if (!tip || (await git(worktreePath, 'merge-base', '--is-ancestor', before.head, tip)) === null) {
-      found.push(`The run rewrote ${before.branch || 'HEAD'}: ${before.head.slice(0, 7)}, its tip before the run, is no longer in its history.`);
-    }
-    const dirty = lines(await output(worktreePath, 'status', '--porcelain=v1', '--untracked-files=all')).map((line) => line.slice(3));
-    if (dirty.length) found.push(`The run left uncommitted changes: ${listed(dirty)}.`);
-    const known = new Set([...before.refs, ...branches.map((branch) => `refs/heads/${branch}`)]);
-    const added = after.refs.filter((ref) => !known.has(ref) && !ref.startsWith('refs/remotes/'));
-    const makers = await Promise.all(added.map((ref) => makerOf(worktreePath, ref)));
-    const refs = added.filter((_, i) => makers[i] === null || makers[i] === committer);
-    if (refs.length) found.push(`The run added refs: ${listed(refs)}.`);
-    const remotes = after.remotes.filter((remote) => !before.remotes.includes(remote));
-    if (remotes.length) found.push(`The run added remotes: ${listed(remotes)}.`);
-    if (heldTo(after.config, before.branch) !== heldTo(before.config, before.branch)) found.push('The run changed the git config.');
-    const pushUrls = lines((await git(worktreePath, 'config', '--name-only', '--get-regexp', '^remote\\..*\\.pushurl$')) ?? '');
-    if (pushUrls.length) found.push(`A remote has a pushurl, which the run's push guard can't cover: ${listed(pushUrls)}.`);
-    const hooks = [...new Set([...Object.keys(before.hooks), ...Object.keys(after.hooks)])].filter((hook) => before.hooks[hook] !== after.hooks[hook]);
-    if (hooks.length) found.push(`The run changed git hooks: ${listed(hooks.sort())}.`);
-    return found;
-  },
+  snapshot: (worktreePath) => hostChecks.snapshot(worktreePath),
+  violations: (...args) => hostChecks.violations(...args),
 };
 
 // The paths a `status --porcelain=v1 -z` listing names: NUL-separated, so
@@ -301,13 +339,6 @@ function lines(text: string): string[] {
 // The first few, and how many more.
 function listed(items: string[]): string {
   return items.length > 5 ? `${items.slice(0, 5).join(', ')} and ${items.length - 5} more` : items.join(', ');
-}
-
-// The email of whoever made the ref, from the oldest entry of its reflog, or
-// null when it has none. An AFK run logs every ref it updates (ADR 0007).
-async function makerOf(worktreePath: string, ref: string): Promise<string | null> {
-  const emails = lines((await git(worktreePath, 'log', '--walk-reflogs', '--format=%ge', '--end-of-options', ref)) ?? '');
-  return emails.at(-1) ?? null;
 }
 
 // The config settings a run is held to, in a comparable form: all but other

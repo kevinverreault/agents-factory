@@ -17,6 +17,7 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | Factory plugin loads, `/factory:<skill> args`, cross-skill calls | Holds. No `.claude/skills/` fallback needed | `src/skills/plugin.contract.test.ts` |
 | `gh` re-reads a refreshed `hosts.yml` | Holds | `src/github/gh-config.contract.test.ts` |
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
+| L2 sandbox: bundle round trip, restart, no credentials (#64) | Holds on Docker Desktop 27 (WSL 2 engine) | `src/sandbox/docker.contract.test.ts` |
 | Ink tells `ctrl+h` from Backspace | No. Windows Terminal sends `08` for ctrl+h (and for ctrl+Backspace), `7f` for Backspace, and no kitty sequences. `/handoff` is the primary path | `src/tui/keys.contract.test.tsx`, `npm run probe:keys` |
 
 ## Agent SDK on Windows (SDK #359, #444)
@@ -114,3 +115,17 @@ The `--kitty` run gave the same bytes. Ink's `auto` mode didn't switch the termi
 - To offer `ctrl+h` anyway, the handoff sheet already gives the safety net: opening it is never a commitment, and `esc` backs out (#23 story 56).
 
 To re-check after a Windows Terminal or Ink upgrade, run `npm run probe:keys` and `npm run probe:keys -- --kitty`, then press the same three keys.
+
+## L2 sandbox on Docker (ADR 0007, ADR 0011)
+
+`dockerSandbox()` (`src/sandbox/docker.ts`) runs each L2 task in a container of its own, from an image it builds on first use: `node:24-bookworm-slim` with git, `gh`, and the Linux CLI of the pinned SDK (`@anthropic-ai/claude-agent-sdk-linux-x64`). The shared contract (`src/sandbox/sandbox-contract.ts`) runs against the fake and against Docker Desktop 27.0.3 on Windows 10, recorded on 2026-11-07:
+
+- Commits made in the container reach the host task branch through a `git bundle`, as a fast-forward, and the host branch's new commits reach the container at the next prepare. A branch changed on both sides is refused either way.
+- `docker restart` kills a turn still running in the container (a `sleep` that would have written a file never did), and the `docker exec` that started it ends. The clone keeps commits not yet brought out.
+- The container runs as uid 10001 with no credential in its environment or home. Only the host clone's git directory is mounted, read-only, so the operator's working files stay out and a push to it fails. The skill set copied in can't be changed.
+- A run's gitconfig and hooks, written on the host into the run directory the container mounts read-only, hold inside it: commits carry the factory's trailers, and pushes fail on the `pushInsteadOf` scheme. Docker Desktop's bind mounts keep the hooks executable.
+- The sessions mount is the CLI's project directory for `/work`, shared with the host.
+- `claude --version` in the container reports the version the pinned SDK bundles.
+
+Not proven here: a real Claude run inside the container, which needs a subscription token from `claude setup-token`, and egress denial, which arrives with #65.
+

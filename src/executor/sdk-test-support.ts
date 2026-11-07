@@ -35,6 +35,8 @@ export function afkRun(cwd: string, firstMessage: string, maxTurns: number, allo
     model: 'claude-haiku-5-5',
     maxTurns,
     credential: 'subscription-host',
+    token: null,
+    container: null,
     plugin: null,
     // Its history starts nowhere: there is nothing from before the run to keep.
     guards: { start: '0'.repeat(40), env: {} },

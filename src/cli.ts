@@ -5,7 +5,8 @@
 // `repo add`, `repo move` and `repo remove` register, re-point and unregister
 // the operator's clones; `skills update` and `skills status` move and inspect
 // the skill set pin; `models update` moves each model tier to the model this
-// factory ships; `setup github` creates the factory's GitHub App. `hook`
+// factory ships; `setup github` creates the factory's GitHub App, and
+// `setup token` stores the subscription token L2 runs use. `hook`
 // is run by Claude Code, not the operator: it relays a run's hook events
 // to the daemon.
 import { userInfo } from 'node:os';
@@ -35,6 +36,7 @@ const USAGE = [
   '       agents-factory skills update | skills status',
   '       agents-factory models update',
   '       agents-factory setup github [--name <app-name>]',
+  '       agents-factory setup token',
 ].join('\n');
 
 // The manifest flow's code is valid for an hour.
@@ -103,6 +105,21 @@ async function main(args: string[]): Promise<number> {
     return skillsCommand(args[1], paths);
   }
   if (args[0] === 'models' && args[1] === 'update' && args.length === 2) return modelsCommand(paths);
+  if (args[0] === 'setup' && args[1] === 'token' && args.length === 2) {
+    const token = await readToken();
+    const connection = await connectOrStart(paths);
+    try {
+      const reply = await connection.send({ type: 'setupToken', token });
+      if (!reply.ok) {
+        console.error(reply.reason);
+        return 1;
+      }
+      console.log('Stored the subscription token. L2 runs use it from their next start.');
+      return 0;
+    } finally {
+      connection.close();
+    }
+  }
   if (args[0] === 'setup' && args[1] === 'github') {
     const name = setupName(args.slice(2));
     if (name === null) {
@@ -118,6 +135,19 @@ async function main(args: string[]): Promise<number> {
   }
   console.error(USAGE);
   return 2;
+}
+
+// The token `setup token` stores: read from stdin, where the operator pastes
+// what `claude setup-token` printed, or pipes it.
+async function readToken(): Promise<string> {
+  if (process.stdin.isTTY) process.stdout.write('Paste the token `claude setup-token` printed, then press enter: ');
+  const { createInterface } = await import('node:readline');
+  const lines = createInterface({ input: process.stdin });
+  for await (const line of lines) {
+    lines.close();
+    return line;
+  }
+  return '';
 }
 
 // The TUI's connection to its daemon, started if none runs. A daemon of

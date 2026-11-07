@@ -3,6 +3,7 @@ import { agentSdkExecutor } from '../executor/agent-sdk.ts';
 import { gitCli } from '../git/git.ts';
 import { gitHubApi } from '../github/github.ts';
 import { routingTable } from '../models/routing-table.ts';
+import { dockerSandbox } from '../sandbox/docker.ts';
 import { windowsCredentials } from '../secrets/secrets.ts';
 import { skillSetManager } from '../skills/skill-set.ts';
 import { openStore } from '../store/store.ts';
@@ -20,6 +21,7 @@ try {
     executor: agentSdkExecutor(),
     git: gitCli,
     github: gitHubApi(),
+    sandbox: dockerSandbox({ namespace: paths.credentialPrefix }),
     secrets: windowsCredentials(paths.credentialPrefix),
     skillSets: skillSetManager({ root: paths.skillsRoot, lockPath: paths.skillsLock }),
     routingTable: routingTable(paths.modelsTable),

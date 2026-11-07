@@ -35,6 +35,9 @@ export type CloneView = { repo: string; path: string };
 // again whether the App is installed on the repository, and replies with the
 // repository's `AppCheck`.
 export type GitHubCommand = { type: 'setupGitHub'; code: string } | { type: 'checkApp'; repo: string };
+// `setup token`: the subscription OAuth token L2 runs authenticate with
+// (ADR 0007), as `claude setup-token` printed it, for the credential store.
+export type TokenCommand = { type: 'setupToken'; token: string };
 // The skill set's per-repo setup: `checkSkills` fetches the repository's base
 // branch and looks for it there again, and replies with the repository's
 // `SkillsSetup`. "Set up now" is a launch of the `setup` preset.
@@ -94,6 +97,7 @@ export type Command =
   | DaemonCommand
   | RepoCommand
   | GitHubCommand
+  | TokenCommand
   | SkillsCommand
   | LaunchCommand
   | AdvanceCommand

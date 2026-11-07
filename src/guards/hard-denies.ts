@@ -44,12 +44,9 @@ export async function refusal(call: Pick<ToolCall, 'tool' | 'input'>, history: R
 }
 
 // The real history of the run's worktree at `cwd`, which started at `start`.
-export function runHistoryIn(cwd: string, start: string): RunHistory {
+export function runHistoryIn(cwd: string, start: string, git: (args: string[]) => Promise<number> = hostGit(cwd)): RunHistory {
   // Git's exit status: 0 yes, 1 no, anything else when `rev` isn't a commit.
-  const status = (...args: string[]) =>
-    new Promise<number>((done) =>
-      execFile('git', ['-C', cwd, ...args], { windowsHide: true }, (error) => done(error ? Number(error.code ?? 128) : 0)),
-    );
+  const status = (...args: string[]) => git(args);
   return {
     async isCommit(rev) {
       return (await status('rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`)) === 0;
@@ -58,6 +55,14 @@ export function runHistoryIn(cwd: string, start: string): RunHistory {
       return (await status('merge-base', '--is-ancestor', start, `${rev}^{commit}`)) === 0;
     },
   };
+}
+
+// Git's exit status in `cwd` on the host.
+function hostGit(cwd: string): (args: string[]) => Promise<number> {
+  return (args) =>
+    new Promise<number>((done) =>
+      execFile('git', ['-C', cwd, ...args], { windowsHide: true }, (error) => done(error ? Number(error.code ?? 128) : 0)),
+    );
 }
 
 // Git invocations read alike in either shell, as far as the denies go.

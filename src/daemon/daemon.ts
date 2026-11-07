@@ -114,6 +114,7 @@ import {
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
+import { SandboxError, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
@@ -132,6 +133,8 @@ export type DaemonOptions = {
   // lives in (ADR 0004). Only the daemon calls either.
   github: GitHub;
   secrets: Secrets;
+  // Where L2 tasks' runs execute (ADR 0007): one container per task.
+  sandbox: Sandbox;
   skillSets: SkillSets;
   // The routing table each run's tier resolves through when it starts (ADR 0009).
   routingTable: RoutingTableFile;
@@ -151,6 +154,9 @@ export type DaemonOptions = {
 export const IDLE_EXIT_MS = 10 * 60_000;
 // The credential the factory identity's App lives under: its id, slug and private key.
 export const GITHUB_APP_SECRET = 'github-app';
+// The credential L2 runs authenticate with (ADR 0001): a subscription OAuth
+// token, as `claude setup-token` prints it, the `subscription-token` profile.
+export const SUBSCRIPTION_TOKEN_SECRET = 'subscription-token';
 // How long before its expiry an AFK run's bot token is replaced, and how
 // long after a failed replacement it is tried again.
 const TOKEN_REFRESH_MS = 10 * 60_000;
@@ -178,7 +184,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   mkdirSync(dirname(options.tokenPath), { recursive: true });
   writeFileSync(options.tokenPath, token, { mode: 0o600 });
 
-  const { store, clock, executor, git, github, secrets, skillSets, routingTable } = options;
+  const { store, clock, executor, git, github, sandbox, secrets, skillSets, routingTable } = options;
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
   // Whether the daemon before this one stopped gracefully (ADR 0003).
   const cleanStart = store.takeCleanShutdown();
@@ -197,7 +203,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const held = new Map<string, ToolCall[]>();
   // Each guarded AFK run's worktree as it found it, checked once it ends
   // (ADR 0007), and the scripts the gate let it write to the temp folder.
-  const guarded = new Map<string, { worktree: string; snapshot: RunSnapshot; scripts: Set<string> }>();
+  // An L2 run's are made in its container's clone, whose commits come out to
+  // the host worktree once it ends.
+  const guarded = new Map<string, Guarded>();
+  // Each task's container this daemon knows of (ADR 0011), and whether it
+  // runs: listed at start, then kept by what the daemon does to them.
+  const containers = new Map<string, boolean>();
+  // The tasks whose containers may still run a turn the daemon cut short:
+  // restarted before anything else happens in them (ADR 0003).
+  const staleTurns = new Set<string>();
+  // The runs whose checks found broken guards, until their end is in.
+  const brokenRuns = new Set<string>();
+  // What the daemon does to each task's container, one step at a time, and
+  // the tasks whose container is due to be settled.
+  const containerJobs = new Map<string, Promise<unknown>>();
+  const settling = new Set<string>();
   // Each guarded AFK run's read-only bot token (ADR 0004): its gh config
   // directory, and when it is next replaced.
   const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
@@ -320,6 +340,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return moveRepo(command);
       case 'setupGitHub':
         return setUpGitHub(command);
+      case 'setupToken':
+        return setUpToken(command.token);
       case 'checkApp':
         return serially(async (): Promise<Reply> => {
           if (!lifecycle.repositories[command.repo]) return { ok: false, reason: `${command.repo} is not registered.` };
@@ -409,6 +431,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const value: SetupView = { slug: created.slug, installationSettings: installationSettings(created.slug) };
       return { ok: true, value };
     });
+  }
+
+  // `setup token`: the subscription token L2 runs take (ADR 0007) goes into
+  // the credential store, and the next L2 run reads it from there.
+  async function setUpToken(token: unknown): Promise<Reply> {
+    const trimmed = typeof token === 'string' ? token.trim() : '';
+    if (!trimmed) return { ok: false, reason: 'The token is empty: paste what `claude setup-token` printed.' };
+    try {
+      await secrets.write(SUBSCRIPTION_TOKEN_SECRET, trimmed);
+    } catch (error) {
+      if (!(error instanceof SecretsError)) throw error;
+      return { ok: false, reason: `The token couldn’t be stored: ${error.message}` };
+    }
+    return { ok: true };
   }
 
   // The factory identity's App, read once from the credential store.
@@ -609,7 +645,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
       if (!branch) {
-        const unique = await workAtStake(lifecycle.tasks[taskId]!);
+        const unique = (await bringOutForCancel(lifecycle.tasks[taskId]!)) ?? (await workAtStake(lifecycle.tasks[taskId]!));
         if (unique) {
           const choose: Option[] = [
             { label: 'Keep branch', command: { type: 'cancel', taskId, branch: 'keep' } },
@@ -709,6 +745,27 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
       return `Couldn’t check whether ${branch} holds work that exists nowhere else: ${error.message}`;
+    }
+  }
+
+  // Brings what a root's container holds out to its task branch, so the
+  // cancel sheet weighs it too: null once done, or when it has none, else
+  // why it couldn't, which is work at stake. The container is settled after.
+  async function bringOutForCancel(task: Task): Promise<string | null> {
+    if (task.parent || !task.worktree || !containers.has(task.id)) return null;
+    const { path, branch } = task.worktree;
+    try {
+      await onContainer(task.id, async () => {
+        await sandbox.start(task.id);
+        containers.set(task.id, true);
+        await sandbox.bringOut(task.id, path, branch);
+      });
+      return null;
+    } catch (error) {
+      if (!(error instanceof SandboxError)) throw error;
+      return `Couldn’t bring ${task.id}’s commits out of its container, where they may be the only copy: ${error.message}`;
+    } finally {
+      settleContainer(task.id);
     }
   }
 
@@ -930,7 +987,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Before anything else, every run the store still shows live is
   // reconciled (ADR 0003): no run outlives the daemon that started it. After
   // a graceful stop there is none; after a crash, they are flagged unclean.
-  void serially(() => settle({ type: 'runsReconciled', interruption: cleanStart ? 'graceful' : 'unclean' }, new Set()));
+  // A container whose task's run the store still shows live may hold that
+  // run's turn, still going: it is restarted before the run is requeued,
+  // and its commits come out (ADR 0003). Docker that can't be reached
+  // leaves the daemon knowing of no container.
+  void serially(async () => {
+    try {
+      for (const { taskId, running } of await sandbox.list()) containers.set(taskId, running);
+    } catch (error) {
+      if (!(error instanceof SandboxError)) throw error;
+    }
+    for (const run of Object.values(lifecycle.runs)) {
+      // Even one Docker didn't list: it may answer by the time the run is prepared.
+      if (run.status !== 'ended' && runsInContainer(run)) staleTurns.add(run.taskId);
+    }
+    for (const taskId of [...staleTurns]) await onContainer(taskId, () => endStaleTurn(taskId)).catch(() => {});
+    await settle({ type: 'runsReconciled', interruption: cleanStart ? 'graceful' : 'unclean' }, new Set());
+  });
 
   // Every repository's clone is checked at start (ADR 0010), and the skill
   // set versions finished tasks left behind are removed.
@@ -1062,6 +1135,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     store.saveLifecycle(lifecycle);
     publish();
     driveExecutor(before, action);
+    driveContainers();
     driveLoops();
     driveCleanups();
     driveReopens();
@@ -1345,6 +1419,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     const repository = lifecycle.repositories[task.repo];
     if (!repository) return failed(`${task.repo} isn’t registered any more, so ${task.id}’s worktree at ${path} stays.`);
+    const unretired = await retireContainer(task);
+    if (unretired) return failed(unretired);
     // A root's tree goes with it: each child branch kept to merge, merged or
     // not (ADR 0011). One whose child's own cleanup is still under way is
     // left to the sweep after it.
@@ -1470,17 +1546,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Starts the runs the action started, and stops the live runs an operator
   // verb ended (a run event's own run has already ended on the executor).
   function driveExecutor(before: Lifecycle, action: LifecycleAction): void {
+    // Ended first: a run starting in the same task waits for what its
+    // container does about the run cut short.
     for (const run of Object.values(lifecycle.runs)) {
       const was = before.runs[run.id];
-      if (!was && run.status === 'active') {
-        streamed.set(run.id, []);
-        void startRun(run);
-      } else if (was && was.status !== 'ended' && run.status === 'ended') {
-        streamed.delete(run.id);
+      if (was && was.status !== 'ended' && run.status === 'ended') {
+        // The runs the store showed live at start are the dead daemon's: recovery restarted their containers.
+        const startedHere = streamed.delete(run.id);
         held.delete(run.id);
         // A run ended by an operator verb or parked isn't checked: it never finished.
         unguard(run.id);
-        if (!('runId' in action && action.runId === run.id)) executor.stop(run.id);
+        const ownEvent = 'runId' in action && action.runId === run.id;
+        if (!ownEvent) executor.stop(run.id);
+        // Killing `docker exec` leaves the turn running in the container (ADR
+        // 0003), and a run that failed may have lost its `docker exec` first.
+        // One whose guards broke ended its turn, and keeps its commits there.
+        const brokeGuards = brokenRuns.delete(run.id);
+        if (startedHere && runsInContainer(run) && containers.has(run.taskId) && (!ownEvent || (action.type === 'runFailed' && !brokeGuards))) {
+          staleTurns.add(run.taskId);
+          settleContainer(run.taskId);
+        }
+      }
+    }
+    for (const run of Object.values(lifecycle.runs)) {
+      if (!before.runs[run.id] && run.status === 'active') {
+        streamed.set(run.id, []);
+        void startRun(run);
       }
     }
     // The conversation verbs act on the task's live run.
@@ -1545,17 +1636,37 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // Starts the run on the executor. An AFK run in a worktree starts guarded
   // (ADR 0007), once its worktree is snapshotted, unless it ended meanwhile.
+  // An L2 run starts in its task's container (ADR 0007), prepared with the
+  // host task branch's commits, and its checks are made there. Any run of a
+  // task with a container waits for what the container is doing first, such
+  // as bringing out the commits of a run cut short.
   async function startRun(run: Run): Promise<void> {
     const task = lifecycle.tasks[run.taskId]!;
     const cwd = task.worktree?.path ?? null;
     let guards: RunGuards | null = null;
+    let container: Container | null = null;
+    let token: string | null = null;
+    if (containers.has(task.id)) await onContainer(task.id, async () => {});
     if (run.mode === 'AFK' && cwd) {
-      let snapshot: RunSnapshot;
-      try {
-        snapshot = await git.snapshot(cwd);
-      } catch (error) {
-        if (!(error instanceof GitError)) throw error;
-        return void dispatch({ type: 'runFailed', runId: run.id, reason: `The factory couldn't read the run's worktree at ${cwd}: ${error.message}` });
+      const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
+      const l2 = run.autonomy === 'L2';
+      if (l2) {
+        try {
+          token = await secrets.read(SUBSCRIPTION_TOKEN_SECRET);
+        } catch (error) {
+          if (!(error instanceof SecretsError)) throw error;
+          return fail(`The factory couldn’t read the subscription token L2 runs use: ${error.message}`);
+        }
+        if (!token) return fail(NO_SUBSCRIPTION_TOKEN);
+      }
+      let snapshot: RunSnapshot | null = null;
+      if (!l2) {
+        try {
+          snapshot = await git.snapshot(cwd);
+        } catch (error) {
+          if (!(error instanceof GitError)) throw error;
+          return fail(`The factory couldn't read the run's worktree at ${cwd}: ${error.message}`);
+        }
       }
       // The run reads GitHub as the App, never as the operator (ADR 0004).
       let bot: BotToken;
@@ -1563,10 +1674,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         bot = await botToken(task.repo);
       } catch (error) {
         if (!isGitHubFailure(error)) throw error;
-        return void dispatch({ type: 'runFailed', runId: run.id, reason: `The factory couldn’t give the run its read-only GitHub token: ${error.message}` });
+        return fail(`The factory couldn’t give the run its read-only GitHub token: ${error.message}`);
       }
       if (lifecycle.runs[run.id]?.status !== 'active') return;
-      const dir = join(options.runsRoot, run.id);
+      // An L2 run's are where its container mounts them, read-only.
+      const dir = l2 ? containerRunDir(task.id) : join(options.runsRoot, run.id);
       const env = prepareRunGit(dir, FACTORY_IDENTITY, {
         task: task.id,
         run: run.id,
@@ -1574,9 +1686,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       });
       const ghConfigDir = join(dir, 'gh');
       Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
-      guarded.set(run.id, { worktree: cwd, snapshot, scripts: new Set() });
+      if (l2) {
+        try {
+          container = await prepareContainer(task, run, dir);
+          snapshot = await container.checks.snapshot(container.workdir);
+        } catch (error) {
+          if (!(error instanceof SandboxError || error instanceof GitError)) throw error;
+          return fail(`The factory couldn’t prepare ${task.id}’s container: ${error.message}`);
+        }
+        // Ended while its container was prepared: the container is settled again.
+        if (lifecycle.runs[run.id]?.status !== 'active') return settleContainer(task.id);
+      }
+      guarded.set(run.id, { worktree: container?.workdir ?? cwd, host: cwd, dir, checks: container?.checks ?? git, container, snapshot: snapshot!, scripts: new Set() });
       botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
-      guards = { start: snapshot.head, env };
+      guards = { start: snapshot!.head, env: l2 ? inRunDir(env, dir) : env };
     }
     const start: RunStart = {
       runId: run.id,
@@ -1589,8 +1712,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       firstMessage: run.opening,
       model: run.model,
       maxTurns: run.maxTurns ?? null,
-      // The scheduler's choice (ADR 0001): L2's profile comes with the sandbox.
-      credential: 'subscription-host',
+      // The scheduler's choice (ADR 0001): an L2 run's token goes into its container alone.
+      credential: container ? 'subscription-token' : 'subscription-host',
+      token,
+      container,
       plugin: run.skillSet ? skillSets.pathOf(run.skillSet) : null,
       guards,
       // Claude Code matches them itself, so most calls never reach the gate.
@@ -1694,11 +1819,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           await git.addWorktree(repository.path, { ...action.worktree, startPoint: `origin/${repository.baseBranch}` });
           action.base = (await git.snapshot(action.worktree.path)).head;
         } else {
+          // An L2 parent's commits are in its container: the child is cut from its tip there.
+          if (containers.get(parent.id)) await onContainer(parent.id, () => sandbox.bringOut(parent.id, parent.worktree!.path, parent.worktree!.branch));
           action.base = (await git.snapshot(parent.worktree!.path)).head;
           await git.addWorktree(repository.path, { ...action.worktree, startPoint: action.base });
         }
       } catch (error) {
-        if (!(error instanceof GitError)) throw error;
+        if (!(error instanceof GitError || error instanceof SandboxError)) throw error;
         return { ok: false, error: `The factory couldn’t cut ${action.worktree.branch} for the child: ${error.message}` };
       }
       const refusal = await settle(action, new Set());
@@ -1724,12 +1851,29 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     );
     let broken: string[];
     try {
-      broken = await git.violations(guard.worktree, guard.snapshot, branches, FACTORY_IDENTITY.email);
+      // The container's clone has no other task's branches.
+      broken = await guard.checks.violations(guard.worktree, guard.snapshot, guard.container ? [] : branches, FACTORY_IDENTITY.email);
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
       broken = [`The factory couldn't check the run's worktree: ${error.message}`];
     }
-    if (broken.length === 0) return event.type === 'runCompleted' ? withCommits(event, guard.worktree) : event;
+    // A run in a container that kept the guards hands its commits to the
+    // host task branch, as a fast-forward through a bundle.
+    if (broken.length === 0 && guard.container) {
+      const { taskId } = guard.container;
+      const { branch } = lifecycle.tasks[taskId]!.worktree!;
+      try {
+        await onContainer(taskId, () => sandbox.bringOut(taskId, guard.host, branch));
+      } catch (error) {
+        if (!(error instanceof SandboxError)) throw error;
+        const unbrought = `the factory couldn’t bring its commits out of ${taskId}’s container: ${error.message}`;
+        return event.type === 'runCompleted'
+          ? { type: 'runFailed', runId: event.runId, reason: `The run completed, but ${unbrought}` }
+          : { ...event, reason: `${event.reason} Then ${unbrought}` };
+      }
+    }
+    if (broken.length === 0) return event.type === 'runCompleted' ? withCommits(event, guard.host) : event;
+    brokenRuns.add(event.runId);
     const breach = `broke the factory’s git guards. ${broken.join(' ')}`;
     return event.type === 'runCompleted'
       ? { type: 'runFailed', runId: event.runId, reason: `The run ${breach}` }
@@ -1783,8 +1927,119 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // hooks and gh config.
   function unguard(runId: string): void {
     botTokens.delete(runId);
-    if (!guarded.delete(runId)) return;
-    rmSync(join(options.runsRoot, runId), { recursive: true, force: true, maxRetries: 3 });
+    const guard = guarded.get(runId);
+    if (!guard) return;
+    guarded.delete(runId);
+    // A container's run directory stays mounted until the container goes.
+    if (!guard.container) rmSync(guard.dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+
+  // The task's container's run directory on the host, mounted read-only in it.
+  function containerRunDir(taskId: string): string {
+    return join(options.runsRoot, 'containers', taskId);
+  }
+
+  // Runs `job` on the task's container once what the daemon already does to
+  // it is done: one step at a time.
+  function onContainer<T>(taskId: string, job: () => Promise<T>): Promise<T> {
+    const result = (containerJobs.get(taskId) ?? Promise.resolve()).then(job);
+    containerJobs.set(taskId, result.catch(() => {}));
+    return result;
+  }
+
+  // The run's task's container, running, with the host task branch's
+  // commits in it, and the branches of the children it awaits to merge.
+  function prepareContainer(task: Task, run: Run, runDir: string): Promise<Container> {
+    const { path, branch } = task.worktree!;
+    const branches = childrenOf(lifecycle, task)
+      .filter((child) => child.child?.awaited && !child.child.research && !child.child.branchDeleted && child.worktree)
+      .map((child) => child.worktree!.branch);
+    return onContainer(task.id, async () => {
+      // No run starts beside a turn that may still run there.
+      if (staleTurns.has(task.id)) await endStaleTurn(task.id);
+      let sessionsDir: string;
+      try {
+        sessionsDir = executor.sessionsDir(path);
+      } catch (error) {
+        throw new SandboxError((error as Error).message);
+      }
+      const plugin = run.skillSet ? skillSets.pathOf(run.skillSet) : null;
+      const container = await sandbox.prepare({ taskId: task.id, clonePath: lifecycle.repositories[task.repo]!.path, branch, branches, plugin, runDir, sessionsDir });
+      containers.set(task.id, true);
+      return container;
+    });
+  }
+
+  // Settles each container the daemon knows of.
+  function driveContainers(): void {
+    for (const taskId of containers.keys()) settleContainer(taskId);
+  }
+
+  // Brings the task's container to what its task needs (ADR 0011), once
+  // what the daemon already does to it is done: a turn the daemon cut short
+  // dies with a restart, and its commits come out to the host task branch
+  // (ADR 0003); then a container whose task has no live run there stops. A
+  // step that fails is tried again the next time the Lifecycle changes.
+  function settleContainer(taskId: string): void {
+    if (settling.has(taskId)) return;
+    settling.add(taskId);
+    void onContainer(taskId, async () => {
+      settling.delete(taskId);
+      try {
+        if (staleTurns.has(taskId)) await endStaleTurn(taskId);
+        const task = lifecycle.tasks[taskId];
+        const run = task && liveRun(lifecycle, task);
+        // A run starting there prepares it; one that ends before it does settles it again.
+        const inUse = !!run && runsInContainer(run);
+        if (!inUse && containers.get(taskId)) {
+          await sandbox.stop(taskId);
+          containers.set(taskId, false);
+        }
+      } catch (error) {
+        if (!(error instanceof SandboxError)) throw error;
+      }
+    });
+  }
+
+  // Restarts the task's container, which kills a turn still running in it
+  // and keeps its clone, then brings its commits out to the host task branch.
+  // Until the restart is made, the turn may still run: the next run's
+  // prepare tries it again first.
+  async function endStaleTurn(taskId: string): Promise<void> {
+    const had = await sandbox.restart(taskId);
+    staleTurns.delete(taskId);
+    if (!had) return void containers.delete(taskId);
+    containers.set(taskId, true);
+    const worktree = lifecycle.tasks[taskId]?.worktree;
+    if (!worktree) return;
+    // Commits that can't come out stay in the container: the next run's
+    // prepare, or the task's cleanup, says why.
+    await sandbox.bringOut(taskId, worktree.path, worktree.branch).catch((error) => {
+      if (!(error instanceof SandboxError)) throw error;
+    });
+  }
+
+  // At the task's end (ADR 0011): its container's commits come out to the
+  // host task branch in a final bundle, and then the container goes, with
+  // its run directory. Null once done, or why it couldn't be.
+  function retireContainer(task: Task): Promise<string | null> {
+    const ranInOne = containers.has(task.id) || task.runIds.some((id) => runsInContainer(lifecycle.runs[id]!));
+    if (!ranInOne) return Promise.resolve(null);
+    return onContainer(task.id, async () => {
+      try {
+        if ((await sandbox.list()).some((listed) => listed.taskId === task.id)) {
+          await sandbox.start(task.id);
+          await sandbox.bringOut(task.id, task.worktree!.path, task.worktree!.branch);
+          await sandbox.remove(task.id);
+        }
+      } catch (error) {
+        if (!(error instanceof SandboxError)) throw error;
+        return `The factory couldn’t bring ${task.id}’s last commits out of its container and remove it, so it removed nothing yet: ${error.message}`;
+      }
+      containers.delete(task.id);
+      rmSync(containerRunDir(task.id), { recursive: true, force: true, maxRetries: 3 });
+      return null;
+    });
   }
 
   // The L1 gate (ADR 0007), for the calls Claude Code still asks about once
@@ -1832,6 +2087,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       stopTicking();
       holdRuns = 'The daemon is stopping, so it starts no new run.';
       await serially(() => settle({ type: 'runsReconciled', interruption: 'graceful' }, new Set()));
+      // A container whose run was cut short is restarted, its commits come out, and it stops.
+      await Promise.all(containerJobs.values());
       // Written before the pipe is let go: the next daemon may start as soon
       // as it is, and must find the marker. Nothing after it starts a run.
       store.markCleanShutdown();
@@ -1853,6 +2110,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 }
 
 const NO_APP = 'The factory has no GitHub App yet: run `agents-factory setup github` to create it.';
+const NO_SUBSCRIPTION_TOKEN =
+  'The factory has no subscription token for L2 runs yet: run `claude setup-token`, then `agents-factory setup token` to store what it prints.';
+
+// Whether the run executes in its task's container: an L2 AFK run (ADR 0007).
+function runsInContainer(run: Run): boolean {
+  return run.mode === 'AFK' && run.autonomy === 'L2';
+}
+
+// What the factory holds about a guarded AFK run while it runs (ADR 0007):
+// where its checks are made (`worktree`, the container's workdir for an L2
+// run) and how, its task's host worktree, its own directory of git config,
+// hooks and gh config, its container if it runs in one, its snapshot from
+// before it started, and the temp scripts the gate let it write.
+type Guarded = {
+  worktree: string;
+  host: string;
+  dir: string;
+  checks: Pick<Git, 'snapshot' | 'violations'>;
+  container: Container | null;
+  snapshot: RunSnapshot;
+  scripts: Set<string>;
+};
 
 // What closing a ticket says on it (ADR 0006): its work is on the task
 // branch, not yet on the base branch, and at L1 only on the operator's machine.

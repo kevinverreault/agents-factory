@@ -163,14 +163,14 @@ describe('launching at an AFK stage', () => {
     ]);
   });
 
-  test('refuses max turns below 1, an unknown priority, and L2 until the sandbox exists', async () => {
+  test('refuses max turns below 1, an unknown priority, and an unknown autonomy level', async () => {
     const { factory, operator, tui } = await attached();
 
     expect(await operator.send({ ...implement, maxTurns: 0 })).toEqual({ ok: false, reason: 'Max turns must be a whole number of at least 1.' });
     expect(await operator.send({ ...implement, priority: 'asap' as never })).toEqual({ ok: false, reason: 'asap is not a priority (normal or urgent).' });
-    expect(await operator.send({ ...implement, autonomy: 'L2' })).toEqual({
+    expect(await operator.send({ ...implement, autonomy: 'L3' as never })).toEqual({
       ok: false,
-      reason: 'L2 runs in a sandbox, which the factory doesn’t have yet: launch at L1.',
+      reason: 'L3 is not an autonomy level (L1 or L2).',
     });
 
     await operator.send({ type: 'daemon.status' });

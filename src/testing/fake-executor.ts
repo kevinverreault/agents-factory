@@ -79,6 +79,10 @@ export class FakeExecutor implements Executor {
     this.archived.push({ sessionId, dir, events: transcript.length });
   }
 
+  sessionsDir(cwd: string): string {
+    return `${cwd}.sessions`;
+  }
+
   // Archiving fails with `reason` from now on, or works again (null).
   failArchive(reason: string | null): void {
     this.archiveFailure = reason;
