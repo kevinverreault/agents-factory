@@ -30,6 +30,16 @@ export function childWorktree(root: string, repository: Repository, parent: Task
   return { branch: `${parent.branch}--c${n}`, path: worktreePath(root, repository, childId) };
 }
 
+// A research child's worktree (ADR 0007): its own path, on `research/<name>`.
+export function researchWorktree(root: string, repository: Repository, childId: string, name: string): TaskWorktree {
+  return { branch: researchBranch(name), path: worktreePath(root, repository, childId) };
+}
+
+// The branch a research child named `name` works on.
+export function researchBranch(name: string): string {
+  return `research/${name}`;
+}
+
 // Where task `taskId` of `repository` has its worktree: `<root>/<owner>-<name>/<id>`.
 function worktreePath(root: string, repository: Repository, taskId: string): string {
   return join(root, repository.id.replace('/', '-'), taskId);

@@ -118,15 +118,38 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       expect(await github.readIssue(readOnly.token, openIssue)).toMatchObject({ open: true });
     });
 
-    test('refuses to push a branch that isn’t a task branch, pushing nothing', async () => {
+    test('refuses to push a branch that isn’t a task or research branch, pushing nothing', async () => {
       const { github, app, installedRepo, clone } = await makeFixture();
       const branch = `contract/not-a-task-branch-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Never pushed.\n' });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
       await expect(github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).rejects.toThrow(
-        `The factory pushes only task branches (factory/…), not ${branch}.`,
+        `The factory pushes only task branches (factory/…) and research branches (research/…), not ${branch}.`,
       );
+
+      expect(await clone.remoteTip(branch)).toBeNull();
+    });
+
+    test('pushes a research branch whose commits touch only docs/research/**', async () => {
+      const { github, app, installedRepo, clone } = await makeFixture();
+      const branch = `research/contract-${unique()}`;
+      const tip = await clone.commitOn(branch, { [`docs/research/contract-${unique()}.md`]: 'Findings.\n' });
+      const { token } = await github.mintToken(app, installedRepo, PUSH);
+
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).toEqual({ pushed: tip });
+
+      expect(await clone.remoteTip(branch)).toBe(tip);
+    });
+
+    test('refuses to push a research branch whose commits touch any other path, pushing nothing', async () => {
+      const { github, app, installedRepo, clone } = await makeFixture();
+      const branch = `research/contract-${unique()}`;
+      const other = `contract/${unique()}.txt`;
+      await clone.commitOn(branch, { [`docs/research/contract-${unique()}.md`]: 'Findings.\n', [other]: 'Never pushed.\n' });
+      const { token } = await github.mintToken(app, installedRepo, PUSH);
+
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).toEqual({ outsideResearch: [other] });
 
       expect(await clone.remoteTip(branch)).toBeNull();
     });
@@ -265,7 +288,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, installedRepo, baseBranch } = await makeFixture();
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
-      await expect(github.deleteBranch(token, installedRepo, baseBranch)).rejects.toThrow(`The factory pushes only task branches (factory/…), not ${baseBranch}.`);
+      await expect(github.deleteBranch(token, installedRepo, baseBranch)).rejects.toThrow(`The factory deletes only task branches (factory/…) on GitHub, not ${baseBranch}.`);
     });
 
     test('refuses an App whose private key isn’t the one GitHub issued', async () => {

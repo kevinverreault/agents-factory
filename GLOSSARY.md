@@ -36,6 +36,13 @@ A child task its parent doesn't wait for; its work never joins the parent's bran
 What a child task hands its parent when it ends: a summary, a status, and where its work is.
 _Avoid_: Result, return value
 
+**Research child**:
+A fire-and-forget child task that resolves one research ticket of a map, at L1, on its own `research/<name>` branch, which the factory pushes when its commits touch only `docs/research/**`; its ticket closes when it reports.
+
+**Factory note**:
+A message the factory puts into a HITL conversation on its own behalf, such as a fire-and-forget child's report.
+_Avoid_: System message, notification
+
 **Group**:
 A named label the operator filters tasks by, such as the tickets of one spec; it has no lifecycle of its own.
 _Avoid_: Project, epic, folder

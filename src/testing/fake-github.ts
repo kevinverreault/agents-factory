@@ -1,6 +1,8 @@
 import {
   GitHubError,
+  deleteRefusal,
   goneHead,
+  outsideResearch,
   pushRefusal,
   workflowFiles,
   type BranchPush,
@@ -229,7 +231,10 @@ export class FakeGitHub implements GitHub {
     if (!tip) throw new GitHubError(`error: src refspec ${branch} does not match any`);
     const remoteTip = git.originTip(clonePath, branch);
     if (remoteTip === tip) return { pushed: tip };
-    const workflows = workflowFiles(git.outgoingChanges(clonePath, branch, remoteTip));
+    const changed = git.outgoingChanges(clonePath, branch, remoteTip);
+    const outside = outsideResearch(branch, changed);
+    if (outside.length) return { outsideResearch: outside };
+    const workflows = workflowFiles(changed);
     if (workflows.length) return { workflowFiles: workflows };
     git.push(clonePath, branch);
     this.pushes.push({ repo, branch, tip, token: snapshot(minted) });
@@ -295,7 +300,7 @@ export class FakeGitHub implements GitHub {
   }
 
   async deleteBranch(token: string, repo: string, branch: string): Promise<void> {
-    const refusal = pushRefusal(branch);
+    const refusal = deleteRefusal(branch);
     if (refusal) throw new GitHubError(refusal);
     await this.held();
     const minted = this.scoped(token, repo, 'contents', 'write');

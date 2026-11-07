@@ -34,13 +34,15 @@ export const OPEN_PR: Permissions = { contents: 'read', pull_requests: 'write', 
 
 export type InstallationToken = { token: string; expiresAt: number };
 
-// What the factory pushes (ADR 0004): the task branch of the clone at
-// `clonePath`, to the branch of the same name in the repository `repo`.
+// What the factory pushes (ADR 0004): the task branch, or a research
+// branch (ADR 0007), of the clone at `clonePath`, to the branch of the same
+// name in the repository `repo`.
 export type BranchPush = { clonePath: string; repo: string; branch: string };
 // The tip GitHub has of the branch once pushed, or, unpushed, the workflow
 // files its commits change: the App has no Workflows permission, so the
-// operator pushes those by hand (ADR 0004).
-export type Pushed = { pushed: string } | { workflowFiles: string[] };
+// operator pushes those by hand (ADR 0004); or, for a research branch, the
+// paths its commits change outside `docs/research/` (ADR 0007).
+export type Pushed = { pushed: string } | { workflowFiles: string[] } | { outsideResearch: string[] };
 
 // What closing a draft PR, with its comment, or reopening it, writes with:
 // pull requests alone.
@@ -119,10 +121,30 @@ export interface GitHub {
 export class GitHubError extends Error {}
 
 // The refspec guard (ADR 0004): the factory pushes task branches
-// (`factory/<id>-<slug>`) and nothing else, so a token that could write any
-// branch never writes the base branch. Why `branch` can't be pushed, or null.
+// (`factory/<id>-<slug>`) and research branches (`research/<name>`, ADR
+// 0007) and nothing else, so a token that could write any branch never
+// writes the base branch. Why `branch` can't be pushed, or null.
 export function pushRefusal(branch: string): string | null {
-  return /^factory\/[\w.-]+$/.test(branch) ? null : `The factory pushes only task branches (factory/…), not ${branch}.`;
+  return TASK_BRANCH.test(branch) || RESEARCH_BRANCH.test(branch)
+    ? null
+    : `The factory pushes only task branches (factory/…) and research branches (research/…), not ${branch}.`;
+}
+
+// Why the factory won't delete `branch` on GitHub, or null: it deletes only
+// the task branches it pushed (ADR 0011). A research branch is the map's
+// context pointer, so it stays.
+export function deleteRefusal(branch: string): string | null {
+  return TASK_BRANCH.test(branch) ? null : `The factory deletes only task branches (factory/…) on GitHub, not ${branch}.`;
+}
+
+const TASK_BRANCH = /^factory\/[\w.-]+$/;
+const RESEARCH_BRANCH = /^research\/[\w.-]+$/;
+
+// The research branch's push is the one exception to "no code leaves this
+// machine" (ADR 0007): the paths its outgoing commits change outside
+// `docs/research/`, which block it. None for any other branch.
+export function outsideResearch(branch: string, paths: string[]): string[] {
+  return RESEARCH_BRANCH.test(branch) ? paths.filter((path) => !path.startsWith('docs/research/')) : [];
 }
 
 // Where the operator installs the App, or changes which repositories an
@@ -257,7 +279,10 @@ export function gitHubApi(): GitHub {
       // What GitHub has already is no change of this push's, as far as the clone knows it.
       const known = remoteTip && (await git('cat-file', '-t', remoteTip).catch(() => null)) === 'commit' ? [remoteTip] : [];
       const changed = await git('log', '--format=', '--name-only', '--no-renames', tip, '--not', '--remotes=origin', ...known);
-      const workflows = workflowFiles([...new Set(changed.split(/\r?\n/).filter(Boolean))].sort());
+      const paths = [...new Set(changed.split(/\r?\n/).filter(Boolean))].sort();
+      const outside = outsideResearch(branch, paths);
+      if (outside.length) return { outsideResearch: outside };
+      const workflows = workflowFiles(paths);
       if (workflows.length) return { workflowFiles: workflows };
       // The tip checked, not whatever the branch points at by now.
       await git('push', '--no-verify', '--porcelain', url, `${tip}:refs/heads/${branch}`);
@@ -301,7 +326,7 @@ export function gitHubApi(): GitHub {
       if (reopened.status !== 200) throw refused(`reopen ${ref}`, reopened);
     },
     async deleteBranch(token, repo, branch) {
-      const refusal = pushRefusal(branch);
+      const refusal = deleteRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
       const reply = await call('DELETE', `/repos/${repo}/git/refs/heads/${refPath(branch)}`, token);
       // Deleted already, such as by GitHub's auto-delete; any other refusal is one.
