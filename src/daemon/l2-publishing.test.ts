@@ -199,6 +199,28 @@ describe('the open-pr action', () => {
     expect(factory.executor.started).toHaveLength(3);
   });
 
+  test('taken over before its PR opened and handed back at L2, the root still reaches In review with its draft PR open', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementing('L2'));
+    factory.github.failPullRequests('Validation Failed.');
+    await throughPrBody(factory, tui, 'L2');
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    factory.github.failPullRequests(null);
+
+    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R4');
+    await operator.send({ type: 'openHandoff', taskId: 'T1' });
+    factory.executor.report('R4', { type: 'briefWritten', brief: { goal: 'Open the PR.', decided: [], doneWhen: [], outOfScope: [], links: [] } });
+    const { brief, tier, maxTurns } = (await tui.until((state) => !!state.tasks.T1?.handoff?.brief)).tasks.T1!.handoff!;
+    expect(await operator.send({ type: 'handoff', taskId: 'T1', brief: brief!, continueAs: 'resume', autonomy: 'L2', tier, maxTurns })).toEqual({ ok: true });
+    await started(factory, 5);
+    factory.executor.report('R5', { type: 'runCompleted' });
+
+    const reviewing = await tui.until((state) => state.tasks.T1?.label === 'In review' && state.tasks.T1.publishing === null);
+    expect(reviewing.tasks.T1).toMatchObject({ pr: { number: 101, draft: true } });
+    expect(factory.github.pullRequests).toHaveLength(1);
+  });
+
   test('is skipped at L1: the root reaches In review with its branch local', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(implementing('L1'));
@@ -209,6 +231,28 @@ describe('the open-pr action', () => {
     expect(reviewing.tasks.T1).toMatchObject({ pr: null, publishing: null });
     expect(factory.github.pushes).toEqual([]);
     expect(factory.github.pullRequests).toEqual([]);
+  });
+});
+
+describe('Request changes on an L2 root with its draft PR', () => {
+  test('pushes what the changes run committed to the PR, and the root is back In review', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementing('L2'));
+    await throughPrBody(factory, tui, 'L2');
+    const { branch } = (await tui.until((state) => state.tasks.T1?.label === 'In review')).tasks.T1!;
+
+    expect(await operator.send({ type: 'requestChanges', taskId: 'T1', comments: 'Validate the email field.' })).toEqual({ ok: true });
+    await started(factory, 4);
+    commitInContainer(factory, 'T1', 'src/validate.ts');
+    factory.executor.report('R4', { type: 'runCompleted' });
+
+    const reviewing = await tui.until((state) => state.tasks.T1?.label === 'In review' && state.tasks.T1.publishing === null && factory.github.pushes.length === 2);
+    const tip = factory.git.branchTip(clone, branch!)!;
+    expect(factory.github.pushes.at(-1)).toMatchObject({ branch, tip });
+    expect(factory.git.originTip(clone, branch!)).toBe(tip);
+    expect(reviewing.tasks.T1).toMatchObject({ pr: { number: 101 } });
+    expect(factory.github.pullRequests).toHaveLength(1);
+    expect(reviewing.attentionQueue).toEqual([{ kind: 'review', taskId: 'T1' }]);
   });
 });
 

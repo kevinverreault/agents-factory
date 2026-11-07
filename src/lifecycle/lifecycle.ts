@@ -1161,10 +1161,12 @@ function picking(finishing = false): Loop {
 function advanceFrom(state: Lifecycle, task: Task, from: Stage, run: Run | undefined, sessionId: string | undefined, at: number): void {
   const blocked = (reason: string) => raise(state, task, run, 'stage-blocked', false, reason, at);
   task.loop = null;
-  // Past the last stage, the root task is the operator's to review.
+  // Past the last stage, the root task is the operator's to review. One
+  // whose open-pr stage just opened or updated its PR has nothing to publish.
   const to = nextAfkStage(task, from);
   if (!to) {
-    task.state = 'in-review';
+    if (from.kind === 'action' && task.pr) task.state = 'in-review';
+    else reachReview(task);
     return;
   }
   if (to.mode === 'HITL') return blocked(`The next stage, ${to.id}, is HITL: take ${task.id} over to start it.`);
@@ -1835,6 +1837,20 @@ function failPublishing(state: Lifecycle, task: Task, request: AttentionRequest 
   else addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
 }
 
+// A root reaching In review after a run. At L2 the factory publishes what
+// the run did unattended (ADR 0007): it pushes the task branch to the root's
+// PR, or, with no PR yet, pushes and opens one if the preset has an open-pr
+// stage, as when the operator took the root over before it opened.
+function reachReview(task: Task): void {
+  task.state = 'in-review';
+  if (task.autonomy === 'L2' && !task.child && task.worktree && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
+}
+
+// Whether the task's frozen preset has an open-pr stage.
+function opensPr(task: Task): boolean {
+  return !!task.preset?.stages.some((stage) => stage.kind === 'action' && stage.id === 'open-pr');
+}
+
 // Whether the AFK task is at a factory action stage, while the factory
 // works it or a failed step of it needs the operator.
 function atActionStage(task: Task): boolean {
@@ -2201,8 +2217,8 @@ function handoffStage(task: Task): Stage | null {
   return stages.slice(from).find((stage) => stage.mode === 'AFK' && stage.requires !== 'L2') ?? null;
 }
 
-// A new handoff sheet, pre-filled from the AFK stage it hands off to. L2
-// runs in a sandbox, which the factory doesn't have yet, so it hands off at L1.
+// A new handoff sheet, pre-filled from the AFK stage it hands off to. It
+// hands off at L1 unless the operator raises it to L2 on the sheet.
 function newHandoffSheet(task: Task, readiness: Readiness): HandoffSheet {
   const stage = handoffStage(task);
   const share = task.context ? task.context.used / task.context.window : null;
@@ -3080,7 +3096,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // with no preset, or one handed off with no AFK stage ahead) is its last.
       const from = stageOf(task, run!.stage);
       if (from?.mode !== 'AFK' || task.changesRequested) {
-        task.state = 'in-review';
+        reachReview(task);
         break;
       }
       if (run!.ticket) {
