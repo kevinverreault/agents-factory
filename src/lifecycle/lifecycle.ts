@@ -287,7 +287,7 @@ export type Task = {
   // The factory notes a HITL task holds for its conversation (ADR 0009):
   // its fire-and-forget children's reports, delivered on the operator's
   // turn, or in its next run's opening once it was parked.
-  notes?: string[];
+  factoryNotes?: string[];
   // The rules the operator allowed for this task (ADR 0007): its L1 runs
   // make calls they cover without asking. Tasks stored before them have none.
   allowRules?: string[];
@@ -708,7 +708,7 @@ export type ResearchEvent =
   | { type: 'researchPushed'; taskId: string; commit: string }
   | { type: 'researchPushRefused'; taskId: string; paths: string[] }
   | { type: 'researchClosed'; taskId: string }
-  | { type: 'researchFailed'; taskId: string; step: 'push' | 'close'; reason: string };
+  | { type: 'researchFailed'; taskId: string; step: NonNullable<Research['step']>; reason: string };
 
 // The daemon delivered the factory notes the HITL task held to its live
 // run, on the operator's turn.
@@ -1680,7 +1680,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'researchFailed':
       return task.child?.research?.step === action.step ? null : `${task.id} isn’t at ${action.step}.`;
     case 'notesDelivered':
-      if (!task.notes?.length) return `${task.id} holds no factory notes.`;
+      if (!task.factoryNotes?.length) return `${task.id} holds no factory notes.`;
       return liveRun(state, task)?.turn === 'operator' ? null : `${task.id}’s conversation isn’t on the operator’s turn.`;
     case 'childBranchDeleted':
       return keptChildBranches([task]).length ? null : `${task.id} keeps no child branch.`;
@@ -1904,7 +1904,7 @@ function noteParent(state: Lifecycle, child: Task): void {
   const note = childNote(child);
   const run = liveRun(state, parent);
   if (run?.status === 'active' && run.turn === 'agent') run.queued.push(note);
-  else (parent.notes ??= []).push(note);
+  else (parent.factoryNotes ??= []).push(note);
 }
 
 // What the factory note of a child's report says.
@@ -1915,7 +1915,11 @@ function childNote(child: Task): string {
     '## Factory note',
     `Your fire-and-forget child ${child.id} (${child.title}) has reported: ${report.status}; its run ended ${report.outcome ?? 'without a run'}.`,
     ...(research && report.status !== 'cancelled'
-      ? [`The factory pushes ${report.branch} and closes the research ticket ${research.ticket} next.`]
+      ? [
+          report.commits.length
+            ? `The factory pushes ${report.branch} next, if its commits touch nothing but docs/research/**, then closes the research ticket ${research.ticket}.`
+            : `It committed no findings: the factory closes the research ticket ${research.ticket} next.`,
+        ]
       : []),
     report.summary,
     ...(report.notes ? [`Notes: ${report.notes}`] : []),
@@ -2135,8 +2139,10 @@ function startRun(
   const reported = awaitedChildren(state, task).filter(isTerminal);
   if (reported.length) opening = [reportsOpening(task, reported), opening].filter(Boolean).join('\n\n');
   // So do the factory notes a parked conversation held.
-  if (task.notes?.length) opening = [...task.notes, opening].filter(Boolean).join('\n\n');
-  task.notes = [];
+  if (task.factoryNotes?.length) {
+    opening = [...task.factoryNotes, opening].filter(Boolean).join('\n\n');
+    task.factoryNotes = [];
+  }
   task.resumeWith = null;
   task.newSession = false;
   const tier = nextTier(task);
@@ -2455,7 +2461,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'notesDelivered':
       // The executor sends them as the agent's next message.
       run!.turn = 'agent';
-      task.notes = [];
+      task.factoryNotes = [];
       break;
     case 'interrupt':
       // The executor cuts the turn, and reports its end like any other.

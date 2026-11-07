@@ -1046,6 +1046,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Takes each research child that reported its next step on GitHub (ADR
   // 0007): once per daemon, and again once the operator answers the request
   // a failure raised. Its outcome goes through the Lifecycle like any other event.
+  // The research steps this daemon has started, as `<task> <step>`.
   const researchStarted = new Set<string>();
   function driveResearch(): void {
     for (const task of Object.values(lifecycle.tasks)) {
@@ -1108,7 +1109,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const notesInFlight = new Set<string>();
   function driveNotes(): void {
     for (const task of Object.values(lifecycle.tasks)) {
-      if (stopping || !task.notes?.length || notesInFlight.has(task.id)) continue;
+      if (stopping || !task.factoryNotes?.length || notesInFlight.has(task.id)) continue;
       const run = liveRun(lifecycle, task);
       if (run?.status !== 'active' || run.turn !== 'operator') continue;
       notesInFlight.add(task.id);
@@ -1454,7 +1455,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (action.type === 'sendMessage') {
       if (before.runs[run!.id]!.turn === 'operator') executor.send(run!.id, action.text);
     } else if (action.type === 'notesDelivered') {
-      executor.send(run!.id, before.tasks[action.taskId]!.notes!.join('\n\n'));
+      executor.send(run!.id, before.tasks[action.taskId]!.factoryNotes!.join('\n\n'));
     } else if (action.type === 'interrupt') {
       executor.interrupt(run!.id);
     } else if (action.type === 'answerQuestion') {

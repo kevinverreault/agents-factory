@@ -137,7 +137,8 @@ export function deleteRefusal(branch: string): string | null {
   return TASK_BRANCH.test(branch) ? null : `The factory deletes only task branches (factory/…) on GitHub, not ${branch}.`;
 }
 
-const TASK_BRANCH = /^factory\/[\w.-]+$/;
+// A task branch, `factory/<id>-<slug>`, and a research branch, `research/<name>`.
+const TASK_BRANCH =/^factory\/[\w.-]+$/;
 const RESEARCH_BRANCH = /^research\/[\w.-]+$/;
 
 // The research branch's push is the one exception to "no code leaves this
