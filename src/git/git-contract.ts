@@ -286,6 +286,24 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
         expect(await git.worktrees(clone)).toEqual([{ path, branch: 'factory/T1-a', head }]);
       }));
 
+    test('the branches under a prefix are listed in name order, the clone’s own and origin’s as origin has them now', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, push }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        await git.fetch(clone, 'main');
+        for (const [task, branch] of [['T2', 'factory/T2-b'], ['T1', 'factory/T1-a'], ['T3', 'research/oauth']]) {
+          await git.addWorktree(clone, { path: join(root, 'wt', task!), branch: branch!, startPoint: 'origin/main' });
+        }
+        await push(clone, 'factory/T1-a');
+
+        expect(await git.branches(clone, 'factory/')).toEqual(['factory/T1-a', 'factory/T2-b']);
+        expect(await git.originBranches(clone, 'factory/')).toEqual(['factory/T1-a']);
+
+        await git.removeWorktree(clone, join(root, 'wt', 'T1'));
+        await git.deleteBranch(clone, 'factory/T1-a');
+        expect(await git.branches(clone, 'factory/')).toEqual(['factory/T2-b']);
+        expect(await git.originBranches(clone, 'factory/')).toEqual(['factory/T1-a']);
+      }));
+
     test('a task branch’s unpushed commits are those on no branch of origin, newest first, and a branch that is gone has none', () =>
       withFixture(async ({ git, root, cloneWithOrigin, editFile, commitAll, push }) => {
         const clone = await cloneWithOrigin('widgets', 'main');

@@ -471,8 +471,12 @@ export type AttentionRequest = {
 // What recovery did with the runs an unclean start found live (ADR 0003):
 // those it requeued as interrupted, those it parked, and those the
 // crash-loop guard failed; and the intents it replayed first. Reports
-// stored before intents were journaled have none.
-export type Recovery = { requeued: RunRef[]; parked: RunRef[]; failed: RunRef[]; replayed?: ReplayedIntent[] };
+// stored before intents were journaled have none. `found` is what it found
+// that no live task has, when it found any: it deletes none of it.
+export type Recovery = { requeued: RunRef[]; parked: RunRef[]; failed: RunRef[]; replayed?: ReplayedIntent[]; found?: Found };
+// The containers (by task) and worktrees (by path) an unclean start found
+// that belong to no live task (ADR 0003). The leftover matcher finds them.
+export type Found = { containers: string[]; worktrees: string[] };
 export type RunRef = { taskId: string; runId: string };
 
 // A multi-step operator verb with side effects outside the store, journaled
@@ -618,7 +622,9 @@ export type OperatorCommand =
   | { type: 'setAutonomy'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'setSlotCap'; cap: number }
   | { type: 'setKeepAwake'; on: boolean }
-  | { type: 'removeRepo'; repo: string }
+  // Unregisters the repository. Without `anyway`, the daemon asks the
+  // operator first while it has leftovers no live task has (ADR 0011).
+  | { type: 'removeRepo'; repo: string; anyway?: boolean }
   // Dismisses the Factory recovered report: it asks nothing but to be read.
   | { type: 'dismiss'; requestId: string };
 
@@ -802,8 +808,9 @@ export type ClockEvent = { type: 'deadlinesDue' };
 // (ADR 0002, ADR 0003): on a graceful stop, or at a start that found no
 // clean-shutdown marker (`unclean`). Active AFK runs end `interrupted` and
 // their tasks queue again; suspended and HITL runs park. `replayed` is what
-// the daemon replayed of the intents it found unfinished, just before.
-export type Reconciled = { type: 'runsReconciled'; interruption: Interruption; replayed?: ReplayedIntent[] };
+// the daemon replayed of the intents it found unfinished, just before, and
+// `found` the leftovers an unclean start found.
+export type Reconciled = { type: 'runsReconciled'; interruption: Interruption; replayed?: ReplayedIntent[]; found?: Found };
 
 // What the daemon did on GitHub between a Ralph loop's iterations (ADR 0006),
 // and between a work loop's tickets (ADR 0012).
@@ -2506,9 +2513,10 @@ function park(state: Lifecycle, task: Task, run: Run, at: number): void {
 // once their deadline passed. A task whose run was active at the unclean
 // start before this one too isn't requeued again: its run fails.
 // After an unclean start, what it did goes in the one Factory recovered
-// report: the open one, if the operator hasn't dismissed it yet.
-function reconcile(state: Lifecycle, interruption: Interruption, replayed: ReplayedIntent[], at: number): void {
-  const recovery: Recovery = { requeued: [], parked: [], failed: [], replayed };
+// report: the open one, if the operator hasn't dismissed it yet, with the
+// leftovers it found.
+function reconcile(state: Lifecycle, interruption: Interruption, replayed: ReplayedIntent[], found: Found | undefined, at: number): void {
+  const recovery: Recovery = { requeued: [], parked: [], failed: [], replayed, ...(found && (found.containers.length || found.worktrees.length) && { found }) };
   // A handoff sheet still open was never confirmed: a confirmed one's
   // intent has just been replayed. It is saved as a draft the next opens from.
   for (const task of Object.values(state.tasks)) {
@@ -2546,7 +2554,8 @@ function reconcile(state: Lifecycle, interruption: Interruption, replayed: Repla
       recovery.parked.push(ref);
     }
   }
-  if (interruption === 'unclean' && Object.values(recovery).some((refs) => refs.length)) reportRecovery(state, recovery, at);
+  const { found: anyFound, ...runsAndIntents } = recovery;
+  if (interruption === 'unclean' && (anyFound || Object.values(runsAndIntents).some((listed) => listed.length))) reportRecovery(state, recovery, at);
 }
 
 // Adds what recovery did to the open Factory recovered report, or raises one.
@@ -2559,6 +2568,11 @@ function reportRecovery(state: Lifecycle, recovery: Recovery, at: number): void 
     failed: [...before.failed, ...recovery.failed],
     replayed: [...(before.replayed ?? []), ...(recovery.replayed ?? [])],
   };
+  // What an earlier start found and this one found again is listed once.
+  if (before.found || recovery.found) {
+    const union = (pick: (found: Found) => string[]) => [...new Set([...(before.found ? pick(before.found) : []), ...(recovery.found ? pick(recovery.found) : [])])];
+    merged.found = { containers: union((found) => found.containers), worktrees: union((found) => found.worktrees) };
+  }
   const request: AttentionRequest = open ?? {
     id: nextId(state, 'request'),
     repo: null,
@@ -2575,7 +2589,7 @@ function reportRecovery(state: Lifecycle, recovery: Recovery, at: number): void 
   state.requests[request.id] = request;
 }
 
-function recoveryReason({ requeued, parked, failed, replayed = [] }: Recovery): string {
+function recoveryReason({ requeued, parked, failed, replayed = [], found }: Recovery): string {
   const runs = (refs: RunRef[]) => refs.map(({ taskId, runId }) => `${taskId} (${runId})`).join(', ');
   const intents = replayed.map(({ taskId, verb, outcome }) => `${taskId}’s ${verb}${outcome === 'rolled back' ? ' (rolled back)' : ''}`).join(', ');
   return [
@@ -2584,7 +2598,16 @@ function recoveryReason({ requeued, parked, failed, replayed = [] }: Recovery): 
     ...(requeued.length ? [`Requeued ${runs(requeued)}.`] : []),
     ...(parked.length ? [`Parked ${runs(parked)}.`] : []),
     ...(failed.length ? [`Failed ${runs(failed)}: active at two unclean starts in a row.`] : []),
+    ...(found ? [`Found what no live task has: ${foundText(found)}. It deleted none of them: :gc lists them to delete.`] : []),
   ].join(' ');
+}
+
+// The leftovers recovery found, as its report lists them. The factory stops
+// each container, as it does every container whose task has no live run
+// (ADR 0011), but it may not have yet when the report is written.
+function foundText({ containers, worktrees }: Found): string {
+  const items = [...containers.map((taskId) => `${taskId}’s container`), ...worktrees.map((path) => `the worktree at ${path}`)];
+  return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0]!;
 }
 
 // What the run that resumes a root on the operator's review comments opens on.
@@ -3445,7 +3468,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       for (const overdue of overdueRuns(state, at)) park(state, state.tasks[overdue.taskId]!, overdue, at);
       break;
     case 'runsReconciled':
-      reconcile(state, action.interruption, action.replayed ?? [], at);
+      reconcile(state, action.interruption, action.replayed ?? [], action.found, at);
       break;
     case 'intentJournaled':
       state.intents[action.intent.id] = structuredClone(action.intent);

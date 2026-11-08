@@ -1,8 +1,11 @@
 import { join, resolve } from 'node:path';
-import { SandboxError, type Container, type ContainerListing, type ContainerSpec, type Sandbox } from '../sandbox/sandbox.ts';
+import { SandboxError, type Container, type ContainerListing, type ContainerSpec, type ImageListing, type Sandbox } from '../sandbox/sandbox.ts';
 import type { FakeGit } from './fake-git.ts';
 
-type FakeContainer = { spec: ContainerSpec; running: boolean; denied: string[] };
+type FakeContainer = { spec: ContainerSpec; running: boolean; denied: string[]; image: string };
+
+// The image this factory version builds, once a container needs it.
+export const CURRENT_IMAGE = 'agents-factory-sandbox:current';
 
 // Containers that exist only in memory: each one's clone is a clone of the
 // fake git, sharing its commits, at `clonePathOf(task)`, with its working
@@ -14,6 +17,9 @@ export class FakeSandbox implements Sandbox {
   // Each spec a container was prepared with.
   readonly prepared: ContainerSpec[] = [];
   private readonly containers = new Map<string, FakeContainer>();
+  // The images the factory built, each with whether another factory home's
+  // containers use it.
+  private readonly built = new Map<string, { usedElsewhere: boolean }>();
   private failures = new Map<string, string>();
   private unlistable: string | null = null;
 
@@ -56,10 +62,23 @@ export class FakeSandbox implements Sandbox {
     this.unlistable = reason;
   }
 
-  // The daemon before this one made the task's container, now in `state`.
-  leave(spec: ContainerSpec, state: 'running' | 'stopped'): void {
+  // The daemon before this one made the task's container, now in `state`,
+  // from `image`.
+  leave(spec: ContainerSpec, state: 'running' | 'stopped', image = CURRENT_IMAGE): void {
     this.git.cloneOf(spec.clonePath, this.clonePathOf(spec.taskId), this.workdirOf(spec.taskId), spec.branch);
-    this.containers.set(spec.taskId, { spec, running: state === 'running', denied: [] });
+    this.containers.set(spec.taskId, { spec, running: state === 'running', denied: [], image });
+    if (!this.built.has(image)) this.built.set(image, { usedElsewhere: false });
+  }
+
+  // An older factory version built `image`, which no container of this
+  // factory home uses, but maybe another's.
+  leaveImage(image: string, { usedElsewhere = false } = {}): void {
+    this.built.set(image, { usedElsewhere });
+  }
+
+  // Whether the image is there.
+  hasImage(image: string): boolean {
+    return this.built.has(image);
   }
 
   async prepare(spec: ContainerSpec): Promise<Container> {
@@ -68,7 +87,8 @@ export class FakeSandbox implements Sandbox {
     let container = this.containers.get(spec.taskId);
     if (!container) {
       this.git.cloneOf(spec.clonePath, this.clonePathOf(spec.taskId), this.workdirOf(spec.taskId), spec.branch);
-      this.containers.set(spec.taskId, (container = { spec, running: false, denied: [] }));
+      this.containers.set(spec.taskId, (container = { spec, running: false, denied: [], image: CURRENT_IMAGE }));
+      if (!this.built.has(CURRENT_IMAGE)) this.built.set(CURRENT_IMAGE, { usedElsewhere: false });
     }
     container.spec = spec;
     container.running = true;
@@ -128,6 +148,21 @@ export class FakeSandbox implements Sandbox {
   async list(): Promise<ContainerListing[]> {
     if (this.unlistable) throw new SandboxError(this.unlistable);
     return [...this.containers].map(([taskId, { running }]) => ({ taskId, running }));
+  }
+
+  async images(): Promise<ImageListing[]> {
+    if (this.unlistable) throw new SandboxError(this.unlistable);
+    return [...this.built]
+      .filter(([, { usedElsewhere }]) => !usedElsewhere)
+      .map(([image]) => ({ image, current: image === CURRENT_IMAGE, usedBy: [...this.containers].filter(([, container]) => container.image === image).map(([taskId]) => taskId) }))
+      .sort((a, b) => a.image.localeCompare(b.image));
+  }
+
+  async removeImage(image: string): Promise<void> {
+    this.record('removeImage', image);
+    const user = [...this.containers].find(([, container]) => container.image === image);
+    if (user) throw new SandboxError(`Error response from daemon: conflict: unable to remove ${image}: container ${user[0]} is using it`);
+    this.built.delete(image);
   }
 
   private record(op: string, taskId: string): void {

@@ -12,7 +12,8 @@
 // setup. Over the same state, the condensed view (`v`): Needs you and the
 // groups, the task tree and the selected task's detail side by side, `tab`
 // moving the focus and `f` zooming the detail. The group picker (`g`) and
-// the `:` command line (`:task 9`, `:group billing`) jump anywhere.
+// the `:` command line (`:task 9`, `:group billing`) jump anywhere, and
+// `:gc` opens the gc sheet on what belongs to no live task.
 // Plain .ts (no JSX) so Node runs it without a build step.
 import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, useStdin } from 'ink';
@@ -27,6 +28,7 @@ import { AnswerSheet, answerable, titleOf, useAnswering, waitingFor } from './an
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { CommandLine, runCommand, type Jump } from './command-line.ts';
 import { Condensed, groupCounts, PANES, Sidebar, type Pane } from './condensed.ts';
+import { GcSheet } from './gc-sheet.ts';
 import { GroupPicker, pickerKey } from './group-picker.ts';
 import { Conversation } from './conversation.ts';
 import { Help } from './help.ts';
@@ -43,9 +45,9 @@ import { UsageStrip, UsageTab } from './usage.ts';
 const TABS = ['tasks', 'needs-you', 'runs', 'usage'] as const;
 type Tab = (typeof TABS)[number];
 const TAB_NAMES: Record<Tab, string> = { tasks: 'Tasks', 'needs-you': 'Needs you', runs: 'Runs', usage: 'Usage' };
-// What fills the screen: the screens, the launch card or quick launch over
-// them, or one task's conversation.
-type View = { kind: 'tabs' } | { kind: 'launch' } | { kind: 'quick' } | { kind: 'conversation'; taskId: string };
+// What fills the screen: the screens, the launch card, quick launch or the
+// gc sheet over them, or one task's conversation.
+type View = { kind: 'tabs' } | { kind: 'launch' } | { kind: 'quick' } | { kind: 'gc' } | { kind: 'conversation'; taskId: string };
 // How many of the selected task's latest events the pane under the task tree shows.
 const OUTPUT_PANE_LINES = 6;
 // The row a pane's cursor is on, and where it was, for when that row is gone.
@@ -190,6 +192,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     if ('refused' in to) return setRefusal(to.refused);
     setRefusal(null);
     if (to.to === 'group') return filterBy(to.group);
+    if (to.to === 'gc') return setView({ kind: 'gc' });
     const { taskId } = to;
     // A task the group filter hides shows again in the whole tree.
     if (group !== null && !state?.tasks[taskId]?.groups.includes(group)) setGroup(null);
@@ -421,6 +424,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
             openUrl,
           })
         : null,
+      view.kind === 'gc' ? h(GcSheet, { key: 'gc', connection, onLeave: toTabs }) : null,
       state && view.kind === 'quick'
         ? h(QuickLaunch, {
             connection,

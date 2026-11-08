@@ -144,6 +144,19 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
         expect(await containerTip(fresh, spec.branch)).toBe(await hostTip(spec, spec.branch));
       }));
 
+    test('the current image is listed with the tasks whose containers use it, and isn’t removed while one does', () =>
+      withFixture(async ({ sandbox, task }) => {
+        await sandbox.prepare((await task('T1')).spec);
+
+        const current = (await sandbox.images()).filter((listing) => listing.current);
+        expect(current).toEqual([{ image: expect.any(String), current: true, usedBy: ['T1'] }]);
+        await expect(sandbox.removeImage(current[0]!.image)).rejects.toThrow(SandboxError);
+        await sandbox.remove('T1');
+        expect((await sandbox.images()).filter((listing) => listing.current)).toEqual([{ ...current[0], usedBy: [] }]);
+        // An image that isn't there is no error.
+        await sandbox.removeImage('agents-factory-sandbox:no-such-version');
+      }));
+
     test('each task has a container of its own', () =>
       withFixture(async ({ sandbox, task, commitInContainer, containerTip, hostTip }) => {
         const first = await task('T1');

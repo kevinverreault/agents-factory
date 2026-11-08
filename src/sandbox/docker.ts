@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GitError, guardChecks } from '../git/git.ts';
-import { RUN_DIR, SandboxError, type Container, type ContainerListing, type ContainerSpec, type GitResult, type Sandbox } from './sandbox.ts';
+import { RUN_DIR, SandboxError, type Container, type ContainerListing, type ContainerSpec, type GitResult, type ImageListing, type Sandbox } from './sandbox.ts';
 
 const WORKDIR = '/work';
 const PLUGIN_DIR = '/opt/factory/plugin';
@@ -29,6 +29,9 @@ const USER = 'agent';
 const TASK_LABEL = 'agents-factory.task';
 const NAMESPACE_LABEL = 'agents-factory.namespace';
 const IMAGE_LABEL = 'agents-factory.sandbox';
+// On a task's egress proxy: the task it serves, which is no task label so
+// the proxy is no task's container.
+const EGRESS_LABEL = 'agents-factory.egress-for';
 const REPOSITORY = 'agents-factory-sandbox';
 // How long a stopped container's processes get before they are killed.
 const STOP_SECONDS = '3';
@@ -143,6 +146,8 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
         proxy,
         '--label',
         `${NAMESPACE_LABEL}=${namespace}`,
+        '--label',
+        `${EGRESS_LABEL}=${taskId}`,
         '--init',
         '--user',
         USER,
@@ -365,6 +370,36 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
         const [taskId, state] = line.trim().split('\t');
         return taskId ? [{ taskId, running: state === 'running' }] : [];
       });
+    },
+
+    async images() {
+      const refs = (await docker(['image', 'ls', '--filter', `label=${IMAGE_LABEL}=true`, '--format', '{{.Repository}}:{{.Tag}}']))
+        .split(/\r?\n/)
+        .map((ref) => ref.trim())
+        .filter((ref) => ref && !ref.includes('<none>'));
+      // Each container's image, and the task it is this home's for: its
+      // own, or the one its egress proxy serves. Any other container's
+      // image, another home's or a proxy from before the proxy label, isn't
+      // this home's to judge.
+      const format = `{{.Image}}\t{{.Label "${NAMESPACE_LABEL}"}}\t{{.Label "${TASK_LABEL}"}}\t{{.Label "${EGRESS_LABEL}"}}`;
+      const usedBy = new Map<string, string[]>();
+      const elsewhere = new Set<string>();
+      for (const line of (await docker(['ps', '--all', '--format', format])).split(/\r?\n/)) {
+        const [used, home, task, served] = line.trim().split('\t');
+        if (!used) continue;
+        const taskId = home === namespace ? task || served : '';
+        if (taskId) usedBy.set(used, [...(usedBy.get(used) ?? []), taskId]);
+        else elsewhere.add(used);
+      }
+      return refs
+        .filter((ref) => !elsewhere.has(ref))
+        .sort()
+        .map((ref): ImageListing => ({ image: ref, current: ref === image, usedBy: [...new Set(usedBy.get(ref) ?? [])] }));
+    },
+
+    async removeImage(ref) {
+      if ((await docker(['image', 'inspect', ref]).catch(() => null)) === null) return;
+      await docker(['image', 'rm', ref]);
     },
   };
 }
