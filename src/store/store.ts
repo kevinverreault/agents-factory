@@ -50,9 +50,9 @@ export function openStore(path: string): Store {
   function load(): Lifecycle | null {
     const meta = db.prepare(`SELECT value FROM meta WHERE key = 'lifecycle'`).get() as { value: string } | undefined;
     if (!meta) return null;
-    const saved = JSON.parse(meta.value) as Pick<Lifecycle, 'counters' | 'slotCap'>;
+    const saved = JSON.parse(meta.value) as Pick<Lifecycle, 'counters' | 'slotCap' | 'keepAwake'>;
     // A store saved before a counter existed starts it at 0.
-    const lifecycle: Lifecycle = { ...initialLifecycle(), slotCap: saved.slotCap };
+    const lifecycle: Lifecycle = { ...initialLifecycle(), slotCap: saved.slotCap, ...(saved.keepAwake !== undefined && { keepAwake: saved.keepAwake }) };
     Object.assign(lifecycle.counters, saved.counters);
     for (const collection of Object.keys(COLLECTIONS) as Collection[]) {
       const rows = db.prepare(`SELECT id, data FROM ${COLLECTIONS[collection]} ORDER BY seq`).all() as {
@@ -71,7 +71,7 @@ export function openStore(path: string): Store {
     db.exec('BEGIN');
     try {
       db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('lifecycle', ?)`).run(
-        JSON.stringify({ counters: lifecycle.counters, slotCap: lifecycle.slotCap }),
+        JSON.stringify({ counters: lifecycle.counters, slotCap: lifecycle.slotCap, keepAwake: lifecycle.keepAwake }),
       );
       for (const collection of Object.keys(COLLECTIONS) as Collection[]) {
         const table = COLLECTIONS[collection];

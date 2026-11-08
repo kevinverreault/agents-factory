@@ -36,6 +36,7 @@ import {
   guard,
   initialLifecycle,
   isTerminal,
+  keepsAwake,
   keptChildBranches,
   label,
   liveRun,
@@ -119,6 +120,7 @@ import {
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
+import type { AwakeBlock, Processes } from '../os/processes.ts';
 import { SandboxError, egressFor, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
@@ -141,6 +143,9 @@ export type DaemonOptions = {
   // Where L2 tasks' runs execute (ADR 0007): one container per task.
   sandbox: Sandbox;
   skillSets: SkillSets;
+  // The OS's processes (ADR 0003): each run's CLI tree, swept once it ends,
+  // and the idle-sleep block held while AFK work runs.
+  processes: Processes;
   // The routing table each run's tier resolves through when it starts (ADR 0009).
   routingTable: RoutingTableFile;
   worktreeRoot: string;
@@ -168,6 +173,13 @@ const TOKEN_REFRESH_MS = 10 * 60_000;
 const TOKEN_RETRY_MS = 60_000;
 // How often the daemon checks whether it is idle and fires overdue deadlines.
 const TICK_MS = 5_000;
+// A gap this long between ticks means the machine slept (ADR 0003): a
+// monotonic clock can't tell, since it counts time asleep. A run that fails
+// within the window after a wake says so.
+const WAKE_GAP_MS = 60_000;
+const AFTER_WAKE_MS = 10 * 60_000;
+// How long after a failed keep-awake block the daemon asks for it again.
+const AWAKE_RETRY_MS = 60_000;
 // How often the daemon reads the PRs of the roots In review (ADR 0011), besides
 // whenever a TUI attaches: the factory's only poll.
 export const PR_POLL_MS = 15 * 60_000;
@@ -256,6 +268,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // The In review roots whose PR this daemon is reading on GitHub, and when
   // it next reads them all.
   const prReadsInFlight = new Set<string>();
+  // The sweeps of ended runs' CLI trees under way (ADR 0003).
+  const processSweeps = new Set<Promise<void>>();
   let nextPrPoll = clock.now() + PR_POLL_MS;
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
@@ -274,9 +288,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let replayedTakeovers = false;
   let restartsWhenIdle = false;
 
+  // Wake detection (ADR 0003): the last time the daemon looked at the clock,
+  // at a tick or a run's failure, and when it last found the machine had
+  // slept since. Overdue deadlines fire at every tick, so the first one
+  // after a wake fires those that passed while the machine slept.
+  let lookedAt = clock.now();
+  let wokeAt: number | null = null;
+  function noticeWake(): void {
+    const now = clock.now();
+    if (now - lookedAt > WAKE_GAP_MS) wokeAt = now;
+    lookedAt = now;
+  }
+  function wokeRecently(): boolean {
+    return wokeAt !== null && clock.now() - wokeAt <= AFTER_WAKE_MS;
+  }
+
   // Idle exit (ADR 0002): the daemon stays up while anything needs a clock.
   let idleSince: number | null = null;
   const stopTicking = clock.every(TICK_MS, () => {
+    noticeWake();
+    driveKeepAwake();
     fireOverdueDeadlines();
     refreshBotTokens();
     if (clock.now() >= nextPrPoll) pollPrs();
@@ -1050,7 +1081,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -1232,6 +1263,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     drivePublishes();
     driveResearch();
     driveBranchSweeps(before);
+    driveProcessSweeps(before);
+    driveKeepAwake();
     driveNotes();
     driveQuickLaunches();
     restartIfIdle();
@@ -1324,6 +1357,49 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       quickInFlight.add(task.id);
       void openHandoff(task.id, { quick: true }).finally(() => quickInFlight.delete(task.id));
     }
+  }
+
+  // Sweeps the CLI tree of every run that ended (ADR 0003), however it
+  // ended: MCP servers and shells outlive normal session ends too. The runs
+  // the store showed live at start are the dead daemon's, ended by recovery,
+  // and swept the same way. The daemon stops only once every sweep is done.
+  function driveProcessSweeps(before: Lifecycle): void {
+    for (const run of Object.values(lifecycle.runs)) {
+      const was = before.runs[run.id];
+      if (!was || was.status === 'ended' || run.status !== 'ended') continue;
+      // One whose CLI never came up has only its job to close.
+      const sweep = options.processes.sweep(run.id, run.cli).catch(() => {});
+      processSweeps.add(sweep);
+      void sweep.finally(() => processSweeps.delete(sweep));
+    }
+  }
+
+  // Keep-awake (ADR 0003): while at least one AFK run is active, and the
+  // operator hasn't turned it off, the machine is kept from idle sleep.
+  // Suspended runs, queued tasks and HITL runs don't hold it. A block that
+  // couldn't be had is asked for again a minute later at the soonest, at a
+  // tick: runs change the Lifecycle many times a second.
+  let awake: Promise<AwakeBlock | null> | null = null;
+  let holdFailedAt: number | null = null;
+  function driveKeepAwake(): void {
+    const wanted = !stopping && keepsAwake(lifecycle) && Object.values(lifecycle.runs).some((run) => run.mode === 'AFK' && run.status === 'active');
+    if (wanted && !awake && (holdFailedAt === null || clock.now() - holdFailedAt >= AWAKE_RETRY_MS)) {
+      const holding = options.processes.holdAwake().then(
+        (block) => ((holdFailedAt = null), block),
+        () => {
+          holdFailedAt = clock.now();
+          if (awake === holding) awake = null;
+          return null;
+        },
+      );
+      awake = holding;
+    }
+    if (!wanted && awake) letSleep();
+  }
+  function letSleep(): Promise<void> {
+    const block = awake;
+    awake = null;
+    return block?.then((held) => held?.release()) ?? Promise.resolve();
   }
 
   // Sweeps a task's kept child branches (ADR 0011) after each of its runs
@@ -1857,8 +1933,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     executor.start(start, {
       // A session is named for each completed run now, in case the next
       // stage's context is fresh, as it is for `advanceStage`.
-      report: (event) =>
-        void checkedAfterRun(event).then((checked) => dispatch(checked.type === 'runCompleted' ? { ...checked, sessionId: randomUUID() } : checked)),
+      // A failure is timed as it arrives, against the last wake, which may
+      // be the one it arrives on.
+      report: (event) => {
+        if (event.type === 'runFailed') noticeWake();
+        const reported = event.type === 'runFailed' && wokeRecently() ? { ...event, afterWake: true } : event;
+        void checkedAfterRun(reported).then((checked) => dispatch(checked.type === 'runCompleted' ? { ...checked, sessionId: randomUUID() } : checked));
+      },
       converse: (event) => broadcast(run.id, event),
       askPermission: (call) => gate(run.id, call),
       delegate: (request) => delegate(run.id, request),
@@ -2295,6 +2376,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await serially(() => settle({ type: 'runsReconciled', interruption: 'graceful' }, new Set()));
       // A container whose run was cut short is restarted, its commits come out, and it stops.
       await Promise.all(containerJobs.values());
+      await Promise.all(processSweeps);
+      await letSleep();
       // Written before the pipe is let go: the next daemon may start as soon
       // as it is, and must find the marker. Nothing after it starts a run.
       store.markCleanShutdown();
