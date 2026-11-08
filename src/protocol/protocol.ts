@@ -96,9 +96,10 @@ export type HookEvent = {
 };
 export type HookCommand = { type: 'hookEvent'; event: HookEvent };
 // `factory gc` (ADR 0011). `listLeftovers` replies with the `LeftoversView`
-// of what belongs to no live task; `gc` deletes those of `leftovers` that
-// still do, and replies with a `GcResult`.
-export type GcCommand = { type: 'listLeftovers' } | { type: 'gc'; leftovers: Leftover[] };
+// of what belongs to no live task, in `repo` alone when it names one, as
+// `repo remove` asks; `gc` deletes those of `leftovers` that still are
+// leftovers, and replies with a `GcResult`.
+export type GcCommand = { type: 'listLeftovers'; repo?: string } | { type: 'gc'; leftovers: Leftover[] };
 // What a task tree leaves behind: a worktree under the worktree root, a
 // local or remote (origin's, on GitHub) `factory/*` branch, a container the
 // factory made for a task, or a sandbox image of an older factory version.

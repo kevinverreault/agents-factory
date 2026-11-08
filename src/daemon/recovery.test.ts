@@ -2,6 +2,7 @@
 // stop requeues active AFK runs as `interrupted` and parks the rest; a start
 // without the clean-shutdown marker reconciles the same way, flagged unclean,
 // guards against crash loops and reports what it did in Needs you.
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
@@ -21,6 +22,18 @@ async function attached(): Promise<{ factory: TestFactory; operator: FactoryConn
   const tui = watch(operator);
   await tui.until(() => true);
   return { factory, operator, tui };
+}
+
+const clone = resolve('/clones/widgets');
+
+// What a daemon before this one left that no task has: a worktree under the
+// worktree root, and a running container of a task the store never heard of.
+async function debris(factory: TestFactory): Promise<{ path: string; container: string }> {
+  const path = join(factory.paths.worktreeRoot, 'acme-widgets', 'T7');
+  const branch = 'factory/T7-lost-work';
+  await factory.git.addWorktree(clone, { path, branch, startPoint: 'origin/main' });
+  factory.sandbox.leave({ taskId: 'T9', clonePath: clone, branch, branches: [], plugin: null, runDir: '/run', sessionsDir: '/sessions', egress: [] }, 'running');
+  return { path, container: 'T9' };
 }
 
 // Resolves once every change sent before it has gone through the daemon.
@@ -294,6 +307,38 @@ describe('the Factory recovered report', () => {
         recovery: { requeued: [{ taskId: 'T1', runId: 'R1' }], parked: [], failed: [{ taskId: 'T1', runId: 'R2' }] },
       },
     ]);
+  });
+
+  test('an unclean start stops a leftover container and lists it with a leftover worktree, deleting neither', async () => {
+    const { factory } = await attached();
+    const { path, container } = await debris(factory);
+
+    await factory.crash();
+    await factory.startDaemon();
+    const tui = watch(await factory.attach());
+
+    const state = await tui.until((state) => state.attentionQueue.some((item) => item.kind === 'attention' && item.attention === 'recovery-report'));
+    expect(state.attentionQueue).toMatchObject([
+      {
+        attention: 'recovery-report',
+        reason: `The factory restarted after it stopped uncleanly. Found what no live task has: ${container}’s container and the worktree at ${path}. It deleted none of them: :gc lists them to delete.`,
+        recovery: { requeued: [], parked: [], failed: [], found: { containers: [container], worktrees: [path] } },
+      },
+    ]);
+    await expect.poll(() => factory.sandbox.state(container)).toBe('stopped');
+    expect((await factory.git.worktrees(clone)).map((worktree) => worktree.path)).toEqual([path]);
+  });
+
+  test('a graceful restart doesn’t report leftovers', async () => {
+    const { factory } = await attached();
+    await debris(factory);
+
+    await factory.restart();
+    const operator = await factory.attach();
+    const tui = watch(operator);
+    await settled(operator);
+
+    expect(tui.state().attentionQueue).toEqual([]);
   });
 
   test('an unclean start with nothing to reconcile reports nothing', async () => {

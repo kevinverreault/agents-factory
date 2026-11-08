@@ -2,7 +2,8 @@
 // own. It lists what belongs to no live task, nothing ticked; `space` ticks
 // the leftover under the cursor, `a` ticks every one or none, and `enter`
 // deletes only the ticked ones, then shows what happened to each. `esc`
-// backs out, deleting nothing.
+// backs out, deleting nothing. With `repo`, as `repo remove` opens it, it
+// lists that repository's leftovers alone.
 import { createElement as h, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -23,7 +24,7 @@ const KINDS: Record<Leftover['kind'], string> = {
   image: 'image',
 };
 
-export function GcSheet({ connection, onLeave }: { connection: FactoryConnection; onLeave(): void }) {
+export function GcSheet({ connection, repo, onLeave }: { connection: FactoryConnection; repo?: string; onLeave(): void }) {
   // In a ref too, so each key typed in one burst goes on from the last.
   const current = useRef<Stage>({ kind: 'listing' });
   const [stage, setStageState] = useState<Stage>(current.current);
@@ -33,12 +34,12 @@ export function GcSheet({ connection, onLeave }: { connection: FactoryConnection
   };
 
   useEffect(() => {
-    void connection.send({ type: 'listLeftovers' }).then((reply) => {
+    void connection.send({ type: 'listLeftovers', ...(repo !== undefined && { repo }) }).then((reply) => {
       if (!reply.ok) return setStage({ kind: 'refused', reason: reply.reason });
       const view = reply.value as LeftoversView;
       setStage({ kind: 'ticking', view, cursor: 0, ticked: view.leftovers.map(() => false) });
     });
-  }, [connection]);
+  }, [connection, repo]);
 
   const remove = (leftovers: Leftover[]) => {
     setStage({ kind: 'deleting' });
@@ -62,7 +63,7 @@ export function GcSheet({ connection, onLeave }: { connection: FactoryConnection
     } else if (key.return && ticked.some(Boolean)) remove(view.leftovers.filter((_, i) => ticked[i]).map(({ leftover }) => leftover));
   });
 
-  const title = h(Text, { bold: true }, 'Leftovers', h(Text, { dimColor: true }, ' · what belongs to no live task; only what you tick is deleted'));
+  const title = h(Text, { bold: true }, repo === undefined ? 'Leftovers' : `Leftovers in ${repo}`, h(Text, { dimColor: true }, ' · what belongs to no live task; only what you tick is deleted'));
   if (stage.kind === 'listing') return column(title, h(Text, { dimColor: true }, 'Looking for leftovers…'));
   if (stage.kind === 'deleting') return column(title, h(Text, { dimColor: true }, 'Deleting the ticked leftovers…'));
   if (stage.kind === 'refused') return column(title, h(Text, { color: 'red' }, stage.reason), h(Text, { dimColor: true }, 'esc back'));

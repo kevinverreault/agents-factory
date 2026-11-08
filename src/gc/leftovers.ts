@@ -1,8 +1,8 @@
 // The leftover matcher (ADR 0003, ADR 0011): what a task tree left behind
 // that belongs to no live task. `factory gc` lists what it finds and deletes
 // only what the operator ticks. It reads the store and the world and
-// deletes nothing itself, so recovery's report can list what it finds too
-// (ADR 0003), though it doesn't yet. A task is live until it is Done or
+// deletes nothing itself, so the Factory recovered report lists what it
+// finds after an unclean start too (ADR 0003). A task is live until it is Done or
 // Cancelled and its own cleanup is through: until then, what it has is its
 // cleanup's to remove.
 import { relative, isAbsolute } from 'node:path';
@@ -38,6 +38,25 @@ function identity(leftover: Leftover): string {
   }
 }
 
+// The leftovers in a sentence, as a refusal names them.
+export function listedLeftovers(leftovers: Leftover[]): string {
+  const items = leftovers.map((leftover) => {
+    switch (leftover.kind) {
+      case 'worktree':
+        return `the worktree at ${leftover.path}`;
+      case 'branch':
+        return `the branch ${leftover.branch}`;
+      case 'remote-branch':
+        return `the branch ${leftover.branch} on origin`;
+      case 'container':
+        return `${leftover.taskId}’s container`;
+      case 'image':
+        return `the image ${leftover.image}`;
+    }
+  });
+  return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items.join('');
+}
+
 // What the matcher looks at, as found.
 export type World = {
   worktrees: { repo: string; path: string; branch: string }[];
@@ -54,10 +73,19 @@ export type World = {
 // under `worktreeRoot` and its local and origin's `factory/*` branches. A
 // repository whose clone is missing is skipped, and said so, as is an
 // origin that can't be reached; then the factory's containers and images,
-// unless Docker can't be reached.
-export async function lookAround({ git, sandbox }: { git: Git; sandbox: Sandbox }, lifecycle: Lifecycle, worktreeRoot: string): Promise<World> {
+// unless Docker can't be reached. Without `origin`, origin isn't asked, as
+// at start-up, where the network may be down. With `repo`, only that
+// repository is looked at, and only the containers of its known tasks: an
+// image, or a container of no task the factory knows, is no repository's.
+export async function lookAround(
+  { git, sandbox }: { git: Git; sandbox: Sandbox },
+  lifecycle: Lifecycle,
+  worktreeRoot: string,
+  { origin = true, repo: scope }: { origin?: boolean; repo?: string } = {},
+): Promise<World> {
   const world: World = { worktrees: [], branches: [], remoteBranches: [], containers: [], images: [], unlisted: [] };
   for (const repository of Object.values(lifecycle.repositories)) {
+    if (scope !== undefined && repository.id !== scope) continue;
     const repo = repository.id;
     if (repository.missing) {
       world.unlisted.push(`${repo}’s clone is missing, so its worktrees and branches weren’t looked at.`);
@@ -73,6 +101,7 @@ export async function lookAround({ git, sandbox }: { git: Git; sandbox: Sandbox 
       world.unlisted.push(`${repo}’s worktrees and branches couldn’t be read: ${error.message}`);
       continue;
     }
+    if (!origin) continue;
     try {
       for (const branch of await git.originBranches(repository.path, FACTORY_BRANCHES)) world.remoteBranches.push({ repo, branch });
     } catch (error) {
@@ -81,8 +110,9 @@ export async function lookAround({ git, sandbox }: { git: Git; sandbox: Sandbox 
     }
   }
   try {
-    world.containers = (await sandbox.list()).map(({ taskId }) => taskId);
-    world.images = await sandbox.images();
+    const containers = (await sandbox.list()).map(({ taskId }) => taskId);
+    world.containers = scope === undefined ? containers : containers.filter((taskId) => lifecycle.tasks[taskId]?.repo === scope);
+    world.images = scope === undefined ? await sandbox.images() : [];
   } catch (error) {
     if (!(error instanceof SandboxError)) throw error;
     world.containers = [];

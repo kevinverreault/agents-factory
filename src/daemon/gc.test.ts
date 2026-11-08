@@ -219,6 +219,86 @@ describe('deleting leftovers', () => {
   });
 });
 
+describe('repo remove runs gc scoped to its repository', () => {
+  const gadgets = resolve('/clones/gadgets');
+
+  // acme/gadgets registered too, with its own crash debris.
+  async function withGadgets(factory: TestFactory, operator: FactoryConnection): Promise<{ path: string; branch: string }> {
+    factory.git.addClone(gadgets, { originUrl: 'https://github.com/acme/gadgets.git', defaultBranch: 'main' });
+    factory.github.install('acme/gadgets');
+    const registered = await operator.send({ type: 'registerRepo', path: gadgets });
+    if (!registered.ok) throw new Error(registered.reason);
+    const path = join(factory.paths.worktreeRoot, 'acme-gadgets', 'T8');
+    const branch = 'factory/T8-lost-gadget';
+    await factory.git.addWorktree(gadgets, { path, branch, startPoint: 'origin/main' });
+    return { path, branch };
+  }
+
+  test('listing leftovers for one repository lists only its own, and no image or container of no task', async () => {
+    const { factory, operator } = await attached();
+    const mine = await crashDebris(factory, 'T7');
+    await withGadgets(factory, operator);
+    factory.sandbox.leave({ taskId: 'T9', clonePath: clone, branch: mine.branch, branches: [], plugin: null, runDir: '/run', sessionsDir: '/sessions', egress: [] }, 'stopped');
+    factory.sandbox.leaveImage('agents-factory-sandbox:old');
+
+    const reply = await operator.send({ type: 'listLeftovers', repo: 'acme/widgets' });
+
+    expect(reply).toEqual({
+      ok: true,
+      value: {
+        leftovers: [
+          { leftover: { kind: 'worktree', repo: 'acme/widgets', ...mine }, why: 'No task of the factory’s has it.' },
+          { leftover: { kind: 'branch', repo: 'acme/widgets', branch: mine.branch }, why: 'No task of the factory’s has it.' },
+        ],
+        unlisted: [],
+      },
+    });
+  });
+
+  test('removing a repository with leftovers asks first, naming them, and removing it anyway leaves them', async () => {
+    const { factory, operator, tui } = await attached();
+    const { path, branch } = await crashDebris(factory, 'T7');
+
+    expect(await operator.send({ type: 'removeRepo', repo: 'acme/widgets' })).toEqual({
+      ok: false,
+      reason: `acme/widgets has leftovers no live task has: the worktree at ${path} and the branch ${branch}. Tick the ones to delete with gc first. Remove it anyway, leaving them?`,
+      confirm: { type: 'removeRepo', repo: 'acme/widgets', anyway: true },
+    });
+    expect(tui.state().repositories['acme/widgets']).toBeDefined();
+
+    expect(await operator.send({ type: 'removeRepo', repo: 'acme/widgets', anyway: true })).toEqual({ ok: true });
+    await tui.until((state) => !('acme/widgets' in state.repositories));
+    expect((await factory.git.worktrees(clone)).map((worktree) => worktree.path)).toEqual([path]);
+  });
+
+  test('once gc deleted them, the repository is removed without asking; another repository’s leftovers don’t count', async () => {
+    const { factory, operator, tui } = await attached();
+    const { path, branch } = await crashDebris(factory, 'T7');
+    await withGadgets(factory, operator);
+    await operator.send({
+      type: 'gc',
+      leftovers: [
+        { kind: 'worktree', repo: 'acme/widgets', path, branch },
+        { kind: 'branch', repo: 'acme/widgets', branch },
+      ],
+    });
+
+    expect(await operator.send({ type: 'removeRepo', repo: 'acme/widgets' })).toEqual({ ok: true });
+    await tui.until((state) => !('acme/widgets' in state.repositories));
+  });
+
+  test('a repository with unfinished tasks is refused for them, before its leftovers are looked at', async () => {
+    const { factory, operator } = await attached();
+    await crashDebris(factory, 'T7');
+    await operator.send({ type: 'createTask', title: 'Settle the glossary', mode: 'HITL', repo: 'acme/widgets' });
+
+    expect(await operator.send({ type: 'removeRepo', repo: 'acme/widgets' })).toEqual({
+      ok: false,
+      reason: 'acme/widgets has unfinished tasks (T1). Finish or cancel them first.',
+    });
+  });
+});
+
 // Launches an AFK task, whose run starts at once.
 async function launch(operator: FactoryConnection, prompt: string): Promise<void> {
   const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', prompt });

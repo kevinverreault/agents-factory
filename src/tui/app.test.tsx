@@ -6,6 +6,7 @@ import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.
 import type { LeftoversView, PresetsView } from '../protocol/protocol.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
 import { App } from './app.ts';
+import { GcSheet } from './gc-sheet.ts';
 
 const apps: { unmount(): void }[] = [];
 afterEach(() => {
@@ -3259,5 +3260,15 @@ describe('factory gc from the TUI', () => {
     await press(app, ':', 'g', 'c', '\r');
 
     await eventually(() => expect(app.lastFrame()).toContain('Nothing is left over: everything belongs to a live task.'));
+  });
+
+  test('the sheet `repo remove` opens asks for that repository’s leftovers alone, and says whose they are', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('listLeftovers', { ok: true, value: { leftovers: leftovers.leftovers.slice(0, 2), unlisted: [] } });
+    const app = render(<GcSheet connection={connection} repo="acme/widgets" onLeave={() => {}} />);
+    apps.push(app);
+
+    await eventually(() => expect(app.lastFrame()).toContain('Leftovers in acme/widgets'));
+    expect(connection.sent).toEqual([{ type: 'listLeftovers', repo: 'acme/widgets' }]);
   });
 });

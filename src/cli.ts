@@ -25,7 +25,7 @@ import { modelsCommand } from './models/models-command.ts';
 import { openUrl } from './os/open-url.ts';
 import { connect, HandshakeRefused, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
 import type { RepositoryView } from './protocol/factory-state.ts';
-import type { Command, DaemonStatus, LeftoversView } from './protocol/protocol.ts';
+import type { Command, DaemonStatus, LeftoversView, Reply } from './protocol/protocol.ts';
 import { skillsCommand } from './skills/skills-command.ts';
 import { App } from './tui/app.ts';
 import { describeLeftover, GcSheet } from './tui/gc-sheet.ts';
@@ -36,7 +36,7 @@ const USAGE = [
   '       agents-factory daemon status | daemon stop',
   '       agents-factory repo add [path] [--base-branch <branch>] [--default-preset <preset>]',
   '       agents-factory repo move <new-path>',
-  '       agents-factory repo remove <owner/name>',
+  '       agents-factory repo remove <owner/name> [--anyway]',
   '       agents-factory skills update | skills status',
   '       agents-factory models update',
   '       agents-factory setup github [--name <app-name>]',
@@ -88,7 +88,7 @@ async function main(args: string[]): Promise<number> {
       return 2;
     }
     const connection = await connectOrStart(paths);
-    const reply = await connection.send(command);
+    const reply = command.type === 'removeRepo' && !command.anyway ? await removeRepo(connection, command.repo) : await connection.send(command);
     connection.close();
     if (!reply.ok) {
       console.error(reply.reason);
@@ -158,6 +158,33 @@ async function main(args: string[]): Promise<number> {
   return 2;
 }
 
+// `repo remove` (ADR 0011): a repository with leftovers no live task has
+// is refused until the operator chooses. In a terminal, the gc sheet opens
+// on that repository's leftovers to tick the ones to delete, and then the
+// operator is asked whether to remove it, leaving whatever is left.
+// Without one, the refusal stands, and `--anyway` removes it, leaving them.
+async function removeRepo(connection: FactoryConnection, repo: string): Promise<Reply> {
+  const reply = await connection.send({ type: 'removeRepo', repo });
+  if (reply.ok || !reply.confirm) return reply;
+  if (!process.stdin.isTTY) return { ...reply, reason: `${reply.reason} Run it in a terminal to tick them in gc, or pass --anyway.` };
+  const sheet = render(h(GcSheet, { connection, repo, onLeave: () => sheet.unmount() }));
+  await sheet.waitUntilExit();
+  const again = await connection.send({ type: 'removeRepo', repo });
+  if (again.ok || !again.confirm) return again;
+  return (await ask(`${again.reason} [y/N] `)) ? connection.send(again.confirm) : { ok: false, reason: `Kept ${repo} registered.` };
+}
+
+// Whether the operator answers yes.
+async function ask(question: string): Promise<boolean> {
+  const { createInterface } = await import('node:readline/promises');
+  const lines = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return /^y(es)?$/i.test((await lines.question(question)).trim());
+  } finally {
+    lines.close();
+  }
+}
+
 // `gc`: the gc sheet the TUI's `:gc` opens, on its own. Ticking needs a
 // terminal: without one, the leftovers are only listed.
 async function gc(paths: FactoryPaths): Promise<number> {
@@ -222,7 +249,7 @@ async function attachTui(paths: FactoryPaths): Promise<FactoryConnection | null>
 }
 
 // `repo add [path] [--base-branch b] [--default-preset p]`,
-// `repo move <new-path>` or `repo remove <owner/name>`, or null when the
+// `repo move <new-path>` or `repo remove <owner/name> [--anyway]`, or null when the
 // arguments don't fit.
 function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 'moveRepo' | 'removeRepo' }> | null {
   let parsed;
@@ -230,7 +257,7 @@ function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 
     parsed = parseArgs({
       args,
       allowPositionals: true,
-      options: { 'base-branch': { type: 'string' }, 'default-preset': { type: 'string' } },
+      options: { 'base-branch': { type: 'string' }, 'default-preset': { type: 'string' }, anyway: { type: 'boolean' } },
     });
   } catch {
     return null;
@@ -238,7 +265,7 @@ function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 
   const { positionals, values } = parsed;
   const [verb, operand, ...rest] = positionals;
   if (rest.length) return null;
-  if (verb === 'add') {
+  if (verb === 'add' && !values.anyway) {
     // The daemon's working directory isn't ours, so the path goes absolute.
     return {
       type: 'registerRepo',
@@ -248,7 +275,9 @@ function repoCommand(args: string[]): Extract<Command, { type: 'registerRepo' | 
     };
   }
   if (verb === 'move' && operand && Object.keys(values).length === 0) return { type: 'moveRepo', path: resolve(operand) };
-  if (verb === 'remove' && operand && Object.keys(values).length === 0) return { type: 'removeRepo', repo: operand };
+  if (verb === 'remove' && operand && Object.keys(values).every((key) => key === 'anyway')) {
+    return { type: 'removeRepo', repo: operand, ...(values.anyway && { anyway: true }) };
+  }
   return null;
 }
 

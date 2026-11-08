@@ -7,7 +7,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
 import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart, type Verdict } from '../executor/executor.ts';
-import { DELETION_ORDER, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
+import { DELETION_ORDER, listedLeftovers, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   GitHubError,
@@ -61,6 +61,7 @@ import {
   type AppCheck,
   type ChildSpawned,
   type CleanupEvent,
+  type Found,
   type Lifecycle,
   type Readiness,
   type LifecycleAction,
@@ -430,9 +431,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       case 'hookEvent':
         return captureArtifacts(command.event);
       case 'listLeftovers':
-        return serially(async (): Promise<Reply> => ({ ok: true, value: await leftovers() }));
+        return serially(async (): Promise<Reply> => {
+          if (command.repo !== undefined && !lifecycle.repositories[command.repo]) return { ok: false, reason: `${command.repo} is not registered.` };
+          return { ok: true, value: await leftovers(command.repo) };
+        });
       case 'gc':
         return deleteTicked(command.leftovers);
+      case 'removeRepo':
+        return removeRepo(command);
       case 'inspectClone': {
         const clone = await readClone(git, command.path);
         if ('refusal' in clone) return { ok: false, reason: clone.refusal };
@@ -447,8 +453,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // What belongs to no live task, as the matcher finds it now (ADR 0011).
   // Called only from inside `serially`, so no launch or spawn cuts a
   // worktree meanwhile.
-  async function leftovers(): Promise<LeftoversView> {
-    return matchLeftovers(lifecycle, await lookAround({ git, sandbox }, lifecycle, options.worktreeRoot));
+  async function leftovers(repo?: string): Promise<LeftoversView> {
+    return matchLeftovers(lifecycle, await lookAround({ git, sandbox }, lifecycle, options.worktreeRoot, { repo }));
+  }
+
+  // `repo remove` (ADR 0011): once nothing else refuses it, a repository
+  // with leftovers no live task has asks first, so the operator can tick
+  // them in gc first: once the repository is unregistered, gc no longer
+  // looks in its clone. Removing it anyway leaves them there.
+  function removeRepo(action: Extract<LifecycleAction, { type: 'removeRepo' }>): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const refused = guard(lifecycle, action);
+      if (refused) return { ok: false, reason: refused };
+      if (!action.anyway) {
+        const left = (await leftovers(action.repo)).leftovers.map(({ leftover }) => leftover);
+        if (left.length) {
+          return {
+            ok: false,
+            reason: `${action.repo} has leftovers no live task has: ${listedLeftovers(left)}. Tick the ones to delete with gc first. Remove it anyway, leaving them?`,
+            confirm: { type: 'removeRepo', repo: action.repo, anyway: true },
+          };
+        }
+      }
+      const refusal = await settle(action, new Set());
+      return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
   }
 
   // `factory gc` (ADR 0011): deletes the ticked leftovers that still are
@@ -1195,8 +1225,22 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome: finished ? 'finished' : 'resumed' });
     }
     replayedTakeovers = true;
-    await settle({ type: 'runsReconciled', interruption: cleanStart ? 'graceful' : 'unclean', replayed }, new Set());
+    const found = cleanStart ? undefined : await foundAtStart();
+    await settle({ type: 'runsReconciled', interruption: cleanStart ? 'graceful' : 'unclean', replayed, ...(found && { found }) }, new Set());
   });
+
+  // What an unclean start finds that no live task has (ADR 0003): the
+  // containers and worktrees the leftover matcher finds, origin left
+  // unasked. Recovery deletes none of them; `gc` does, once ticked.
+  async function foundAtStart(): Promise<Found> {
+    const { leftovers: listed } = matchLeftovers(lifecycle, await lookAround({ git, sandbox }, lifecycle, options.worktreeRoot, { origin: false }));
+    const found: Found = { containers: [], worktrees: [] };
+    for (const { leftover } of listed) {
+      if (leftover.kind === 'container') found.containers.push(leftover.taskId);
+      if (leftover.kind === 'worktree') found.worktrees.push(leftover.path);
+    }
+    return found;
+  }
 
   // Every repository's clone is checked at start (ADR 0010), and the skill
   // set versions finished tasks left behind are removed.
