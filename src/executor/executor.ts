@@ -129,6 +129,11 @@ export interface Executor {
   // replacing any copy there; a session with no transcript yet has nothing
   // to copy. Throws an `ArchiveError` when it can't.
   archive(session: Session, dir: string): Promise<void>;
+  // Puts the session's transcript back from its copy in `dir` when the CLI's
+  // retention sweep deleted it, so the session resumes and replays again. A
+  // session still in place, or with no copy, is left as it is. Throws an
+  // `ArchiveError` when it can't.
+  restore(session: Session, dir: string): Promise<void>;
   // Where the CLI keeps the session transcripts of runs whose cwd is `cwd`:
   // an L2 container mounts it, so its runs and the host's share sessions.
   sessionsDir(cwd: string): string;

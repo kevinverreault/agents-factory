@@ -48,7 +48,8 @@ export function afkRun(cwd: string, firstMessage: string, maxTurns: number, allo
 }
 
 // The types of the run events reported, in order, without usage metering's,
-// which come with every API message and result.
+// which come with every API message and result, or usage snapshots, which
+// come whenever the API sends the account's usage window.
 export function typesOf(reported: RunEvent[]): RunEvent['type'][] {
-  return reported.flatMap((event) => (isMetering(event) ? [] : [event.type]));
+  return reported.flatMap((event) => (isMetering(event) || event.type === 'usageSnapshotSeen' ? [] : [event.type]));
 }

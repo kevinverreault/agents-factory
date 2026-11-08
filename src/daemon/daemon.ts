@@ -275,6 +275,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const prReadsInFlight = new Set<string>();
   // The sweeps of ended runs' CLI trees under way (ADR 0003).
   const processSweeps = new Set<Promise<void>>();
+  // Each task's last job on its transcripts under way (ADR 0011): archiving
+  // an ended run's, or putting one back. They go one at a time per task.
+  const transcriptJobs = new Map<string, Promise<void>>();
   let nextPrPoll = clock.now() + PR_POLL_MS;
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
@@ -1144,8 +1147,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     publish();
     // Taken now, so a run that ends during the read still has it.
     const live = streamed.get(runId) ?? [];
-    // A Done task's conversation is read from its archive.
+    // A Done task's conversation is read from its archive, and a live task's
+    // from the session file, put back first if the retention sweep took it.
     const sessionId = run.sessionId ?? task.sessionId;
+    if (sessionId && task.worktree && !task.transcripts) await restoreTranscript(task, sessionId);
     const history =
       sessionId && task.worktree ? await executor.history({ sessionId, cwd: task.worktree.path, archive: task.transcripts ?? null }) : [];
     // The client left, or asked again, while the file was read.
@@ -1184,7 +1189,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -1381,6 +1386,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveResearch();
     driveBranchSweeps(before);
     driveProcessSweeps(before);
+    driveTranscriptArchives(before);
     driveKeepAwake();
     driveNotes();
     driveQuickLaunches();
@@ -1489,6 +1495,46 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       processSweeps.add(sweep);
       void sweep.finally(() => processSweeps.delete(sweep));
     }
+  }
+
+  // Archives the transcript of every run that ended (ADR 0011) for its task
+  // at once. The operator's own `claude` sessions sweep the session directory
+  // factory runs share with their own retention period, so a task left
+  // unfinished past it would otherwise lose them. Best effort: the task's end
+  // archives every session again, and holds its cleanup back when it can't.
+  // A run that ended with its task is left to that cleanup.
+  function driveTranscriptArchives(before: Lifecycle): void {
+    for (const run of Object.values(lifecycle.runs)) {
+      const was = before.runs[run.id];
+      if (!was || was.status === 'ended' || run.status !== 'ended') continue;
+      const task = lifecycle.tasks[run.taskId];
+      const sessionId = run.sessionId ?? before.tasks[run.taskId]?.sessionId;
+      if (!task?.worktree || !sessionId || task.state === 'done' || task.state === 'cancelled') continue;
+      const cwd = task.worktree.path;
+      void onTranscripts(task.id, () => executor.archive({ sessionId, cwd }, transcriptsOf(task.id)));
+    }
+  }
+
+  // Puts the task's session transcript back from its archive, if the
+  // retention sweep took it, before a run resumes it or it is replayed.
+  function restoreTranscript(task: Task, sessionId: string): Promise<void> {
+    const cwd = task.worktree!.path;
+    return onTranscripts(task.id, () => executor.restore({ sessionId, cwd }, transcriptsOf(task.id)));
+  }
+
+  // Runs `job` on the task's transcripts once the one before it is done. A
+  // job that fails is let go: what it would have kept is kept again later.
+  function onTranscripts(taskId: string, job: () => Promise<void>): Promise<void> {
+    const next = (transcriptJobs.get(taskId) ?? Promise.resolve()).then(job).catch(() => {});
+    transcriptJobs.set(taskId, next);
+    void next.finally(() => {
+      if (transcriptJobs.get(taskId) === next) transcriptJobs.delete(taskId);
+    });
+    return next;
+  }
+
+  function transcriptsOf(taskId: string): string {
+    return join(options.transcriptsRoot, taskId);
   }
 
   // Keep-awake (ADR 0003): while at least one AFK run is active, and the
@@ -1705,7 +1751,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function cleanUp(task: Task): Promise<CleanupEvent> {
     const { path, branch } = task.worktree!;
     const failed = (reason: string): CleanupEvent => ({ type: 'cleanupFailed', taskId: task.id, reason });
-    const transcripts = join(options.transcriptsRoot, task.id);
+    const transcripts = transcriptsOf(task.id);
+    // An ended run's transcript may still be on its way to the archive.
+    await transcriptJobs.get(task.id);
     try {
       for (const sessionId of sessionsOf(lifecycle, task)) await executor.archive({ sessionId, cwd: path }, transcripts);
     } catch (error) {
@@ -1972,6 +2020,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     let container: Container | null = null;
     let token: string | null = null;
     if (containers.has(task.id)) await onContainer(task.id, async () => {});
+    // The CLI resumes a session only from its file (ADR 0011).
+    if (run.resumesSession && cwd && task.sessionId) {
+      await restoreTranscript(task, task.sessionId);
+      if (lifecycle.runs[run.id]?.status !== 'active') return;
+    }
     if (run.mode === 'AFK' && cwd) {
       const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
       const l2 = run.autonomy === 'L2';
@@ -2494,6 +2547,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // A container whose run was cut short is restarted, its commits come out, and it stops.
       await Promise.all(containerJobs.values());
       await Promise.all(processSweeps);
+      await Promise.all(transcriptJobs.values());
       await letSleep();
       // Written before the pipe is let go: the next daemon may start as soon
       // as it is, and must find the marker. Nothing after it starts a run.
