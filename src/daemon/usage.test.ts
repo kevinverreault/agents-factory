@@ -231,30 +231,27 @@ describe('usage limits on AFK runs', () => {
     ]);
   });
 
-  test('a weekly limit that resets within the wait cap fails the run too, rather than being waited out', async () => {
-    const { factory, operator, tui } = await running();
+  test('a weekly limit that resets within the wait cap is waited out like a 5-hour one (ADR 0008)', async () => {
+    const { factory, tui } = await running();
     const resetsAt = factory.clock.now() + hours(4);
     factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'rejected', spent: 1, resetsAt });
     factory.executor.report('R1', { type: 'windowWaited', waitMs: hours(4) });
 
-    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
-    expect(state.runs.R1).toMatchObject({ status: 'ended', outcome: 'failed' });
-    expect(state.attentionQueue).toEqual([
-      expect.objectContaining({ attention: 'failure', reason: 'The weekly usage limit is spent: it resets Thu 29 Oct, 13:00.' }),
-    ]);
-    // The CLI waiting on the limit is stopped.
-    expect(factory.executor.stopped).toEqual(['R1']);
-    expect(state.slots.active).toBe(0);
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Waiting for window');
+    expect(state.runs.R1).toMatchObject({ status: 'active', waitingForWindow: resetsAt });
+    expect(state.attentionQueue).toEqual([]);
+    expect(factory.executor.stopped).toEqual([]);
   });
 
-  test('a weekly limit on another model’s window leaves a 5-hour limit to be waited out', async () => {
+  test('a run that fails while only another model’s weekly window is spent keeps its own reason', async () => {
     const { factory, operator, tui } = await running();
     expect(tui.state().runs.R1?.model).toBe(SONNET);
     factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day_opus', status: 'rejected', spent: 1, resetsAt: factory.clock.now() + hours(40) });
-    factory.executor.report('R1', { type: 'windowWaited', waitMs: hours(2) });
     await settled(operator);
+    factory.executor.report('R1', { type: 'runFailed', reason: 'The CLI exited.' });
 
-    expect(tui.state().tasks.T1?.label).toBe('Waiting for window');
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.attentionQueue).toEqual([expect.objectContaining({ attention: 'failure', reason: 'The CLI exited.' })]);
   });
 
   test('a run that fails with no usage window spent keeps its own reason', async () => {

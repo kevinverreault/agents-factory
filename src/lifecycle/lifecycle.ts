@@ -2594,10 +2594,9 @@ function raise(
   task.state = 'waiting';
 }
 
-// Why a run whose weekly usage window is spent failed, after what failed it, if anything.
-function weeklyLimitReason(resetsAt: number, failure = ''): string {
-  const spent = `The weekly usage limit is spent: it resets ${resetTime(resetsAt)}.`;
-  return failure ? `${failure.replace(/\.?\s*$/, '.')} ${spent}` : spent;
+// Why a run whose weekly usage window is spent failed: what failed it, and when the window resets.
+function weeklyLimitReason(resetsAt: number, failure: string): string {
+  return `${failure.replace(/\.?\s*$/, '.')} The weekly usage limit is spent: it resets ${resetTime(resetsAt)}.`;
 }
 
 // Logs on the run the hosts its container's egress proxy denied it (ADR 0007).
@@ -3253,19 +3252,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       raise(state, task, run!, 'failure', false, withDenials(reason, action.deniedHosts), at, { deniedHosts: action.deniedHosts });
       break;
     }
-    case 'windowWaited': {
-      // A 5-hour limit is waited out in place, holding the run's slot. A
-      // weekly one fails the run, though the watchdog would wait it out
-      // were its reset within the cap: the operator decides on a long wait.
-      const weekly = weeklySpentUntil(state.snapshots, run!.model, at);
-      if (weekly === null) {
-        run!.waitingForWindow = at + action.waitMs;
-        break;
-      }
-      endRun(run!, 'failed', at);
-      raise(state, task, run!, 'failure', false, weeklyLimitReason(weekly), at);
+    case 'windowWaited':
+      // A usage limit is waited out in place, holding the run's slot
+      // (ADR 0008). A weekly one resets beyond the cap, so the CLI fails
+      // the run instead; one that resets within it is waited out too.
+      run!.waitingForWindow = at + action.waitMs;
       break;
-    }
     case 'attentionRaised': {
       suspend(run!, at);
       // Named by what it asks.

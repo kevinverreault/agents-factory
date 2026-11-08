@@ -1605,8 +1605,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         held.delete(run.id);
         // A run ended by an operator verb or parked isn't checked: it never finished.
         unguard(run.id);
-        // A run the factory failed on a weekly limit is still waiting in its CLI.
-        const ownEvent = 'runId' in action && action.runId === run.id && action.type !== 'windowWaited';
+        const ownEvent = 'runId' in action && action.runId === run.id;
         if (!ownEvent) executor.stop(run.id);
         // Killing `docker exec` leaves the turn running in the container (ADR
         // 0003), and a run that failed may have lost its `docker exec` first.
