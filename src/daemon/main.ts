@@ -3,6 +3,7 @@ import { agentSdkExecutor } from '../executor/agent-sdk.ts';
 import { gitCli } from '../git/git.ts';
 import { gitHubApi } from '../github/github.ts';
 import { routingTable } from '../models/routing-table.ts';
+import { osProcesses } from '../os/processes.ts';
 import { dockerSandbox } from '../sandbox/docker.ts';
 import { windowsCredentials } from '../secrets/secrets.ts';
 import { skillSetManager } from '../skills/skill-set.ts';
@@ -13,17 +14,19 @@ import { factoryPaths } from './paths.ts';
 
 const paths = factoryPaths();
 const store = openStore(paths.storePath);
+const processes = osProcesses();
 try {
   const daemon = await startDaemon({
     ...paths,
     store,
     clock: systemClock,
-    executor: agentSdkExecutor(),
+    executor: agentSdkExecutor({ adopt: processes.adopt }),
     git: gitCli,
     github: gitHubApi(),
     sandbox: dockerSandbox({ namespace: paths.credentialPrefix }),
     secrets: windowsCredentials(paths.credentialPrefix),
     skillSets: skillSetManager({ root: paths.skillsRoot, lockPath: paths.skillsLock }),
+    processes,
     routingTable: routingTable(paths.modelsTable),
   });
   await daemon.stopped;

@@ -29,6 +29,7 @@ import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
 import type { ModelUsage, Usage, UsageWindowStatus } from '../usage/usage.ts';
 import { processCreatedAt } from '../os/process-info.ts';
+import type { Processes } from '../os/processes.ts';
 import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
 import { afkFactoryTools, hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
@@ -71,7 +72,9 @@ const WINDOW_WAIT_MS = 60_000;
 // artifact capture. Spawned directly by Claude Code, with no shell between.
 const RELAY_HOOK = { command: process.execPath, args: [fileURLToPath(new URL('../cli.ts', import.meta.url)), 'hook'] };
 
-export function agentSdkExecutor(): Executor {
+// `adopt` puts each CLI, right after spawn, into its run's job (ADR 0003),
+// so that what it starts goes down with the run.
+export function agentSdkExecutor({ adopt }: { adopt?: Processes['adopt'] } = {}): Executor {
   const runs = new Map<string, LiveRun>();
 
   function say(runId: string, text: string): void {
@@ -125,6 +128,7 @@ export function agentSdkExecutor(): Executor {
             : spawnCli(spawnOptions);
           const spawnedAt = Date.now();
           const pid = child.pid!;
+          void adopt?.(start.runId, pid).catch(() => {});
           spawning.cli = processCreatedAt(pid).then(
             (createdAt) => ({ pid, createdAt }),
             () => ({ pid, createdAt: spawnedAt }),

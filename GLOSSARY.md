@@ -130,6 +130,10 @@ _Avoid_: Handoff summary, handover note
 Where the operator reviews and edits the handoff brief and confirms a handoff, with continue-as, autonomy level, model tier and max turns pre-filled from the next AFK stage. Opening it is never a commitment: backing out keeps the conversation going.
 _Avoid_: Handoff dialog, handover form
 
+**Intent**:
+An operator or agent verb with steps outside the store, journaled before its first such step. After a crash, the next daemon finishes it or rolls it back before it reconciles runs. A handoff's commit, a spawn's worktree and a takeover's container restart each get an intent row. A cancel cascade's ticket reopening and a cleanup wait on their task instead.
+_Avoid_: Transaction, pending operation
+
 **Advance sheet**:
 Where the operator moves a HITL task on to its next HITL stage, when the agent proposes it or whenever they choose, skipping optional stages on the way. Only the operator advances; the agent can only propose.
 _Avoid_: Next-stage dialog, stage picker

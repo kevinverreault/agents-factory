@@ -36,6 +36,7 @@ import {
   guard,
   initialLifecycle,
   isTerminal,
+  keepsAwake,
   keptChildBranches,
   label,
   liveRun,
@@ -62,6 +63,7 @@ import {
   type Lifecycle,
   type Readiness,
   type LifecycleAction,
+  type Intent,
   type LoopEvent,
   type PermissionAnswer,
   type PrReadEvent,
@@ -71,6 +73,7 @@ import {
   type Repository,
   type RepoEvent,
   type Run,
+  type ReplayedIntent,
   type RulesAnswer,
   type RunEvent,
   type SkillsSetup,
@@ -117,6 +120,7 @@ import {
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
+import type { AwakeBlock, Processes } from '../os/processes.ts';
 import { SandboxError, egressFor, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
@@ -139,6 +143,9 @@ export type DaemonOptions = {
   // Where L2 tasks' runs execute (ADR 0007): one container per task.
   sandbox: Sandbox;
   skillSets: SkillSets;
+  // The OS's processes (ADR 0003): each run's CLI tree, swept once it ends,
+  // and the idle-sleep block held while AFK work runs.
+  processes: Processes;
   // The routing table each run's tier resolves through when it starts (ADR 0009).
   routingTable: RoutingTableFile;
   worktreeRoot: string;
@@ -166,6 +173,13 @@ const TOKEN_REFRESH_MS = 10 * 60_000;
 const TOKEN_RETRY_MS = 60_000;
 // How often the daemon checks whether it is idle and fires overdue deadlines.
 const TICK_MS = 5_000;
+// A gap this long between ticks means the machine slept (ADR 0003): a
+// monotonic clock can't tell, since it counts time asleep. A run that fails
+// within the window after a wake says so.
+const WAKE_GAP_MS = 60_000;
+const AFTER_WAKE_MS = 10 * 60_000;
+// How long after a failed keep-awake block the daemon asks for it again.
+const AWAKE_RETRY_MS = 60_000;
 // How often the daemon reads the PRs of the roots In review (ADR 0011), besides
 // whenever a TUI attaches: the factory's only poll.
 export const PR_POLL_MS = 15 * 60_000;
@@ -221,6 +235,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // the tasks whose container is due to be settled.
   const containerJobs = new Map<string, Promise<unknown>>();
   const settling = new Set<string>();
+  // The takeovers' intents whose container step is under way.
+  const takeoversInFlight = new Set<string>();
   // Each guarded AFK run's read-only bot token (ADR 0004): its gh config
   // directory, and when it is next replaced.
   const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
@@ -252,6 +268,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // The In review roots whose PR this daemon is reading on GitHub, and when
   // it next reads them all.
   const prReadsInFlight = new Set<string>();
+  // The sweeps of ended runs' CLI trees under way (ADR 0003).
+  const processSweeps = new Set<Promise<void>>();
   let nextPrPoll = clock.now() + PR_POLL_MS;
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
@@ -262,11 +280,34 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Why the daemon starts no new run now, if it doesn't: it is stopping, or
   // stops once no run is active, to be restarted (ADR 0002).
   let holdRuns: string | null = null;
+  // Whether the daemon is replaying the intents the one before left
+  // unfinished (ADR 0003): no run starts until they are reconciled.
+  let replaying = false;
+  // Whether the start-up has replayed the takeovers' intents: until then,
+  // the takeovers it finds are its own to finish, or to resume.
+  let replayedTakeovers = false;
   let restartsWhenIdle = false;
+
+  // Wake detection (ADR 0003): the last time the daemon looked at the clock,
+  // at a tick or a run's failure, and when it last found the machine had
+  // slept since. Overdue deadlines fire at every tick, so the first one
+  // after a wake fires those that passed while the machine slept.
+  let lookedAt = clock.now();
+  let wokeAt: number | null = null;
+  function noticeWake(): void {
+    const now = clock.now();
+    if (now - lookedAt > WAKE_GAP_MS) wokeAt = now;
+    lookedAt = now;
+  }
+  function wokeRecently(): boolean {
+    return wokeAt !== null && clock.now() - wokeAt <= AFTER_WAKE_MS;
+  }
 
   // Idle exit (ADR 0002): the daemon stays up while anything needs a clock.
   let idleSince: number | null = null;
   const stopTicking = clock.every(TICK_MS, () => {
+    noticeWake();
+    driveKeepAwake();
     // What time alone changes: a usage snapshot going unknown.
     publish();
     fireOverdueDeadlines();
@@ -831,18 +872,78 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         await settle({ type: 'handoffOpened', taskId, readiness: ready }, new Set());
         return { ok: false, reason: `The handoff is blocked. ${ready.blockers.join(' ')}` };
       }
+      action.committed = ready.toCommit;
+      // The commit is outside the store: the handoff is journaled first
+      // (ADR 0003), and a crash from here on is finished by the next daemon.
       if (ready.toCommit.length) {
-        try {
-          await git.commit(task.worktree!.path, ready.toCommit, `Handoff of ${task.id}: ${task.title}`);
-        } catch (error) {
-          if (!(error instanceof GitError)) throw error;
-          return { ok: false, reason: `The handoff commit failed: ${error.message}` };
+        const { type, ...handoff } = action;
+        const intent: Intent = { id: `handoff:${taskId}`, verb: 'handoff', taskId, handoff };
+        const refused = await settle({ type: 'intentJournaled', taskId, intent }, new Set());
+        if (refused) return { ok: false, reason: refused };
+        action.intent = intent.id;
+        const uncommitted = await commitHandoff(task, ready.toCommit);
+        if (uncommitted) {
+          await settle({ type: 'intentDropped', taskId, intentId: intent.id }, new Set());
+          return { ok: false, reason: uncommitted };
         }
       }
-      action.committed = ready.toCommit;
       const refusal = await settle(action, new Set());
+      if (refusal && action.intent) await settle({ type: 'intentDropped', taskId, intentId: action.intent }, new Set());
       return refusal ? { ok: false, reason: refusal } : { ok: true };
     });
+  }
+
+  // Commits those of the handoff's files still uncommitted, as the HITL
+  // work they are: null once done, or why it couldn't. Done again, it
+  // commits nothing twice.
+  async function commitHandoff(task: Task, files: string[]): Promise<string | null> {
+    const { path } = task.worktree!;
+    try {
+      const left = await git.uncommitted(path, files);
+      if (left.length) await git.commit(path, left, `Handoff of ${task.id}: ${task.title}`);
+      return null;
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return `The handoff commit failed: ${error.message}`;
+    }
+  }
+
+  // Finishes a confirmed handoff a crash cut short (ADR 0003): its commit,
+  // then the handoff itself. One the task no longer takes, or whose commit
+  // fails, is rolled back: the task stays HITL, its committed work kept.
+  async function replayHandoff(intent: Extract<Intent, { verb: 'handoff' }>): Promise<ReplayedIntent['outcome']> {
+    const action: LifecycleAction = { type: 'handedOff', ...intent.handoff, intent: intent.id };
+    const task = lifecycle.tasks[intent.taskId];
+    const refused = guard(lifecycle, action) ?? (await commitHandoff(task!, intent.handoff.committed));
+    if (!refused && !(await settle(action, new Set()))) return 'finished';
+    await settle({ type: 'intentDropped', taskId: intent.taskId, intentId: intent.id }, new Set());
+    return 'rolled back';
+  }
+
+  // Replays every intent the daemon before left unfinished (ADR 0003), before
+  // any run is reconciled: the verb sees the runs as that daemon left them.
+  // No run starts meanwhile; reconciling starts what they queued.
+  async function replayIntents(): Promise<ReplayedIntent[]> {
+    const replayed: ReplayedIntent[] = [];
+    // A cancelled task's reopening of its tickets and a cleanup are held on
+    // the task while under way (ADR 0011): this daemon carries them on.
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (task.reopening?.tickets.length) replayed.push({ taskId: task.id, verb: 'cancel', outcome: 'resumed' });
+      if (task.cleanup) replayed.push({ taskId: task.id, verb: 'cleanup', outcome: 'resumed' });
+    }
+    replaying = true;
+    try {
+      for (const intent of Object.values(lifecycle.intents)) {
+        if (intent.verb === 'handoff') replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome: await replayHandoff(intent) });
+        if (intent.verb === 'spawn') {
+          const outcome = typeof (await finishSpawn(intent)) === 'string' ? 'rolled back' : 'finished';
+          replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome });
+        }
+      }
+    } finally {
+      replaying = false;
+    }
+    return replayed;
   }
 
   // How the task's worktree stands for a handoff: the task branch checked
@@ -982,7 +1083,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -1002,6 +1103,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // and its commits come out (ADR 0003). Docker that can't be reached
   // leaves the daemon knowing of no container.
   void serially(async () => {
+    const replayed = await replayIntents();
     try {
       for (const { taskId, running } of await sandbox.list()) containers.set(taskId, running);
     } catch (error) {
@@ -1011,8 +1113,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // Even one Docker didn't list: it may answer by the time the run is prepared.
       if (run.status !== 'ended' && runsInContainer(run)) staleTurns.add(run.taskId);
     }
+    // So may the container of an L2 run a takeover ended, its turn not yet ended there.
+    const takeovers = Object.values(lifecycle.intents).filter((intent) => intent.verb === 'takeover');
+    for (const { taskId } of takeovers) staleTurns.add(taskId);
     for (const taskId of [...staleTurns]) await onContainer(taskId, () => endStaleTurn(taskId)).catch(() => {});
-    await settle({ type: 'runsReconciled', interruption: cleanStart ? 'graceful' : 'unclean' }, new Set());
+    for (const intent of takeovers) {
+      // One Docker didn't answer for carries on once it does.
+      const finished = !staleTurns.has(intent.taskId);
+      if (finished) await settle({ type: 'intentDropped', taskId: intent.taskId, intentId: intent.id }, new Set());
+      replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome: finished ? 'finished' : 'resumed' });
+    }
+    replayedTakeovers = true;
+    await settle({ type: 'runsReconciled', interruption: cleanStart ? 'graceful' : 'unclean', replayed }, new Set());
   });
 
   // Every repository's clone is checked at start (ADR 0010), and the skill
@@ -1096,7 +1208,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // clones were already found in place, so they aren't checked twice.
   async function settle(action: LifecycleAction, inPlace: Set<string>): Promise<string | null> {
     for (;;) {
-      const { state, refusal } = reduce(lifecycle, action, clock.now(), routes(), { holdRuns });
+      const { state, refusal } = reduce(lifecycle, action, clock.now(), routes(), { holdRuns: holdRuns ?? (replaying ? REPLAYING : null) });
       if (refusal) return refusal;
       const missing = await missingClones(state, inPlace);
       if (missing.length === 0) {
@@ -1146,12 +1258,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     publish();
     driveExecutor(before, action);
     driveContainers();
+    driveTakeovers();
     driveLoops();
     driveCleanups();
     driveReopens();
     drivePublishes();
     driveResearch();
     driveBranchSweeps(before);
+    driveProcessSweeps(before);
+    driveKeepAwake();
     driveNotes();
     driveQuickLaunches();
     restartIfIdle();
@@ -1244,6 +1359,49 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       quickInFlight.add(task.id);
       void openHandoff(task.id, { quick: true }).finally(() => quickInFlight.delete(task.id));
     }
+  }
+
+  // Sweeps the CLI tree of every run that ended (ADR 0003), however it
+  // ended: MCP servers and shells outlive normal session ends too. The runs
+  // the store showed live at start are the dead daemon's, ended by recovery,
+  // and swept the same way. The daemon stops only once every sweep is done.
+  function driveProcessSweeps(before: Lifecycle): void {
+    for (const run of Object.values(lifecycle.runs)) {
+      const was = before.runs[run.id];
+      if (!was || was.status === 'ended' || run.status !== 'ended') continue;
+      // One whose CLI never came up has only its job to close.
+      const sweep = options.processes.sweep(run.id, run.cli).catch(() => {});
+      processSweeps.add(sweep);
+      void sweep.finally(() => processSweeps.delete(sweep));
+    }
+  }
+
+  // Keep-awake (ADR 0003): while at least one AFK run is active, and the
+  // operator hasn't turned it off, the machine is kept from idle sleep.
+  // Suspended runs, queued tasks and HITL runs don't hold it. A block that
+  // couldn't be had is asked for again a minute later at the soonest, at a
+  // tick: runs change the Lifecycle many times a second.
+  let awake: Promise<AwakeBlock | null> | null = null;
+  let holdFailedAt: number | null = null;
+  function driveKeepAwake(): void {
+    const wanted = !stopping && keepsAwake(lifecycle) && Object.values(lifecycle.runs).some((run) => run.mode === 'AFK' && run.status === 'active');
+    if (wanted && !awake && (holdFailedAt === null || clock.now() - holdFailedAt >= AWAKE_RETRY_MS)) {
+      const holding = options.processes.holdAwake().then(
+        (block) => ((holdFailedAt = null), block),
+        () => {
+          holdFailedAt = clock.now();
+          if (awake === holding) awake = null;
+          return null;
+        },
+      );
+      awake = holding;
+    }
+    if (!wanted && awake) letSleep();
+  }
+  function letSleep(): Promise<void> {
+    const block = awake;
+    awake = null;
+    return block?.then((held) => held?.release()) ?? Promise.resolve();
   }
 
   // Sweeps a task's kept child branches (ADR 0011) after each of its runs
@@ -1777,8 +1935,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     executor.start(start, {
       // A session is named for each completed run now, in case the next
       // stage's context is fresh, as it is for `advanceStage`.
-      report: (event) =>
-        void checkedAfterRun(event).then((checked) => dispatch(checked.type === 'runCompleted' ? { ...checked, sessionId: randomUUID() } : checked)),
+      // A failure is timed as it arrives, against the last wake, which may
+      // be the one it arrives on.
+      report: (event) => {
+        if (event.type === 'runFailed') noticeWake();
+        const reported = event.type === 'runFailed' && wokeRecently() ? { ...event, afterWake: true } : event;
+        void checkedAfterRun(reported).then((checked) => dispatch(checked.type === 'runCompleted' ? { ...checked, sessionId: randomUUID() } : checked));
+      },
       converse: (event) => broadcast(run.id, event),
       askPermission: (call) => gate(run.id, call),
       delegate: (request) => delegate(run.id, request),
@@ -1862,31 +2025,71 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       action.worktree = research
         ? researchWorktree(options.worktreeRoot, repository, childId, research.name)
         : childWorktree(options.worktreeRoot, repository, parent.worktree!, childId, childrenOf(lifecycle, parent).length + 1);
+      let startPoint: string;
       try {
         if (research) {
           const unfetched = await fetchBase(git, repository);
           if (unfetched) return { ok: false, error: `The factory couldn’t cut ${action.worktree.branch} for the child: ${unfetched}` };
-          await git.addWorktree(repository.path, { ...action.worktree, startPoint: `origin/${repository.baseBranch}` });
-          action.base = (await git.snapshot(action.worktree.path)).head;
+          startPoint = `origin/${repository.baseBranch}`;
         } else {
           // An L2 parent's commits are in its container: the child is cut from its tip there.
           if (containers.get(parent.id)) await onContainer(parent.id, () => sandbox.bringOut(parent.id, parent.worktree!.path, parent.worktree!.branch));
           action.base = (await git.snapshot(parent.worktree!.path)).head;
-          await git.addWorktree(repository.path, { ...action.worktree, startPoint: action.base });
+          startPoint = action.base;
         }
       } catch (error) {
         if (!(error instanceof GitError || error instanceof SandboxError)) throw error;
         return { ok: false, error: `The factory couldn’t cut ${action.worktree.branch} for the child: ${error.message}` };
       }
-      const refusal = await settle(action, new Set());
-      if (refusal) {
-        // No child holds them: the worktree and branch just cut go again.
-        await git.removeWorktree(repository.path, action.worktree.path).catch(() => {});
-        await git.deleteBranch(repository.path, action.worktree.branch).catch(() => {});
-        return { ok: false, error: refusal };
-      }
-      return { ok: true, text: spawnedText(lifecycle.tasks[childId]!) };
+      // Cutting the child's worktree is outside the store: the spawn is
+      // journaled first (ADR 0003), keyed by the run and its tool call.
+      const intent: Intent = { id: `spawn:${runId}:${request.toolUseId}`, verb: 'spawn', taskId: parent.id, spawn: action, startPoint };
+      const unjournaled = await settle({ type: 'intentJournaled', taskId: parent.id, intent }, new Set());
+      if (unjournaled) return { ok: false, error: unjournaled };
+      const spawned = await finishSpawn(intent);
+      return typeof spawned === 'string' ? { ok: false, error: spawned } : { ok: true, text: spawnedText(spawned) };
     });
+  }
+
+  // Takes a spawn's steps, each of which can be taken again: cuts the
+  // child's worktree unless it is cut already, then spawns the child, which
+  // finishes the intent. A spawn the Lifecycle refuses, or whose worktree
+  // can't be cut, is rolled back: what it cut goes again, and it says why.
+  // A spawn that already made its child makes no other.
+  async function finishSpawn(intent: Extract<Intent, { verb: 'spawn' }>): Promise<Task | string> {
+    const action: ChildSpawned = { ...structuredClone(intent.spawn), intent: intent.id };
+    const spawned = () => childSpawnedBy(lifecycle, action.runId, action.toolUseId);
+    const done = spawned();
+    if (done) {
+      await settle({ type: 'intentDropped', taskId: intent.taskId, intentId: intent.id }, new Set());
+      return done;
+    }
+    const { path } = lifecycle.repositories[lifecycle.tasks[intent.taskId]!.repo]!;
+    const { branch } = action.worktree;
+    // Whether the child's worktree is this spawn's: only then does a rollback remove it.
+    let cut = false;
+    let problem = guard(lifecycle, action);
+    if (!problem) {
+      try {
+        cut = (await git.worktrees(path)).some((worktree) => worktree.path === action.worktree.path);
+        if (!cut) await git.addWorktree(path, { ...action.worktree, startPoint: intent.startPoint });
+        cut = true;
+        // A research child's base is the tip it was cut from.
+        if (!action.base) action.base = (await git.snapshot(action.worktree.path)).head;
+      } catch (error) {
+        if (!(error instanceof GitError)) throw error;
+        problem = `The factory couldn’t cut ${branch} for the child: ${error.message}`;
+      }
+    }
+    problem ??= await settle(action, new Set());
+    if (!problem) return spawned()!;
+    if (cut) {
+      // No child holds them: the worktree and branch cut for it go again.
+      await git.removeWorktree(path, action.worktree.path).catch(() => {});
+      await git.deleteBranch(path, branch).catch(() => {});
+    }
+    await settle({ type: 'intentDropped', taskId: intent.taskId, intentId: intent.id }, new Set());
+    return problem;
   }
 
   // The run event, failed when it ends a guarded run that broke the git
@@ -2029,6 +2232,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
   }
 
+  // Finishes each takeover's intent (ADR 0003) once its task's container has
+  // ended the turn the AFK run left there and brought its commits out: the
+  // takeover queued that before this, behind what the container already does.
+  // One whose restart failed is tried again the next time the Lifecycle changes.
+  function driveTakeovers(): void {
+    for (const intent of Object.values(lifecycle.intents)) {
+      if (stopping || !replayedTakeovers || intent.verb !== 'takeover' || takeoversInFlight.has(intent.id)) continue;
+      takeoversInFlight.add(intent.id);
+      const { taskId } = intent;
+      void onContainer(taskId, async () => {
+        if (staleTurns.has(taskId)) await endStaleTurn(taskId);
+      })
+        .then(
+          () => serially(async () => void (stopping || (await settle({ type: 'intentDropped', taskId, intentId: intent.id }, new Set())))),
+          (error) => {
+            if (!(error instanceof SandboxError)) throw error;
+          },
+        )
+        .finally(() => takeoversInFlight.delete(intent.id));
+    }
+  }
+
   // Settles each container the daemon knows of.
   function driveContainers(): void {
     for (const taskId of containers.keys()) settleContainer(taskId);
@@ -2153,6 +2378,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await serially(() => settle({ type: 'runsReconciled', interruption: 'graceful' }, new Set()));
       // A container whose run was cut short is restarted, its commits come out, and it stops.
       await Promise.all(containerJobs.values());
+      await Promise.all(processSweeps);
+      await letSleep();
       // Written before the pipe is let go: the next daemon may start as soon
       // as it is, and must find the marker. Nothing after it starts a run.
       store.markCleanShutdown();
@@ -2173,6 +2400,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   return { stopped, stop };
 }
 
+// Why no run starts while the daemon replays its unfinished intents.
+const REPLAYING = 'The factory is finishing what it left unfinished, so it starts no new run yet.';
 const NO_APP = 'The factory has no GitHub App yet: run `agents-factory setup github` to create it.';
 const NO_SUBSCRIPTION_TOKEN =
   'The factory has no subscription token for L2 runs yet: run `claude setup-token`, then `agents-factory setup token` to store what it prints.';

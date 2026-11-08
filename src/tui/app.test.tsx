@@ -31,6 +31,7 @@ function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attention
     artifacts: {},
     attentionQueue,
     slots: { active: 0, cap: 2 },
+    keepAwake: true,
     lastUsedRepo: null,
     usage: { window: null, weekly: null, tokensPerHour: Array(12).fill(0) },
   };
