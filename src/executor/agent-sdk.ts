@@ -18,6 +18,7 @@ import {
   type HookCallback,
   type Options,
   type Query,
+  type SDKRateLimitInfo,
   type SDKResultMessage,
   type SessionKey,
   type SessionStore,
@@ -26,7 +27,7 @@ import {
 import { HARD_DENY_RULES, refusal, runHistoryIn } from '../guards/hard-denies.ts';
 import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
-import type { ModelUsage, Usage } from '../usage/usage.ts';
+import type { ModelUsage, Usage, UsageWindowStatus } from '../usage/usage.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import type { Processes } from '../os/processes.ts';
 import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
@@ -52,6 +53,20 @@ type LiveRun = {
 };
 
 const SUMMARY_LENGTH = 200;
+
+// AFK runs wait out a 5-hour usage limit inside the run (ADR 0008): Claude
+// Code's retry watchdog, with its usage-limit waits and all its waits in a
+// request each capped at 6 hours. A limit whose reset is further away fails
+// the request at once (see docs/walking-skeleton.md).
+export const RETRY_WATCHDOG_ENV = {
+  CLAUDE_CODE_RETRY_WATCHDOG: '1',
+  CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS: String(6 * 3_600_000),
+  CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS: String(6 * 3_600_000),
+} as const;
+
+// A retry this long is the watchdog sleeping until a usage window resets,
+// not an ordinary backoff.
+const WINDOW_WAIT_MS = 60_000;
 
 // The `hook` CLI, which relays each PostToolUse hook event to the daemon for
 // artifact capture. Spawned directly by Claude Code, with no shell between.
@@ -192,12 +207,23 @@ export function agentSdkExecutor({ adopt }: { adopt?: Processes['adopt'] } = {})
     let latest: { used: number; model: string } | null = null;
     // An AFK run's final result text: a child's report summary if it reported none.
     let result: string | undefined;
+    // What the usage window the run last read said.
+    let windowStatus: UsageWindowStatus | null = null;
     try {
       for await (const message of run.query) {
         if (run.stopped) return;
         if (message.type === 'system' && message.subtype === 'init' && !run.reportedStart && run.cli) {
           run.reportedStart = true;
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
+        } else if (message.type === 'rate_limit_event') {
+          const seen = snapshotOf(message.rate_limit_info);
+          windowStatus = message.rate_limit_info.status;
+          if (seen) report({ type: 'usageSnapshotSeen', runId, ...seen });
+        } else if (message.type === 'system' && message.subtype === 'api_retry') {
+          // Only an AFK run has the watchdog: a HITL conversation shows the
+          // limit, and the operator decides.
+          const waits = message.error === 'rate_limit' && (windowStatus === 'rejected' || message.retry_delay_ms >= WINDOW_WAIT_MS);
+          if (run.mode === 'AFK' && waits) report({ type: 'windowWaited', runId, waitMs: message.retry_delay_ms });
         } else if (message.type === 'assistant') {
           // In-run subagents' messages count in the run's usage, never in its conversation.
           const sampled = sampleOf(message.message);
@@ -310,7 +336,13 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
 function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
   // Python reads and writes files as UTF-8, not Windows' code page, so the
   // run needn't ask to set it for each script (T11).
-  const env: Record<string, string | undefined> = { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', PYTHONUTF8: '1', ...guards!.env };
+  const env: Record<string, string | undefined> = {
+    ...runEnv(credential),
+    ...RETRY_WATCHDOG_ENV,
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+    PYTHONUTF8: '1',
+    ...guards!.env,
+  };
   for (const name of AFK_UNSET) delete env[name];
   return {
     env,
@@ -347,7 +379,13 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
 // would deny them, and they would crowd the hosts a failed run lists.
 function l2Options({ maxTurns, guards, token, container }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
   return {
-    env: { CLAUDE_CODE_OAUTH_TOKEN: token!, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', ...guards!.env },
+    env: {
+      CLAUDE_CODE_OAUTH_TOKEN: token!,
+      ...RETRY_WATCHDOG_ENV,
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      ...guards!.env,
+    },
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     settingSources: ['project'],
@@ -512,6 +550,16 @@ function sampleOf(message: unknown): { messageId: string; model: string; usage: 
       cost: 0,
     },
   };
+}
+
+// A usage window's reading, as a usage snapshot: the share spent, 0 to 1,
+// and the reset in ms. The CLI hands on the headers' fraction (a value over
+// 1 is taken as a percentage), and its reset in seconds. A reading naming no
+// window is no snapshot.
+function snapshotOf({ rateLimitType, status, utilization, resetsAt }: SDKRateLimitInfo) {
+  if (!rateLimitType) return null;
+  const spent = typeof utilization === 'number' ? Math.min(Math.max(utilization > 1 ? utilization / 100 : utilization, 0), 1) : null;
+  return { window: rateLimitType, status, spent, resetsAt: typeof resetsAt === 'number' ? resetsAt * 1000 : null };
 }
 
 // The session's usage so far, per model, with the client's API-equivalent cost.

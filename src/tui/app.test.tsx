@@ -33,6 +33,7 @@ function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attention
     slots: { active: 0, cap: 2 },
     keepAwake: true,
     lastUsedRepo: null,
+    usage: { window: null, weekly: null, tokensPerHour: Array(12).fill(0) },
   };
 }
 
@@ -532,7 +533,7 @@ describe('launching and conversing', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[],
+    deniedHosts: [] as string[], waitingForWindow: null,
   };
   const repositories = { 'acme/gadgets': gadgets, 'acme/widgets': widgets };
 
@@ -1860,7 +1861,7 @@ describe('answering in the conversation', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[],
+    deniedHosts: [] as string[], waitingForWindow: null,
   };
   const permission = {
     kind: 'attention' as const,
@@ -2080,7 +2081,7 @@ describe('taking over with c', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[],
+    deniedHosts: [] as string[], waitingForWindow: null,
   };
   const permission = {
     kind: 'attention' as const,
@@ -2180,7 +2181,7 @@ describe('the conversation of an AFK task that is no longer live', () => {
     const ended = {
       id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const, interruption: null,
       turn: 'agent' as const, queued: [] as string[], question: null, permission: null, stage: 'implement', ticket: null, proposal: null,
-      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {}, deniedHosts: [] as string[],
+      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {}, deniedHosts: [] as string[], waitingForWindow: null,
     };
     const { app } = await started({ ...factoryState([reviewed]), runs: { R1: ended } }, { connection });
     await press(app, '\r', '\r');
@@ -2199,7 +2200,7 @@ describe('usage', () => {
   function metered(id: string, taskId: string, stage: string | null, ticket: string | null, used: RunView['usage']): RunView {
     return {
       id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage, ticket,
-      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used, deniedHosts: [],
+      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used, deniedHosts: [], waitingForWindow: null,
     };
   }
   const implementing = { ...task('T1', 'Implement the login flow', 'running', 'Running'), groups: ['login'] };
@@ -2237,6 +2238,60 @@ describe('usage', () => {
     expect(app.lastFrame()).not.toMatch(/grill\s+/);
   });
 
+  describe('the usage strip', () => {
+    const resetsAt = Date.UTC(2026, 9, 29, 14, 30);
+    const reading = (state: FactoryState): FactoryState => ({
+      ...state,
+      slots: { active: 1, cap: 2 },
+      usage: { window: { spent: 0.42, resetsAt }, weekly: { spent: 0.181, resetsAt: Date.UTC(2026, 10, 2, 9) }, tokensPerHour: [0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 400, 800] },
+    });
+    // The frame with its lines run together: the strip's parts wrap on a narrow terminal.
+    const oneLine = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.replace(/\s*\n\s*/g, ' ');
+    const strip = /Window 42% · resets 14:30 · Weekly 18% · Slots 1\/2 · ▁▁▁▁▁▁▁▁▁▂▅█ 800\/h · claude-sonnet-5-5 2\.1M · claude-haiku-5-5 330/;
+
+    test('shows the usage window and its reset, the weekly window, slots, a tokens/hour sparkline and tokens by model, on every screen', async () => {
+      const { app } = await started(reading(metering()));
+      await eventually(() => expect(oneLine(app)).toMatch(strip));
+
+      for (const screen of ['2', '3', '4']) {
+        await press(app, screen);
+        await eventually(() => expect(oneLine(app)).toMatch(strip));
+      }
+      // A task's detail, and the condensed view.
+      await press(app, '1', '\r');
+      await eventually(() => expect(app.lastFrame()).toContain('task tree'));
+      expect(oneLine(app)).toMatch(strip);
+      await press(app, '\x1b', 'v');
+      await eventually(() => expect(app.lastFrame()).toContain('Condensed'));
+      expect(oneLine(app)).toMatch(strip);
+    });
+
+    test('shows in a task’s conversation too', async () => {
+      const talking = { ...task('T4', 'Grill me about billing', 'running', 'In conversation', 'HITL'), liveRunId: 'R5', worktree: '/worktrees/acme-widgets/T4', sessionId: 'b1' };
+      const live = { ...metered('R5', 'T4', 'grill', null, {}), mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, endedAt: null };
+      const state = reading(metering());
+      const { app } = await started({ ...state, tasks: { T4: talking }, runs: { ...runs, R5: live } });
+      await press(app, '\r', '\r');
+
+      await eventually(() => expect(app.lastFrame()).toContain('Grill me about billing'));
+      expect(oneLine(app)).toMatch(/Window 42% · resets 14:30 · Weekly 18% · Slots 1\/2/);
+    });
+
+    test('a usage window with no snapshot to trust shows as unknown', async () => {
+      const { app } = await started({ ...factoryState([grilling]), usage: { window: null, weekly: null, tokensPerHour: Array(12).fill(0) } });
+
+      await eventually(() => expect(app.lastFrame()).toContain('Window unknown · Weekly unknown · Slots 0/2 · ▁▁▁▁▁▁▁▁▁▁▁▁ 0/h'));
+    });
+
+    test('a run waiting out a usage limit shows waiting for window on the Runs screen', async () => {
+      const waiting = { ...metered('R5', 'T1', 'implement', null, {}), status: 'active' as const, outcome: null, endedAt: null, waitingForWindow: resetsAt };
+      const { app } = await started({ ...metering(), runs: { R5: waiting } });
+      await press(app, '3');
+
+      await eventually(() => expect(app.lastFrame()).toMatch(/R5\s+T1\s+Implement the login flow\s+AFK\s+implement\s+claude-sonnet-5-5\s+waiting for window/));
+    });
+  });
+
   test('the Usage tab of a factory that spent nothing says so', async () => {
     const { app } = await started(factoryState([grilling]));
     await press(app, '4');
@@ -2262,7 +2317,7 @@ describe('the screens view', () => {
   function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
     return {
       id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
-      ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, deniedHosts: [], ...fields,
+      ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, deniedHosts: [], waitingForWindow: null, ...fields,
     };
   }
   const grilling = task('T1', 'Grill me about the docs', 'queued', 'Ready for you', 'HITL');
@@ -2447,7 +2502,8 @@ describe('the screens view', () => {
   test('on a short terminal a task’s detail keeps its latest messages in view, older ones scrolling off over the runs', async () => {
     const runs = { R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
     const { app, connection } = await started({ ...factoryState([implementing]), runs });
-    resize(app, 20);
+    // A row for the usage strip under the rest.
+    resize(app, 21);
     await press(app, '\r');
     await eventually(() => expect(app.lastFrame()).toContain('Tasks › T2'));
     connection.serveConversation(
@@ -2457,7 +2513,7 @@ describe('the screens view', () => {
 
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame.split('\n')).toHaveLength(20);
+      expect(frame.split('\n')).toHaveLength(21);
       expect(frame).toContain('Tasks › T2');
       expect(frame).toContain('Step 29.');
       expect(frame).not.toContain('Step 0.');
@@ -2668,7 +2724,7 @@ describe('the wayfinder work loop', () => {
     const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', finishing: false, frontier: null, cleared: false } };
     const run = {
       id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, interruption: null, turn: 'operator' as const, queued: [] as string[],
-      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {}, deniedHosts: [] as string[],
+      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {}, deniedHosts: [] as string[], waitingForWindow: null,
     };
     const { app } = await started({ ...factoryState([working]), runs: { R1: run } }, { connection });
     await press(app, '\r', '\r');
@@ -2746,7 +2802,7 @@ describe('quick launch', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [],
+    deniedHosts: [], waitingForWindow: null,
   };
   const question = {
     id: 'toolu_1',

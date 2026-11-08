@@ -205,7 +205,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
   // Whether the daemon before this one stopped gracefully (ADR 0003).
   const cleanStart = store.takeCleanShutdown();
-  let published: FactoryState = toFactoryState(lifecycle);
+  let published: FactoryState = toFactoryState(lifecycle, new Set(), clock.now());
   const startedAt = clock.now();
   const sockets = new Set<Socket>();
   const subscribers = new Set<Socket>();
@@ -308,6 +308,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const stopTicking = clock.every(TICK_MS, () => {
     noticeWake();
     driveKeepAwake();
+    // What time alone changes: a usage snapshot going unknown.
+    publish();
     fireOverdueDeadlines();
     refreshBotTokens();
     if (clock.now() >= nextPrPoll) pollPrs();
@@ -2360,7 +2362,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   function publish(): void {
-    const next = toFactoryState(lifecycle, watched());
+    const next = toFactoryState(lifecycle, watched(), clock.now());
     const ops = diffFactoryState(published, next);
     published = next;
     if (ops.length) for (const socket of subscribers) send(socket, { type: 'patch', ops });

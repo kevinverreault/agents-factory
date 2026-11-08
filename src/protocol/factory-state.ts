@@ -37,7 +37,7 @@ import {
 } from '../lifecycle/lifecycle.ts';
 import type { PullRequest } from '../github/github.ts';
 import type { Tier } from '../models/routing.ts';
-import type { ModelUsage } from '../usage/usage.ts';
+import { tokensPerHour, windowView, type ModelUsage, type WindowView } from '../usage/usage.ts';
 
 export type TaskView = {
   id: string;
@@ -111,7 +111,16 @@ export type HandoffView = Omit<HandoffSheet, 'asked'>;
 export type RunView = Pick<
   Run,
   'id' | 'taskId' | 'mode' | 'autonomy' | 'status' | 'outcome' | 'interruption' | 'turn' | 'queued' | 'question' | 'stage' | 'proposal' | 'model' | 'cli' | 'skillSet' | 'startedAt' | 'endedAt'
-> & { maxTurns: number | null; tier: Tier | null; ticket: string | null; usage: ModelUsage; permission: Permission | null; deniedHosts: string[] };
+> & {
+  maxTurns: number | null;
+  tier: Tier | null;
+  ticket: string | null;
+  usage: ModelUsage;
+  permission: Permission | null;
+  deniedHosts: string[];
+  // While an AFK run waits out a 5-hour usage limit, when its wait ends.
+  waitingForWindow: number | null;
+};
 
 // `app` is null until the daemon has checked the App's installation, and
 // `skills` until it has checked the skill set's setup.
@@ -134,14 +143,22 @@ export type FactoryState = {
   keepAwake: boolean;
   // Where a launch card goes when the working directory is in no registered clone.
   lastUsedRepo: string | null;
+  usage: UsageSummary;
 };
 
-// `watched` holds the runs whose conversations a TUI has open.
-export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string> = new Set()): FactoryState {
+// What the usage strip shows besides the runs' own usage (ADR 0008): the
+// 5-hour usage window and the weekly one, each null while unknown, and
+// every run's tokens in each of the last hours, oldest first, the hour now last.
+export type UsageSummary = { window: WindowView; weekly: WindowView; tokensPerHour: number[] };
+
+// `watched` holds the runs whose conversations a TUI has open, and `at` is
+// now: a usage snapshot past its reset or too old by then is unknown.
+export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string>, at: number): FactoryState {
   const repositories: Record<string, RepositoryView> = {};
   for (const repository of Object.values(lifecycle.repositories)) repositories[repository.id] = repositoryView(repository);
   const tasks: Record<string, TaskView> = {};
   for (const task of Object.values(lifecycle.tasks)) {
+    const live = liveRun(lifecycle, task);
     tasks[task.id] = {
       id: task.id,
       title: task.title,
@@ -156,8 +173,8 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       priority: task.priority ?? 'normal',
       groups: task.groups,
       state: task.state,
-      label: label(task, readyForYou(lifecycle, task, watched)),
-      liveRunId: liveRun(lifecycle, task)?.id ?? null,
+      label: live?.waitingForWindow ? 'Waiting for window' : label(task, readyForYou(lifecycle, task, watched)),
+      liveRunId: live?.id ?? null,
       branch: task.worktree?.branch ?? null,
       worktree: task.worktree?.path ?? null,
       sessionId: task.sessionId,
@@ -220,6 +237,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       maxTurns,
       ticket: run.ticket ?? null,
       usage: structuredClone(run.usage ?? {}),
+      waitingForWindow: run.waitingForWindow ?? null,
       cli,
       skillSet: skillSet ?? null,
       startedAt,
@@ -236,6 +254,11 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
     slots: { active: heldSlots(lifecycle), cap: lifecycle.slotCap },
     keepAwake: keepsAwake(lifecycle),
     lastUsedRepo: lastUsedRepo(lifecycle),
+    usage: {
+      window: windowView(lifecycle.snapshots.five_hour, at),
+      weekly: windowView(lifecycle.snapshots.seven_day, at),
+      tokensPerHour: tokensPerHour(Object.values(lifecycle.samples), at),
+    },
   };
 }
 
