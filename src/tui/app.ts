@@ -37,7 +37,7 @@ import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useRows } from './screen.ts';
 import { TaskDetail } from './task-detail.ts';
 import { edit } from './text-input.ts';
-import { UsageTab } from './usage.ts';
+import { UsageStrip, UsageTab } from './usage.ts';
 
 // The screens, in the order of the number keys that switch to them.
 const TABS = ['tasks', 'needs-you', 'runs', 'usage'] as const;
@@ -460,6 +460,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
       closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
       command === null ? null : h(CommandLine, { draft: command }),
+      state ? h(UsageStrip, { state }) : null,
     ),
   );
 }

@@ -7,5 +7,7 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.{ts,tsx}'],
     exclude: ['src/**/*.contract.test.{ts,tsx}'],
+    // Times show in the machine's own zone: tests pin it, so they can name them.
+    env: { TZ: 'UTC' },
   },
 });

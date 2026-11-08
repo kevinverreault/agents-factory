@@ -21,6 +21,7 @@ export function runsOf(state: FactoryState, taskId: string): RunView[] {
 
 // How a run ended, or that it is live or suspended.
 export function runOutcome(run: RunView): string {
+  if (run.waitingForWindow !== null) return 'waiting for window';
   return run.outcome ?? (run.status === 'active' ? 'live' : run.status);
 }
 

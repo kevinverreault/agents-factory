@@ -98,3 +98,40 @@ export function TaskUsage({ state, taskId }: { state: FactoryState; taskId: stri
     hasChildren ? line('tree', 'task tree', overall(views.trees[taskId] ?? {}), true) : null,
   );
 }
+
+const BARS = '▁▂▃▄▅▆▇█';
+
+// Each count as a bar, scaled to the largest: nothing is the lowest bar,
+// and anything at all is at least the next one up.
+export function sparkline(counts: number[]): string {
+  const most = Math.max(0, ...counts);
+  return counts.map((count) => BARS[count === 0 ? 0 : Math.max(1, Math.round((count / most) * (BARS.length - 1)))]).join('');
+}
+
+const percent = (spent: number) => `${Math.round(spent * 100)}%`;
+
+// When a usage window resets, as a time of day in the machine's own zone:
+// the 5-hour window always resets within the day.
+function clockTime(ms: number): string {
+  return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ms);
+}
+
+// The always-on usage strip (ADR 0008): the usage window spent and when it
+// resets, the weekly window spent (each unknown without a snapshot to
+// trust), slot occupancy, the last hours' tokens with this hour's, and every
+// model's tokens. Its parts wrap onto a second line on a narrow terminal.
+export function UsageStrip({ state }: { state: FactoryState }) {
+  const { window, weekly, tokensPerHour } = state.usage;
+  const parts = [
+    window ? `Window ${percent(window.spent)} · resets ${clockTime(window.resetsAt)}` : 'Window unknown',
+    weekly ? `Weekly ${percent(weekly.spent)}` : 'Weekly unknown',
+    `Slots ${state.slots.active}/${state.slots.cap}`,
+    `${sparkline(tokensPerHour)} ${tokens(tokensPerHour.at(-1) ?? 0)}/h`,
+    ...Object.entries(usageViews(state).models).map(([model, usage]) => `${model} ${tokens(tokensOf(usage))}`),
+  ];
+  return h(
+    Box,
+    { flexWrap: 'wrap', flexShrink: 0 },
+    ...parts.map((part, i) => h(Text, { key: i, dimColor: true }, i === 0 ? part : ` · ${part}`)),
+  );
+}

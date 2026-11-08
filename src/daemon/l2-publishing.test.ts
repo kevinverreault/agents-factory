@@ -269,7 +269,8 @@ describe('an L2 root', () => {
     factory.executor.report('R2', { type: 'runCompleted' });
     // Both tickets closed: the review, then the PR body.
     await started(factory, 3);
-    expect(tui.state().runs.R3).toMatchObject({ stage: 'review' });
+    // The executor may start the run before its patch reaches the TUI.
+    expect((await tui.until((state) => !!state.runs.R3)).runs.R3).toMatchObject({ stage: 'review' });
     factory.executor.report('R3', { type: 'runCompleted' });
     await started(factory, 4);
     factory.executor.report('R4', { type: 'prBodyWritten', body: 'Adds login and logout.' });

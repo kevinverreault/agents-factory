@@ -19,7 +19,7 @@ import { Event } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { useRows } from './screen.ts';
 import { edit } from './text-input.ts';
-import { TaskUsage } from './usage.ts';
+import { TaskUsage, UsageStrip } from './usage.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -188,6 +188,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       refusal ? h(Text, { color: 'red' }, refusal) : null,
       chat ? h(Text, null, `› ${draft}▏`) : null,
       h(Text, { dimColor: true }, hint),
+      h(UsageStrip, { state }),
     ),
   );
 }

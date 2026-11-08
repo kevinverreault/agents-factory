@@ -17,6 +17,7 @@ const SONNET = 'claude-sonnet-5-5';
 const HAIKU = 'claude-haiku-5-5';
 const usage = (input: number, output: number, cacheRead = 0, cacheWrite = 0, cost = 0) => ({ input, output, cacheRead, cacheWrite, cost });
 const minutes = (n: number) => n * 60_000;
+const hours = (n: number) => n * 3_600_000;
 
 // Resolves once every change sent before it has gone through the daemon.
 async function settled(connection: FactoryConnection): Promise<void> {
@@ -83,6 +84,186 @@ describe('a run’s usage record', () => {
     await settled(operator);
 
     expect(tui.state().runs.R1).toMatchObject({ status: 'ended', usage: { [SONNET]: usage(100, 10) } });
+  });
+});
+
+describe('usage snapshots', () => {
+  test('the latest reading of each usage window shows as spent and when it resets', async () => {
+    const { factory, operator, tui } = await conversing();
+    const now = factory.clock.now();
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'allowed', spent: 0.25, resetsAt: now + hours(3) });
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'allowed', spent: 0.1, resetsAt: now + hours(90) });
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'allowed_warning', spent: 0.82, resetsAt: now + hours(3) });
+    await settled(operator);
+
+    expect(tui.state().usage).toMatchObject({
+      window: { spent: 0.82, resetsAt: now + hours(3) },
+      weekly: { spent: 0.1, resetsAt: now + hours(90) },
+    });
+  });
+
+  test('a reading that says nothing of what is spent keeps the last one for the same window', async () => {
+    const { factory, operator, tui } = await conversing();
+    const resetsAt = factory.clock.now() + hours(3);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'allowed', spent: 0.4, resetsAt });
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'allowed_warning', spent: null, resetsAt });
+    await settled(operator);
+
+    expect(tui.state().usage.window).toEqual({ spent: 0.4, resetsAt });
+  });
+
+  test('a snapshot past its reset shows as unknown', async () => {
+    const { factory, operator, tui } = await conversing();
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'allowed', spent: 0.5, resetsAt: factory.clock.now() + minutes(20) });
+    await settled(operator);
+    expect(tui.state().usage.window).not.toBeNull();
+
+    factory.clock.advance(minutes(21));
+
+    await tui.until((state) => state.usage.window === null);
+  });
+
+  test('a snapshot too old to trust shows as unknown, though its reset is still ahead', async () => {
+    const { factory, operator, tui } = await conversing();
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'allowed', spent: 0.3, resetsAt: factory.clock.now() + hours(100) });
+    await settled(operator);
+
+    factory.clock.advance(minutes(59));
+    await settled(operator);
+    expect(tui.state().usage.weekly).toEqual({ spent: 0.3, resetsAt: expect.any(Number) });
+
+    factory.clock.advance(minutes(2));
+    await tui.until((state) => state.usage.weekly === null);
+  });
+
+  test('a spent window’s snapshot is trusted until its reset, however long since it was seen', async () => {
+    const { factory, operator, tui } = await conversing();
+    const resetsAt = factory.clock.now() + hours(4);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'rejected', spent: 1, resetsAt });
+    await settled(operator);
+
+    factory.clock.advance(hours(3));
+    await settled(operator);
+
+    expect(tui.state().usage.window).toEqual({ spent: 1, resetsAt });
+  });
+
+  test('snapshots outlast a daemon restart', async () => {
+    const { factory, operator } = await conversing();
+    const resetsAt = factory.clock.now() + hours(2);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'allowed', spent: 0.6, resetsAt });
+    await settled(operator);
+
+    await factory.restart();
+
+    const reattached = watch(await factory.attach());
+    expect((await reattached.until(() => true)).usage.window).toEqual({ spent: 0.6, resetsAt });
+  });
+});
+
+describe('tokens per hour', () => {
+  test('the last 12 hours’ tokens, oldest first, the hour now last, from every run’s per-minute usage', async () => {
+    const { factory, operator, tui } = await conversing();
+    // Each message lands before the clock moves on.
+    const sampled = async (after: number, messageId: string, model: string, used: ReturnType<typeof usage>) => {
+      factory.clock.advance(after);
+      factory.executor.report('R1', { type: 'usageSampled', messageId, model, usage: used });
+      await settled(operator);
+    };
+    await sampled(minutes(10), 'msg_1', SONNET, usage(100, 10, 1_000, 50));
+    await sampled(minutes(40), 'msg_2', HAIKU, usage(200, 40));
+    await sampled(minutes(20), 'msg_3', SONNET, usage(300, 0));
+
+    expect(tui.state().usage.tokensPerHour).toEqual([...Array(10).fill(0), 1_400, 300]);
+
+    // Hours with nothing in them roll the older ones off.
+    factory.clock.advance(minutes(11 * 60));
+    await tui.until((state) => state.usage.tokensPerHour.at(0) === 300);
+    expect(tui.state().usage.tokensPerHour).toEqual([300, ...Array(11).fill(0)]);
+  });
+});
+
+describe('usage limits on AFK runs', () => {
+  async function running(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
+    const factory = await startTestFactory();
+    factories.push(factory);
+    await factory.registerRepo();
+    const operator = await factory.attach();
+    const tui = watch(operator);
+    await tui.until(() => true);
+    await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Fix the login bug', mode: 'AFK', submit: true });
+    await tui.until((state) => state.runs.R1?.status === 'active');
+    return { factory, operator, tui };
+  }
+
+  test('a 5-hour limit is waited out in place: the run shows waiting for window, keeps its slot, and goes on by itself after the reset', async () => {
+    const { factory, operator, tui } = await running();
+    const resetsAt = factory.clock.now() + hours(2);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'rejected', spent: 1, resetsAt });
+    factory.executor.report('R1', { type: 'windowWaited', waitMs: hours(2) });
+
+    let state = await tui.until((state) => state.tasks.T1?.label === 'Waiting for window');
+    expect(state.runs.R1).toMatchObject({ status: 'active', waitingForWindow: resetsAt });
+    expect(state.slots).toEqual({ active: 1, cap: 2 });
+    expect(state.attentionQueue).toEqual([]);
+
+    // Past the reset, the CLI's retry goes through and the run streams again.
+    factory.clock.advance(hours(2));
+    factory.executor.report('R1', { type: 'usageSampled', messageId: 'msg_1', model: SONNET, usage: usage(100, 10) });
+
+    state = await tui.until((state) => state.tasks.T1?.label === 'Running');
+    expect(state.runs.R1).toMatchObject({ status: 'active', waitingForWindow: null });
+    expect(factory.executor.stopped).toEqual([]);
+  });
+
+  test('a weekly limit fails the run with an attention request naming the reset time', async () => {
+    const { factory, operator, tui } = await running();
+    const resetsAt = Date.UTC(2026, 10, 2, 14, 30);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'rejected', spent: 1, resetsAt });
+    await settled(operator);
+    // The CLI won't wait days: the request fails at once.
+    factory.executor.report('R1', { type: 'runFailed', reason: 'API Error: 429 usage limit' });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.runs.R1).toMatchObject({ status: 'ended', outcome: 'failed' });
+    expect(state.attentionQueue).toEqual([
+      expect.objectContaining({ attention: 'failure', taskId: 'T1', reason: 'API Error: 429 usage limit. The weekly usage limit is spent: it resets Mon 2 Nov, 14:30.' }),
+    ]);
+  });
+
+  test('a weekly limit that resets within the wait cap fails the run too, rather than being waited out', async () => {
+    const { factory, operator, tui } = await running();
+    const resetsAt = factory.clock.now() + hours(4);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'rejected', spent: 1, resetsAt });
+    factory.executor.report('R1', { type: 'windowWaited', waitMs: hours(4) });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.runs.R1).toMatchObject({ status: 'ended', outcome: 'failed' });
+    expect(state.attentionQueue).toEqual([
+      expect.objectContaining({ attention: 'failure', reason: 'The weekly usage limit is spent: it resets Thu 29 Oct, 13:00.' }),
+    ]);
+    // The CLI waiting on the limit is stopped.
+    expect(factory.executor.stopped).toEqual(['R1']);
+    expect(state.slots.active).toBe(0);
+  });
+
+  test('a weekly limit on another model’s window leaves a 5-hour limit to be waited out', async () => {
+    const { factory, operator, tui } = await running();
+    expect(tui.state().runs.R1?.model).toBe(SONNET);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day_opus', status: 'rejected', spent: 1, resetsAt: factory.clock.now() + hours(40) });
+    factory.executor.report('R1', { type: 'windowWaited', waitMs: hours(2) });
+    await settled(operator);
+
+    expect(tui.state().tasks.T1?.label).toBe('Waiting for window');
+  });
+
+  test('a run that fails with no usage window spent keeps its own reason', async () => {
+    const { factory, tui } = await running();
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'allowed', spent: 0.4, resetsAt: factory.clock.now() + hours(50) });
+    factory.executor.report('R1', { type: 'runFailed', reason: 'The CLI exited.' });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.attentionQueue).toEqual([expect.objectContaining({ attention: 'failure', reason: 'The CLI exited.' })]);
   });
 });
 

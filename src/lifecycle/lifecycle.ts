@@ -12,7 +12,23 @@ import type { Issue, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
-import { correction, grown, merged, NO_USAGE, overall, plus, tokensOf, type ModelUsage, type Usage } from '../usage/usage.ts';
+import {
+  correction,
+  grown,
+  merged,
+  NO_USAGE,
+  overall,
+  plus,
+  resetTime,
+  weeklySpentUntil,
+  tokensOf,
+  updatedSnapshot,
+  type ModelUsage,
+  type Usage,
+  type UsageSnapshots,
+  type UsageWindowKind,
+  type UsageWindowStatus,
+} from '../usage/usage.ts';
 
 export type Mode = 'HITL' | 'AFK';
 export type AutonomyLevel = 'L1' | 'L2';
@@ -412,6 +428,10 @@ export type Run = {
   // While it is live, what each of its API messages since its session's
   // last total was counted at, by message id; null once it ended.
   countedMessages?: Record<string, Usage> | null;
+  // While an AFK run waits out a 5-hour usage limit in place (ADR 0008),
+  // when its wait ends, in ms; null once it goes on, or ended. Runs stored
+  // before it have none.
+  waitingForWindow?: number | null;
   startedAt: number;
   endedAt: number | null;
 };
@@ -498,6 +518,9 @@ export type Lifecycle = {
   requests: Record<string, AttentionRequest>;
   artifacts: Record<string, Artifact>;
   samples: Record<string, UsageSample>;
+  // The latest usage snapshot of each usage window, by its kind (ADR 0008).
+  // Stores saved before snapshots have none.
+  snapshots: UsageSnapshots;
   slotCap: number;
 };
 
@@ -607,7 +630,13 @@ export type RunEvent =
   | { type: 'usageSampled'; runId: string; messageId: string; model: string; usage: Usage }
   // The run's session's usage so far, per model, as a result reports it: a
   // resumed session's counts the runs before.
-  | { type: 'usageTotaled'; runId: string; models: ModelUsage };
+  | { type: 'usageTotaled'; runId: string; models: ModelUsage }
+  // The run saw a usage window's reading (a `rate_limit_event`): the share
+  // of it spent (0 to 1) and when it resets, in ms, where it says.
+  | { type: 'usageSnapshotSeen'; runId: string; window: UsageWindowKind; status: UsageWindowStatus; spent: number | null; resetsAt: number | null }
+  // An AFK run's request hit a usage limit, and Claude Code's retry
+  // watchdog waits `waitMs` for it to reset before retrying.
+  | { type: 'windowWaited'; runId: string; waitMs: number };
 
 // The agent spawned a child task through `spawn_child` (ADR 0009), and the
 // daemon cut its branch from the parent's tip, `base`, into its worktree.
@@ -843,6 +872,7 @@ export function initialLifecycle(): Lifecycle {
     requests: {},
     artifacts: {},
     samples: {},
+    snapshots: {},
     slotCap: DEFAULT_SLOT_CAP,
   };
 }
@@ -1564,9 +1594,10 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       // The task's rules still decide the other calls of a run that waits
       // on a request, or on a HITL run's card.
       if (!grantFor(state.tasks[run.taskId]!, run, action)) return 'Another request of this run is waiting on the operator.';
-    } else if (run.status !== 'active' && !(run.status === 'suspended' && action.type === 'runFailed') && !isMetering(action)) {
+    } else if (run.status !== 'active' && !(run.status === 'suspended' && action.type === 'runFailed') && !isMetering(action) && action.type !== 'usageSnapshotSeen') {
       // A suspended run can still fail: its CLI may exit while it waits on
-      // the operator. What a run spent is metered whenever it says.
+      // the operator. What a run spent is metered, and what it saw of the
+      // usage windows kept, whenever it says.
       return `Run ${run.id} is not active.`;
     }
   }
@@ -1718,7 +1749,10 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'turnEnded':
     case 'usageSampled':
     case 'usageTotaled':
+    case 'usageSnapshotSeen':
       return null;
+    case 'windowWaited':
+      return task.mode === 'AFK' ? null : 'Only an AFK run waits out a usage limit.';
     case 'findingsReported':
       return runReports(task, state.runs[action.runId]!).includes('findings') ? null : 'Only a run of a fix-once review stage reports findings.';
     case 'prBodyWritten':
@@ -2376,6 +2410,7 @@ function endRun(run: Run, outcome: RunOutcome, at: number): void {
   run.parksAt = null;
   run.endedAt = at;
   run.countedMessages = null;
+  run.waitingForWindow = null;
 }
 
 export function isMetering(action: { type: string }): action is Extract<RunEvent, { type: 'usageSampled' | 'usageTotaled' }> {
@@ -2557,6 +2592,12 @@ function raise(
 ): void {
   addRequest(state, task, run, kind, holdsRun, reason, at, extra);
   task.state = 'waiting';
+}
+
+// Why a run whose weekly usage window is spent failed, after what failed it, if anything.
+function weeklyLimitReason(resetsAt: number, failure = ''): string {
+  const spent = `The weekly usage limit is spent: it resets ${resetTime(resetsAt)}.`;
+  return failure ? `${failure.replace(/\.?\s*$/, '.')} ${spent}` : spent;
 }
 
 // Logs on the run the hosts its container's egress proxy denied it (ADR 0007).
@@ -3180,6 +3221,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const counted = metered.countedMessages?.[action.messageId] ?? NO_USAGE;
       const added = grown(counted, action.usage);
       metered.countedMessages = { ...metered.countedMessages, [action.messageId]: plus(counted, added) };
+      // A run streaming again has its usage window back.
+      metered.waitingForWindow = null;
       meter(state, metered, { [action.model]: added }, at);
       break;
     }
@@ -3190,16 +3233,39 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (metered.status !== 'ended') metered.countedMessages = {};
       break;
     }
+    case 'usageSnapshotSeen': {
+      const { window, status, spent, resetsAt } = action;
+      state.snapshots[window] = updatedSnapshot(state.snapshots[window], { window, status, spent, resetsAt, seenAt: at });
+      break;
+    }
     case 'prBodyWritten':
       task.prBody = prBody(task, action.body);
       break;
-    case 'runFailed':
+    case 'runFailed': {
       // The request a suspended run waited on can't resume it any more.
       if (request?.holdsRun) request.status = 'superseded';
+      // An AFK run failed with its weekly limit spent says when it resets
+      // (ADR 0008): the CLI's failure carries only the API's message.
+      const weekly = task.mode === 'AFK' ? weeklySpentUntil(state.snapshots, run!.model, at) : null;
       endRun(run!, 'failed', at);
       logDenials(run!, action.deniedHosts);
-      raise(state, task, run!, 'failure', false, withDenials(action.reason, action.deniedHosts), at, { deniedHosts: action.deniedHosts });
+      const reason = weekly === null ? action.reason : weeklyLimitReason(weekly, action.reason);
+      raise(state, task, run!, 'failure', false, withDenials(reason, action.deniedHosts), at, { deniedHosts: action.deniedHosts });
       break;
+    }
+    case 'windowWaited': {
+      // A 5-hour limit is waited out in place, holding the run's slot. A
+      // weekly one fails the run, though the watchdog would wait it out
+      // were its reset within the cap: the operator decides on a long wait.
+      const weekly = weeklySpentUntil(state.snapshots, run!.model, at);
+      if (weekly === null) {
+        run!.waitingForWindow = at + action.waitMs;
+        break;
+      }
+      endRun(run!, 'failed', at);
+      raise(state, task, run!, 'failure', false, weeklyLimitReason(weekly), at);
+      break;
+    }
     case 'attentionRaised': {
       suspend(run!, at);
       // Named by what it asks.

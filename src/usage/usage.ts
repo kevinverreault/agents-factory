@@ -88,3 +88,86 @@ export function usageViews({ runs, tasks }: { runs: Record<string, MeteredRun>; 
   }
   return views;
 }
+
+// Usage windows (ADR 0008), as `rate_limit_event`s name them: the 5-hour
+// one, the weekly one, and the weekly ones per model or with overage.
+export type UsageWindowKind = 'five_hour' | 'seven_day' | 'seven_day_opus' | 'seven_day_sonnet' | 'seven_day_overage_included' | 'overage';
+export type UsageWindowStatus = 'allowed' | 'allowed_warning' | 'rejected';
+
+// The usage windows each run's requests count against.
+export type UsageSnapshots = Partial<Record<UsageWindowKind, UsageSnapshot>>;
+
+// Whether `window` is a weekly one that a run on `model` spends: a model's
+// own weekly window spends only that model's runs.
+function weeklyFor(window: UsageWindowKind, model: string): boolean {
+  if (window === 'seven_day_opus') return model.includes('opus');
+  if (window === 'seven_day_sonnet') return model.includes('sonnet');
+  return window.startsWith('seven_day');
+}
+
+// The factory's latest reading of a usage window, as a run saw it: the share
+// of it spent (0 to 1), when it resets, in ms, and when it was seen. Nothing
+// gates on it; a weekly one spent only says why an AFK run fails (ADR 0008).
+export type UsageSnapshot = {
+  window: UsageWindowKind;
+  status: UsageWindowStatus;
+  spent: number | null;
+  resetsAt: number | null;
+  seenAt: number;
+};
+
+// How long a snapshot is trusted once seen: a run sees a new one whenever
+// the window's reading changes, so one this old says nothing of the window
+// now, the operator's own chat spending it too. A spent window's stays
+// spent until its reset, however old.
+export const SNAPSHOT_TRUST_MS = 60 * 60_000;
+
+// A window as a reading shows it: what is spent and when it resets, or null
+// (unknown) once the snapshot is past its reset or too old to trust.
+export type WindowView = { spent: number; resetsAt: number } | null;
+
+export function windowView(snapshot: UsageSnapshot | undefined, at: number): WindowView {
+  if (!snapshot || snapshot.spent === null || snapshot.resetsAt === null) return null;
+  if (snapshot.resetsAt <= at || (snapshot.status !== 'rejected' && snapshot.seenAt + SNAPSHOT_TRUST_MS < at)) return null;
+  return { spent: snapshot.spent, resetsAt: snapshot.resetsAt };
+}
+
+// The window's reading `seen` brings: what it says, and what was spent as
+// the last reading had it when it says nothing of that for the same window.
+export function updatedSnapshot(last: UsageSnapshot | undefined, seen: UsageSnapshot): UsageSnapshot {
+  if (seen.spent !== null || !last || last.resetsAt !== seen.resetsAt) return seen;
+  return { ...seen, spent: last.spent };
+}
+
+const HOUR_MS = 3_600_000;
+// How many hours the tokens-per-hour sparkline covers.
+const SPARKLINE_HOURS = 12;
+
+// Every run's tokens in each of the last `hours` hours, oldest first and the
+// hour `at` is in last, from their per-minute samples (each from `minute`, in ms).
+export function tokensPerHour(samples: Iterable<{ minute: number; models: ModelUsage }>, at: number, hours = SPARKLINE_HOURS): number[] {
+  const counts = new Array<number>(hours).fill(0);
+  const last = Math.floor(at / HOUR_MS);
+  for (const { minute, models } of samples) {
+    const ago = last - Math.floor(minute / HOUR_MS);
+    if (ago >= 0 && ago < hours) counts[hours - 1 - ago]! += tokensOf(overall(models));
+  }
+  return counts;
+}
+
+// When a usage window resets, in the machine's own time zone: its weekday,
+// date and time.
+export function resetTime(ms: number): string {
+  return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ms);
+}
+
+// When the weekly usage window a run on `model` spends resets, if the
+// snapshots show it spent at `at`: the latest such reset.
+export function weeklySpentUntil(snapshots: UsageSnapshots, model: string, at: number): number | null {
+  let until: number | null = null;
+  for (const { window, status, resetsAt } of Object.values(snapshots)) {
+    if (!weeklyFor(window, model) || status !== 'rejected' || resetsAt === null || resetsAt <= at) continue;
+    if (until === null || resetsAt > until) until = resetsAt;
+  }
+  return until;
+}
