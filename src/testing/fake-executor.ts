@@ -33,11 +33,14 @@ export class FakeExecutor implements Executor {
   private archiveFailure: string | null = null;
   private readonly runs = new Map<string, { sink: RunSink; sessionId: string }>();
   private readonly transcripts = new Map<string, ConversationEvent[]>();
+  // The runs whose session had a transcript when they started.
+  private readonly resumable = new Set<string>();
   private events = 0;
   private held: Promise<void> = Promise.resolve();
 
   start(run: RunStart, sink: RunSink): void {
     this.started.push(run);
+    if (this.transcripts.has(run.sessionId)) this.resumable.add(run.runId);
     this.runs.set(run.runId, { sink, sessionId: run.sessionId });
     if (run.firstMessage !== null) this.converse(run.runId, { type: 'message', from: 'operator', text: run.firstMessage });
   }
@@ -79,8 +82,25 @@ export class FakeExecutor implements Executor {
     this.archived.push({ sessionId, dir, events: transcript.length });
   }
 
+  async restore({ sessionId }: Session, dir: string): Promise<void> {
+    if (this.transcripts.has(sessionId)) return;
+    const copy = this.archives.get(dir)?.get(sessionId);
+    if (copy) this.transcripts.set(sessionId, [...copy]);
+  }
+
   sessionsDir(cwd: string): string {
     return `${cwd}.sessions`;
+  }
+
+  // Claude Code's retention sweep deletes the session's transcript.
+  sweep(sessionId: string): void {
+    this.transcripts.delete(sessionId);
+  }
+
+  // The runs started to resume a session with no transcript, which the real
+  // CLI can't find.
+  get resumedWithoutTranscript(): string[] {
+    return this.started.filter((run) => run.resumesSession && !this.resumable.has(run.runId)).map((run) => run.runId);
   }
 
   // Archiving fails with `reason` from now on, or works again (null).

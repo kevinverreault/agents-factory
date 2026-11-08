@@ -3,7 +3,7 @@
 // The resume check runs the operator's own `claude` from PATH.
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -12,7 +12,7 @@ import { expect, test } from 'vitest';
 import type { RunEvent } from '../lifecycle/lifecycle.ts';
 import { FACTORY_ALLOW_LIST, type ToolCall } from '../permissions/permissions.ts';
 import { isAlive, waitFor } from '../os/test-support.ts';
-import { agentSdkExecutor } from './agent-sdk.ts';
+import { agentSdkExecutor, claudeProjectDir } from './agent-sdk.ts';
 import type { ConversationEvent, RunStart } from './executor.ts';
 import { afkRun, afkRunOptions, typesOf } from './sdk-test-support.ts';
 
@@ -100,6 +100,16 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
   executor.stop('R1');
   await waitFor(() => !isAlive(pid), 15_000);
   expect(typesOf(reported)).toEqual(['runStarted', 'turnEnded', 'turnEnded']);
+
+  // Taken by the retention sweep, the session is put back from the archive
+  // and replays from its file again; restoring one in place changes nothing.
+  const transcript = join(claudeProjectDir(cwd), `${run.sessionId}.jsonl`);
+  rmSync(transcript);
+  await executor.restore({ sessionId: run.sessionId, cwd }, archive);
+  expect(await executor.history({ sessionId: run.sessionId, cwd })).toEqual(live);
+  const restored = readFileSync(transcript, 'utf8');
+  await executor.restore({ sessionId: run.sessionId, cwd }, archive);
+  expect(readFileSync(transcript, 'utf8')).toBe(restored);
 });
 
 test('the agent proposes advancing through the factory MCP server’s propose_advance, with no permission prompt', async () => {

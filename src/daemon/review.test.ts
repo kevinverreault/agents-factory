@@ -133,7 +133,11 @@ describe('at Done', () => {
     const done = await tui.until((state) => state.tasks.T1?.transcripts !== null);
     const archive = join(factory.paths.transcriptsRoot, 'T1');
     expect(done.tasks.T1).toMatchObject({ label: 'Done', transcripts: archive, cleanup: null });
-    expect(factory.executor.archived).toEqual([{ sessionId, dir: archive, events: 2 }]);
+    // Archived once when its run ended, then again with all it holds at Done.
+    expect(factory.executor.archived).toEqual([
+      { sessionId, dir: archive, events: 1 },
+      { sessionId, dir: archive, events: 2 },
+    ]);
     expect(await factory.git.worktrees(clone)).toEqual([]);
     await expect(factory.git.isMerged(clone, branch, 'origin/main')).rejects.toThrow();
     await factory.git.fetch(clone, branch);

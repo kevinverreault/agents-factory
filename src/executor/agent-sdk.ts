@@ -5,7 +5,7 @@
 // and nowhere else.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -71,6 +71,14 @@ const WINDOW_WAIT_MS = 60_000;
 // The `hook` CLI, which relays each PostToolUse hook event to the daemon for
 // artifact capture. Spawned directly by Claude Code, with no shell between.
 const RELAY_HOOK = { command: process.execPath, args: [fileURLToPath(new URL('../cli.ts', import.meta.url)), 'hook'] };
+
+// Every factory run keeps session transcripts for about ten years (ADR 0011),
+// so its own retention sweep never deletes a task's sessions before the task
+// ends and archives them. The flag tier wins over the operator's user
+// settings, which a HITL run loads. An AFK run loads no user settings, so
+// claude.exe 2.1.312 skips its sweep anyway, but that is the CLI's choice to
+// change. The operator's own `claude` sessions still sweep with their own period.
+const RETENTION = { cleanupPeriodDays: 3650 };
 
 // `adopt` puts each CLI, right after spawn, into its run's job (ADR 0003),
 // so that what it starts goes down with the run.
@@ -187,6 +195,21 @@ export function agentSdkExecutor({ adopt }: { adopt?: Processes['adopt'] } = {})
         rmSync(join(dir, `${sessionId}.jsonl`), { force: true });
         rmSync(join(dir, sessionId), { recursive: true, force: true });
         await importSessionToStore(sessionId, archiveStore(dir), { dir: cwd });
+      } catch (error) {
+        throw new ArchiveError((error as Error).message);
+      }
+    },
+
+    // The archive keeps the CLI's own layout (`archiveStore`), so putting a
+    // session back is copying its files into the CLI's session directory.
+    async restore({ sessionId, cwd }, dir) {
+      try {
+        const sessions = claudeProjectDir(cwd);
+        const transcript = `${sessionId}.jsonl`;
+        if (existsSync(join(sessions, transcript)) || !existsSync(join(dir, transcript))) return;
+        mkdirSync(sessions, { recursive: true });
+        if (existsSync(join(dir, sessionId))) cpSync(join(dir, sessionId), join(sessions, sessionId), { recursive: true, force: false });
+        copyFileSync(join(dir, transcript), join(sessions, transcript));
       } catch (error) {
         throw new ArchiveError((error as Error).message);
       }
@@ -310,7 +333,7 @@ function hitlOptions(credential: CredentialProfile, canUseTool: CanUseTool, fact
     mcpServers: { factory: factory.server },
     allowedTools: factory.allowed,
     settingSources: ['user', 'project', 'local'],
-    settings: { hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
+    settings: { ...RETENTION, hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] } },
     canUseTool,
   };
 }
@@ -356,6 +379,7 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
     // keeps no allow rules, so every call that would prompt reaches the gate.
     managedSettings: { allowManagedPermissionRulesOnly: true, permissions: { allow: [...allowRules], deny: [...HARD_DENY_RULES] } },
     settings: {
+      ...RETENTION,
       hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] },
       attribution: { commit: '', pr: '' },
     },
@@ -392,7 +416,7 @@ function l2Options({ maxTurns, guards, token, container }: RunStart, canUseTool:
     mcpServers: { factory: factory.server },
     strictMcpConfig: true,
     managedSettings: { allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
-    settings: { attribution: { commit: '', pr: '' } },
+    settings: { ...RETENTION, attribution: { commit: '', pr: '' } },
     hooks: { PreToolUse: [{ hooks: [hardDenies(container!.workdir, guards!.start, (args) => container!.git(args).then(({ code }) => code))] }] },
     ...(maxTurns !== null && { maxTurns }),
     canUseTool,
