@@ -7,7 +7,9 @@
 // the skill set pin; `models update` moves each model tier to the model this
 // factory ships; `setup github` creates the factory's GitHub App, and
 // `setup token` stores the subscription token L2 runs use; `keep-awake`
-// turns off or on keeping the machine awake while AFK runs are active. `hook`
+// turns off or on keeping the machine awake while AFK runs are active; `gc`
+// lists the leftovers that belong to no live task and deletes only those
+// the operator ticks (ADR 0011). `hook`
 // is run by Claude Code, not the operator: it relays a run's hook events
 // to the daemon.
 import { userInfo } from 'node:os';
@@ -23,9 +25,10 @@ import { modelsCommand } from './models/models-command.ts';
 import { openUrl } from './os/open-url.ts';
 import { connect, HandshakeRefused, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
 import type { RepositoryView } from './protocol/factory-state.ts';
-import type { Command, DaemonStatus } from './protocol/protocol.ts';
+import type { Command, DaemonStatus, LeftoversView } from './protocol/protocol.ts';
 import { skillsCommand } from './skills/skills-command.ts';
 import { App } from './tui/app.ts';
+import { describeLeftover, GcSheet } from './tui/gc-sheet.ts';
 import { RestartPrompt } from './tui/restart-prompt.ts';
 
 const USAGE = [
@@ -39,6 +42,7 @@ const USAGE = [
   '       agents-factory setup github [--name <app-name>]',
   '       agents-factory setup token',
   '       agents-factory keep-awake on | keep-awake off',
+  '       agents-factory gc',
 ].join('\n');
 
 // The manifest flow's code is valid for an hour.
@@ -121,6 +125,7 @@ async function main(args: string[]): Promise<number> {
       connection.close();
     }
   }
+  if (args[0] === 'gc' && args.length === 1) return gc(paths);
   if (args[0] === 'setup' && args[1] === 'token' && args.length === 2) {
     const token = await readToken();
     const connection = await connectOrStart(paths);
@@ -151,6 +156,31 @@ async function main(args: string[]): Promise<number> {
   }
   console.error(USAGE);
   return 2;
+}
+
+// `gc`: the gc sheet the TUI's `:gc` opens, on its own. Ticking needs a
+// terminal: without one, the leftovers are only listed.
+async function gc(paths: FactoryPaths): Promise<number> {
+  const connection = await connectOrStart(paths);
+  try {
+    if (!process.stdin.isTTY) {
+      const reply = await connection.send({ type: 'listLeftovers' });
+      if (!reply.ok) {
+        console.error(reply.reason);
+        return 1;
+      }
+      const { leftovers, unlisted } = reply.value as LeftoversView;
+      for (const why of unlisted) console.log(why);
+      for (const { leftover, why } of leftovers) console.log(`${describeLeftover(leftover)} · ${why}`);
+      console.log(leftovers.length ? 'Run agents-factory gc in a terminal to tick what to delete.' : 'Nothing is left over: everything belongs to a live task.');
+      return 0;
+    }
+    const sheet = render(h(GcSheet, { connection, onLeave: () => sheet.unmount() }));
+    await sheet.waitUntilExit();
+    return 0;
+  } finally {
+    connection.close();
+  }
 }
 
 // The token `setup token` stores: read from stdin, where the operator pastes

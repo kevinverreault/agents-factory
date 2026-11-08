@@ -7,6 +7,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
 import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart, type Verdict } from '../executor/executor.ts';
+import { DELETION_ORDER, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   GitHubError,
@@ -92,7 +93,10 @@ import {
   type GitHubCommand,
   type HandoffCommand,
   type HookEvent,
+  type GcResult,
   type LaunchCommand,
+  type Leftover,
+  type LeftoversView,
   type PresetCommand,
   type PresetsView,
   type RepoCommand,
@@ -425,6 +429,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return listPresets(command);
       case 'hookEvent':
         return captureArtifacts(command.event);
+      case 'listLeftovers':
+        return serially(async (): Promise<Reply> => ({ ok: true, value: await leftovers() }));
+      case 'gc':
+        return deleteTicked(command.leftovers);
       case 'inspectClone': {
         const clone = await readClone(git, command.path);
         if ('refusal' in clone) return { ok: false, reason: clone.refusal };
@@ -433,6 +441,69 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
       default:
         return dispatch(command);
+    }
+  }
+
+  // What belongs to no live task, as the matcher finds it now (ADR 0011).
+  // Called only from inside `serially`, so no launch or spawn cuts a
+  // worktree meanwhile.
+  async function leftovers(): Promise<LeftoversView> {
+    return matchLeftovers(lifecycle, await lookAround({ git, sandbox }, lifecycle, options.worktreeRoot));
+  }
+
+  // `factory gc` (ADR 0011): deletes the ticked leftovers that still are
+  // leftovers, matched afresh, and says what happened to each, in the order
+  // ticked. Containers go first, so the images they used can follow, and
+  // worktrees before the branches they have checked out. Nothing is
+  // journaled: a leftover a crash left is listed again.
+  function deleteTicked(ticked: Leftover[]): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
+      const current = (await leftovers()).leftovers.map(({ leftover }) => leftover);
+      const outcomes = new Map<Leftover, string | null>();
+      for (const leftover of [...ticked].sort((a, b) => DELETION_ORDER.indexOf(a.kind) - DELETION_ORDER.indexOf(b.kind))) {
+        const isLeftover = current.some((found) => sameLeftover(found, leftover));
+        outcomes.set(leftover, isLeftover ? await deleteLeftover(leftover) : 'It isn’t a leftover now: a live task has it, or it is gone.');
+      }
+      const value: GcResult = { deleted: [], failed: [] };
+      for (const leftover of ticked) {
+        const reason = outcomes.get(leftover)!;
+        if (reason === null) value.deleted.push(leftover);
+        else value.failed.push({ leftover, reason });
+      }
+      return { ok: true, value };
+    });
+  }
+
+  // Deletes the leftover: null once done, or why it couldn't be.
+  async function deleteLeftover(leftover: Leftover): Promise<string | null> {
+    try {
+      switch (leftover.kind) {
+        case 'container':
+          await onContainer(leftover.taskId, async () => {
+            await sandbox.remove(leftover.taskId);
+            containers.delete(leftover.taskId);
+            rmSync(containerRunDir(leftover.taskId), { recursive: true, force: true, maxRetries: 3 });
+          });
+          return null;
+        case 'image':
+          await sandbox.removeImage(leftover.image);
+          return null;
+        case 'remote-branch': {
+          const { repo, branch } = leftover;
+          return await asApp(`delete ${branch}`, async () => github.deleteBranch((await appToken(repo, PUSH)).token, repo, branch));
+        }
+        default: {
+          const repository = lifecycle.repositories[leftover.repo];
+          if (!repository) return `${leftover.repo} isn’t registered any more.`;
+          if (leftover.kind === 'worktree') await git.removeWorktree(repository.path, leftover.path);
+          else await git.deleteBranch(repository.path, leftover.branch);
+          return null;
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof GitError || error instanceof SandboxError)) throw error;
+      return error.message;
     }
   }
 

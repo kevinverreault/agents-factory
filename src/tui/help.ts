@@ -20,7 +20,7 @@ const KEYS: [string, string][] = [
   ['tab', 'in the condensed view, move the focus: sidebar, tree, detail'],
   ['f', 'in the condensed view, zoom the detail to the whole width, or back'],
   ['g', 'pick a group to filter the task tree by, or All tasks'],
-  [':', 'the command line: :task <id> opens a task’s detail, :group <name> filters by a group, :group alone clears it'],
+  [':', 'the command line: :task <id> opens a task’s detail, :group <name> filters by a group, :group alone clears it, :gc lists the leftovers of no live task to delete'],
   ['ctrl+h', 'hand a HITL task off'],
   ['ctrl+e', 'expand a quick launch into its full conversation'],
   ['ctrl+b', 'leave a conversation, back to where you were'],

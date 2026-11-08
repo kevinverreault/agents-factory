@@ -9,7 +9,7 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 23;
+export const PROTOCOL_VERSION = 24;
 
 // The daemon's own verbs, which a client of another protocol version may
 // still send (ADR 0002): their shapes never change. `daemon.stop` stops it
@@ -95,6 +95,27 @@ export type HookEvent = {
   tool_response?: unknown;
 };
 export type HookCommand = { type: 'hookEvent'; event: HookEvent };
+// `factory gc` (ADR 0011). `listLeftovers` replies with the `LeftoversView`
+// of what belongs to no live task; `gc` deletes those of `leftovers` that
+// still do, and replies with a `GcResult`.
+export type GcCommand = { type: 'listLeftovers' } | { type: 'gc'; leftovers: Leftover[] };
+// What a task tree leaves behind: a worktree under the worktree root, a
+// local or remote (origin's, on GitHub) `factory/*` branch, a container the
+// factory made for a task, or a sandbox image of an older factory version.
+export type Leftover =
+  | { kind: 'worktree'; repo: string; path: string; branch: string }
+  | { kind: 'branch'; repo: string; branch: string }
+  | { kind: 'remote-branch'; repo: string; branch: string }
+  | { kind: 'container'; taskId: string }
+  | { kind: 'image'; image: string };
+export type LeftoversView = {
+  // Each leftover, with why it belongs to no live task.
+  leftovers: { leftover: Leftover; why: string }[];
+  // What couldn't be looked at, and why: a clone that is missing, an origin
+  // or Docker that can't be reached.
+  unlisted: string[];
+};
+export type GcResult = { deleted: Leftover[]; failed: { leftover: Leftover; reason: string }[] };
 export type Command =
   | OperatorCommand
   | DaemonCommand
@@ -106,7 +127,8 @@ export type Command =
   | AdvanceCommand
   | HandoffCommand
   | PresetCommand
-  | HookCommand;
+  | HookCommand
+  | GcCommand;
 
 export type DaemonStatus = {
   pid: number;

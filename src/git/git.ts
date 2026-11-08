@@ -36,6 +36,12 @@ export interface Git {
   // Deletes `branch`, merged or not, if the clone still has it. Throws a
   // `GitError` when a worktree has it checked out.
   deleteBranch(clonePath: string, branch: string): Promise<void>;
+  // The clone's local branches whose names start with `prefix` (such as
+  // `factory/`), in name order.
+  branches(clonePath: string, prefix: string): Promise<string[]>;
+  // Origin's branches whose names start with `prefix`, as origin has them
+  // now, in name order. Throws a `GitError` when origin can't be reached.
+  originBranches(clonePath: string, prefix: string): Promise<string[]>;
   // Whether `branch`'s tip is in the history of `into` (such as
   // `origin/main`). Throws a `GitError` when either names no commit.
   isMerged(clonePath: string, branch: string, into: string): Promise<boolean>;
@@ -337,6 +343,17 @@ export const gitCli: Git = {
 
   async repairWorktree(clonePath, path) {
     await run(clonePath, 'worktree', 'repair', path);
+  },
+
+  async branches(clonePath, prefix) {
+    const names = lines(await run(clonePath, 'for-each-ref', '--format=%(refname)', 'refs/heads/'));
+    return names.map((ref) => ref.slice('refs/heads/'.length)).filter((name) => name.startsWith(prefix)).sort();
+  },
+
+  async originBranches(clonePath, prefix) {
+    const listing = lines(await run(clonePath, 'ls-remote', '--heads', 'origin'));
+    const names = listing.map((line) => line.slice(line.indexOf('refs/heads/') + 'refs/heads/'.length));
+    return names.filter((name) => name.startsWith(prefix)).sort();
   },
 
   readDirectory(clonePath, ref, dir) {

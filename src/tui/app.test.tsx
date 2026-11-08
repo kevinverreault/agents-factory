@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
-import type { PresetsView } from '../protocol/protocol.ts';
+import type { LeftoversView, PresetsView } from '../protocol/protocol.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
 import { App } from './app.ts';
 
@@ -3146,7 +3146,7 @@ describe('the condensed view', () => {
     };
 
     await run('frobnicate');
-    await eventually(() => expect(app.lastFrame()).toContain('Unknown command :frobnicate. Try :task <id> or :group <name>.'));
+    await eventually(() => expect(app.lastFrame()).toContain('Unknown command :frobnicate. Try :task <id>, :group <name> or :gc.'));
     await run('task 9');
     await eventually(() => expect(app.lastFrame()).toContain('No task T9.'));
     await run('group payroll');
@@ -3192,5 +3192,72 @@ describe('the condensed view', () => {
     const { app } = await started(factoryState([], [failure('T2', 'A2')]));
     await press(app, 'v', '\t');
     await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T2\s+failure/));
+  });
+});
+
+describe('factory gc from the TUI', () => {
+  const leftovers: LeftoversView = {
+    leftovers: [
+      { leftover: { kind: 'worktree', repo: 'acme/widgets', path: '/worktrees/acme-widgets/T7', branch: 'factory/T7-lost-work' }, why: 'No task of the factory’s has it.' },
+      { leftover: { kind: 'branch', repo: 'acme/widgets', branch: 'factory/T7-lost-work' }, why: 'No task of the factory’s has it.' },
+      { leftover: { kind: 'container', taskId: 'T2' }, why: 'T2 is Cancelled.' },
+    ],
+    unlisted: ['Docker couldn’t be reached, so containers and images weren’t looked at: nope.'],
+  };
+
+  test(':gc lists the leftovers, nothing ticked, and enter deletes only the ticked ones', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('listLeftovers', { ok: true, value: leftovers });
+    const [worktree, , container] = leftovers.leftovers.map(({ leftover }) => leftover);
+    connection.replyTo('gc', { ok: true, value: { deleted: [worktree], failed: [{ leftover: container, reason: 'Docker said no.' }] } });
+    const { app } = await started(factoryState([task('T1', 'Write the spec', 'running', 'Running')]), { connection });
+
+    await press(app, ':', 'g', 'c', '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/›\s+\[ \]\s+worktree\s+\/worktrees\/acme-widgets\/T7 · No task of the factory’s has it\./);
+      expect(frame).toMatch(/\[ \]\s+branch\s+factory\/T7-lost-work in acme\/widgets/);
+      expect(frame).toMatch(/\[ \]\s+container\s+T2 · T2 is Cancelled\./);
+      expect(frame).toContain('Docker couldn’t be reached');
+    });
+    expect(connection.sent).toEqual([{ type: 'listLeftovers' }]);
+
+    // Keys on the sheet do nothing else: x cancels nothing.
+    await press(app, ' ', '\x1b[B', '\x1b[B', 'x', ' ', '\r');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'gc', leftovers: [worktree, container] }));
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Deleted 1.');
+      expect(frame).toContain('T2’s container: Docker said no.');
+    });
+
+    await press(app, '\x1b');
+    await eventually(() => expect(app.lastFrame()).not.toContain('Deleted 1.'));
+    expect(connection.sent.filter((command) => command.type === 'cancel')).toEqual([]);
+  });
+
+  test('a ticks every leftover or none, and esc backs out deleting nothing', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('listLeftovers', { ok: true, value: leftovers });
+    const { app } = await started(factoryState([]), { connection });
+
+    await press(app, ':', 'g', 'c', '\r', 'a');
+    await eventually(() => expect(app.lastFrame()!.match(/\[x\]/g)).toHaveLength(3));
+    await press(app, 'a');
+    await eventually(() => expect(app.lastFrame()).not.toContain('[x]'));
+    await press(app, '\x1b');
+
+    await eventually(() => expect(app.lastFrame()).not.toContain('[ ]'));
+    expect(connection.sent).toEqual([{ type: 'listLeftovers' }]);
+  });
+
+  test('with no leftovers it says so', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('listLeftovers', { ok: true, value: { leftovers: [], unlisted: [] } });
+    const { app } = await started(factoryState([]), { connection });
+
+    await press(app, ':', 'g', 'c', '\r');
+
+    await eventually(() => expect(app.lastFrame()).toContain('Nothing is left over: everything belongs to a live task.'));
   });
 });

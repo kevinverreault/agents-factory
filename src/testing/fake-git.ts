@@ -253,6 +253,16 @@ export class FakeGit implements Git {
     return unpushed;
   }
 
+  async branches(clonePath: string, prefix: string): Promise<string[]> {
+    return [...this.cloneAt(clonePath).branches.keys()].filter((name) => name.startsWith(prefix)).sort();
+  }
+
+  async originBranches(clonePath: string, prefix: string): Promise<string[]> {
+    const clone = this.cloneAt(clonePath);
+    if (clone.unreachable) throw new GitError(clone.unreachable);
+    return [...clone.origin.keys()].filter((name) => name.startsWith(prefix)).sort();
+  }
+
   async repairWorktree(clonePath: string, path: string): Promise<void> {
     const worktree = this.cloneAt(clonePath).worktrees.find((worktree) => worktree.path === path);
     if (!worktree) throw new GitError(`error: not a valid path: ${path}`);

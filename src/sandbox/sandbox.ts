@@ -89,6 +89,11 @@ export type Container = {
 
 // A container the factory made, by its task, and whether it runs.
 export type ContainerListing = { taskId: string; running: boolean };
+// A sandbox image the factory built (ADR 0011): whether it is the one this
+// factory version builds, and the tasks whose containers use it. One that
+// another factory home's containers use isn't listed: it isn't this one's
+// to judge.
+export type ImageListing = { image: string; current: boolean; usedBy: string[] };
 
 export interface Sandbox {
   // The task's container, running, with the host task branch's commits
@@ -116,6 +121,12 @@ export interface Sandbox {
   remove(taskId: string): Promise<void>;
   // Every container the factory made.
   list(): Promise<ContainerListing[]>;
+  // Every sandbox image the factory built, but those another factory
+  // home's containers use, in name order.
+  images(): Promise<ImageListing[]>;
+  // Removes the image, if it is there. Throws a `SandboxError` when a
+  // container still uses it.
+  removeImage(image: string): Promise<void>;
 }
 
 export class SandboxError extends Error {}
