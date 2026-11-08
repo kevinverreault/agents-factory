@@ -499,6 +499,10 @@ export type Lifecycle = {
   artifacts: Record<string, Artifact>;
   samples: Record<string, UsageSample>;
   slotCap: number;
+  // Whether the machine is kept from idle sleep while an AFK run is active
+  // (ADR 0003). On unless the operator turned it off; factories stored
+  // before it have none, and keep it on.
+  keepAwake?: boolean;
 };
 
 // The operator's verbs.
@@ -558,6 +562,7 @@ export type OperatorCommand =
   // Sets an AFK task's autonomy level between runs, clamped by its stage's ceiling.
   | { type: 'setAutonomy'; taskId: string; autonomy: AutonomyLevel }
   | { type: 'setSlotCap'; cap: number }
+  | { type: 'setKeepAwake'; on: boolean }
   | { type: 'removeRepo'; repo: string }
   // Dismisses the Factory recovered report: it asks nothing but to be read.
   | { type: 'dismiss'; requestId: string };
@@ -572,7 +577,9 @@ export type RunEvent =
   // An L2 run's end carries the hosts its container's egress proxy denied it.
   | { type: 'runCompleted'; runId: string; sessionId?: string; commits?: string[]; result?: string; deniedHosts?: string[] }
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
-  | { type: 'runFailed'; runId: string; reason: string; deniedHosts?: string[] }
+  // `afterWake` when the daemon saw it fail shortly after the machine woke
+  // (ADR 0003), so its failure request can say so.
+  | { type: 'runFailed'; runId: string; reason: string; deniedHosts?: string[]; afterWake?: boolean }
   // The agent finished answering: the conversation is the operator's again.
   // `context` is how full the session is now, when the executor knows.
   | { type: 'turnEnded'; runId: string; context?: ContextUse }
@@ -1706,6 +1713,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';
+    case 'setKeepAwake':
+      return typeof action.on === 'boolean' ? null : 'Keep-awake is either on or off.';
     case 'dismiss': {
       const request = state.requests[action.requestId];
       if (!request) return `There is no attention request ${action.requestId}.`;
@@ -2571,6 +2580,18 @@ function withDenials(reason: string, hosts: string[] | undefined): string {
   return `${reason} Its container’s egress proxy denied ${named}.`;
 }
 
+// Whether the machine is kept from idle sleep while an AFK run is active:
+// on unless the operator turned it off (ADR 0003).
+export function keepsAwake(state: Lifecycle): boolean {
+  return state.keepAwake ?? true;
+}
+
+// A failure the daemon saw shortly after a wake says so, so the operator can
+// tell sleep problems from real ones (ADR 0003).
+function withWakeHint(reason: string, woke: boolean | undefined): string {
+  return woke ? `${reason} It failed shortly after the machine woke from sleep.` : reason;
+}
+
 // A request about the task that leaves its state as it is, such as one a
 // cancelled task's cascade raises.
 function addRequest(
@@ -3018,6 +3039,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'setSlotCap':
       state.slotCap = action.cap;
       break;
+    case 'setKeepAwake':
+      state.keepAwake = action.on;
+      break;
     case 'runStarted':
       run!.cli = { pid: action.pid, createdAt: action.createdAt };
       run!.model = action.model;
@@ -3198,7 +3222,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (request?.holdsRun) request.status = 'superseded';
       endRun(run!, 'failed', at);
       logDenials(run!, action.deniedHosts);
-      raise(state, task, run!, 'failure', false, withDenials(action.reason, action.deniedHosts), at, { deniedHosts: action.deniedHosts });
+      raise(state, task, run!, 'failure', false, withWakeHint(withDenials(action.reason, action.deniedHosts), action.afterWake), at, {
+        deniedHosts: action.deniedHosts,
+      });
       break;
     case 'attentionRaised': {
       suspend(run!, at);
