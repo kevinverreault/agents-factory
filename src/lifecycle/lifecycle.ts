@@ -308,6 +308,8 @@ export type Task = {
   egressHosts?: string[];
   // Its open handoff sheet, if any. Tasks stored before handoffs have none.
   handoff?: HandoffSheet | null;
+  // The sheet a stop found open, unconfirmed: the next one opens from it.
+  handoffDraft?: HandoffDraft | null;
   // Its quick launch, while its grill is one. Tasks stored before quick launches have none.
   quick?: QuickLaunch | null;
   // How much of the context window its session fills, once a turn said.
@@ -448,9 +450,37 @@ export type AttentionRequest = {
 
 // What recovery did with the runs an unclean start found live (ADR 0003):
 // those it requeued as interrupted, those it parked, and those the
-// crash-loop guard failed.
-export type Recovery = { requeued: RunRef[]; parked: RunRef[]; failed: RunRef[] };
+// crash-loop guard failed; and the intents it replayed first. Reports
+// stored before intents were journaled have none.
+export type Recovery = { requeued: RunRef[]; parked: RunRef[]; failed: RunRef[]; replayed?: ReplayedIntent[] };
 export type RunRef = { taskId: string; runId: string };
+
+// A multi-step operator verb with side effects outside the store, journaled
+// before its first such step (ADR 0003). Its steps can each be taken again,
+// so the next daemon finishes it, or rolls it back, before it reconciles
+// runs. Each is keyed by what it does: the same verb is never journaled twice.
+export type Intent =
+  // A confirmed handoff: the daemon commits the files of `committed`, then
+  // the task is handed off as the operator confirmed it.
+  | { id: string; verb: 'handoff'; taskId: string; handoff: Omit<HandedOff, 'type' | 'intent'> }
+  // A run's `spawn_child` call, keyed by the run and its tool call: the
+  // daemon cuts the child's worktree from `startPoint`, then the child is
+  // spawned. A research child's `base` is read from its worktree once cut.
+  | { id: string; verb: 'spawn'; taskId: string; spawn: Omit<ChildSpawned, 'intent'>; startPoint: string }
+  // A takeover that ended an L2 run: the daemon restarts the task's
+  // container, which ends the turn the run left there, and brings its
+  // commits out to the host task branch, where the operator converses.
+  | { id: string; verb: 'takeover'; taskId: string };
+// The verbs a recovery report says it replayed: the journaled ones, and a
+// cancelled task's reopening of its tickets and a cleanup, which the task
+// itself holds while they are under way (ADR 0011).
+export type IntentVerb = Intent['verb'] | 'cancel' | 'cleanup';
+// What recovery did with an intent: finished it, rolled it back, or
+// resumed it, to finish once its steps on GitHub or Docker are through.
+export type ReplayedIntent = { taskId: string; verb: IntentVerb; outcome: 'finished' | 'rolled back' | 'resumed' };
+// A task's handoff sheet as the factory last held it, saved when a stop
+// found it unconfirmed: reopening the sheet starts from it.
+export type HandoffDraft = Pick<HandoffSheet, 'brief' | 'continueAs' | 'autonomy' | 'tier' | 'maxTurns'>;
 
 // A GitHub repository the operator registered through their own clone
 // (ADR 0010). Its settings live only here, never in the repo.
@@ -498,6 +528,8 @@ export type Lifecycle = {
   requests: Record<string, AttentionRequest>;
   artifacts: Record<string, Artifact>;
   samples: Record<string, UsageSample>;
+  // The verbs under way outside the store (ADR 0003), by id.
+  intents: Record<string, Intent>;
   slotCap: number;
 };
 
@@ -634,6 +666,8 @@ export type ChildSpawned = {
   worktree: TaskWorktree;
   base: string;
   sessionId: string;
+  // The spawn's intent, which it finishes.
+  intent?: string;
 };
 
 // What artifact capture found after a tool call of the task's latest run,
@@ -705,7 +739,12 @@ export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: A
 // The operator confirmed the handoff sheet, and the daemon committed the
 // task's uncommitted files of `committed`. The daemon names a session, for
 // continuing fresh.
-export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string } & HandoffChoices;
+// `intent` is the intent it finishes, when the daemon journaled one.
+export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string; intent?: string } & HandoffChoices;
+
+// The daemon journaled an intent before its first step outside the store,
+// or dropped it: finished outside the store, or rolled back (ADR 0003).
+export type IntentEvent = { type: 'intentJournaled'; taskId: string; intent: Intent } | { type: 'intentDropped'; taskId: string; intentId: string };
 
 // The daemon deleted a child's kept branch (ADR 0011): its parent's branch
 // had merged it, or its root ended.
@@ -726,8 +765,9 @@ export type ClockEvent = { type: 'deadlinesDue' };
 // The daemon ends every live run, since no new daemon can reattach to one
 // (ADR 0002, ADR 0003): on a graceful stop, or at a start that found no
 // clean-shutdown marker (`unclean`). Active AFK runs end `interrupted` and
-// their tasks queue again; suspended and HITL runs park.
-export type Reconciled = { type: 'runsReconciled'; interruption: Interruption };
+// their tasks queue again; suspended and HITL runs park. `replayed` is what
+// the daemon replayed of the intents it found unfinished, just before.
+export type Reconciled = { type: 'runsReconciled'; interruption: Interruption; replayed?: ReplayedIntent[] };
 
 // What the daemon did on GitHub between a Ralph loop's iterations (ADR 0006),
 // and between a work loop's tickets (ADR 0012).
@@ -790,6 +830,7 @@ export type LifecycleAction =
   | HandoffOpened
   | ReadinessRead
   | HandedOff
+  | IntentEvent
   | ClockEvent
   | Reconciled
   | LoopEvent
@@ -843,6 +884,7 @@ export function initialLifecycle(): Lifecycle {
     requests: {},
     artifacts: {},
     samples: {},
+    intents: {},
     slotCap: DEFAULT_SLOT_CAP,
   };
 }
@@ -1783,6 +1825,10 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'deadlinesDue':
     case 'runsReconciled':
       return null;
+    case 'intentJournaled':
+      return state.intents[action.intent.id] ? `${task.id}’s ${action.intent.verb} is already under way.` : null;
+    case 'intentDropped':
+      return state.intents[action.intentId] ? null : `There is no intent ${action.intentId}.`;
     case 'mapRead':
       return readingMap(state, task) ? null : `${task.id} isn’t reading a map.`;
     case 'ticketsRead':
@@ -2417,8 +2463,16 @@ function park(state: Lifecycle, task: Task, run: Run, at: number): void {
 // start before this one too isn't requeued again: its run fails.
 // After an unclean start, what it did goes in the one Factory recovered
 // report: the open one, if the operator hasn't dismissed it yet.
-function reconcile(state: Lifecycle, interruption: Interruption, at: number): void {
-  const recovery: Recovery = { requeued: [], parked: [], failed: [] };
+function reconcile(state: Lifecycle, interruption: Interruption, replayed: ReplayedIntent[], at: number): void {
+  const recovery: Recovery = { requeued: [], parked: [], failed: [], replayed };
+  // A handoff sheet still open was never confirmed: a confirmed one's
+  // intent has just been replayed. It is saved as a draft the next opens from.
+  for (const task of Object.values(state.tasks)) {
+    if (!task.handoff) continue;
+    const { brief, continueAs, autonomy, tier, maxTurns } = task.handoff;
+    task.handoffDraft = structuredClone({ brief, continueAs, autonomy, tier, maxTurns });
+    task.handoff = null;
+  }
   // An unclean start that finds a task with no active run ends its crash loop.
   if (interruption === 'unclean') {
     for (const task of Object.values(state.tasks)) {
@@ -2459,6 +2513,7 @@ function reportRecovery(state: Lifecycle, recovery: Recovery, at: number): void 
     requeued: [...before.requeued, ...recovery.requeued],
     parked: [...before.parked, ...recovery.parked],
     failed: [...before.failed, ...recovery.failed],
+    replayed: [...(before.replayed ?? []), ...(recovery.replayed ?? [])],
   };
   const request: AttentionRequest = open ?? {
     id: nextId(state, 'request'),
@@ -2476,10 +2531,12 @@ function reportRecovery(state: Lifecycle, recovery: Recovery, at: number): void 
   state.requests[request.id] = request;
 }
 
-function recoveryReason({ requeued, parked, failed }: Recovery): string {
+function recoveryReason({ requeued, parked, failed, replayed = [] }: Recovery): string {
   const runs = (refs: RunRef[]) => refs.map(({ taskId, runId }) => `${taskId} (${runId})`).join(', ');
+  const intents = replayed.map(({ taskId, verb, outcome }) => `${taskId}’s ${verb}${outcome === 'rolled back' ? ' (rolled back)' : ''}`).join(', ');
   return [
     'The factory restarted after it stopped uncleanly.',
+    ...(replayed.length ? [`Replayed ${intents}.`] : []),
     ...(requeued.length ? [`Requeued ${runs(requeued)}.`] : []),
     ...(parked.length ? [`Parked ${runs(parked)}.`] : []),
     ...(failed.length ? [`Failed ${runs(failed)}: active at two unclean starts in a row.`] : []),
@@ -2781,6 +2838,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const sheet = task.handoff!;
       if (run) endRun(run, 'handed off', at);
       task.handoff = null;
+      task.handoffDraft = null;
       task.mode = 'AFK';
       task.autonomy = action.autonomy;
       // What the operator changed on the sheet holds for every later stage too.
@@ -2825,6 +2883,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'takeOver':
       if (request) request.status = 'superseded';
+      // An L2 run's turn may still run in the task's container: ending it,
+      // and bringing its commits out, is the daemon's step outside the store.
+      if (run?.mode === 'AFK' && run.autonomy === 'L2') {
+        const id = `takeover:${task.id}`;
+        state.intents[id] = { id, verb: 'takeover', taskId: task.id };
+      }
       if (run) endRun(run, 'taken over', at);
       // The factory stops publishing at an open-pr stage: HITL work is the operator's.
       if (atActionStage(task)) task.publishing = null;
@@ -3039,7 +3103,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       run!.proposal = { kind: 'handoff', reason: action.reason };
       break;
     case 'handoffOpened': {
-      const sheet = (task.handoff ??= newHandoffSheet(task, action.readiness));
+      // A sheet a stop found unconfirmed opens again as it was.
+      if (!task.handoff) {
+        task.handoff = { ...newHandoffSheet(task, action.readiness), ...task.handoffDraft };
+        task.handoffDraft = null;
+      }
+      const sheet = task.handoff;
       sheet.readiness = action.readiness;
       // A quick launch ends on its handoff sheet: backing out of it keeps the conversation going.
       task.quick = null;
@@ -3292,8 +3361,22 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       for (const overdue of overdueRuns(state, at)) park(state, state.tasks[overdue.taskId]!, overdue, at);
       break;
     case 'runsReconciled':
-      reconcile(state, action.interruption, at);
+      reconcile(state, action.interruption, action.replayed ?? [], at);
       break;
+    case 'intentJournaled':
+      state.intents[action.intent.id] = structuredClone(action.intent);
+      break;
+    case 'intentDropped': {
+      const intent = state.intents[action.intentId]!;
+      // A handoff rolled back keeps what the operator confirmed on its
+      // sheet, which a stop saves as the draft.
+      if (intent.verb === 'handoff' && task.handoff) {
+        const { brief, continueAs, autonomy, tier, maxTurns } = intent.handoff;
+        Object.assign(task.handoff, structuredClone({ brief, continueAs, autonomy, tier, maxTurns }));
+      }
+      delete state.intents[action.intentId];
+      break;
+    }
     case 'dismiss':
       state.requests[action.requestId]!.status = 'closed';
       break;
@@ -3425,6 +3508,8 @@ export function reduce(state: Lifecycle, action: LifecycleAction, at: number, ro
   if (refusal) return { state, refusal };
   const next = structuredClone(state);
   apply(next, action, at);
+  // The action is the last step of the intent it finishes.
+  if ('intent' in action && typeof action.intent === 'string') delete next.intents[action.intent];
   wakeParents(next);
   placeInQueue(state, next);
   const held = 'unreadable' in routes ? routes.unreadable : holdRuns;

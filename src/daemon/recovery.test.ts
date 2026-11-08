@@ -264,6 +264,7 @@ describe('the Factory recovered report', () => {
             { taskId: 'T3', runId: 'R3' },
           ],
           failed: [],
+          replayed: [],
         },
       },
     ]);
