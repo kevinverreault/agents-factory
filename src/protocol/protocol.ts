@@ -9,7 +9,7 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 22;
+export const PROTOCOL_VERSION = 23;
 
 // The daemon's own verbs, which a client of another protocol version may
 // still send (ADR 0002): their shapes never change. `daemon.stop` stops it
