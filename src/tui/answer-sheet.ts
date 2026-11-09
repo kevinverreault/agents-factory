@@ -188,6 +188,16 @@ export function cardItem(task: TaskView, permission: Permission): AttentionQueue
 }
 
 // Whether the digits answer the item.
+// A HITL task queued for its conversation with no run live: parked, or never
+// opened. Opening it starts a run, which resumes its session if it had one.
+// A work loop between its tickets opens only on a frontier, on its first
+// ticket (ADR 0012): not while the map is read, blocked or cleared.
+export function reopens(task: TaskView | undefined): task is TaskView {
+  if (task?.mode !== 'HITL' || task.state !== 'queued' || task.liveRunId || task.handoff) return false;
+  const { loop } = task;
+  return !loop || !!loop.ticket || (!loop.cleared && !!loop.frontier?.length);
+}
+
 export function answerable(item: AttentionQueueItem | undefined, task: TaskView | undefined): boolean {
   if (!item) return false;
   return (item.kind === 'attention' && !!item.question) || choicesFor(item, task).length > 0;
@@ -366,7 +376,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
       : answering
       ? escBack ? 'digits answer · esc back' : null
       : 'a answer'
-    : item.kind === 'ready' && task?.liveRunId
+    : item.kind === 'ready' && (task?.liveRunId || reopens(task))
       ? 'enter opens the conversation'
       : item.kind === 'attention' && item.attention === 'repo-missing'
         ? 'Put the clone back, or run `agents-factory repo move <new-path>`.'

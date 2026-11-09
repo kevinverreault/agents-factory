@@ -1045,7 +1045,7 @@ describe('launching and conversing', () => {
     });
   });
 
-  test('enter opens a conversation from Needs you only for a task Ready for you in a live one', async () => {
+  test('enter on a task Ready for you with no live run reopens its conversation', async () => {
     const connection = new FakeConnection();
     const queued = task('T3', 'Settle the glossary', 'queued', 'Ready for you', 'HITL');
     const { app } = await started(factoryState([failing, queued], [failure, { kind: 'ready', taskId: 'T3' }]), { connection });
@@ -1057,12 +1057,14 @@ describe('launching and conversing', () => {
     app.stdin.write('\x1b[B');
     app.stdin.write('\x1b[B');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T3\s+Settle the glossary/));
+    await eventually(() => {
+      expect(app.lastFrame()).toMatch(/›\s+T3\s+Settle the glossary/);
+      expect(app.lastFrame()).toContain('enter opens the conversation');
+    });
     app.stdin.write('\r');
-    await settle();
 
-    expect(connection.conversed).toEqual([]);
-    await eventually(() => expect(app.lastFrame()).toContain('2 Needs you (2)'));
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'open', taskId: 'T3' }]));
+    await eventually(() => expect(app.lastFrame()).toContain('ctrl+b back'));
   });
 
   test('ctrl+b leaves the conversation for the task’s detail it was opened from, and reopening it replays the conversation afresh', async () => {
@@ -1334,6 +1336,44 @@ describe('launching and conversing', () => {
 
     await eventually(() => expect(connection.sent).toEqual([{ type: 'openHandoff', taskId: 'T1' }]));
     await eventually(() => expect(app.lastFrame()).toContain('claude --resume'));
+  });
+
+  test('c on a parked HITL task reopens its conversation, and a refused reopen stays on the list', async () => {
+    const parked = { ...onLean, state: 'queued' as const, label: 'Ready for you', liveRunId: null };
+    const ended = { ...run, status: 'ended' as const, outcome: 'parked' as const };
+    const refusing = new FakeConnection();
+    refusing.replyTo('open', { ok: false, reason: 'T1 isn’t ready for a conversation (it is Done).' });
+    const { app: refused } = await started({ ...factoryState([parked]), runs: { R1: ended } }, { connection: refusing });
+    await press(refused, 'c');
+    await eventually(() => expect(refused.lastFrame()).toContain('T1 isn’t ready for a conversation (it is Done).'));
+    expect(refused.lastFrame()).not.toContain('claude --resume');
+
+    const { app, connection } = await started({ ...factoryState([parked]), runs: { R1: ended } });
+    await press(app, 'c');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'open', taskId: 'T1' }]));
+    await eventually(() => expect(app.lastFrame()).toContain('claude --resume'));
+  });
+
+  test('a conversation parked while it is open reopens on the next message, which is then sent', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    connection.servePatch([
+      { op: 'set', path: ['runs', 'R1'], value: { ...run, turn: 'operator' as const, status: 'ended' as const, outcome: 'parked' as const } },
+      { op: 'set', path: ['tasks', 'T1'], value: { ...onLean, state: 'queued' as const, label: 'Ready for you', liveRunId: null } },
+    ]);
+    await eventually(() => expect(app.lastFrame()).toContain('enter reopens and sends'));
+
+    await type(app, 'Still there?');
+    app.stdin.write('\r');
+
+    await eventually(() =>
+      expect(connection.sent).toEqual([
+        { type: 'open', taskId: 'T1' },
+        { type: 'sendMessage', taskId: 'T1', text: 'Still there?' },
+      ]),
+    );
   });
 
   test('a blocked handoff shows what blocks it, and esc backs out of the sheet to keep talking', async () => {
@@ -2687,6 +2727,17 @@ describe('the wayfinder work loop', () => {
     await press(app, '2', 'a', '1');
 
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'open', taskId: 'T1', ticket: 'acme/widgets#31' }));
+  });
+
+  test('c opens the task on its first frontier ticket, but not once its map has cleared', async () => {
+    const { app: done, connection: none } = await started(factoryState([cleared]));
+    await press(done, 'c');
+    await settle();
+    expect(none.sent).toEqual([]);
+
+    const { app, connection } = await started(factoryState([picking]));
+    await press(app, 'c');
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'open', taskId: 'T1' }]));
   });
 
   test('a cleared map offers continue to spec, jump to tickets or end, each sent as the advance it is', async () => {
