@@ -8,6 +8,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { runsOf } from './runs.ts';
 import { fixed } from './screen.ts';
+import { GLYPH, Heading, tone } from './theme.ts';
 
 // With `lines`, a glance: that many of the latest events, a row each. Without
 // it, the whole: every event in full, giving way on a short screen so the
@@ -27,9 +28,15 @@ export function Output({ connection, state, taskId, lines }: { connection: Facto
     Box,
     // Squeezed below its title, it clips rather than draws over what follows.
     { flexDirection: 'column', flexShrink: whole ? 1 : 0, overflow: 'hidden', marginTop: 1 },
+    // Its title: live output while its run is, the last output once it ended.
     fixed(
-      h(Text, { bold: true }, 'Output', h(Text, { bold: false, dimColor: true }, run ? ` · ${taskId} · ${run.id} ${run.status === 'ended' ? 'ended' : 'live'}` : ` · ${taskId}`)),
-      events.length === 0 ? h(Text, { dimColor: true }, run ? 'Nothing yet.' : 'No runs yet.') : null,
+      h(
+        Box,
+        { gap: 1 },
+        run && run.status !== 'ended' ? h(Text, tone('ok'), GLYPH.live) : null,
+        h(Heading, { text: `${!run ? 'Output' : run.status === 'ended' ? 'Last output' : 'Live output'} · ${taskId}${run ? ` · ${run.id}` : ''}` }),
+      ),
+      events.length === 0 ? h(Text, tone('dim'), run ? 'Nothing yet.' : 'No runs yet.') : null,
     ),
     h(
       Box,

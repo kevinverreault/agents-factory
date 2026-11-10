@@ -36,10 +36,10 @@ import { LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
 import { QuickLaunch } from './quick-launch.ts';
 import { liveFirst, RunsList } from './runs.ts';
-import { CursorWindow, fixed, useRows } from './screen.ts';
+import { CursorWindow, fixed, useColumns, useRows } from './screen.ts';
 import { TaskDetail } from './task-detail.ts';
 import { edit } from './text-input.ts';
-import { filled, Keys, Rule, tone, type Hint } from './theme.ts';
+import { Cursor, filled, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
 import { UsageStrip, UsageTab } from './usage.ts';
 
 // The screens, in the order of the number keys that switch to them.
@@ -469,9 +469,10 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
           ? h(Condensed, {
               focus,
               zoom,
+              group,
               sidebar: h(Sidebar, { state, cursor: at(cursors['needs-you'], queue.map(rowOf)), focused: focus === 'sidebar', groups, group }),
               tree: h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
-              detail: followed ? h(TaskDetail, { connection, state, task: followed }) : h(Text, { dimColor: true }, 'Nothing selected.'),
+              detail: followed ? h(TaskDetail, { connection, state, task: followed }) : h(Text, tone('dim'), 'Nothing selected.'),
             })
         : drilled
           ? h(TaskDetail, { connection, state, task: drilled })
@@ -587,28 +588,20 @@ function TaskList({
   // which the detail beside it shows.
   compact?: boolean;
 }) {
-  if (tasks.length === 0) return h(Text, { dimColor: true }, hidden ? `Every task is finished. H shows the ${hidden}.` : 'No tasks yet. n quick-launches one, N launches one.');
-  const rows = tasks.map((task, i) =>
-    h(Row, {
-      key: task.id,
-      id: task.id,
-      title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
-      detail: compact ? task.label : `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.progress ? ` · ${task.progress}` : ''}`,
-      selected: focused && i === cursor,
-      dim: finished(task),
-      compact,
-    }),
-  );
+  const columns = useColumns();
+  if (tasks.length === 0) return h(Text, tone('dim'), hidden ? `Every task is finished. H shows the ${hidden}.` : 'No tasks yet. n quick-launches one, N launches one.');
+  const layout = rowLayout(tasks, columns, compact);
+  const rows = tasks.map((task, i) => h(TaskRow, { key: task.id, task, selected: focused && i === cursor, layout }));
   if (compact) {
     return column([
       h(CursorWindow, { key: 'tree', cursor, items: rows }),
-      hidden === null ? null : fixed(h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`)),
+      hidden === null ? null : fixed(h(Text, { key: 'hidden', ...tone('dim') }, `${hidden} finished hidden · H shows them`)),
     ]);
   }
   return column([
     h(CursorWindow, { key: 'tree', cursor, items: rows }),
     fixed(
-      hidden === null ? null : h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`),
+      hidden === null ? null : h(Text, { key: 'hidden', ...tone('dim') }, `${hidden} finished hidden · H shows them`),
       h(Output, { key: 'output', connection, state, taskId: tasks[cursor]!.id, lines: OUTPUT_PANE_LINES }),
     ),
   ]);
@@ -642,6 +635,82 @@ function keepingAncestors(tree: TaskView[], keep: (task: TaskView) => boolean): 
   return tree.filter((task) => kept.has(task.id));
 }
 
+// The columns below which a task row gives up its groups, then its extras.
+const GROUPS_COLUMNS = 100;
+const EXTRAS_COLUMNS = 90;
+// The widest mode and autonomy (`HITL`, `AFK L2`) and state label (`Waiting on children`).
+const MODE_WIDTH = 6;
+const STATE_WIDTH = 19;
+// The narrowest a title gets for the extras to have room, and the widest the groups get.
+const MIN_TITLE_WIDTH = 20;
+const MAX_GROUPS_WIDTH = 24;
+
+// Each column's width, the same on every row so the columns line up. The
+// title takes what the others leave, all of it but what keeps the widest
+// extras whole, and never less than its least. The condensed view's rows
+// are `compact`: only the glyph, id, title and state, the title taking what
+// the pane leaves.
+type RowLayout = { compact: boolean; glyph: number; id: number; title: number; extras: number; groups: number };
+
+function rowLayout(tasks: TaskView[], columns: number, compact: boolean): RowLayout {
+  const widest = (texts: string[]) => Math.max(0, ...texts.map((text) => text.length));
+  const glyph = Math.max(1, ...tasks.map(({ depth }) => depth * 2 + 1));
+  const id = widest(tasks.map(({ id }) => id));
+  if (compact) return { compact, glyph, id, title: 0, extras: 0, groups: 0 };
+  // Narrower than the TUI is designed for, a row gives up its groups, then its extras.
+  const groups = columns >= GROUPS_COLUMNS ? Math.min(widest(tasks.map((task) => task.groups.join(', '))), MAX_GROUPS_WIDTH) : 0;
+  const extras = columns >= EXTRAS_COLUMNS ? widest(tasks.map(extrasOf)) : 0;
+  // The cursor, glyph, id, title, mode and state, each with a gap after it but the last.
+  const fixed = 1 + glyph + id + MODE_WIDTH + STATE_WIDTH + 5 + (groups ? groups + 1 : 0);
+  const rest = Math.max(columns - fixed, 1);
+  if (!extras || rest - 1 < MIN_TITLE_WIDTH + 4) return { compact, glyph, id, title: rest, extras: 0, groups };
+  const title = Math.max(MIN_TITLE_WIDTH, rest - 1 - extras);
+  return { compact, glyph, id, title, extras: rest - 1 - title, groups };
+}
+
+// What a row says past its state: its loop's ticket, its descendants'
+// rollup and its progress.
+function extrasOf(task: TaskView): string {
+  return [loopDetail(task), rollupDetail(task), task.progress].filter(Boolean).join(' · ');
+}
+
+// A task in the tree: its state's glyph, indented by its depth; its id and
+// title; its mode and autonomy; its state, lit as its glyph is; its extras;
+// and its groups. A finished task is dim, a cancelled one struck through
+// too, and the selected one's title bold.
+function TaskRow({ task, selected, layout }: { task: TaskView; selected: boolean; layout: RowLayout }) {
+  const look = stateLook(task.label);
+  const quiet = (text: string) => h(Text, { ...tone('dim'), wrap: 'truncate' }, text);
+  const cell = (width: number | undefined, content: ReactNode, right = false) =>
+    h(Box, { width, flexShrink: 0, justifyContent: right ? 'flex-end' : 'flex-start' }, content);
+  const title = h(Text, { ...tone(finished(task) ? 'dim' : 'fg'), bold: selected, strikethrough: look.strike, wrap: 'truncate' }, task.title);
+  const state = h(Text, { ...tone(look.role), wrap: 'truncate' }, task.label);
+  const indent = '  '.repeat(task.depth);
+  if (layout.compact) {
+    return h(
+      Box,
+      { gap: 1 },
+      h(Cursor, { on: selected }),
+      cell(layout.glyph, h(Text, tone(look.role), `${indent}${look.glyph}`)),
+      cell(layout.id, quiet(task.id)),
+      h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, title),
+      cell(undefined, state),
+    );
+  }
+  return h(
+    Box,
+    { gap: 1 },
+    h(Cursor, { on: selected }),
+    cell(layout.glyph, h(Text, tone(look.role), `${indent}${look.glyph}`)),
+    cell(layout.id, quiet(task.id)),
+    cell(layout.title, title),
+    cell(MODE_WIDTH, quiet(task.autonomy ? `${task.mode} ${task.autonomy}` : task.mode)),
+    cell(STATE_WIDTH, state),
+    layout.extras ? cell(layout.extras, quiet(extrasOf(task))) : null,
+    layout.groups ? cell(layout.groups, quiet(task.groups.join(', ')), true) : null,
+  );
+}
+
 // A tree row's rollup of its descendants (ADR 0009), and on a root the
 // failures waiting on the operator below it.
 function rollupDetail({ rollup, parent }: TaskView): string {
@@ -655,7 +724,7 @@ function rollupDetail({ rollup, parent }: TaskView): string {
     ] as const
   ).flatMap(([count, one, many]) => (count ? [`${count} ${count === 1 ? one : many}`] : []));
   const failed = !parent && rollup.failed.length ? ` · ${rollup.failed.map(({ taskId }) => `${taskId} failed`).join(', ')}` : '';
-  return ` · [${counts.join(', ')}]${failed}`;
+  return `[${counts.join(', ')}]${failed}`;
 }
 
 // Whether the task's run failed and waits on the operator's Retry.
@@ -671,8 +740,8 @@ function finishable(task: TaskView | undefined): boolean {
 // The ticket a task's loop works, and whether it ends after it.
 function loopDetail({ loop }: TaskView): string {
   if (!loop) return '';
-  if (!loop.ticket) return loop.finishing ? ' · finishing' : '';
-  return ` · on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
+  if (!loop.ticket) return loop.finishing ? 'finishing' : '';
+  return `on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
 }
 
 function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }) {

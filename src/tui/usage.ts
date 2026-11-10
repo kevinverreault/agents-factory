@@ -4,7 +4,7 @@ import { createElement as h, type ReactNode } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { overall, tokensOf, usageViews, type ModelUsage, type Usage } from '../usage/usage.ts';
-import { bar, GLYPH, spentRole, tone } from './theme.ts';
+import { bar, GLYPH, Heading, spentRole, tone } from './theme.ts';
 
 export function tokens(count: number): string {
   if (count < 1_000) return String(count);
@@ -86,15 +86,15 @@ export function TaskUsage({ state, taskId }: { state: FactoryState; taskId: stri
     h(
       Box,
       { key, gap: 1 },
-      h(Box, { flexGrow: 1 }, h(Text, { dimColor: dim, wrap: 'truncate' }, name)),
-      h(Text, { dimColor: dim }, tokens(tokensOf(usage))),
-      h(Text, { dimColor: dim }, dollars(usage.cost)),
+      h(Box, { flexGrow: 1 }, h(Text, { ...tone(dim ? 'dim' : 'fg'), wrap: 'truncate' }, name)),
+      h(Text, tone(dim ? 'dim' : 'fg'), tokens(tokensOf(usage))),
+      h(Text, tone(dim ? 'dim' : 'fg'), dollars(usage.cost)),
     );
   return h(
     Box,
     { flexDirection: 'column', flexShrink: 0, marginBottom: 1 },
-    h(Text, { bold: true }, 'Usage'),
-    Object.keys(own).length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
+    h(Heading, { text: 'Usage' }),
+    Object.keys(own).length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
     ...Object.entries(own).map(([model, usage]) => line(model, model, usage)),
     hasChildren ? line('tree', 'task tree', overall(views.trees[taskId] ?? {}), true) : null,
   );

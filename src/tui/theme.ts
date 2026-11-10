@@ -89,6 +89,32 @@ export function stateLook(label: string): Look {
   return { glyph, role, strike: label === 'Cancelled' };
 }
 
+// What a Needs you item is, as its kind column names it, and the role it
+// is lit in: questions and the operator's turn in the accent, what blocks
+// work in warn, what failed in bad, and what waits for review in review.
+type Item = { kind: 'attention'; attention: string } | { kind: 'ready' } | { kind: 'review' };
+const KINDS: Record<string, [string, Role]> = {
+  question: ['question', 'accent'],
+  permission: ['permission', 'warn'],
+  failure: ['failure', 'bad'],
+  'stage-blocked': ['blocked', 'warn'],
+  'github-write': ['github', 'bad'],
+  'pr-closed-unmerged': ['PR closed', 'warn'],
+  'repo-missing': ['repo missing', 'bad'],
+  'recovery-report': ['recovered', 'accent'],
+};
+
+export function kindLook(item: Item): { kind: string; role: Role } {
+  if (item.kind === 'ready') return { kind: 'your turn', role: 'accent' };
+  if (item.kind === 'review') return { kind: 'review', role: 'review' };
+  const [kind, role] = KINDS[item.attention] ?? [item.attention, 'warn'];
+  return { kind, role };
+}
+
+export function kindRole(item: Item): Role {
+  return kindLook(item).role;
+}
+
 // The glyphs the screens share.
 export const GLYPH = {
   selected: '›',
@@ -106,6 +132,8 @@ export const GLYPH = {
   system: '·',
   conversation: '◇',
   failed: '✗',
+  // The group the condensed view's tree is filtered by.
+  marked: '•',
 } as const;
 
 // A share (0 to 1) as a bar of `cells`.
@@ -132,8 +160,8 @@ export function Rule({ role = 'line', label }: { role?: Role; label?: string }) 
 }
 
 // A section heading: dim and uppercase, or accent on a focused pane.
-export function Heading({ children, role = 'dim' }: { children: string; role?: Role }) {
-  return h(Text, { ...tone(role), wrap: 'truncate' }, children.toUpperCase());
+export function Heading({ text, role = 'dim' }: { text: string; role?: Role }) {
+  return h(Text, { ...tone(role), wrap: 'truncate' }, text.toUpperCase());
 }
 
 // Key hints: each key bold, what it does dim, `·` between them. They

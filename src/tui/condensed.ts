@@ -8,27 +8,32 @@ import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { waitingFor } from './answer-sheet.ts';
 import { CursorWindow } from './screen.ts';
+import { border, Cursor, GLYPH, Heading, kindRole, tone } from './theme.ts';
 
 export type Pane = 'sidebar' | 'tree' | 'detail';
 // The order `tab` moves the focus in.
 export const PANES: Pane[] = ['sidebar', 'tree', 'detail'];
 
-// The three panes side by side, the focused one's border lit; zoomed, the
-// detail alone.
+// The three panes side by side, a `│` between them, each under its title,
+// the focused one's lit; zoomed, the detail alone. The sidebar titles its
+// own sections. `group` is what the tree is filtered by.
 export function Condensed({
   focus,
   zoom,
+  group,
   sidebar,
   tree,
   detail,
 }: {
   focus: Pane;
   zoom: boolean;
+  group: string | null;
   sidebar: ReactNode;
   tree: ReactNode;
   detail: ReactNode;
 }) {
-  const pane = (id: Pane, content: ReactNode, size: { width?: number; flexGrow?: number; flexBasis?: number }) =>
+  const titles: Record<Pane, string | null> = { sidebar: null, tree: `Tasks · ${group ?? 'all'}`, detail: zoom ? 'Detail · zoomed' : 'Detail' };
+  const pane = (id: Pane, content: ReactNode, size: { width?: number; flexGrow?: number; flexBasis?: number }, divided: boolean) =>
     h(
       Box,
       {
@@ -37,18 +42,22 @@ export function Condensed({
         flexShrink: size.width === undefined ? 1 : 0,
         flexDirection: 'column',
         overflow: 'hidden',
-        borderStyle: 'single',
-        borderColor: focus === id ? 'cyan' : 'gray',
         paddingX: 1,
+        ...(divided ? { borderStyle: 'single', borderTop: false, borderBottom: false, borderRight: false, ...border('line') } : {}),
       },
+      titles[id] ? h(Heading, { text: titles[id], role: focus === id ? 'accent' : 'dim' }) : null,
       content,
     );
   return h(
     Box,
     { flexDirection: 'row', flexShrink: 1, flexGrow: 1, overflow: 'hidden' },
     ...(zoom
-      ? [pane('detail', detail, { flexGrow: 1 })]
-      : [pane('sidebar', sidebar, { width: 28 }), pane('tree', tree, { flexGrow: 1, flexBasis: 0 }), pane('detail', detail, { flexGrow: 1, flexBasis: 0 })]),
+      ? [pane('detail', detail, { flexGrow: 1 }, false)]
+      : [
+          pane('sidebar', sidebar, { width: 28 }, false),
+          pane('tree', tree, { flexGrow: 1, flexBasis: 0 }, true),
+          pane('detail', detail, { flexGrow: 1, flexBasis: 0 }, true),
+        ]),
   );
 }
 
@@ -72,22 +81,22 @@ export function Sidebar({
   return h(
     Box,
     { flexDirection: 'column' },
-    h(Text, { bold: true }, `Needs you (${queue.length})`),
+    h(Heading, { text: `Needs you (${queue.length})`, role: focused ? 'accent' : 'dim' }),
     queue.length === 0
-      ? h(Text, { dimColor: true }, 'Nothing needs you.')
+      ? h(Text, tone('dim'), 'Nothing needs you.')
       : h(CursorWindow, {
           cursor,
           items: queue.map((item, i) => h(Item, { key: keyOf(item), item, task: item.taskId ? state.tasks[item.taskId] : undefined, selected: focused && i === cursor })),
         }),
-    h(Box, { marginTop: 1 }, h(Text, { bold: true }, 'Groups')),
-    groups.length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
+    h(Box, { marginTop: 1 }, h(Heading, { text: 'Groups' })),
+    groups.length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
     ...groups.map(([name, count]) =>
       h(
         Box,
         { key: name, gap: 1 },
-        h(Text, { color: 'cyan' }, name === group ? '•' : ' '),
-        h(Box, { flexGrow: 1 }, h(Text, { wrap: 'truncate', bold: name === group }, name)),
-        h(Text, { dimColor: true }, String(count)),
+        h(Text, tone('accent'), name === group ? GLYPH.marked : ' '),
+        h(Box, { flexGrow: 1 }, h(Text, { ...tone(name === group ? 'accent' : 'fg'), wrap: 'truncate', bold: name === group }, name)),
+        h(Text, tone('dim'), String(count)),
       ),
     ),
   );
@@ -98,9 +107,9 @@ function Item({ item, task, selected }: { item: AttentionQueueItem; task: TaskVi
   return h(
     Box,
     { gap: 1 },
-    h(Box, { flexShrink: 0 }, h(Text, { color: 'cyan' }, selected ? '›' : ' ')),
-    h(Box, { flexShrink: 0 }, h(Text, { bold: true }, (item.taskId ?? '').padEnd(3))),
-    h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, h(Text, { wrap: 'truncate' }, waitingFor(item, task))),
+    h(Cursor, { on: selected }),
+    h(Box, { flexShrink: 0 }, h(Text, tone('dim'), (item.taskId ?? '').padEnd(3))),
+    h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, h(Text, { ...tone(kindRole(item)), wrap: 'truncate' }, waitingFor(item, task))),
   );
 }
 

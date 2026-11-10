@@ -46,6 +46,12 @@ async function started(state?: FactoryState, { cwd, connection = new FakeConnect
   return { connection, app };
 }
 
+// The terminal's width, which a test's stdout fixes at 100 columns otherwise.
+function widen(app: { stdout: NodeJS.EventEmitter }, columns: number) {
+  Object.defineProperty(app.stdout, 'columns', { value: columns, configurable: true });
+  app.stdout.emit('resize');
+}
+
 describe('the frame', () => {
   const lines = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.split('\n');
 
@@ -96,6 +102,52 @@ describe('the frame', () => {
   });
 });
 
+describe('task rows', () => {
+  const rowOf = (app: { lastFrame(): string | undefined }, id: string) => app.lastFrame()!.split('\n').find((line) => new RegExp(`\\s${id}\\s`).test(line));
+  const looping = (): FactoryState =>
+    factoryState([
+      {
+        ...task('T1', 'Implement the store', 'running', 'Running'),
+        autonomy: 'L2',
+        groups: ['store', 'billing'],
+        progress: 'On the migrations',
+        rollup: { done: 1, running: 0, needsYou: 0, cancelled: 0, failed: [] },
+      },
+      { ...task('T2', 'Write the migrations', 'done', 'Done'), parent: 'T1', depth: 1 },
+      task('T3', 'Grill me on the docs', 'queued', 'Ready for you', 'HITL'),
+      task('T4', 'Drop the old schema', 'cancelled', 'Cancelled'),
+      task('T5', 'Wait for the children', 'awaiting-children', 'Waiting on children'),
+    ]);
+
+  test('a row shows its state’s glyph, its id and title, mode and autonomy, state, extras and groups, the cursor on the selected one', async () => {
+    const { app } = await started(looping());
+
+    await eventually(() => {
+      expect(rowOf(app, 'T1')).toMatch(/^›\s+●\s+T1\s+Implement the store\s+AFK L2\s+Running\s+\[1 done\] · On the migrations\s+store, billing$/);
+      expect(rowOf(app, 'T2')).toMatch(/^\s+✓\s+T2\s+Write the migrations\s+AFK L1\s+Done/);
+      expect(rowOf(app, 'T3')).toMatch(/^\s+◆\s+T3\s+Grill me on the docs\s+HITL\s+Ready for you/);
+      expect(rowOf(app, 'T4')).toMatch(/^\s+✕\s+T4\s+Drop the old schema\s+AFK L1\s+Cancelled/);
+      expect(rowOf(app, 'T5')).toMatch(/^\s+⧗\s+T5/);
+    });
+    // A child sits indented under its parent: its glyph past the root’s.
+    expect(rowOf(app, 'T2')!.indexOf('✓')).toBeGreaterThan(rowOf(app, 'T1')!.indexOf('●'));
+    // The tier is the detail’s, not the row’s.
+    expect(rowOf(app, 'T1')).not.toContain('sonnet');
+  });
+
+  test('on a narrower terminal a row drops its groups first, then its extras', async () => {
+    const { app } = await started(looping());
+    widen(app, 95);
+    await eventually(() => {
+      expect(rowOf(app, 'T1')).toMatch(/Running\s+\[1 done\] · On the migrations$/);
+      expect(rowOf(app, 'T1')).not.toContain('billing');
+    });
+
+    widen(app, 80);
+    await eventually(() => expect(rowOf(app, 'T1')).toMatch(/Implement the store\s+AFK L2\s+Running$/));
+  });
+});
+
 describe('the bare TUI', () => {
   test('the Tasks tab lists every task with its label', async () => {
     const { app } = await started(
@@ -108,8 +160,8 @@ describe('the bare TUI', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toContain('1 Tasks');
-      expect(frame).toMatch(/T1\s+Settle the glossary\s+Ready for you/);
-      expect(frame).toMatch(/T2\s+Implement the store\s+Running/);
+      expect(frame).toMatch(/T1\s+Settle the glossary\s+HITL\s+Ready for you/);
+      expect(frame).toMatch(/T2\s+Implement the store\s+AFK L1\s+Running/);
     });
   });
 
@@ -165,7 +217,7 @@ describe('the bare TUI', () => {
     ]);
     await settle();
 
-    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Implement the store\s+In review/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Implement the store\s+AFK L1\s+In review/));
     await eventually(() => expect(app.lastFrame()).toContain('2 Needs you (1)'));
   });
 
@@ -181,11 +233,11 @@ describe('the bare TUI', () => {
 });
 
 describe('re-tiering', () => {
-  test('each task shows the tier its next run starts at, and t moves the selected task to the next tier', async () => {
+  test('a task’s detail shows the tier its next run starts at, and t moves the selected task to the next tier', async () => {
     const { app, connection } = await started(
       factoryState([task('T1', 'Settle the glossary', 'queued', 'Ready for you', 'HITL'), task('T2', 'Implement the store', 'running', 'Running')]),
     );
-    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+Running · sonnet/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+AFK L1\s+Running/));
     expect(app.lastFrame()).toContain('t re-tier');
 
     app.stdin.write('\x1b[B');
@@ -201,7 +253,8 @@ describe('re-tiering', () => {
     );
 
     connection.servePatch([{ op: 'set', path: ['tasks', 'T2', 'tier'], value: 'opus' }]);
-    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+Running · opus/));
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toMatch(/AFK L1 · Running · .*opus/));
     app.stdin.write('t');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'retier', taskId: 'T2', tier: 'sonnet' }));
   });
@@ -278,14 +331,14 @@ describe('finishing a loop', () => {
   test('F finishes the selected loop after its ticket, and its row says so', async () => {
     const looping = { ...task('T1', 'Implement the spec', 'running', 'Running'), loop: { ticket: 'acme/widgets#11', finishing: false, frontier: null, cleared: false } };
     const { app, connection } = await started(factoryState([looping]));
-    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Implement the spec\s+Running · sonnet · on acme\/widgets#11/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Implement the spec\s+AFK L1\s+Running\s+on acme\/widgets#11/));
     expect(app.lastFrame()).toContain('F finish after this ticket');
 
     await press(app, 'F');
 
     await eventually(() => expect(connection.sent).toEqual([{ type: 'finishLoop', taskId: 'T1' }]));
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'loop'], value: { ticket: 'acme/widgets#11', finishing: true } }]);
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Running · sonnet · on acme\/widgets#11, finishing after it/));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Running on acme\/widgets#11, finishing after it/));
   });
 });
 
@@ -322,15 +375,22 @@ describe('the task tree', () => {
 
   test('children show under their parent, rows roll up their descendants, the root shows a failed child, and a status shows on its row', async () => {
     const { app } = await started(tree());
+    // As wide as the TUI is designed for: the root's extras whole.
+    widen(app, 120);
 
     await eventually(() => {
-      // The tree's rows, which start with their task's id.
-      const rows = app.lastFrame()!.split('\n').filter((line) => /^[›\s]+T\d/.test(line));
+      // The tree's rows, which start with their task's glyph and id.
+      const rows = app.lastFrame()!.split('\n').filter((line) => /^[›\s]+\S\s+T\d/.test(line));
       expect(rows.map((row) => /T\d/.exec(row)![0])).toEqual(['T1', 'T2', 'T3', 'T4', 'T5']);
-      expect(unwrapped(app.lastFrame()!)).toMatch(/T1 +Add a logout button +Running · sonnet · \[2 running, 1 needs you\] · T2 failed · Wiring the header\./);
-      expect(unwrapped(app.lastFrame()!)).toMatch(/T2 +└ Survey sign-out +Needs you/);
-      expect(unwrapped(app.lastFrame()!)).toMatch(/T3 +└ Write the docs +Running · sonnet · \[1 done\]/);
-      expect(unwrapped(app.lastFrame()!)).toMatch(/T4 +└ Check the links +Done/);
+      // Each child's glyph sits indented past its parent's.
+      const glyphAt = rows.map((row) => row.search(/[^›\s]/));
+      expect(glyphAt[1]).toBeGreaterThan(glyphAt[0]!);
+      expect(glyphAt[3]).toBeGreaterThan(glyphAt[2]!);
+      expect(glyphAt[4]).toBe(glyphAt[0]);
+      expect(unwrapped(app.lastFrame()!)).toMatch(/T1 +Add a logout button +AFK L1 +Running +\[2 running, 1 needs you\] · T2 failed · Wiring the header\./);
+      expect(unwrapped(app.lastFrame()!)).toMatch(/! T2 +Survey sign-out +AFK L1 +Needs you/);
+      expect(unwrapped(app.lastFrame()!)).toMatch(/T3 +Write the docs +AFK L1 +Running +\[1 done\]/);
+      expect(unwrapped(app.lastFrame()!)).toMatch(/✓ T4 +Check the links +AFK L1 +Done/);
     });
   });
 
@@ -1144,7 +1204,7 @@ describe('launching and conversing', () => {
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run }, artifacts }, { connection });
     await press(app, '\r', '\r');
     await eventually(() => {
-      expect(app.lastFrame()).toContain('Artifacts');
+      expect(app.lastFrame()).toContain('ARTIFACTS');
       expect(app.lastFrame()).toMatch(/uncommitted\s+GLOSSARY\.md/);
     });
     expect(app.lastFrame()).not.toContain('0009-elsewhere');
@@ -1623,7 +1683,7 @@ describe('answering from Needs you', () => {
     ]);
     await eventually(() => expect(app.lastFrame()).toContain('Nothing needs you.'));
     await press(app, '1');
-    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+Running/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/T2\s+Implement the store\s+AFK L1\s+Running/));
   });
 
   test('a refused answer shows its reason and can be answered again; a multi-select toggles with digits and enter confirms', async () => {
@@ -2390,15 +2450,44 @@ describe('the screens view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).not.toContain('Tasks ›');
-      expect(frame).toMatch(/›\s+T2\s+Implement the store/);
+      expect(frame).toMatch(/›\s+\S\s+T2\s+Implement the store/);
     });
 
     // From a task's detail a number key goes to that screen, leaving the detail behind.
     await press(app, '\r', '3');
     await eventually(() => expect(app.lastFrame()).not.toContain('Tasks ›'));
     await press(app, '1');
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T2\s+Implement the store/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T2\s+Implement the store/));
     expect(app.lastFrame()).not.toContain('Tasks ›');
+  });
+
+  test('a task’s detail: its title, what it is on one line, its open request, then its runs, usage, artifacts and live output', async () => {
+    const child = {
+      ...implementing,
+      parent: 'T1',
+      depth: 1,
+      child: { awaited: true, base: 'abc123', report: null },
+      branch: 'factory/T2-implement-the-store',
+      groups: ['store', 'billing'],
+      tier: 'opus' as const,
+    };
+    const failed: FactoryState['attentionQueue'][number] = {
+      kind: 'attention', recovery: null, deniedHosts: null, taskId: 'T2', repo: 'acme/widgets', requestId: 'Q1', attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+    };
+    const runs = { R3: ran('R3', 'T2', 5, { status: 'active', outcome: null, endedAt: null }) };
+    const { app } = await started({ ...factoryState([grilling, child], [failed]), runs });
+    // Wide enough for the whole of the line that says what it is.
+    widen(app, 180);
+
+    await press(app, '\x1b[B', '\r');
+
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/^T2 Implement the store$/m);
+      expect(frame).toContain('AFK L1 · Running · implement · claude-sonnet-5-5 · opus · factory/T2-implement-the-store · store, billing · child of T1 Grill me about the docs (awaited)');
+      expect(unwrapped(frame)).toContain('FAILURE The agent hit max turns. a answer');
+      expect(frame).toMatch(/RUNS[\s\S]*USAGE[\s\S]*ARTIFACTS[\s\S]*● LIVE OUTPUT · T2 · R3/);
+    });
   });
 
   test('a task’s detail lists its runs with mode, stage, model, outcome and usage, then its artifacts', async () => {
@@ -2435,14 +2524,14 @@ describe('the screens view', () => {
     const { app, connection } = await started({ ...factoryState([conversing, implementing]), runs });
     await eventually(() => expect(connection.followed).toEqual(['R1']));
     connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Which identity provider times out?' });
-    await eventually(() => expect(app.lastFrame()).toMatch(/Output · T1 · R1 live[\s\S]*agent\s+Which identity provider times out\?/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/LIVE OUTPUT · T1 · R1[\s\S]*agent\s+Which identity provider times out\?/));
 
     await press(app, '\x1b[B');
     await eventually(() => expect(connection.followed).toEqual(['R1', 'R3']));
     connection.serveConversation('R3', { type: 'toolUse', id: 'E2', tool: 'Edit', summary: 'src/store/store.ts' });
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/Output · T2 · R3 live[\s\S]*● Edit\s+src\/store\/store\.ts/);
+      expect(frame).toMatch(/LIVE OUTPUT · T2 · R3[\s\S]*● Edit\s+src\/store\/store\.ts/);
       expect(frame).not.toContain('Which identity provider');
     });
 
@@ -2450,7 +2539,7 @@ describe('the screens view', () => {
     await press(app, '\r');
     await eventually(() => expect(connection.followed).toEqual(['R1', 'R3', 'R3']));
     connection.serveConversation('R3', { type: 'message', id: 'E3', from: 'agent', text: 'The store keeps its schema private.' });
-    await eventually(() => expect(app.lastFrame()).toMatch(/Tasks › T2[\s\S]*Output · T2 · R3 live[\s\S]*agent\s+The store keeps its schema private\./));
+    await eventually(() => expect(app.lastFrame()).toMatch(/Tasks › T2[\s\S]*LIVE OUTPUT · T2 · R3[\s\S]*agent\s+The store keeps its schema private\./));
     expect(connection.conversed).toEqual([]);
   });
 
@@ -2470,7 +2559,7 @@ describe('the screens view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toContain('1 Tasks');
-      expect(frame).toMatch(/T1\s+Settle the glossary[\s\S]*› T2\s+Implement the store/);
+      expect(frame).toMatch(/T1\s+Settle the glossary[\s\S]*› \S\s+T2\s+Implement the store/);
       expect(frame).toMatch(/agent\s+Paragraph 0\. Paragraph 1\./);
       expect(frame).toMatch(/● Bash\s+npm test --run/);
       // The two events replace "No runs yet." with two rows.
@@ -2492,10 +2581,10 @@ describe('the screens view', () => {
       const frame = app.lastFrame()!;
       expect(frame.split('\n')).toHaveLength(14);
       expect(frame).toContain('1 Tasks');
-      expect(frame).toMatch(/› T1\s+Task number 1\b/);
+      expect(frame).toMatch(/› \S\s+T1\s+Task number 1\b/);
       expect(frame).not.toContain('Task number 20');
       expect(frame).toContain('enter detail');
-      expect(frame).toContain('Output · T1');
+      expect(frame).toContain('OUTPUT · T1');
     });
 
     await press(app, ...Array.from({ length: 15 }, () => DOWN));
@@ -2503,15 +2592,15 @@ describe('the screens view', () => {
       const frame = app.lastFrame()!;
       expect(frame.split('\n')).toHaveLength(14);
       expect(frame).toContain('1 Tasks');
-      expect(frame).toMatch(/› T16\s+Task number 16\b/);
+      expect(frame).toMatch(/› \S\s+T16\s+Task number 16\b/);
       expect(frame).not.toMatch(/T1\s+Task number 1\b/);
       expect(frame).toContain('enter detail');
-      expect(frame).toContain('Output · T16');
+      expect(frame).toContain('OUTPUT · T16');
     });
 
     // Back up, the tree scrolls back with it.
     await press(app, ...Array.from({ length: 15 }, () => UP));
-    await eventually(() => expect(app.lastFrame()).toMatch(/1 Tasks[\s\S]*› T1\s+Task number 1\b/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/1 Tasks[\s\S]*› \S\s+T1\s+Task number 1\b/));
   });
 
   test('on a short terminal the Runs screen scrolls with its cursor under the tabs', async () => {
@@ -2583,6 +2672,8 @@ describe('the screens view', () => {
 
     await press(app, '3');
     await eventually(() => {
+      // A row naming the columns, over the runs.
+      expect(app.lastFrame()).toMatch(/^\s+run\s+task\s+title\s+mode\s+stage\s+model\s+status\s+tokens\n[›\s]+R3/m);
       const rows = app.lastFrame()!.split('\n').filter((line) => /^[›\s]+R\d/.test(line));
       expect(rows).toHaveLength(4);
       expect(rows[0]).toMatch(/R3\s+T2\s+Implement the store\s+AFK\s+implement\s+claude-sonnet-5-5\s+live/);
@@ -2597,8 +2688,11 @@ describe('the screens view', () => {
     await eventually(() => expect(app.lastFrame()).toMatch(/›\s+R5\s+T1/));
   });
 
-  test('Done and Cancelled tasks show dimmed, and H hides them, keeping a finished task whose subtree still has work', async () => {
-    const DIM = '\x1b[2m';
+  test('Done and Cancelled tasks show dimmed, a cancelled one struck through, and H hides them, keeping a finished task whose subtree still has work', async () => {
+    // The dim role in the 16 colours (gray) right before the title, through any other styles.
+    const dimmed = (title: string) => new RegExp(`\\x1b\\[90m(?:\\x1b\\[\\d+m)*${title}`);
+    const STRUCK = '\x1b[9m';
+    const titles: Record<string, string> = { T1: 'Implement the store', T2: 'Settle the glossary', T5: 'Check the links', T3: 'Write the spec', T4: 'Ship the release' };
     // Styles show in the frame only with colour on, which a test's stdout doesn't detect.
     const level = chalk.level;
     chalk.level = 1;
@@ -2613,11 +2707,13 @@ describe('the screens view', () => {
         { ...task('T6', 'Tag the release', 'running', 'Running'), parent: 'T4', depth: 1 },
       ]),
     );
-    const row = (id: string) => app.lastFrame()!.split('\n').find((line) => new RegExp(`^[›\\s]+${id}\\b`).test(line.replace(/\x1b\[\d+m/g, '')));
+    const row = (id: string) => app.lastFrame()!.split('\n').find((line) => new RegExp(`^[›\\s]+\\S\\s+${id}\\b`).test(line.replace(/\x1b\[\d+m/g, '')));
 
     await eventually(() => {
-      expect(row('T1')).not.toContain(DIM);
-      for (const id of ['T2', 'T5', 'T3', 'T4']) expect(row(id)).toContain(DIM);
+      expect(row('T1')).not.toMatch(dimmed(titles.T1!));
+      for (const id of ['T2', 'T5', 'T3', 'T4']) expect(row(id)).toMatch(dimmed(titles[id]!));
+      expect(row('T3')).toContain(STRUCK);
+      expect(row('T2')).not.toContain(STRUCK);
     });
 
     await press(app, 'H');
@@ -2677,7 +2773,7 @@ describe('the screens view', () => {
       for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', 'v', 'tab', 'f', 'F', ':', 'g', '\\?']) expect(frame).toMatch(new RegExp(`^\\s*${key}\\s{2,}\\S`, 'm'));
     });
     await press(app, '3', '\x1b');
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me about the docs/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T1\s+Grill me about the docs/));
 
     await press(app, '?', '?');
     await eventually(() => expect(app.lastFrame()).not.toMatch(/^\s*enter\s{2,}/m));
@@ -2935,12 +3031,12 @@ describe('quick launch', () => {
     await settle();
     app.stdin.write('\r');
     await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', taskId: 'T1', autonomy: 'L1' }]));
-    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, mode: 'AFK', state: 'queued', label: 'Queued', quick: null, handoff: null } }]);
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, mode: 'AFK', autonomy: 'L1', state: 'queued', label: 'Queued', quick: null, handoff: null } }]);
 
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).not.toContain('Hand off T1');
-      expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+Queued/);
+      expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+AFK L1\s+Queued/);
     });
   });
 
@@ -2988,7 +3084,7 @@ describe('quick launch', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).not.toContain('Quick launch');
-      expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+In conversation/);
+      expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+HITL\s+In conversation/);
     });
   });
 
@@ -3031,32 +3127,32 @@ describe('the condensed view', () => {
       expect(frame).not.toMatch(/1 Tasks\s+2 Needs you/);
       // The sidebar: Needs you, then each group with its tasks counted.
       expect(frame).toMatch(/Needs you \(2\)/);
-      expect(frame).toMatch(/Groups/);
+      expect(frame).toMatch(/GROUPS/);
       expect(frame).toMatch(/billing\s+2/);
       expect(frame).toMatch(/docs\s+1/);
       expect(frame).toMatch(/store\s+1/);
       // The tree, the cursor still on T2, and T2's detail beside it.
-      expect(frame).toMatch(/›\s+T2\s+Implement the/);
+      expect(frame).toMatch(/›\s+\S\s+T2\s+Implement the/);
       expect(frame).toContain('Write the docs');
-      expect(frame).toContain('Output · T2');
+      expect(frame).toContain('OUTPUT · T2');
     });
 
     await press(app, '\x1b[B');
-    await eventually(() => expect(app.lastFrame()).toContain('Output · T3'));
+    await eventually(() => expect(app.lastFrame()).toContain('OUTPUT · T3'));
 
     await press(app, 'v');
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toMatch(/1 Tasks\s+2 Needs you \(2\)/);
-      expect(frame).toMatch(/›\s+T3\s+Write the docs/);
-      expect(frame).not.toMatch(/^\s*Groups/m);
+      expect(frame).toMatch(/›\s+\S\s+T3\s+Write the docs/);
+      expect(frame).not.toMatch(/^\s*GROUPS/m);
     });
   });
 
   test('tab moves the focus from the tree to the detail, then the sidebar, the verbs acting on the focused pane’s task; f zooms the detail', async () => {
     const { app, connection } = await started(condensed());
     await press(app, 'v');
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T1\s+Grill me/));
 
     // The detail: the cursor leaves the tree, and x cancels the task it shows.
     await press(app, '\t');
@@ -3069,26 +3165,26 @@ describe('the condensed view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toMatch(/›\s+T2\s+failure/);
-      expect(frame).toMatch(/T2\s+Implement the store\s+│\s*$/m);
+      expect(frame).toMatch(/│\s+T2\s+Implement the store\s*$/m);
     });
     await press(app, '\x1b[B');
     await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Ready for you/));
 
     // Back to the tree, where the cursor was.
     await press(app, '\t');
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T1\s+Grill me/));
 
     await press(app, 'f');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).not.toContain('Groups');
+      expect(frame).not.toContain('GROUPS');
       expect(frame).not.toContain('Write the docs');
-      expect(frame).toContain('Output · T1');
+      expect(frame).toContain('OUTPUT · T1');
     });
     await press(app, 'f');
-    await eventually(() => expect(app.lastFrame()).toContain('Groups'));
+    await eventually(() => expect(app.lastFrame()).toContain('GROUPS'));
     await press(app, 'f', '\x1b');
-    await eventually(() => expect(app.lastFrame()).toContain('Groups'));
+    await eventually(() => expect(app.lastFrame()).toContain('GROUPS'));
   });
 
   test('g picks a group and the task tree shows only its tasks, in both views; All tasks clears it and esc backs out', async () => {
@@ -3214,11 +3310,11 @@ describe('the condensed view', () => {
     await press(app, '\r');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/T3\s+Write the docs\s+│\s*$/m);
+      expect(frame).toMatch(/│\s+T3\s+Write the docs\s*$/m);
       expect(frame).not.toContain('›');
     });
     await press(app, '\t', '\t');
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T3\s+Write the docs/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T3\s+Write the docs/));
   });
 
   test('the group picker takes keys typed in one burst, opens on the current group, and shows the Tasks screen it filters', async () => {
@@ -3230,7 +3326,7 @@ describe('the condensed view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toContain('group: billing');
-      expect(frame).toMatch(/›\s+T1\s+Grill me about invoices/);
+      expect(frame).toMatch(/›\s+\S\s+T1\s+Grill me about invoices/);
       expect(frame).not.toContain('Write the docs');
     });
     expect(app.lastFrame()).not.toContain('Tasks ›');

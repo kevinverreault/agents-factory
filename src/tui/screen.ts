@@ -14,6 +14,19 @@ export function useRows(): number | undefined {
   return (stdout as NodeJS.WriteStream).rows || undefined;
 }
 
+// The terminal's columns, again on every resize. Unknown, the TUI takes a
+// wide one: the width it is designed for.
+export const DESIGNED_COLUMNS = 120;
+export function useColumns(): number {
+  const { stdout } = useStdout();
+  const [, resized] = useReducer((resizes: number) => resizes + 1, 0);
+  useEffect(() => {
+    stdout.on('resize', resized);
+    return () => void stdout.off('resize', resized);
+  }, [stdout]);
+  return (stdout as NodeJS.WriteStream).columns || DESIGNED_COLUMNS;
+}
+
 // What stays whole on a short screen: the screen's pane clips it instead of
 // squeezing it.
 export function fixed(...children: ReactNode[]) {
