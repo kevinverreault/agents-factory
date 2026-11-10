@@ -6,6 +6,7 @@ import { Box, Text } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
 import { overall, tokensOf } from '../usage/usage.ts';
+import { answerable } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { Output } from './output.ts';
 import { runOutcome, runsOf } from './runs.ts';
@@ -37,7 +38,7 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
       ),
       task.progress ? h(Text, { wrap: 'truncate' }, task.progress) : null,
       request?.kind === 'attention'
-        ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: 'a answer' }, h(Text, null, request.question?.questions[0]?.question ?? request.reason ?? ''))
+        ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: answerable(request, task) ? 'a answer' : undefined }, h(Text, null, request.question?.questions[0]?.question ?? request.reason ?? ''))
         : null,
       h(
         Box,

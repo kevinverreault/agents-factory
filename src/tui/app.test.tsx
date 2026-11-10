@@ -61,7 +61,7 @@ describe('the frame', () => {
     );
 
     await eventually(() => {
-      expect(lines(app)[0]).toMatch(/^agent-factory\s+1 Tasks\s+2 Needs you \(0\)\s+3 Runs\s+4 Usage/);
+      expect(lines(app)[0]).toMatch(/^agents-factory\s+1 Tasks\s+2 Needs you \(0\)\s+3 Runs\s+4 Usage/);
       expect(app.lastFrame()).toContain('Tasks · group: all');
     });
 
@@ -78,12 +78,25 @@ describe('the frame', () => {
     await eventually(() => {
       const frame = lines(app);
       expect(frame.filter((line) => /^─{20,}$/.test(line.trim()))).toHaveLength(4);
-      expect(frame.at(-1)).toMatch(/^enter detail · c converse or take over .*· \? keys/);
-      expect(frame.at(-3)).toMatch(/^window unknown/);
+      // The footer: the lines under the last rule, on as many as it wraps onto.
+      const footer = frame.slice(frame.findLastIndex((line) => /^─{20,}$/.test(line)) + 1);
+      expect(footer.join(' ').replace(/\s+/g, ' ')).toMatch(/^enter detail · c converse or take over .*· g group .*· \? keys$/);
+      expect(footer[0]).toMatch(/·$/);
+      expect(frame.at(-footer.length - 2)).toMatch(/^window unknown/);
     });
 
     await press(app, '3');
     await eventually(() => expect(lines(app).at(-1)).toMatch(/^enter its task’s detail/));
+
+    // A task's detail offers a answer only for a request it has.
+    await press(app, '1', '\r');
+    await eventually(() => expect(lines(app).at(-1)).toMatch(/^enter open conversation/));
+    expect(lines(app).at(-1)).not.toContain('a answer');
+
+    // While a sheet holds the keys, the footer gives way to the sheet's own hint.
+    await press(app, '\x1b', 'g');
+    await eventually(() => expect(app.lastFrame()).toContain('enter filters the tasks · esc back'));
+    expect(app.lastFrame()).not.toContain('enter detail');
   });
 
   test('under NO_COLOR nothing is coloured, on any screen, sheet or view', async () => {
@@ -2380,7 +2393,8 @@ describe('usage', () => {
       const frame = app.lastFrame()!;
       expect(frame).toMatch(new RegExp(`5-hour window\\s+${'█'.repeat(20)}${'░'.repeat(20)} 50% · resets 14:30`));
       expect(frame).toMatch(new RegExp(`Weekly window\\s+${'█'.repeat(10)}${'░'.repeat(30)} 25%`));
-      expect(frame).toMatch(/Parallel slots\s+●○ 1\/2 running/);
+      // Only AFK work waits for a slot: T3, a HITL task Ready for you, isn't queued for one.
+      expect(frame).toMatch(/Parallel slots\s+●○ 1\/2 running · 0 queued/);
       expect(frame).toMatch(/Tokens \/ hour, 12h\s+▁▁▁▁▁▁▁▁▁▂▅█/);
       // The largest model's and group's bars full, the others scaled to them.
       expect(frame).toMatch(/claude-sonnet-5-5\s+3\.0k\s+300\s+2\.0M\s+50\.0k\s+\$1\.75\s+█{20}$/m);

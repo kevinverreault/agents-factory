@@ -381,11 +381,16 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   );
 
   const toTabs = () => setView({ kind: 'tabs' });
-  // The keys the screen on show takes, and those of the selection's only when they apply.
+  // The keys the screen on show takes, and those of the selection's only when
+  // they apply. While a sheet holds the keys, its own hint says what they do.
   const footer = (): Hint[] => {
+    if (view.kind !== 'tabs' || pickerCursor !== null || cancelSheet || command !== null) return [];
     if (help) return [['?', 'or esc closes']];
     if (condensed) return [['tab', 'focus'], ['f', 'zoom'], ['g', 'group'], [':', 'command'], ['v', 'screens'], ['?', 'keys']];
-    if (drilled) return [['enter', 'open conversation'], ['c', 'converse or take over'], ['a', 'answer'], ['x', 'cancel'], ['esc', 'back'], ['?', 'keys']];
+    if (drilled) {
+      const answers = queue.some((item) => item.taskId === drilled.id && answerable(item, drilled));
+      return [['enter', 'open conversation'], ['c', 'converse or take over'], ...(answers ? [['a', 'answer'] as Hint] : []), ['x', 'cancel'], ['esc', 'back'], ['?', 'keys']];
+    }
     if (tab === 'tasks') {
       return [
         ['enter', 'detail'],
@@ -394,6 +399,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         ['x', 'cancel'],
         ...(finishable(tasks[cursor]) ? [['F', 'finish after this ticket'] as Hint] : []),
         ...(failedTask(state, tasks[cursor]) ? [['y', 'retry'] as Hint] : []),
+        ['g', 'group'],
         ['n', 'quick launch'],
         ['N', 'launch'],
         ['?', 'keys'],
@@ -526,7 +532,7 @@ function Header({ tab, needsYou }: { tab: Tab | null; needsYou: number }) {
   return h(
     Box,
     { gap: 1 },
-    h(Text, { ...tone('accent'), bold: true }, 'agent-factory'),
+    h(Text, { ...tone('accent'), bold: true }, 'agents-factory'),
     ...(tab === null
       ? [h(Text, { key: 'condensed', ...tone('dim') }, ' Condensed '), h(Text, { key: 'needs-you', ...tone(needsYou > 0 ? 'warn' : 'dim') }, ` Needs you (${needsYou}) `)]
       : TABS.map((key, i) => label(key, `${i + 1} ${TAB_NAMES[key]}${key === 'needs-you' ? ` (${needsYou})` : ''}`))),
@@ -678,7 +684,8 @@ function TaskRow({ task, selected, layout }: { task: TaskView; selected: boolean
     h(Cursor, { on: selected }),
     cell(layout.glyph, h(Text, tone(look.role), `${indent}${look.glyph}`)),
     cell(layout.id, quiet(task.id)),
-    cell(layout.title, title),
+    // On a terminal too narrow for the other columns, the title gives way first.
+    h(Box, { width: layout.title, flexShrink: 1 }, title),
     cell(MODE_WIDTH, quiet(task.autonomy ? `${task.mode} ${task.autonomy}` : task.mode)),
     cell(STATE_WIDTH, state),
     layout.extras ? cell(layout.extras, quiet(extrasOf(task))) : null,

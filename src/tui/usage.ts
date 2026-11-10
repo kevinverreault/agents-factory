@@ -36,21 +36,19 @@ export function UsageTab({ state }: { state: FactoryState }) {
   const gauges = h(Gauges, { state });
   if (Object.keys(views.models).length === 0) return h(Box, { flexDirection: 'column' }, gauges, h(Box, { marginTop: 1 }, h(Text, tone('dim'), 'No usage yet.')));
   const roots = Object.entries(views.trees).filter(([id]) => !state.tasks[id]?.parent);
-  const largest = (usages: ModelUsage[]) => Math.max(1, ...usages.map((usage) => tokensOf(overall(usage))));
-  const share = (usage: ModelUsage, of: number) => tokensOf(overall(usage)) / of;
   const section = (title: string, rows: [string, string | null, ModelUsage][], barred = false) => {
-    const of = largest(rows.map(([, , usage]) => usage));
+    const of = barred ? mostTokens(rows.map(([, , usage]) => overall(usage))) : 1;
     return rows.length === 0
       ? null
       : h(
           Box,
           { key: title, flexDirection: 'column', marginTop: 1 },
           h(Heading, { text: title }),
-          ...rows.map(([key, label, usage]) => h(UsageRow, { key, name: key, label, usage: overall(usage), bar: barred ? share(usage, of) : null })),
+          ...rows.map(([key, label, usage]) => h(UsageRow, { key, name: key, label, usage: overall(usage), bar: barred ? tokensOf(overall(usage)) / of : null })),
         );
   };
   const models = Object.entries(views.models);
-  const ofModels = Math.max(1, ...models.map(([, usage]) => tokensOf(usage)));
+  const ofModels = mostTokens(models.map(([, usage]) => usage));
   return h(
     Box,
     { flexDirection: 'column' },
@@ -65,13 +63,19 @@ export function UsageTab({ state }: { state: FactoryState }) {
   );
 }
 
+// The most tokens any of the usages has, to bar the others against: at least one.
+function mostTokens(usages: Usage[]): number {
+  return Math.max(1, ...usages.map(tokensOf));
+}
+
 // The usage windows spent, lit by how full they are, with when the 5-hour
 // one resets; the slots taken and the tasks queued for one; and the last
 // 12 hours' tokens.
 function Gauges({ state }: { state: FactoryState }) {
   const { window, weekly, tokensPerHour } = state.usage;
   const { active, cap } = state.slots;
-  const queued = Object.values(state.tasks).filter((task) => task.state === 'queued').length;
+  // Only AFK work waits for a slot: a queued HITL task waits for the operator.
+  const queued = Object.values(state.tasks).filter((task) => task.state === 'queued' && task.mode === 'AFK').length;
   const row = (label: string, ...value: ReactNode[]) =>
     h(Box, { key: label }, h(Box, { width: GAUGE_LABEL_WIDTH, flexShrink: 0 }, h(Text, null, label)), h(Text, { wrap: 'truncate' }, ...value));
   const spent = (share: number) => h(Text, tone(spentRole(share)), `${bar(share, GAUGE_CELLS)} ${percent(share)}`);
@@ -81,7 +85,7 @@ function Gauges({ state }: { state: FactoryState }) {
     window ? row('5-hour window', spent(window.spent), h(Text, tone('dim'), ` · resets ${clockTime(window.resetsAt)}`)) : row('5-hour window', h(Text, tone('dim'), 'unknown')),
     weekly ? row('Weekly window', spent(weekly.spent)) : row('Weekly window', h(Text, tone('dim'), 'unknown')),
     row('Parallel slots', h(Text, tone('ok'), slots(active, cap)), ` ${active}/${cap} running · ${queued} queued`),
-    row('Tokens / hour, 12h', h(Text, tone('accent'), sparkline(tokensPerHour)), h(Text, tone('dim'), ` ${tokens(tokensPerHour.at(-1) ?? 0)}/h now`)),
+    row(`Tokens / hour, ${tokensPerHour.length}h`, h(Text, tone('accent'), sparkline(tokensPerHour)), h(Text, tone('dim'), ` ${tokens(tokensPerHour.at(-1) ?? 0)}/h now`)),
   );
 }
 
@@ -169,7 +173,8 @@ export function UsageStrip({ state }: { state: FactoryState }) {
   const { active, cap } = state.slots;
   const label = (text: string) => h(Text, tone('dim'), text);
   const spent = (share: number, cells: number) => h(Text, tone(spentRole(share)), `${bar(share, cells)} ${percent(share)}`);
-  // Each part with what goes before it: `│` between the parts, `·` between the models.
+  // Each part with what goes before it: `│` between the parts, `·` between
+  // the models. On a line it wraps, the divider ends the line it breaks.
   const parts: [string | null, ReactNode[]][] = [
     [null, window ? [label('window '), spent(window.spent, 14), label(` ${GLYPH.resets}`), clockTime(window.resetsAt)] : [label('window '), 'unknown']],
     [GLYPH.divider, weekly ? [label('week '), spent(weekly.spent, 6)] : [label('week '), 'unknown']],
@@ -180,7 +185,10 @@ export function UsageStrip({ state }: { state: FactoryState }) {
   return h(
     Box,
     { flexWrap: 'wrap', flexShrink: 0 },
-    ...parts.map(([before, part], i) => h(Text, { key: i }, before ? label(` ${before} `) : null, ...part)),
+    ...parts.map(([, part], i) => {
+      const after = parts[i + 1]?.[0];
+      return h(Text, { key: i }, ...part, after ? label(` ${after} `) : null);
+    }),
   );
 }
 

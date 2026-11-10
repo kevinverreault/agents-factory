@@ -165,7 +165,8 @@ export function Heading({ text, role = 'dim' }: { text: string; role?: Role }) {
 }
 
 // Key hints: each key bold, what it does dim, `·` between them. They
-// wrap onto a second line on a narrow terminal, a hint whole on each.
+// wrap onto a second line on a narrow terminal, a hint whole on each, the
+// `·` ending the line it breaks rather than starting the next.
 export type Hint = [key: string, does: string];
 export function Keys({ keys }: { keys: Hint[] }) {
   return h(
@@ -175,9 +176,9 @@ export function Keys({ keys }: { keys: Hint[] }) {
       h(
         Text,
         { key: i },
-        i === 0 ? null : h(Text, tone('dim'), ' · '),
         key ? h(Text, { ...tone('fg'), bold: true }, key) : null,
         does ? h(Text, tone('dim'), key ? ` ${does}` : does) : null,
+        i === keys.length - 1 ? null : h(Text, tone('dim'), ' · '),
       ),
     ),
   );

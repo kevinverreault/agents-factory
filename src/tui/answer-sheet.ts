@@ -202,10 +202,9 @@ function keyOf(item: AttentionQueueItem): string {
 // What the operator is asked for: the attention request, or else the task's
 // own label (Ready for you, In review).
 export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined): string {
-  if (item.kind === 'attention' && item.attention === 'recovery-report') return item.reason ?? '';
-  if (item.kind === 'attention') return item.reason ? `${item.attention}: ${item.reason}` : item.attention;
-  if (item.kind === 'ready' && task?.loop?.cleared) return `${task.label}: the map has cleared`;
-  return task?.label ?? '';
+  if (item.kind !== 'attention') return askedFor(item, task);
+  if (item.attention === 'recovery-report') return item.reason ?? '';
+  return item.reason ? `${item.attention}: ${item.reason}` : item.attention;
 }
 
 // What an item asks of the operator, without its kind, which its row and
