@@ -23,31 +23,65 @@ const TITLE_WIDTH = 40;
 const TOKENS_WIDTH = 16;
 const COST_WIDTH = 10;
 
-// Each model's tokens by kind and API-equivalent cost, then each task tree
-// (by its root), group, stage and Ralph loop ticket that used anything.
+const GAUGE_LABEL_WIDTH = 22;
+const GAUGE_CELLS = 40;
+const TOKEN_BAR_CELLS = 20;
+
+// The Usage tab: gauges of the usage windows, the slots and the last hours'
+// tokens; then each model's tokens by kind and API-equivalent cost, then
+// each task tree (by its root), group, stage and Ralph loop ticket that used
+// anything. Each model's and group's tokens are barred against the largest.
 export function UsageTab({ state }: { state: FactoryState }) {
   const views = usageViews(state);
-  if (Object.keys(views.models).length === 0) return h(Text, { dimColor: true }, 'No usage yet.');
+  const gauges = h(Gauges, { state });
+  if (Object.keys(views.models).length === 0) return h(Box, { flexDirection: 'column' }, gauges, h(Box, { marginTop: 1 }, h(Text, tone('dim'), 'No usage yet.')));
   const roots = Object.entries(views.trees).filter(([id]) => !state.tasks[id]?.parent);
-  const section = (title: string, rows: [string, string | null, ModelUsage][]) =>
-    rows.length === 0
+  const largest = (usages: ModelUsage[]) => Math.max(1, ...usages.map((usage) => tokensOf(overall(usage))));
+  const share = (usage: ModelUsage, of: number) => tokensOf(overall(usage)) / of;
+  const section = (title: string, rows: [string, string | null, ModelUsage][], barred = false) => {
+    const of = largest(rows.map(([, , usage]) => usage));
+    return rows.length === 0
       ? null
       : h(
           Box,
           { key: title, flexDirection: 'column', marginTop: 1 },
-          h(Text, { bold: true }, title),
-          ...rows.map(([key, label, usage]) => h(UsageRow, { key, name: key, label, usage: overall(usage) })),
+          h(Heading, { text: title }),
+          ...rows.map(([key, label, usage]) => h(UsageRow, { key, name: key, label, usage: overall(usage), bar: barred ? share(usage, of) : null })),
         );
+  };
+  const models = Object.entries(views.models);
+  const ofModels = Math.max(1, ...models.map(([, usage]) => tokensOf(usage)));
   return h(
     Box,
     { flexDirection: 'column' },
-    h(KindsRow, { key: 'head', name: 'Model', cells: ['input', 'output', 'cache read', 'cache write', 'cost'], bold: true }),
-    ...Object.entries(views.models).map(([model, usage]) => h(KindsRow, { key: model, name: model, cells: kinds(usage) })),
+    gauges,
+    h(Box, { marginTop: 1 }, h(KindsRow, { name: 'Model', cells: ['input', 'output', 'cache read', 'cache write', 'cost'], bold: true })),
+    ...models.map(([model, usage]) => h(KindsRow, { key: model, name: model, cells: kinds(usage), bar: tokensOf(usage) / ofModels })),
     h(KindsRow, { key: 'total', name: 'Total', cells: kinds(overall(views.models)), bold: true }),
     section('Task trees', roots.map(([id, usage]) => [id, state.tasks[id]?.title ?? '', usage])),
-    section('Groups', Object.entries(views.groups).map(([group, usage]) => [group, null, usage])),
+    section('Groups', Object.entries(views.groups).map(([group, usage]) => [group, null, usage]), true),
     section('Stages', Object.entries(views.stages).map(([stage, usage]) => [stage, null, usage])),
     section('Tickets', Object.entries(views.tickets).map(([ticket, usage]) => [ticket, null, usage])),
+  );
+}
+
+// The usage windows spent, lit by how full they are, with when the 5-hour
+// one resets; the slots taken and the tasks queued for one; and the last
+// 12 hours' tokens.
+function Gauges({ state }: { state: FactoryState }) {
+  const { window, weekly, tokensPerHour } = state.usage;
+  const { active, cap } = state.slots;
+  const queued = Object.values(state.tasks).filter((task) => task.state === 'queued').length;
+  const row = (label: string, ...value: ReactNode[]) =>
+    h(Box, { key: label }, h(Box, { width: GAUGE_LABEL_WIDTH, flexShrink: 0 }, h(Text, null, label)), h(Text, { wrap: 'truncate' }, ...value));
+  const spent = (share: number) => h(Text, tone(spentRole(share)), `${bar(share, GAUGE_CELLS)} ${percent(share)}`);
+  return h(
+    Box,
+    { flexDirection: 'column', flexShrink: 0 },
+    window ? row('5-hour window', spent(window.spent), h(Text, tone('dim'), ` · resets ${clockTime(window.resetsAt)}`)) : row('5-hour window', h(Text, tone('dim'), 'unknown')),
+    weekly ? row('Weekly window', spent(weekly.spent)) : row('Weekly window', h(Text, tone('dim'), 'unknown')),
+    row('Parallel slots', h(Text, tone('ok'), slots(active, cap)), ` ${active}/${cap} running · ${queued} queued`),
+    row('Tokens / hour, 12h', h(Text, tone('accent'), sparkline(tokensPerHour)), h(Text, tone('dim'), ` ${tokens(tokensPerHour.at(-1) ?? 0)}/h now`)),
   );
 }
 
@@ -55,16 +89,23 @@ function kinds(usage: Usage): string[] {
   return [tokens(usage.input), tokens(usage.output), tokens(usage.cacheRead), tokens(usage.cacheWrite), dollars(usage.cost)];
 }
 
-function KindsRow({ name, cells, bold = false }: { name: string; cells: string[]; bold?: boolean }) {
+// `bar` is the row's share of the largest's tokens, if it is barred.
+function TokenBar({ share }: { share: number | null | undefined }) {
+  if (share === null || share === undefined) return null;
+  return h(Box, { marginLeft: 2, flexShrink: 0 }, h(Text, tone('accent'), bar(share, TOKEN_BAR_CELLS)));
+}
+
+function KindsRow({ name, cells, bold = false, bar: share }: { name: string; cells: string[]; bold?: boolean; bar?: number }) {
   return h(
     Box,
     null,
     h(Box, { width: LABEL_WIDTH + 2, flexShrink: 0 }, h(Text, { bold, wrap: 'truncate' }, name)),
     ...cells.map((cell, i) => h(Box, { key: i, width: KIND_WIDTH, justifyContent: 'flex-end' }, h(Text, { bold }, cell))),
+    h(TokenBar, { share }),
   );
 }
 
-function UsageRow({ name, label, usage }: { name: string; label: string | null; usage: Usage }) {
+function UsageRow({ name, label, usage, bar: share }: { name: string; label: string | null; usage: Usage; bar: number | null }) {
   return h(
     Box,
     { gap: 1 },
@@ -73,6 +114,7 @@ function UsageRow({ name, label, usage }: { name: string; label: string | null; 
     label === null ? null : h(Box, { width: TITLE_WIDTH }, h(Text, { wrap: 'truncate' }, label)),
     h(Box, { width: TOKENS_WIDTH, justifyContent: 'flex-end' }, h(Text, null, `${tokens(tokensOf(usage))} tokens`)),
     h(Box, { width: COST_WIDTH, justifyContent: 'flex-end' }, h(Text, null, dollars(usage.cost))),
+    h(TokenBar, { share }),
   );
 }
 

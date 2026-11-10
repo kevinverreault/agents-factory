@@ -198,7 +198,7 @@ describe('the bare TUI', () => {
 
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/T2\s+Implement the store\s+failure: The agent hit max turns\./);
+      expect(frame).toMatch(/failure\s+T2\s+Implement the store\s+The agent hit max turns\./);
       expect(frame).toMatch(/T1\s+Settle the glossary\s+Ready for you/);
       expect(frame).not.toContain('Write the spec');
     });
@@ -566,7 +566,7 @@ describe('repositories', () => {
     app.stdin.write('2');
     await settle();
 
-    await eventually(() => expect(app.lastFrame()).toMatch(/acme\/widgets\s+repo-missing: The clone of acme\/widgets is no longer at/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/repo missing\s+acme\/widgets\s+The clone of acme\/widgets is no longer at/));
   });
 
   test('the Factory recovered report shows in Needs you under that name, and 1 on its sheet dismisses it', async () => {
@@ -586,10 +586,12 @@ describe('repositories', () => {
     };
     const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running')], [report]), { connection });
 
+    // Wide enough for its reason on its row.
+    widen(app, 140);
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› Factory recovered The factory restarted after it stopped uncleanly. Requeued T1 (R1).'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› recovered Factory recovered The factory restarted after it stopped uncleanly. Requeued T1 (R1).'));
     await press(app, '\r');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('── Factory recovered ── The factory restarted after it stopped uncleanly. Requeued T1 (R1). 1 Dismiss'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('RECOVERED The factory restarted after it stopped uncleanly. Requeued T1 (R1). [1] Dismiss'));
     await press(app, '1');
 
     await eventually(() => expect(connection.sent).toContainEqual({ type: 'dismiss', requestId: 'A3' }));
@@ -1034,7 +1036,7 @@ describe('launching and conversing', () => {
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: asking } }, { connection });
     await press(app, '\r', '\r');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/IdP[\s\S]*Which identity provider times out\?[\s\S]*1\s+Okta\s+The workforce SSO[\s\S]*2\s+Auth0\s+The customer login/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/IdP[\s\S]*Which identity provider times out\?[\s\S]*\[1\]\s+Okta\s+The workforce SSO[\s\S]*\[2\]\s+Auth0\s+The customer login/));
 
     app.stdin.write('1');
     await settle();
@@ -1042,7 +1044,7 @@ describe('launching and conversing', () => {
     app.stdin.write('1');
     app.stdin.write('3');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/1\s+\[x\] Safari[\s\S]*2\s+\[ \] Firefox[\s\S]*3\s+\[x\] Chrome/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/\[1\]\s+\[x\] Safari[\s\S]*\[2\]\s+\[ \] Firefox[\s\S]*\[3\]\s+\[x\] Chrome/));
     expect(connection.sent).toEqual([]);
     app.stdin.write('\r');
     await settle();
@@ -1091,7 +1093,7 @@ describe('launching and conversing', () => {
 
     await eventually(() => expect(connection.sent.at(-1)).toMatchObject({ type: 'answerQuestion', answers: { 'Which identity provider times out?': 'Auth0' } }));
     await eventually(() => expect(app.lastFrame()).toContain('That question is no longer open.'));
-    await eventually(() => expect(app.lastFrame()).toMatch(/1\s+Okta\s+The workforce SSO/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/\[1\]\s+Okta\s+The workforce SSO/));
   });
 
   test('the conversation view shows the session id, to resume in the operator’s own terminal', async () => {
@@ -1127,7 +1129,7 @@ describe('launching and conversing', () => {
     await settle();
     app.stdin.write('\x1b[B');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T1\s+Grill me about the login flow\./));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+your turn\s+T1\s+Grill me about the login flow\./));
     app.stdin.write('\r');
     await settle();
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
@@ -1140,7 +1142,7 @@ describe('launching and conversing', () => {
 
     app.stdin.write('\x02');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T2\s+Implement the store\s+failure/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+failure\s+T2\s+Implement the store/));
     connection.servePatch([
       { op: 'set', path: ['tasks', 'T1'], value: readyForYou },
       { op: 'set', path: ['attentionQueue'], value: [ready, failure] },
@@ -1150,8 +1152,8 @@ describe('launching and conversing', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toContain('2 Needs you (2)');
-      expect(frame).toMatch(/›\s+T1\s+Grill me about the login flow\.\s+Ready for you/);
-      expect(frame).toMatch(/ \s+T2\s+Implement the store\s+failure/);
+      expect(frame).toMatch(/›\s+your turn\s+T1\s+Grill me about the login flow\.\s+Ready for you/);
+      expect(frame).toMatch(/^ \s+failure\s+T2\s+Implement the store/m);
     });
   });
 
@@ -1167,7 +1169,7 @@ describe('launching and conversing', () => {
     app.stdin.write('\x1b[B');
     app.stdin.write('\x1b[B');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+T3\s+Settle the glossary/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+your turn\s+T3\s+Settle the glossary/));
     app.stdin.write('\r');
     await settle();
 
@@ -1527,8 +1529,11 @@ describe('answering from Needs you', () => {
     await press(app, '2');
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toMatch(/› T2 Implement the store failure: The agent hit max turns\./);
-      expect(frame).toContain('T2 Implement the store ── failure: The agent hit max turns. 1 Retry 2 Take over 3 Cancel a answer');
+      // Each row: its kind, its task and what it waits for.
+      expect(frame).toMatch(/› failure T2 Implement the store The agent hit max turns\. question T1 Fix the login bug Which identity provider times out\?/);
+      // A rule says which item the sheet under it answers.
+      expect(frame).toMatch(/── 1\/2 ── T2 Implement the store ─+/);
+      expect(frame).toContain('FAILURE The agent hit max turns. [1] Retry [2] Take over [3] Cancel a answer');
     });
 
     await press(app, 'a', '1');
@@ -1537,8 +1542,9 @@ describe('answering from Needs you', () => {
 
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toMatch(/› T1 Fix the login bug question: Which identity provider times out\?/);
-      expect(frame).toMatch(/IdP Which identity provider times out\? 1 Okta The workforce SSO 2 Auth0 The customer login/);
+      expect(frame).toMatch(/› question T1 Fix the login bug Which identity provider times out\?/);
+      expect(frame).toMatch(/── 1\/1 ── T1 Fix the login bug/);
+      expect(frame).toMatch(/IdP Which identity provider times out\? \[1\] Okta The workforce SSO \[2\] Auth0 The customer login/);
       expect(frame).toContain('digits answer · esc back');
     });
     await press(app, '2');
@@ -1573,7 +1579,7 @@ describe('answering from Needs you', () => {
     const { app } = await started(factoryState([looping], [failure]), { connection });
     await press(app, '2');
     await eventually(() =>
-      expect(unwrapped(app.lastFrame()!)).toContain('failure: The agent hit max turns. 1 Retry 2 Skip acme/widgets#11 3 Take over 4 Cancel a answer'),
+      expect(unwrapped(app.lastFrame()!)).toContain('FAILURE The agent hit max turns. [1] Retry [2] Skip acme/widgets#11 [3] Take over [4] Cancel a answer'),
     );
 
     await press(app, 'a', '2');
@@ -1592,7 +1598,7 @@ describe('answering from Needs you', () => {
     await press(app, '2');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        '1 Retry 2 Allow both hosts for this task and retry 3 Allow pypi.org for this task and retry 4 Allow files.pythonhosted.org for this task and retry 5 Take over 6 Cancel a answer',
+        '[1] Retry [2] Allow both hosts for this task and retry [3] Allow pypi.org for this task and retry [4] Allow files.pythonhosted.org for this task and retry [5] Take over [6] Cancel a answer',
       ),
     );
 
@@ -1610,7 +1616,7 @@ describe('answering from Needs you', () => {
     const { app } = await started(factoryState([takenOver], [failure]));
     await press(app, '2');
 
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('failure: The agent hit max turns. 1 Retry 2 Cancel a answer'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('FAILURE The agent hit max turns. [1] Retry [2] Cancel a answer'));
   });
 
   test('a stalled loop can be retried once its blockers move, taken over or cancelled', async () => {
@@ -1619,7 +1625,7 @@ describe('answering from Needs you', () => {
     const blocked = { ...failure, attention: 'stage-blocked' as const, reason: 'implement’s loop stalled: every open ticket is blocked (acme/widgets#12 by acme/widgets#11).' };
     const { app } = await started(factoryState([stalled], [blocked]), { connection });
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('acme/widgets#11). 1 Retry 2 Take over 3 Cancel a answer'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('acme/widgets#11). [1] Retry [2] Take over [3] Cancel a answer'));
 
     await press(app, 'a', '1');
 
@@ -1632,7 +1638,7 @@ describe('answering from Needs you', () => {
     const unreopened = { ...failure, attention: 'github-write' as const, reason: 'The factory couldn’t reopen acme/widgets#11 on GitHub as its App.' };
     const { app } = await started(factoryState([cancelled], [unreopened]), { connection });
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('as its App. 1 Try again a answer'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('as its App. [1] Try again a answer'));
 
     await press(app, 'a', '1');
 
@@ -1645,7 +1651,7 @@ describe('answering from Needs you', () => {
     const closed = { ...failure, attention: 'pr-closed-unmerged' as const, reason: 'PR #101 of T2 was closed without merging. Cancel the task, or reopen the PR.' };
     const { app } = await started(factoryState([inReview], [closed]), { connection });
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('reopen the PR. 1 Cancel task 2 Reopen PR a answer'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('reopen the PR. [1] Cancel task [2] Reopen PR a answer'));
 
     await press(app, 'a', '2');
 
@@ -1723,7 +1729,7 @@ describe('answering from Needs you', () => {
     await press(app, '2');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        '── T2 Implement the store ── permission: Bash: npm publish 1 Allow once 2 Allow for this task: Bash(npm publish *) 3 Allow always: Bash(npm publish *) 4 Deny with a note a answer',
+        'PERMISSION Bash: npm publish [1] Allow once [2] Allow for this task: Bash(npm publish *) [3] Allow always: Bash(npm publish *) [4] Deny with a note a answer',
       ),
     );
 
@@ -1758,7 +1764,7 @@ describe('answering from Needs you', () => {
     };
     const { app } = await started(factoryState([failing], [chained]), { connection });
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('2 Allow for this task: Bash(npm install *), Bash(sed -i *)'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[2] Allow for this task: Bash(npm install *), Bash(sed -i *)'));
 
     await press(app, 'a', '2');
     await eventually(() =>
@@ -1810,7 +1816,7 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
 
     await press(app, ESC);
-    await eventually(() => expect(app.lastFrame()).toContain('4 Deny with a note'));
+    await eventually(() => expect(app.lastFrame()).toContain('[4] Deny with a note'));
     // The digits still answer: esc left only the note.
     await press(app, '4');
     await eventually(() => expect(app.lastFrame()).toContain('Note for the agent:'));
@@ -1834,7 +1840,7 @@ describe('answering from Needs you', () => {
     await press(app, '2');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        '── T3 Add a logout button ── In review 1 Request changes 2 Mark done 3 Cancel 4 Push & open draft PR a answer',
+        'REVIEW In review [1] Request changes [2] Mark done [3] Cancel [4] Push & open draft PR a answer',
       ),
     );
 
@@ -1855,21 +1861,21 @@ describe('answering from Needs you', () => {
     const opened = { ...reviewing, pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: true } };
     const withPr = await started(factoryState([opened], [review]));
     await press(withPr.app, '2');
-    await eventually(() => expect(unwrapped(withPr.app.lastFrame()!)).toContain('3 Cancel 4 Push to draft PR #101 a answer'));
+    await eventually(() => expect(unwrapped(withPr.app.lastFrame()!)).toContain('[3] Cancel [4] Push to draft PR #101 a answer'));
 
     // Where GitHub offers no draft PRs, the factory opened a regular one.
     const regular = await started(factoryState([{ ...opened, pr: { ...opened.pr, draft: false } }], [review]));
     await press(regular.app, '2');
-    await eventually(() => expect(unwrapped(regular.app.lastFrame()!)).toContain('3 Cancel 4 Push to PR #101 a answer'));
+    await eventually(() => expect(unwrapped(regular.app.lastFrame()!)).toContain('[3] Cancel [4] Push to PR #101 a answer'));
 
     const underWay = await started(factoryState([{ ...reviewing, publishing: { step: 'push' as const, problem: null } }], [review]));
     await press(underWay.app, '2');
-    await eventually(() => expect(unwrapped(underWay.app.lastFrame()!)).toContain('3 Cancel a answer'));
+    await eventually(() => expect(unwrapped(underWay.app.lastFrame()!)).toContain('[3] Cancel a answer'));
 
     // Pushed since its last run started, its PR has all its work.
     const pushed = await started(factoryState([{ ...opened, pushed: true }], [review]));
     await press(pushed.app, '2');
-    await eventually(() => expect(unwrapped(pushed.app.lastFrame()!)).toContain('3 Cancel a answer'));
+    await eventually(() => expect(unwrapped(pushed.app.lastFrame()!)).toContain('[3] Cancel a answer'));
   });
 
   test('a root still in review once its choice went through takes the digits again: a later push, or Mark done', async () => {
@@ -1880,7 +1886,7 @@ describe('answering from Needs you', () => {
 
     const opened = { ...reviewing, pr: { number: 101, url: 'https://github.com/acme/widgets/pull/101', draft: true } };
     connection.serveSnapshot(factoryState([opened], [review]));
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('4 Push to draft PR #101'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[4] Push to draft PR #101'));
     await press(app, '4');
     await eventually(() => expect(connection.sent).toHaveLength(2));
     await press(app, '2');
@@ -1941,7 +1947,7 @@ describe('answering from Needs you', () => {
     const { app } = await started(factoryState([], [missing]), { connection });
     await press(app, '2', 'a', '1');
 
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('── acme/widgets ── repo-missing: The clone of acme/widgets is no longer at /clones/widgets. Put the clone back'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('REPO MISSING The clone of acme/widgets is no longer at /clones/widgets. Put the clone back'));
     expect(connection.sent).toEqual([]);
   });
 });
@@ -2001,7 +2007,7 @@ describe('answering in the conversation', () => {
     const app = await opened(permission, connection);
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain('permission: Bash: gh issue view 12 1 Allow once 2 Allow for this task: Bash(gh issue view 12) 3 Allow always: Bash(gh issue view 12) 4 Deny with a note');
+      expect(frame).toContain('PERMISSION Bash: gh issue view 12 [1] Allow once [2] Allow for this task: Bash(gh issue view 12) [3] Allow always: Bash(gh issue view 12) [4] Deny with a note');
       expect(frame).toContain('digits answer · c take over · ctrl+b back');
       expect(frame).not.toContain('esc back');
     });
@@ -2061,7 +2067,7 @@ describe('answering in the conversation', () => {
     await settle();
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain(`permission: Bash: ${command} 1 Allow once 2 Allow for this task: Bash(for f *), Bash(do sed *), Bash(done *) 3`);
+      expect(frame).toContain(`PERMISSION Bash: ${command} [1] Allow once [2] Allow for this task: Bash(for f *), Bash(do sed *), Bash(done *) [3]`);
       expect(frame).toContain('digits answer · c take over · ctrl+b back');
       expect(frame).toContain('Step 29.');
       expect(frame).not.toContain('Step 0.');
@@ -2083,10 +2089,10 @@ describe('answering in the conversation', () => {
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain("2 Allow for this task: Bash(cat > /tmp/edit.py <<'EOF' ↵ print(0) ↵");
-      expect(frame).toContain('print(40) ↵ EOF) 3 Allow always');
+      expect(frame).toContain("[2] Allow for this task: Bash(cat > /tmp/edit.py <<'EOF' ↵ print(0) ↵");
+      expect(frame).toContain('print(40) ↵ EOF) [3] Allow always');
       expect(frame).not.toContain('print(20)');
-      expect(frame).toContain('4 Deny with a note');
+      expect(frame).toContain('[4] Deny with a note');
       expect(frame).toContain('digits answer · c take over · ctrl+b back');
     });
 
@@ -2116,7 +2122,7 @@ describe('answering in the conversation', () => {
       ],
     };
     const app = await opened({ ...permission, attention: 'question', reason: 'Which endpoint?', question, permission: null }, connection);
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/API Which endpoint\? 1 v1 The old one 2 v2 The new one/));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/API Which endpoint\? \[1\] v1 The old one \[2\] v2 The new one/));
 
     await press(app, '2');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which endpoint?': 'v2' } }));
@@ -2138,7 +2144,7 @@ describe('answering in the conversation', () => {
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain('permission: Bash: npm test 1 Allow once 2 Allow for this task: Bash(npm test *) 3 Allow always: Bash(npm test *) 4 Deny with a note');
+      expect(frame).toContain('PERMISSION Bash: npm test [1] Allow once [2] Allow for this task: Bash(npm test *) [3] Allow always: Bash(npm test *) [4] Deny with a note');
       expect(frame).toContain('The agent is waiting on you.');
       expect(frame).toContain('digits answer · ctrl+b back');
       expect(frame).not.toContain('›');
@@ -2347,6 +2353,28 @@ describe('usage', () => {
     // A task, group or stage that spent nothing has no row.
     expect(app.lastFrame()).not.toMatch(/docs\s+/);
     expect(app.lastFrame()).not.toMatch(/grill\s+/);
+  });
+
+  test('the Usage tab opens on gauges of the usage windows, the slots and the last hours’ tokens, and bars each model’s and group’s tokens', async () => {
+    const resetsAt = Date.UTC(2026, 9, 29, 14, 30);
+    const { app } = await started({
+      ...metering(),
+      slots: { active: 1, cap: 2 },
+      usage: { window: { spent: 0.5, resetsAt }, weekly: { spent: 0.25, resetsAt: Date.UTC(2026, 10, 2, 9) }, tokensPerHour: [0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 400, 800] },
+    });
+
+    await press(app, '4');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(new RegExp(`5-hour window\\s+${'█'.repeat(20)}${'░'.repeat(20)} 50% · resets 14:30`));
+      expect(frame).toMatch(new RegExp(`Weekly window\\s+${'█'.repeat(10)}${'░'.repeat(30)} 25%`));
+      expect(frame).toMatch(/Parallel slots\s+●○ 1\/2 running/);
+      expect(frame).toMatch(/Tokens \/ hour, 12h\s+▁▁▁▁▁▁▁▁▁▂▅█/);
+      // The largest model's and group's bars full, the others scaled to them.
+      expect(frame).toMatch(/claude-sonnet-5-5\s+3\.0k\s+300\s+2\.0M\s+50\.0k\s+\$1\.75\s+█{20}$/m);
+      expect(frame).toMatch(/claude-haiku-5-5\s+300\s+30\s+0\s+0\s+\$0\.13\s+░{20}$/m);
+      expect(frame).toMatch(/login\s+2\.1M tokens\s+\$1\.88\s+█{20}$/m);
+    });
   });
 
   describe('the usage strip', () => {
@@ -2735,12 +2763,12 @@ describe('the screens view', () => {
     const { app, connection } = await started(factoryState([{ ...grilling, state: 'waiting', label: 'Needs you' }, failing], [failure('T1', 'A1'), failure('T2', 'A2')]));
 
     await press(app, '\x1b[B', 'a');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› T2 Implement the store failure/));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› failure T2 Implement the store/));
     await press(app, '1');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
 
     await press(app, '\x1b', '1', '\x1b[A', '\r', 'a');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› T1 Grill me about the docs failure/));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› failure T1 Grill me about the docs/));
     await press(app, '1');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1' }));
   });
@@ -2817,7 +2845,7 @@ describe('the wayfinder work loop', () => {
     const { app } = await started(factoryState([picking], ready), { connection });
     await press(app, '2');
     await eventually(() =>
-      expect(unwrapped(app.lastFrame()!)).toContain('T1 Overhaul billing ── Ready for you 1 acme/widgets#31 Which payment provider? 2 acme/widgets#33 Invoice layout a answer'),
+      expect(unwrapped(app.lastFrame()!)).toContain('YOUR TURN Ready for you [1] acme/widgets#31 Which payment provider? [2] acme/widgets#33 Invoice layout a answer'),
     );
 
     await press(app, 'a', '2');
@@ -2840,7 +2868,7 @@ describe('the wayfinder work loop', () => {
     const { app } = await started(factoryState([cleared], ready), { connection });
     await press(app, '2');
     await eventually(() =>
-      expect(unwrapped(app.lastFrame()!)).toContain('Ready for you: the map has cleared 1 Continue to spec 2 Jump to tickets 3 End: put T1 in review a answer'),
+      expect(unwrapped(app.lastFrame()!)).toContain('Ready for you: the map has cleared [1] Continue to spec [2] Jump to tickets [3] End: put T1 in review a answer'),
     );
 
     await press(app, 'a', '3');
@@ -2895,7 +2923,7 @@ describe('a stalled work loop', () => {
     };
     const { app } = await started(factoryState([stalled], [blocked]), { connection });
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('acme/widgets#39). 1 Read the map again 2 Cancel a answer'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('acme/widgets#39). [1] Read the map again [2] Cancel a answer'));
 
     await press(app, 'a', '1');
 
@@ -2912,7 +2940,7 @@ describe('a stalled work loop', () => {
     const { app } = await started(factoryState([blockedNext], [blocked]), { connection });
     await press(app, '2');
 
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('has no map. 1 Dismiss a answer'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('has no map. [1] Dismiss a answer'));
   });
 });
 
@@ -3006,7 +3034,7 @@ describe('quick launch', () => {
 
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/Quick launch T1[\s\S]*Same fields as the table\?[\s\S]*1\s+Yes\s+One schema/);
+      expect(frame).toMatch(/Quick launch T1[\s\S]*Same fields as the table\?[\s\S]*\[1\]\s+Yes\s+One schema/);
       expect(frame).toContain('ctrl+e full conversation');
       // The card, not the full conversation view.
       expect(frame).not.toContain('claude --resume');

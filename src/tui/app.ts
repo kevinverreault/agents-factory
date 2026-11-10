@@ -24,7 +24,7 @@ import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
-import { AnswerSheet, answerable, titleOf, useAnswering, waitingFor } from './answer-sheet.ts';
+import { AnswerSheet, answerable, askedFor, titleOf, useAnswering } from './answer-sheet.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { CommandLine, runCommand, type Jump } from './command-line.ts';
 import { Condensed, groupCounts, PANES, Sidebar, type Pane } from './condensed.ts';
@@ -39,7 +39,7 @@ import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useColumns, useRows } from './screen.ts';
 import { TaskDetail } from './task-detail.ts';
 import { edit } from './text-input.ts';
-import { Cursor, filled, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
+import { Cursor, filled, kindLook, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
 import { UsageStrip, UsageTab } from './usage.ts';
 
 // The screens, in the order of the number keys that switch to them.
@@ -485,7 +485,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
               : fixed(h(UsageTab, { state })),
     ),
     fixed(
-      state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
+      state && item
+        ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm, position: { at: cursor + 1, of: queue.length } })
+        : null,
       closed ? h(Text, { ...tone('bad') }, 'The daemon connection closed.') : null,
       command === null ? null : h(CommandLine, { draft: command }),
       h(Rule, { key: 'strip-rule' }),
@@ -536,33 +538,6 @@ function Header({ tab, needsYou }: { tab: Tab | null; needsYou: number }) {
 function Breadcrumb({ screen, task, group }: { screen: string; task: TaskView | undefined; group: string | null }) {
   const rest = task ? ` › ${task.id} ${task.title}` : group !== null ? ` · group: ${group}` : '';
   return h(Text, { wrap: 'truncate' }, h(Text, tone('fg'), screen), h(Text, tone('dim'), rest));
-}
-
-// A compact row, as the condensed view's tree has, gives its title whatever
-// room is left rather than a fixed column.
-function Row({
-  id,
-  title,
-  detail,
-  selected = false,
-  dim = false,
-  compact = false,
-}: {
-  id: string;
-  title: string;
-  detail: string;
-  selected?: boolean;
-  dim?: boolean;
-  compact?: boolean;
-}) {
-  return h(
-    Box,
-    { gap: 1 },
-    h(Box, { flexShrink: 0 }, h(Text, { color: 'cyan' }, selected ? '›' : ' ')),
-    h(Box, { flexShrink: 0 }, h(Text, { bold: true, dimColor: dim }, id.padEnd(4))),
-    h(Box, compact ? { flexGrow: 1, flexShrink: 1, flexBasis: 0 } : { width: 40 }, h(Text, { wrap: 'truncate', dimColor: dim }, title)),
-    compact ? h(Box, { flexShrink: 0 }, h(Text, { dimColor: dim }, detail)) : h(Text, { dimColor: dim }, detail),
-  );
 }
 
 // The task tree, Done and Cancelled tasks dimmed, and the selected task's
@@ -744,16 +719,30 @@ function loopDetail({ loop }: TaskView): string {
   return `on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
 }
 
+// The widest kind (`repo missing`) and the title's width on a Needs you row.
+const KIND_WIDTH = 12;
+const ITEM_TITLE_WIDTH = 30;
+
+// Needs you, an item a row: its kind lit in its colour, its task's id and
+// bright title, and what it asks, dim.
 function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }) {
-  if (state.attentionQueue.length === 0) return h(Text, { dimColor: true }, 'Nothing needs you.');
+  if (state.attentionQueue.length === 0) return h(Text, tone('dim'), 'Nothing needs you.');
+  const id = Math.max(2, ...state.attentionQueue.map(({ taskId }) => (taskId ?? '').length));
   return h(CursorWindow, {
     cursor,
     items: state.attentionQueue.map((item, i) => {
       const key = item.kind === 'attention' ? item.requestId : `${item.kind}-${item.taskId}`;
-      const { taskId } = item;
-      const task = taskId === null ? undefined : state.tasks[taskId];
-      const title = titleOf(item, task);
-      return h(Row, { key, id: taskId ?? '', title, detail: waitingFor(item, task), selected: i === cursor });
+      const task = item.taskId === null ? undefined : state.tasks[item.taskId];
+      const look = kindLook(item);
+      return h(
+        Box,
+        { key, gap: 1 },
+        h(Cursor, { on: i === cursor }),
+        h(Box, { width: KIND_WIDTH, flexShrink: 0 }, h(Text, { ...tone(look.role), wrap: 'truncate' }, look.kind)),
+        h(Box, { width: id, flexShrink: 0 }, h(Text, tone('dim'), item.taskId ?? '')),
+        h(Box, { width: ITEM_TITLE_WIDTH, flexShrink: 0 }, h(Text, { ...tone('fg'), bold: i === cursor, wrap: 'truncate' }, titleOf(item, task))),
+        h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, h(Text, { ...tone('dim'), wrap: 'truncate' }, askedFor(item, task))),
+      );
     }),
   });
 }
