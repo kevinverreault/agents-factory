@@ -24,6 +24,7 @@ const KEYS: [string, string][] = [
   ['ctrl+h', 'hand a HITL task off'],
   ['ctrl+e', 'expand a quick launch into its full conversation'],
   ['ctrl+b', 'leave a conversation, back to where you were'],
+  ['pgup pgdn', 'page back through a conversation taller than the screen, and down to its latest'],
   ['?', 'this help'],
 ];
 
@@ -32,7 +33,7 @@ export function Help() {
     Box,
     { flexDirection: 'column' },
     h(Text, { bold: true }, 'Keys'),
-    ...KEYS.map(([key, does]) => h(Box, { key, gap: 2 }, h(Box, { width: 8, flexShrink: 0 }, h(Text, { bold: true }, key)), h(Text, null, does))),
+    ...KEYS.map(([key, does]) => h(Box, { key, gap: 2 }, h(Box, { width: 10, flexShrink: 0 }, h(Text, { bold: true }, key)), h(Text, null, does))),
     h(Text, { dimColor: true }, '? or esc closes'),
   );
 }

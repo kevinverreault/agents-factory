@@ -17,7 +17,7 @@ import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
-import { useRows } from './screen.ts';
+import { usePager, useRows } from './screen.ts';
 import { edit } from './text-input.ts';
 import { TaskUsage, UsageStrip } from './usage.ts';
 
@@ -46,6 +46,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const height = useRows();
+  const pager = usePager();
 
   useEffect(() => {
     if (!runId) return;
@@ -78,9 +79,15 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     task?.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state) && answers.form === null && answers.confirm === null;
   const takeOver = () => void connection.send({ type: 'takeOver', taskId }).then(tell);
 
+  // Paging through the conversation, whatever else takes the keys: a sheet over it too.
+  useInput((_, key) => {
+    if (key.pageUp) pager.up();
+    if (key.pageDown) pager.down();
+  });
   useInput((input, key) => {
     const typed = typing.current;
     if (key.ctrl && input === 'b') return onLeave();
+    if (key.pageUp || key.pageDown) return;
     if (canTakeOver && input === 'c') return takeOver();
     if (answering) return answers.key(input, key);
     if (!takesChat) return;
@@ -145,7 +152,8 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
             ? 'enter reopens and sends'
             : 'enter send';
   const chat = takesChat && !answering;
-  const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''}${chat ? ' · /handoff hand off' : ''} · ctrl+b back`;
+  const scrollHint = pager.overflows ? ` · pgup/pgdn scroll${pager.scrolledBack ? ' (newer below)' : ''}` : '';
+  const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''}${chat ? ' · /handoff hand off' : ''} · ctrl+b back${scrollHint}`;
 
   return h(
     Box,
@@ -165,10 +173,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     h(
       Box,
       { flexGrow: 1, marginY: 1, gap: 2 },
-      // The latest events stay in view; older ones scroll off the top.
-      h(
-        Box,
-        { flexDirection: 'column', flexGrow: 1, justifyContent: 'flex-end', overflow: 'hidden' },
+      // The latest events stay in view, older ones scrolling off the top,
+      // until pgup pages back to them.
+      pager.view(
         ...events.map((event) => h(Event, { key: event.id, event })),
         ...(run?.queued ?? []).map((text, i) =>
           h(Box, { key: `queued-${i}`, gap: 1, flexShrink: 0 }, h(Box, { width: 6, flexShrink: 0 }, h(Text, { dimColor: true }, 'queued')), h(Text, { dimColor: true }, text)),
