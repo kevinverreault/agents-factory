@@ -49,6 +49,5 @@ export function RunsList({ state, runs, cursor }: { state: FactoryState; runs: R
         ),
       ),
     }),
-    fixed(h(Text, { dimColor: true }, 'enter its task’s detail · c converse or take over · x cancel its task · ? keys')),
   );
 }

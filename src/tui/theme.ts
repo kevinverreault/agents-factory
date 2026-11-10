@@ -1,0 +1,174 @@
+// The TUI's look: the operator's design system as colour roles, the
+// 16-colour table for terminals without truecolour, the glyphs each task
+// state shows, and the pieces every screen is drawn with (rules, headings,
+// key hints, sheets). No screen sets a colour or a glyph of its own.
+//
+// The TUI is for dark terminals: it colours text and never paints the
+// terminal's background. Truecolour terminals (Windows Terminal among them)
+// get the hex, others the 16-colour name, and under NO_COLOR, or off a TTY,
+// it is monochrome: glyphs, › and bold still tell rows apart.
+import { createElement as h, type ReactNode } from 'react';
+import { Box, Text } from 'ink';
+import chalk from 'chalk';
+
+export type Role = 'fg' | 'dim' | 'accent' | 'ok' | 'warn' | 'bad' | 'review' | 'line';
+type Ansi = 'white' | 'gray' | 'greenBright' | 'green' | 'yellow' | 'red' | 'magenta' | 'black';
+type Colour = { hex: string; ansi: Ansi; source: string };
+
+// The design system (kevinverreault/design-system, src/styles/global.css),
+// its dark theme, copied: it isn't a package.
+export const ROLES: Record<Role, Colour> = {
+  fg: { hex: '#ffffff', ansi: 'white', source: '--color-on-background: 0 0% 100%' },
+  // TUI-only: the design system has no muted text. A neutral between its surface and white.
+  dim: { hex: '#999999', ansi: 'gray', source: 'TUI-only: hsl(160 0% 60%)' },
+  accent: { hex: '#9fce7e', ansi: 'greenBright', source: '--color-accent (sauge): 95 45% 65%' },
+  ok: { hex: '#53c67d', ansi: 'green', source: '--color-success: 142 50% 55%' },
+  warn: { hex: '#fab338', ansi: 'yellow', source: '--color-warning: 38 95% 60%' },
+  bad: { hex: '#f07575', ansi: 'red', source: '--color-error-text: 0 80% 70%' },
+  // TUI-only: terracotta (--color-secondary, 13 50% 45%) lifted for dark, as the design system lifts sauge.
+  review: { hex: '#d28c79', ansi: 'magenta', source: 'TUI-only: hsl(13 50% 65%)' },
+  line: { hex: '#333333', ansi: 'gray', source: '--color-surface: 160 0% 20%' },
+};
+
+// What text on an accent fill (the active tab) is in.
+export const ON_ACCENT: Colour = { hex: '#1a1a1a', ansi: 'black', source: '--color-background: 160 0% 10%' };
+
+// Whether, and how richly, the terminal takes colour: NO_COLOR turns it
+// off, which chalk's own detection doesn't heed.
+function level(): number {
+  return process.env.NO_COLOR ? 0 : chalk.level;
+}
+
+function colour({ hex, ansi }: Colour): string | undefined {
+  const at = level();
+  return at === 0 ? undefined : at === 3 ? hex : ansi;
+}
+
+// A Text's props for a role. Without colour, dim text is dimmed instead.
+export function tone(role: Role): { color?: string; dimColor?: boolean } {
+  const color = colour(ROLES[role]);
+  if (color) return { color };
+  return role === 'dim' || role === 'line' ? { dimColor: true } : {};
+}
+
+// A Box's border props for a role.
+export function border(role: Role): { borderColor?: string; borderDimColor?: boolean } {
+  const color = colour(ROLES[role]);
+  if (color) return { borderColor: color };
+  return role === 'dim' || role === 'line' ? { borderDimColor: true } : {};
+}
+
+// The active tab: filled with the accent, or reversed without colour.
+export function filled(): { color?: string; backgroundColor?: string; inverse?: boolean } {
+  const fill = colour(ROLES.accent);
+  return fill ? { color: colour(ON_ACCENT), backgroundColor: fill } : { inverse: true };
+}
+
+// How a task's shown state (its label) looks: a glyph and the role its
+// glyph and state text are in.
+export type Look = { glyph: string; role: Role; strike: boolean };
+const LOOKS: Record<string, [string, Role]> = {
+  Running: ['●', 'ok'],
+  'Needs you': ['!', 'warn'],
+  'In review': ['◎', 'review'],
+  'Ready for you': ['◆', 'accent'],
+  'In conversation': ['◇', 'accent'],
+  Queued: ['⋯', 'dim'],
+  // A HITL task queued until the factory read its map.
+  'Reading the map': ['⋯', 'dim'],
+  // A run held until the usage window reopens.
+  'Waiting for window': ['⋯', 'warn'],
+  'Waiting on children': ['⧗', 'dim'],
+  Done: ['✓', 'dim'],
+  Cancelled: ['✕', 'dim'],
+  Draft: ['○', 'dim'],
+};
+
+export function stateLook(label: string): Look {
+  const [glyph, role] = LOOKS[label] ?? ['·', 'fg'];
+  return { glyph, role, strike: label === 'Cancelled' };
+}
+
+// The glyphs the screens share.
+export const GLYPH = {
+  selected: '›',
+  current: '✓',
+  live: '●',
+  slotTaken: '●',
+  slotFree: '○',
+  resets: '↻',
+  divider: '│',
+  rule: '─',
+  barFull: '█',
+  barEmpty: '░',
+  agent: '◆',
+  operator: '›',
+  system: '·',
+  conversation: '◇',
+  failed: '✗',
+} as const;
+
+// A share (0 to 1) as a bar of `cells`.
+export function bar(share: number, cells: number): string {
+  const full = Math.round(Math.min(Math.max(share, 0), 1) * cells);
+  return GLYPH.barFull.repeat(full) + GLYPH.barEmpty.repeat(cells - full);
+}
+
+// How full a usage window is: ok below 65%, warn from 65%, bad from 85%.
+export function spentRole(share: number): Role {
+  return share >= 0.85 ? 'bad' : share >= 0.65 ? 'warn' : 'ok';
+}
+
+// The cursor's column: › on the selected row, a space on the others.
+export function Cursor({ on }: { on: boolean }) {
+  return h(Box, { flexShrink: 0 }, h(Text, tone('accent'), on ? GLYPH.selected : ' '));
+}
+
+// A full-width rule, or one led by a label in the label's role.
+export function Rule({ role = 'line', label }: { role?: Role; label?: string }) {
+  const line = h(Box, { flexGrow: 1, borderStyle: 'single', borderTop: true, borderBottom: false, borderLeft: false, borderRight: false, ...border(role) });
+  if (label === undefined) return h(Box, { flexShrink: 0 }, line);
+  return h(Box, { flexShrink: 0, gap: 1 }, h(Box, { flexShrink: 1 }, h(Text, { ...tone(role), wrap: 'truncate' }, `${GLYPH.rule.repeat(2)} ${label}`)), line);
+}
+
+// A section heading: dim and uppercase, or accent on a focused pane.
+export function Heading({ children, role = 'dim' }: { children: string; role?: Role }) {
+  return h(Text, { ...tone(role), wrap: 'truncate' }, children.toUpperCase());
+}
+
+// Key hints: each key bold, what it does dim, `·` between them. They
+// wrap onto a second line on a narrow terminal, a hint whole on each.
+export type Hint = [key: string, does: string];
+export function Keys({ keys }: { keys: Hint[] }) {
+  return h(
+    Box,
+    { flexWrap: 'wrap', flexShrink: 0 },
+    ...keys.map(([key, does], i) =>
+      h(
+        Text,
+        { key: i },
+        i === 0 ? null : h(Text, tone('dim'), ' · '),
+        h(Text, { ...tone('fg'), bold: true }, key),
+        does ? h(Text, tone('dim'), ` ${does}`) : null,
+      ),
+    ),
+  );
+}
+
+// The one style of every sheet, card, picker and prompt: a rounded border
+// in the accent, or the kind's role when it is about a request; an
+// uppercase title; and a dim key hint at the bottom.
+export function Sheet({ title, role = 'accent', hint, children }: { title: string; role?: Role; hint?: ReactNode; children?: ReactNode }) {
+  return h(
+    Box,
+    { flexDirection: 'column', borderStyle: 'round', ...border(role), paddingX: 1, flexShrink: 0 },
+    h(Text, { ...tone(role), bold: true, wrap: 'truncate' }, title.toUpperCase()),
+    children,
+    typeof hint === 'string' ? h(Text, tone('dim'), hint) : (hint ?? null),
+  );
+}
+
+// An option on a sheet: its digit in brackets, in the accent.
+export function Option({ digit, children }: { digit: number | string; children?: ReactNode }) {
+  return h(Box, { gap: 1 }, h(Text, { ...tone('accent'), bold: true }, `[${digit}]`), h(Box, { flexShrink: 1 }, typeof children === 'string' ? h(Text, null, children) : children));
+}

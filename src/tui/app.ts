@@ -39,6 +39,7 @@ import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useRows } from './screen.ts';
 import { TaskDetail } from './task-detail.ts';
 import { edit } from './text-input.ts';
+import { filled, Keys, Rule, tone, type Hint } from './theme.ts';
 import { UsageStrip, UsageTab } from './usage.ts';
 
 // The screens, in the order of the number keys that switch to them.
@@ -380,6 +381,28 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   );
 
   const toTabs = () => setView({ kind: 'tabs' });
+  // The keys the screen on show takes, and those of the selection's only when they apply.
+  const footer = (): Hint[] => {
+    if (help) return [['?', 'or esc closes']];
+    if (condensed) return [['tab', 'focus'], ['f', 'zoom'], ['g', 'group'], [':', 'command'], ['v', 'screens'], ['?', 'keys']];
+    if (drilled) return [['enter', 'open conversation'], ['c', 'converse or take over'], ['a', 'answer'], ['x', 'cancel'], ['esc', 'back'], ['?', 'keys']];
+    if (tab === 'tasks') {
+      return [
+        ['enter', 'detail'],
+        ['c', 'converse or take over'],
+        ['t', 're-tier'],
+        ['x', 'cancel'],
+        ...(finishable(tasks[cursor]) ? [['F', 'finish after this ticket'] as Hint] : []),
+        ...(failedTask(state, tasks[cursor]) ? [['y', 'retry'] as Hint] : []),
+        ['n', 'quick launch'],
+        ['N', 'launch'],
+        ['?', 'keys'],
+      ];
+    }
+    if (tab === 'needs-you') return [['↑↓', 'move'], ['a', 'answer'], ['c', 'converse or take over'], ['x', 'cancel'], ['?', 'keys']];
+    if (tab === 'runs') return [['enter', 'its task’s detail'], ['c', 'converse or take over'], ['x', 'cancel its task'], ['?', 'keys']];
+    return [['1–4', 'screens'], ['?', 'keys']];
+  };
   if (state && view.kind === 'conversation') {
     return h(Conversation, { connection, state, taskId: view.taskId, onLeave: toTabs });
   }
@@ -390,9 +413,10 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     // On a full screen only the screen's pane gives way: squeezed, wrapped
     // text would draw its lines over the next ones.
     fixed(
-      condensed
-        ? h(Text, { key: 'condensed', dimColor: true }, 'Condensed · tab focus · f zoom · g group · : command · v screens · ? keys')
-        : h(Tabs, { tab, needsYou: state?.attentionQueue.length ?? 0 }),
+      h(Header, { key: 'header', tab: condensed ? null : tab, needsYou: state?.attentionQueue.length ?? 0 }),
+      h(Rule, { key: 'header-rule' }),
+      h(Breadcrumb, { key: 'crumb', screen: condensed ? 'Condensed' : TAB_NAMES[tab], task: condensed ? undefined : drilled, group: tab === 'tasks' || condensed ? (group ?? 'all') : null }),
+      h(Rule, { key: 'crumb-rule' }),
       unregistered
         ? h(Text, { key: 'register' }, `${unregistered.repo} is not registered. `, h(Text, { bold: true }, 'r'), ' Register this repo')
         : null,
@@ -408,8 +432,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
               ' re-check',
             )
         : null,
-      group === null ? null : h(Text, { key: 'group' }, 'Group ', h(Text, { bold: true }, group), h(Text, { dimColor: true }, ' · g picks another')),
-      refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
+      refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
       pickerCursor === null ? null : h(GroupPicker, { key: 'picker', groups, cursor: pickerCursor, current: group }),
       cancelSheet
         ? h(ChoosePrompt, { key: 'cancel', reason: `Cancel ${cancelSheet.taskId}: ${cancelSheet.reason}`, options: cancelSheet.options.map(({ label }) => label) })
@@ -448,12 +471,12 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
               zoom,
               sidebar: h(Sidebar, { state, cursor: at(cursors['needs-you'], queue.map(rowOf)), focused: focus === 'sidebar', groups, group }),
               tree: h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
-              detail: followed ? h(TaskDetail, { connection, state, task: followed, from: null }) : h(Text, { dimColor: true }, 'Nothing selected.'),
+              detail: followed ? h(TaskDetail, { connection, state, task: followed }) : h(Text, { dimColor: true }, 'Nothing selected.'),
             })
         : drilled
-          ? h(TaskDetail, { connection, state, task: drilled, from: TAB_NAMES[tab] })
+          ? h(TaskDetail, { connection, state, task: drilled })
         : tab === 'tasks'
-          ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor, retries: failedTask(state, tasks[cursor]) })
+          ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor })
           : tab === 'needs-you'
             ? h(NeedsYouList, { state, cursor })
             : tab === 'runs'
@@ -462,9 +485,12 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     ),
     fixed(
       state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
-      closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
+      closed ? h(Text, { ...tone('bad') }, 'The daemon connection closed.') : null,
       command === null ? null : h(CommandLine, { draft: command }),
+      h(Rule, { key: 'strip-rule' }),
       state ? h(UsageStrip, { state }) : null,
+      h(Rule, { key: 'footer-rule' }),
+      h(Keys, { keys: footer() }),
     ),
   );
 }
@@ -488,14 +514,27 @@ function withoutSetup(
   return { repo: found.id, reason: found.skills.reason, settingUp, offered: !settingUp && !found.skills.failed };
 }
 
-function Tabs({ tab, needsYou }: { tab: Tab; needsYou: number }) {
+// The factory's name, then the screens' tabs, the one on show filled, and
+// Needs you lit while anything needs the operator. In the condensed view,
+// which has no tabs, its name and Needs you's count.
+function Header({ tab, needsYou }: { tab: Tab | null; needsYou: number }) {
   const label = (key: Tab, text: string) =>
-    h(Text, { key, bold: tab === key, inverse: tab === key }, ` ${text} `);
+    h(Text, { key, ...(tab === key ? { ...filled(), bold: true } : tone(key === 'needs-you' && needsYou > 0 ? 'warn' : 'dim')) }, ` ${text} `);
   return h(
     Box,
-    { gap: 1, marginBottom: 1 },
-    ...TABS.map((key, i) => label(key, `${i + 1} ${TAB_NAMES[key]}${key === 'needs-you' ? ` (${needsYou})` : ''}`)),
+    { gap: 1 },
+    h(Text, { ...tone('accent'), bold: true }, 'agent-factory'),
+    ...(tab === null
+      ? [h(Text, { key: 'condensed', ...tone('dim') }, ' Condensed '), h(Text, { key: 'needs-you', ...tone(needsYou > 0 ? 'warn' : 'dim') }, ` Needs you (${needsYou}) `)]
+      : TABS.map((key, i) => label(key, `${i + 1} ${TAB_NAMES[key]}${key === 'needs-you' ? ` (${needsYou})` : ''}`))),
   );
+}
+
+// Where the operator is: the screen, then the task drilled into, or the
+// group the task tree is filtered by.
+function Breadcrumb({ screen, task, group }: { screen: string; task: TaskView | undefined; group: string | null }) {
+  const rest = task ? ` › ${task.id} ${task.title}` : group !== null ? ` · group: ${group}` : '';
+  return h(Text, { wrap: 'truncate' }, h(Text, tone('fg'), screen), h(Text, tone('dim'), rest));
 }
 
 // A compact row, as the condensed view's tree has, gives its title whatever
@@ -534,7 +573,6 @@ function TaskList({
   tasks,
   hidden,
   cursor,
-  retries = false,
   focused = true,
   compact = false,
 }: {
@@ -543,7 +581,6 @@ function TaskList({
   tasks: TaskView[];
   hidden: number | null;
   cursor: number;
-  retries?: boolean;
   // Whether the cursor shows: in the condensed view, only while the tree has the focus.
   focused?: boolean;
   // In the condensed view: the rows narrow, without the keys or the output,
@@ -568,12 +605,9 @@ function TaskList({
       hidden === null ? null : fixed(h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`)),
     ]);
   }
-  const finishes = finishable(tasks[cursor]) ? ' · F finish after this ticket' : '';
-  const retry = retries ? ' · y retry' : '';
   return column([
     h(CursorWindow, { key: 'tree', cursor, items: rows }),
     fixed(
-      h(Text, { key: 'keys', dimColor: true }, `enter detail · c converse or take over · t re-tier · x cancel${finishes}${retry} · n quick launch · N launch · ? keys`),
       hidden === null ? null : h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`),
       h(Output, { key: 'output', connection, state, taskId: tasks[cursor]!.id, lines: OUTPUT_PANE_LINES }),
     ),

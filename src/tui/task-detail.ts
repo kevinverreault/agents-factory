@@ -11,9 +11,7 @@ import { runOutcome, runsOf } from './runs.ts';
 import { fixed } from './screen.ts';
 import { dollars, tokens, TaskUsage } from './usage.ts';
 
-// `from` names the screen `esc` pops back to; the condensed view's detail
-// pane has none.
-export function TaskDetail({ connection, state, task, from }: { connection: FactoryConnection; state: FactoryState; task: TaskView; from: string | null }) {
+export function TaskDetail({ connection, state, task }: { connection: FactoryConnection; state: FactoryState; task: TaskView }) {
   const runs = runsOf(state, task.id);
   const facts = [
     task.autonomy ? `${task.mode} ${task.autonomy}` : task.mode,
@@ -29,8 +27,7 @@ export function TaskDetail({ connection, state, task, from }: { connection: Fact
     { flexDirection: 'column' },
     // On a short screen only the output gives way.
     fixed(
-      from === null ? null : h(Text, { dimColor: true, wrap: 'truncate' }, `${from} › ${task.id} ${task.title}`),
-      h(Box, { gap: 2, marginTop: from === null ? 0 : 1 }, h(Text, { bold: true }, task.id), h(Text, { wrap: 'truncate' }, task.title)),
+      h(Box, { gap: 2 }, h(Text, { bold: true }, task.id), h(Text, { wrap: 'truncate' }, task.title)),
       h(Text, { dimColor: true, wrap: 'truncate' }, facts.filter(Boolean).join(' · ')),
       task.progress ? h(Text, { wrap: 'truncate' }, task.progress) : null,
       h(
@@ -44,7 +41,6 @@ export function TaskDetail({ connection, state, task, from }: { connection: Fact
       h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id) }),
     ),
     h(Output, { connection, state, taskId: task.id }),
-    fixed(h(Text, { dimColor: true }, 'enter open conversation · c converse or take over · a answer · x cancel · esc back · ? keys')),
   );
 }
 

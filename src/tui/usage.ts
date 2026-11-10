@@ -1,9 +1,10 @@
 // What runs used, as the TUI shows it (ADR 0008): the Usage tab, and a
 // task's usage in its detail. Both are queries over the factory state's runs.
-import { createElement as h } from 'react';
+import { createElement as h, type ReactNode } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { overall, tokensOf, usageViews, type ModelUsage, type Usage } from '../usage/usage.ts';
+import { bar, GLYPH, spentRole, tone } from './theme.ts';
 
 export function tokens(count: number): string {
   if (count < 1_000) return String(count);
@@ -116,22 +117,33 @@ function clockTime(ms: number): string {
   return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ms);
 }
 
-// The always-on usage strip (ADR 0008): the usage window spent and when it
-// resets, the weekly window spent (each unknown without a snapshot to
-// trust), slot occupancy, the last hours' tokens with this hour's, and every
-// model's tokens. Its parts wrap onto a second line on a narrow terminal.
+// The always-on usage strip (ADR 0008): the usage window spent as a bar lit
+// by how full it is, and when it resets; the weekly window's bar (each
+// unknown without a snapshot to trust); slot occupancy; the last hours'
+// tokens with this hour's; and every model's tokens. Its parts wrap onto a
+// second line on a narrow terminal.
 export function UsageStrip({ state }: { state: FactoryState }) {
   const { window, weekly, tokensPerHour } = state.usage;
-  const parts = [
-    window ? `Window ${percent(window.spent)} · resets ${clockTime(window.resetsAt)}` : 'Window unknown',
-    weekly ? `Weekly ${percent(weekly.spent)}` : 'Weekly unknown',
-    `Slots ${state.slots.active}/${state.slots.cap}`,
-    `${sparkline(tokensPerHour)} ${tokens(tokensPerHour.at(-1) ?? 0)}/h`,
-    ...Object.entries(usageViews(state).models).map(([model, usage]) => `${model} ${tokens(tokensOf(usage))}`),
+  const { active, cap } = state.slots;
+  const label = (text: string) => h(Text, tone('dim'), text);
+  const spent = (share: number, cells: number) => h(Text, tone(spentRole(share)), `${bar(share, cells)} ${percent(share)}`);
+  // Each part with what goes before it: `│` between the parts, `·` between the models.
+  const parts: [string | null, ReactNode[]][] = [
+    [null, window ? [label('window '), spent(window.spent, 14), label(` ${GLYPH.resets}`), clockTime(window.resetsAt)] : [label('window '), 'unknown']],
+    [GLYPH.divider, weekly ? [label('week '), spent(weekly.spent, 6)] : [label('week '), 'unknown']],
+    [GLYPH.divider, [label('slots '), h(Text, tone('ok'), slots(active, cap)), ` ${active}/${cap}`]],
+    [GLYPH.divider, [h(Text, tone('accent'), sparkline(tokensPerHour)), ` ${tokens(tokensPerHour.at(-1) ?? 0)}/h`]],
+    ...Object.entries(usageViews(state).models).map(([model, usage], i): [string, ReactNode[]] => [i === 0 ? GLYPH.divider : '·', [label(`${model} `), tokens(tokensOf(usage))]]),
   ];
   return h(
     Box,
     { flexWrap: 'wrap', flexShrink: 0 },
-    ...parts.map((part, i) => h(Text, { key: i, dimColor: true }, i === 0 ? part : ` · ${part}`)),
+    ...parts.map(([before, part], i) => h(Text, { key: i }, before ? label(` ${before} `) : null, ...part)),
   );
+}
+
+// Slots taken, then free, a glyph each: past the cap, those over it as a count.
+function slots(active: number, cap: number): string {
+  const over = active - cap;
+  return GLYPH.slotTaken.repeat(Math.min(active, cap)) + GLYPH.slotFree.repeat(Math.max(cap - active, 0)) + (over > 0 ? ` +${over}` : '');
 }

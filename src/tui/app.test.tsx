@@ -46,6 +46,56 @@ async function started(state?: FactoryState, { cwd, connection = new FakeConnect
   return { connection, app };
 }
 
+describe('the frame', () => {
+  const lines = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.split('\n');
+
+  test('the header names the factory and its tabs, and the breadcrumb says where you are', async () => {
+    const { app } = await started(
+      factoryState([{ ...task('T1', 'Settle the glossary', 'queued', 'Ready for you', 'HITL'), groups: ['docs'] }, task('T2', 'Implement the store', 'running', 'Running')]),
+    );
+
+    await eventually(() => {
+      expect(lines(app)[0]).toMatch(/^agent-factory\s+1 Tasks\s+2 Needs you \(0\)\s+3 Runs\s+4 Usage/);
+      expect(app.lastFrame()).toContain('Tasks · group: all');
+    });
+
+    await press(app, '\x1b[B', '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T2 Implement the store'));
+
+    await press(app, '\x1b', ':', ...'group docs', '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks · group: docs'));
+  });
+
+  test('rules divide the header, breadcrumb, body, strip and footer, and the screen’s keys are its last line, under the strip', async () => {
+    const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running')]));
+
+    await eventually(() => {
+      const frame = lines(app);
+      expect(frame.filter((line) => /^─{20,}$/.test(line.trim()))).toHaveLength(4);
+      expect(frame.at(-1)).toMatch(/^enter detail · c converse or take over .*· \? keys/);
+      expect(frame.at(-3)).toMatch(/^window unknown/);
+    });
+
+    await press(app, '3');
+    await eventually(() => expect(lines(app).at(-1)).toMatch(/^enter its task’s detail/));
+  });
+
+  // Skipped until every screen takes its colours from the theme (#137).
+  test.skip('under NO_COLOR nothing is coloured', async () => {
+    const level = chalk.level;
+    chalk.level = 3;
+    vi.stubEnv('NO_COLOR', '1');
+    onTestFinished(() => {
+      chalk.level = level;
+      vi.unstubAllEnvs();
+    });
+    const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running'), task('T2', 'Settle the glossary', 'done', 'Done')]));
+
+    await eventually(() => expect(app.lastFrame()).toContain('Implement the store'));
+    expect(app.lastFrame()).not.toMatch(/\x1b\[(?:3[0-9]|4[0-9]|9[0-7]|10[0-7])(?:;[\d;]*)?m/);
+  });
+});
+
 describe('the bare TUI', () => {
   test('the Tasks tab lists every task with its label', async () => {
     const { app } = await started(
@@ -2248,7 +2298,7 @@ describe('usage', () => {
     });
     // The frame with its lines run together: the strip's parts wrap on a narrow terminal.
     const oneLine = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.replace(/\s*\n\s*/g, ' ');
-    const strip = /Window 42% · resets 14:30 · Weekly 18% · Slots 1\/2 · ▁▁▁▁▁▁▁▁▁▂▅█ 800\/h · claude-sonnet-5-5 2\.1M · claude-haiku-5-5 330/;
+    const strip = /window ██████░░░░░░░░ 42% ↻14:30 │ week █░░░░░ 18% │ slots ●○ 1\/2 │ ▁▁▁▁▁▁▁▁▁▂▅█ 800\/h │ claude-sonnet-5-5 2\.1M · claude-haiku-5-5 330/;
 
     test('shows the usage window and its reset, the weekly window, slots, a tokens/hour sparkline and tokens by model, on every screen', async () => {
       const { app } = await started(reading(metering()));
@@ -2275,13 +2325,13 @@ describe('usage', () => {
       await press(app, '\r', '\r');
 
       await eventually(() => expect(app.lastFrame()).toContain('Grill me about billing'));
-      expect(oneLine(app)).toMatch(/Window 42% · resets 14:30 · Weekly 18% · Slots 1\/2/);
+      expect(oneLine(app)).toMatch(/window ██████░░░░░░░░ 42% ↻14:30 │ week █░░░░░ 18% │ slots ●○ 1\/2/);
     });
 
     test('a usage window with no snapshot to trust shows as unknown', async () => {
       const { app } = await started({ ...factoryState([grilling]), usage: { window: null, weekly: null, tokensPerHour: Array(12).fill(0) } });
 
-      await eventually(() => expect(app.lastFrame()).toContain('Window unknown · Weekly unknown · Slots 0/2 · ▁▁▁▁▁▁▁▁▁▁▁▁ 0/h'));
+      await eventually(() => expect(app.lastFrame()).toContain('window unknown │ week unknown │ slots ○○ 0/2 │ ▁▁▁▁▁▁▁▁▁▁▁▁ 0/h'));
     });
 
     test('a run waiting out a usage limit shows waiting for window on the Runs screen', async () => {
@@ -2503,8 +2553,8 @@ describe('the screens view', () => {
   test('on a short terminal a task’s detail keeps its latest messages in view, older ones scrolling off over the runs', async () => {
     const runs = { R3: ran('R3', 'T2', 2, { status: 'active', outcome: null }) };
     const { app, connection } = await started({ ...factoryState([implementing]), runs });
-    // A row for the usage strip under the rest.
-    resize(app, 21);
+    // Rows for the frame around the detail.
+    resize(app, 26);
     await press(app, '\r');
     await eventually(() => expect(app.lastFrame()).toContain('Tasks › T2'));
     connection.serveConversation(
@@ -2514,7 +2564,7 @@ describe('the screens view', () => {
 
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame.split('\n')).toHaveLength(21);
+      expect(frame.split('\n')).toHaveLength(26);
       expect(frame).toContain('Tasks › T2');
       expect(frame).toContain('Step 29.');
       expect(frame).not.toContain('Step 0.');
@@ -3059,7 +3109,7 @@ describe('the condensed view', () => {
       const frame = app.lastFrame()!;
       expect(frame).not.toContain('Pick a group');
       expect(frame).toContain('1 Tasks');
-      expect(frame).toContain('Group billing');
+      expect(frame).toContain('group: billing');
       expect(frame).toContain('Grill me about invoices');
       expect(frame).toContain('Implement the store');
       expect(frame).not.toContain('Write the docs');
@@ -3081,7 +3131,7 @@ describe('the condensed view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toContain('Write the docs');
-      expect(frame).not.toContain('Group billing');
+      expect(frame).not.toContain('group: billing');
     });
   });
 
@@ -3119,7 +3169,7 @@ describe('the condensed view', () => {
     await press(app, '\r');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toContain('Group billing');
+      expect(frame).toContain('group: billing');
       expect(frame).not.toContain('Tasks ›');
       expect(frame).not.toContain('Write the docs');
     });
@@ -3128,7 +3178,7 @@ describe('the condensed view', () => {
     for (const key of 'group') await press(app, key);
     await press(app, '\r');
     await eventually(() => expect(app.lastFrame()).toContain('Write the docs'));
-    expect(app.lastFrame()).not.toContain('Group billing');
+    expect(app.lastFrame()).not.toContain('group: billing');
 
     // esc sets the line aside.
     await press(app, ':', 'q', '\x1b');
@@ -3179,7 +3229,7 @@ describe('the condensed view', () => {
     app.stdin.write('\r');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toContain('Group billing');
+      expect(frame).toContain('group: billing');
       expect(frame).toMatch(/›\s+T1\s+Grill me about invoices/);
       expect(frame).not.toContain('Write the docs');
     });
