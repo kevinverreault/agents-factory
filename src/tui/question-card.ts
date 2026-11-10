@@ -5,7 +5,7 @@
 import { createElement as h } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { Answers, Question } from '../lifecycle/lifecycle.ts';
-import { filled, Sheet, tone } from './theme.ts';
+import { Sheet, tone } from './theme.ts';
 
 export type Card = {
   // The question being answered.
@@ -56,7 +56,7 @@ export function QuestionCard({ question, card, ownWords = true, nested = false }
     h(
       Box,
       { key: 'asked', gap: 1 },
-      h(Text, { ...filled(), bold: true }, ` ${asked.header} `),
+      h(Text, { inverse: true, bold: true }, ` ${asked.header} `),
       h(Text, { ...tone('fg'), bold: true }, asked.question),
       count > 1 ? h(Text, tone('dim'), `(${card.index + 1}/${count})`) : null,
     ),

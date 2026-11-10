@@ -6,7 +6,7 @@ import { createElement as h, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
-import { Cursor, Sheet, tone } from './theme.ts';
+import { Cursor, GLYPH, Sheet, tone } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -84,7 +84,7 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
         h(Cursor, { on: i === sheet.cursor }),
         h(Box, { width: 16 }, h(Text, { ...tone(i < to ? 'dim' : 'fg'), bold: i === to }, stage.id)),
         h(Text, tone('dim'), [stage.model, stage.optional && 'optional', i < to && '· skipped'].filter(Boolean).join(' ')),
-        i === to ? h(Text, tone('ok'), '← advances here') : null,
+        i === to ? h(Text, tone('ok'), `${GLYPH.advances} advances here`) : null,
       ),
     ),
     then,

@@ -15,7 +15,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
 import { edit } from './text-input.ts';
-import { Cursor, Sheet, tone, type Role } from './theme.ts';
+import { choosable, Cursor, GLYPH, joined, Sheet, tone, type Role } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -127,7 +127,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
 
   const row = (field: Field, label: string, value: ReactNode, choice = true) => {
     const focused = draft.field === field;
-    const shown = typeof value === 'string' && focused ? (choice ? `‹ ${value} ›` : `${value}▏`) : value;
+    const shown = typeof value === 'string' && focused ? (choice ? choosable(value) : `${value}${GLYPH.caret}`) : value;
     return h(
       Box,
       { key: field, gap: 1 },
@@ -288,5 +288,5 @@ function words(text: string): string[] {
 }
 
 function describeStage({ id, mode, model }: StartStage): string {
-  return [id, mode, model].filter(Boolean).join(' · ');
+  return joined([id, mode, model].filter((part): part is string => Boolean(part)));
 }

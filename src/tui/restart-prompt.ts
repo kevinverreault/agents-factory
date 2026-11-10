@@ -48,7 +48,7 @@ export function RestartPrompt({ daemonVersion, restart, onAttached, onQuit }: Pr
   }
   return h(
     Sheet,
-    { title, role: 'warn', hint: 'q quit' },
+    { title, hint: 'q quit' },
     h(Text, null, skew),
     stage.problem ? h(Text, tone('warn'), stage.problem) : null,
     ...CHOICES.map(([when, label], i) => h(Option, { key: when, digit: i + 1 }, label)),

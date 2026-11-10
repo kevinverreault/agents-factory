@@ -6,12 +6,12 @@ import { Box, Text } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
 import { overall, tokensOf } from '../usage/usage.ts';
-import { answerable } from './answer-sheet.ts';
+import { answerable, askedFor } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { Output } from './output.ts';
 import { runOutcome, runsOf } from './runs.ts';
 import { fixed } from './screen.ts';
-import { Heading, kindLook, Sheet, stateLook, tone } from './theme.ts';
+import { GLYPH, Heading, joined, kindLook, Sheet, stateLook, tone } from './theme.ts';
 import { dollars, tokens, TaskUsage } from './usage.ts';
 
 export function TaskDetail({ connection, state, task }: { connection: FactoryConnection; state: FactoryState; task: TaskView }) {
@@ -20,8 +20,8 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
   const model = (task.liveRunId ? state.runs[task.liveRunId] : runs.at(-1))?.model;
   const parent = task.parent ? state.tasks[task.parent] : undefined;
   const child = task.parent ? `child of ${task.parent}${parent ? ` ${parent.title}` : ''}${task.child ? (task.child.awaited ? ' (awaited)' : ' (fire-and-forget)') : ''}` : null;
-  const before = [task.autonomy ? `${task.mode} ${task.autonomy}` : task.mode];
-  const after = [task.stage, model, task.tier, task.branch, task.groups.join(', '), child].filter(Boolean);
+  const before = [modeOf(task)];
+  const after = [task.stage, model, task.tier, task.branch, task.groups.join(', '), child].filter((part): part is string => Boolean(part));
   const request = state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === task.id);
   return h(
     Box,
@@ -32,13 +32,13 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
       h(
         Text,
         { ...tone('dim'), wrap: 'truncate' },
-        `${before.join(' · ')} · `,
+        `${joined(before)} ${GLYPH.between} `,
         h(Text, tone(stateLook(task.label).role), task.label),
-        after.length ? ` · ${after.join(' · ')}` : '',
+        after.length ? ` ${GLYPH.between} ${joined(after)}` : '',
       ),
       task.progress ? h(Text, { wrap: 'truncate' }, task.progress) : null,
       request?.kind === 'attention'
-        ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: answerable(request, task) ? 'a answer' : undefined }, h(Text, null, request.question?.questions[0]?.question ?? request.reason ?? ''))
+        ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: answerable(request, task) ? 'a answer' : undefined }, h(Text, null, askedFor(request, task)))
         : null,
       h(
         Box,
@@ -52,6 +52,11 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
     ),
     h(Output, { connection, state, taskId: task.id }),
   );
+}
+
+// A task's mode, with its autonomy when it has one: `AFK L2`, `HITL`.
+export function modeOf({ mode, autonomy }: Pick<TaskView, 'mode' | 'autonomy'>): string {
+  return autonomy ? `${mode} ${autonomy}` : mode;
 }
 
 // A run: bright while live, its outcome lit, and dim once it ended.

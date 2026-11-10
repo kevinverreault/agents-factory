@@ -10,6 +10,7 @@
 import { createElement as h, type ReactNode } from 'react';
 import { Box, Text } from 'ink';
 import chalk from 'chalk';
+import type { AttentionKind } from '../lifecycle/lifecycle.ts';
 
 export type Role = 'fg' | 'dim' | 'accent' | 'ok' | 'warn' | 'bad' | 'review' | 'line';
 type Ansi = 'white' | 'gray' | 'greenBright' | 'green' | 'yellow' | 'red' | 'magenta' | 'black';
@@ -65,7 +66,9 @@ export function filled(): { color?: string; backgroundColor?: string; inverse?: 
 }
 
 // How a task's shown state (its label) looks: a glyph and the role its
-// glyph and state text are in.
+// glyph and state text are in. Keyed by the labels the lifecycle's label()
+// gives, and the factory state's Waiting for window; the theme's tests
+// check every one of them has its look here.
 export type Look = { glyph: string; role: Role; strike: boolean };
 const LOOKS: Record<string, [string, Role]> = {
   Running: ['●', 'ok'],
@@ -92,8 +95,8 @@ export function stateLook(label: string): Look {
 // What a Needs you item is, as its kind column names it, and the role it
 // is lit in: questions and the operator's turn in the accent, what blocks
 // work in warn, what failed in bad, and what waits for review in review.
-type Item = { kind: 'attention'; attention: string } | { kind: 'ready' } | { kind: 'review' };
-const KINDS: Record<string, [string, Role]> = {
+type Item = { kind: 'attention'; attention: AttentionKind } | { kind: 'ready' } | { kind: 'review' };
+const KINDS: Record<AttentionKind, [string, Role]> = {
   question: ['question', 'accent'],
   permission: ['permission', 'warn'],
   failure: ['failure', 'bad'],
@@ -107,7 +110,7 @@ const KINDS: Record<string, [string, Role]> = {
 export function kindLook(item: Item): { kind: string; role: Role } {
   if (item.kind === 'ready') return { kind: 'your turn', role: 'accent' };
   if (item.kind === 'review') return { kind: 'review', role: 'review' };
-  const [kind, role] = KINDS[item.attention] ?? [item.attention, 'warn'];
+  const [kind, role] = KINDS[item.attention];
   return { kind, role };
 }
 
@@ -134,7 +137,30 @@ export const GLYPH = {
   failed: '✗',
   // The group the condensed view's tree is filtered by.
   marked: '•',
+  // Between a breadcrumb's screen and the task drilled into.
+  crumb: '›',
+  // Between the parts of a line that says what something is.
+  between: '·',
+  // The end of a line being typed.
+  caret: '▏',
+  // The stage an advance lands on.
+  advances: '←',
+  // Around a value ←→ changes.
+  chooseBefore: '‹',
+  chooseAfter: '›',
+  // A sparkline's bars, lowest to highest.
+  spark: '▁▂▃▄▅▆▇█',
 } as const;
+
+// A value ←→ changes, between its markers.
+export function choosable(value: string): string {
+  return `${GLYPH.chooseBefore} ${value} ${GLYPH.chooseAfter}`;
+}
+
+// Parts of a line that says what something is, `·` between them.
+export function joined(parts: string[]): string {
+  return parts.join(` ${GLYPH.between} `);
+}
 
 // A share (0 to 1) as a bar of `cells`.
 export function bar(share: number, cells: number): string {

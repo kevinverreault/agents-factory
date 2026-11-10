@@ -18,7 +18,8 @@ import { HandoffSheet } from './handoff-sheet.ts';
 import { Event, SystemLine } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { useRows } from './screen.ts';
-import { border, GLYPH, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
+import { modeOf } from './task-detail.ts';
+import { border, GLYPH, joined, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
 import { edit } from './text-input.ts';
 import { TaskUsage, UsageStrip } from './usage.ts';
 
@@ -136,7 +137,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const chat = takesChat && !answering;
   const hint: Hint[] = [...keys, ...(canAdvance(task) ? [['ctrl+n', 'advance'] as Hint] : []), ...(chat ? [['/handoff', 'hand off'] as Hint] : []), ['ctrl+b', 'back']];
   const label = task?.label ?? '';
-  const what = [task?.autonomy ? `${task.mode} ${task.autonomy}` : task?.mode, task?.stage, run?.model].filter(Boolean);
+  const what = [task ? modeOf(task) : null, task?.stage, run?.model].filter((part): part is string => Boolean(part));
 
   return h(
     Box,
@@ -150,10 +151,10 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       h(
         Text,
         { ...tone('dim'), wrap: 'truncate' },
-        what.length ? `${what.join(' · ')} · ` : '',
+        what.length ? `${joined(what)} ${GLYPH.between} ` : '',
         h(Text, tone(stateLook(label).role), label),
-        task?.branch ? ` · ${task.branch}` : '',
-        midTurn ? h(Text, tone('ok'), ' · agent working…') : null,
+        task?.branch ? ` ${GLYPH.between} ${task.branch}` : '',
+        midTurn ? h(Text, tone('ok'), ` ${GLYPH.between} agent working…`) : null,
       ),
       // The escape hatch: the same session in the operator's own terminal.
       task?.sessionId
@@ -195,7 +196,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
       live && (run.turn === 'operator' || question || run.permission) ? h(Text, tone('warn'), 'The agent is waiting on you.') : null,
       refusal ? h(Text, tone('bad'), refusal) : null,
-      chat ? h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}▏`) : null,
+      chat ? h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`) : null,
       h(Rule, null),
       h(UsageStrip, { state }),
       h(Rule, null),

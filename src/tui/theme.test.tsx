@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import { Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
+import { label, type Task, type TaskState } from '../lifecycle/lifecycle.ts';
 import { ROLES, Sheet, stateLook, tone } from './theme.ts';
 
 const withLevel = (level: 0 | 1 | 2 | 3) => {
@@ -70,6 +71,21 @@ describe('state glyphs', () => {
     ['Draft', '○', 'dim'],
   ])('%s shows %s in %s', (label, glyph, role) => {
     expect(stateLook(label)).toMatchObject({ glyph, role });
+  });
+
+  test('every label a task can have has a glyph of its own, so a renamed label fails here instead of showing uncoloured', () => {
+    const states: TaskState[] = ['draft', 'queued', 'running', 'waiting', 'awaiting-children', 'in-review', 'done', 'cancelled'];
+    const labels = new Set(['Waiting for window']);
+    for (const state of states)
+      for (const mode of ['AFK', 'HITL'] as const)
+        for (const ready of [false, true]) {
+          // A HITL task queued at a work loop over a map waits for the factory to read it.
+          for (const preset of [null, { stages: [{ id: 'tickets', kind: 'loop', mode: 'HITL', exit: 'map-cleared' }] }]) {
+            labels.add(label({ state, mode, preset, stage: 'tickets', loop: preset ? { step: 'pick' } : null } as unknown as Task, ready));
+          }
+        }
+    expect(labels).toContain('Reading the map');
+    for (const shown of labels) expect(stateLook(shown).glyph, shown).not.toBe('·');
   });
 
   test('only a cancelled task is struck through', () => {

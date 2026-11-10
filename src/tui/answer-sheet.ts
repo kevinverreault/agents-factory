@@ -14,7 +14,7 @@ import type { Command, Option, Reply } from '../protocol/protocol.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
-import { kindLook, Option as Pick, Rule, Sheet, tone } from './theme.ts';
+import { GLYPH, kindLook, Option as Pick, Rule, Sheet, tone } from './theme.ts';
 
 // What a digit on the sheet does. A choice that `opens` takes the operator
 // into the task's conversation once the daemon accepts it; one with `fields`
@@ -396,7 +396,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
       ...choicesFor(item, task).map((choice, i) => h(Pick, { key: choice.label, digit: i + 1 }, choice.label)),
       // With more than one field, › marks the one being typed into.
       ...(form?.fields ?? []).map(({ prompt, value }, i) =>
-        h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? '› ' : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(value)),
+        h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? `${GLYPH.selected} ` : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(value)),
       ),
       confirm?.options ? h(ChoosePrompt, { reason: confirm.reason, options: confirm.options }) : null,
       confirm && !confirm.options ? h(Text, tone('warn'), confirm.reason) : null,

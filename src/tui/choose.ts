@@ -13,7 +13,7 @@ export function chooseKey(options: Option[], input: string, key: Key): Option | 
   return /^[1-9]$/.test(input) ? (options[Number(input) - 1] ?? null) : null;
 }
 
-// With a `title`, a sheet of its own in warn; without, inside the sheet
+// With a `title`, a sheet of its own; without, inside the sheet
 // whose refusal asks it.
 export function ChoosePrompt({ title, reason, options }: { title?: string; reason: string; options: string[] }) {
   const hint = `enter ${options[0]} · esc back`;
@@ -21,6 +21,6 @@ export function ChoosePrompt({ title, reason, options }: { title?: string; reaso
     h(Text, { key: 'reason', ...tone('warn') }, reason),
     ...options.map((label, i) => h(Pick, { key: label, digit: i + 1 }, label)),
   ];
-  if (title !== undefined) return h(Sheet, { title, role: 'warn', hint }, ...body);
+  if (title !== undefined) return h(Sheet, { title, hint }, ...body);
   return h(Box, { flexDirection: 'column' }, ...body, h(Text, { key: 'hint', ...tone('dim') }, hint));
 }

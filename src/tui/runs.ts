@@ -37,6 +37,8 @@ const COLUMNS: [name: string, width: number][] = [
   ['status', 19],
 ];
 const TOKENS_WIDTH = 7;
+// The title's column, bold on the selected row.
+const TITLE_COLUMN = 2;
 
 // Every run under a dim row naming its columns: a live one bright, its
 // status lit, and an ended one dim.
@@ -57,7 +59,7 @@ export function RunsList({ state, runs, cursor }: { state: FactoryState; runs: R
           Box,
           { key: run.id, gap: 1 },
           h(Cursor, { on: i === cursor }),
-          ...cells.map((text, at) => cell(COLUMNS[at]![1], text, at === cells.length - 1 && role === 'fg' ? 'ok' : role, at === 0 && i === cursor)),
+          ...cells.map((text, at) => cell(COLUMNS[at]![1], text, at === cells.length - 1 && role === 'fg' ? 'ok' : role, at === TITLE_COLUMN && i === cursor)),
           tokensCell(tokens(tokensOf(overall(run.usage))), 'dim'),
         );
       }),

@@ -16,7 +16,7 @@ export function dollars(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
 
-const KIND_WIDTH = 12;
+const TOKEN_KIND_WIDTH = 12;
 const LABEL_WIDTH = 20;
 const ID_WIDTH = 4;
 const TITLE_WIDTH = 40;
@@ -44,7 +44,7 @@ export function UsageTab({ state }: { state: FactoryState }) {
           Box,
           { key: title, flexDirection: 'column', marginTop: 1 },
           h(Heading, { text: title }),
-          ...rows.map(([key, label, usage]) => h(UsageRow, { key, name: key, label, usage: overall(usage), bar: barred ? tokensOf(overall(usage)) / of : null })),
+          ...rows.map(([key, label, usage]) => h(UsageRow, { key, name: key, label, usage: overall(usage), share: barred ? tokensOf(overall(usage)) / of : null })),
         );
   };
   const models = Object.entries(views.models);
@@ -54,13 +54,21 @@ export function UsageTab({ state }: { state: FactoryState }) {
     { flexDirection: 'column' },
     gauges,
     h(Box, { marginTop: 1 }, h(KindsRow, { name: 'Model', cells: ['input', 'output', 'cache read', 'cache write', 'cost'], bold: true })),
-    ...models.map(([model, usage]) => h(KindsRow, { key: model, name: model, cells: kinds(usage), bar: tokensOf(usage) / ofModels })),
+    ...models.map(([model, usage]) => h(KindsRow, { key: model, name: model, cells: kinds(usage), share: tokensOf(usage) / ofModels })),
     h(KindsRow, { key: 'total', name: 'Total', cells: kinds(overall(views.models)), bold: true }),
     section('Task trees', roots.map(([id, usage]) => [id, state.tasks[id]?.title ?? '', usage])),
     section('Groups', Object.entries(views.groups).map(([group, usage]) => [group, null, usage]), true),
     section('Stages', Object.entries(views.stages).map(([stage, usage]) => [stage, null, usage])),
     section('Tickets', Object.entries(views.tickets).map(([ticket, usage]) => [ticket, null, usage])),
   );
+}
+
+// A usage window's spent share as a bar of `cells`, lit by how full it is,
+// and its percentage; unknown without a snapshot to trust. The Usage tab's
+// gauges and the strip both show it.
+function Spent({ window, cells }: { window: { spent: number } | null; cells: number }) {
+  if (!window) return h(Text, tone('dim'), 'unknown');
+  return h(Text, tone(spentRole(window.spent)), `${bar(window.spent, cells)} ${percent(window.spent)}`);
 }
 
 // The most tokens any of the usages has, to bar the others against: at least one.
@@ -78,12 +86,11 @@ function Gauges({ state }: { state: FactoryState }) {
   const queued = Object.values(state.tasks).filter((task) => task.state === 'queued' && task.mode === 'AFK').length;
   const row = (label: string, ...value: ReactNode[]) =>
     h(Box, { key: label }, h(Box, { width: GAUGE_LABEL_WIDTH, flexShrink: 0 }, h(Text, null, label)), h(Text, { wrap: 'truncate' }, ...value));
-  const spent = (share: number) => h(Text, tone(spentRole(share)), `${bar(share, GAUGE_CELLS)} ${percent(share)}`);
   return h(
     Box,
     { flexDirection: 'column', flexShrink: 0 },
-    window ? row('5-hour window', spent(window.spent), h(Text, tone('dim'), ` · resets ${clockTime(window.resetsAt)}`)) : row('5-hour window', h(Text, tone('dim'), 'unknown')),
-    weekly ? row('Weekly window', spent(weekly.spent)) : row('Weekly window', h(Text, tone('dim'), 'unknown')),
+    row('5-hour window', h(Spent, { window, cells: GAUGE_CELLS }), window ? h(Text, tone('dim'), ` ${GLYPH.between} resets ${clockTime(window.resetsAt)}`) : null),
+    row('Weekly window', h(Spent, { window: weekly, cells: GAUGE_CELLS })),
     row('Parallel slots', h(Text, tone('ok'), slots(active, cap)), ` ${active}/${cap} running · ${queued} queued`),
     row(`Tokens / hour, ${tokensPerHour.length}h`, h(Text, tone('accent'), sparkline(tokensPerHour)), h(Text, tone('dim'), ` ${tokens(tokensPerHour.at(-1) ?? 0)}/h now`)),
   );
@@ -99,17 +106,18 @@ function TokenBar({ share }: { share: number | null | undefined }) {
   return h(Box, { marginLeft: 2, flexShrink: 0 }, h(Text, tone('accent'), bar(share, TOKEN_BAR_CELLS)));
 }
 
-function KindsRow({ name, cells, bold = false, bar: share }: { name: string; cells: string[]; bold?: boolean; bar?: number }) {
+// `share` is the row's share of the largest's tokens, if it is barred.
+function KindsRow({ name, cells, bold = false, share }: { name: string; cells: string[]; bold?: boolean; share?: number }) {
   return h(
     Box,
     null,
     h(Box, { width: LABEL_WIDTH + 2, flexShrink: 0 }, h(Text, { bold, wrap: 'truncate' }, name)),
-    ...cells.map((cell, i) => h(Box, { key: i, width: KIND_WIDTH, justifyContent: 'flex-end' }, h(Text, { bold }, cell))),
+    ...cells.map((cell, i) => h(Box, { key: i, width: TOKEN_KIND_WIDTH, justifyContent: 'flex-end' }, h(Text, { bold }, cell))),
     h(TokenBar, { share }),
   );
 }
 
-function UsageRow({ name, label, usage, bar: share }: { name: string; label: string | null; usage: Usage; bar: number | null }) {
+function UsageRow({ name, label, usage, share }: { name: string; label: string | null; usage: Usage; share: number | null }) {
   return h(
     Box,
     { gap: 1 },
@@ -146,13 +154,13 @@ export function TaskUsage({ state, taskId }: { state: FactoryState; taskId: stri
   );
 }
 
-const BARS = '▁▂▃▄▅▆▇█';
 
 // Each count as a bar, scaled to the largest: nothing is the lowest bar,
 // and anything at all is at least the next one up.
 export function sparkline(counts: number[]): string {
   const most = Math.max(0, ...counts);
-  return counts.map((count) => BARS[count === 0 ? 0 : Math.max(1, Math.round((count / most) * (BARS.length - 1)))]).join('');
+  const bars = GLYPH.spark;
+  return counts.map((count) => bars[count === 0 ? 0 : Math.max(1, Math.round((count / most) * (bars.length - 1)))]).join('');
 }
 
 const percent = (spent: number) => `${Math.round(spent * 100)}%`;
@@ -172,15 +180,14 @@ export function UsageStrip({ state }: { state: FactoryState }) {
   const { window, weekly, tokensPerHour } = state.usage;
   const { active, cap } = state.slots;
   const label = (text: string) => h(Text, tone('dim'), text);
-  const spent = (share: number, cells: number) => h(Text, tone(spentRole(share)), `${bar(share, cells)} ${percent(share)}`);
   // Each part with what goes before it: `│` between the parts, `·` between
   // the models. On a line it wraps, the divider ends the line it breaks.
   const parts: [string | null, ReactNode[]][] = [
-    [null, window ? [label('window '), spent(window.spent, 14), label(` ${GLYPH.resets}`), clockTime(window.resetsAt)] : [label('window '), 'unknown']],
-    [GLYPH.divider, weekly ? [label('week '), spent(weekly.spent, 6)] : [label('week '), 'unknown']],
+    [null, [label('window '), h(Spent, { window, cells: 14 }), ...(window ? [label(` ${GLYPH.resets}`), clockTime(window.resetsAt)] : [])]],
+    [GLYPH.divider, [label('week '), h(Spent, { window: weekly, cells: 6 })]],
     [GLYPH.divider, [label('slots '), h(Text, tone('ok'), slots(active, cap)), ` ${active}/${cap}`]],
     [GLYPH.divider, [h(Text, tone('accent'), sparkline(tokensPerHour)), ` ${tokens(tokensPerHour.at(-1) ?? 0)}/h`]],
-    ...Object.entries(usageViews(state).models).map(([model, usage], i): [string, ReactNode[]] => [i === 0 ? GLYPH.divider : '·', [label(`${model} `), tokens(tokensOf(usage))]]),
+    ...Object.entries(usageViews(state).models).map(([model, usage], i): [string, ReactNode[]] => [i === 0 ? GLYPH.divider : GLYPH.between, [label(`${model} `), tokens(tokensOf(usage))]]),
   ];
   return h(
     Box,

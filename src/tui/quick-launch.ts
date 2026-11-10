@@ -15,7 +15,7 @@ import { cycle, defaultRepo, NO_REPOSITORY } from './launch-card.ts';
 import { Output } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
-import { GLYPH, Sheet, tone } from './theme.ts';
+import { choosable, GLYPH, Sheet, tone } from './theme.ts';
 
 // The preset a quick launch runs.
 const QUICK_PRESET = 'quick';
@@ -131,9 +131,9 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
       Sheet,
       { title: 'Quick launch', hint: `enter launch, at most three questions${repositories.length > 1 ? ' · ←→ repository' : ''} · esc back` },
       repo
-        ? h(Box, { gap: 1 }, h(Text, tone('dim'), 'Repository'), h(Text, null, repositories.length > 1 ? `‹ ${repo} ›` : repo))
+        ? h(Box, { gap: 1 }, h(Text, tone('dim'), 'Repository'), h(Text, null, repositories.length > 1 ? choosable(repo) : repo))
         : h(Text, tone('warn'), NO_REPOSITORY),
-      h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}▏`),
+      h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`),
       taskId ? h(Text, tone('dim'), 'Starting the grill…') : null,
       refusal ? h(Text, tone('bad'), refusal) : null,
     );
@@ -143,7 +143,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
     { title: `Quick launch ${task.id}`, hint: 'ctrl+h or /handoff hand off · ctrl+e full conversation · esc leave it as a conversation' },
     h(Text, { ...tone('fg'), bold: true, wrap: 'truncate' }, task.title),
     question ? h(QuestionCard, { question, card, nested: true }) : h(Output, { connection, state, taskId: task.id, lines: OUTPUT_LINES }),
-    h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}▏`),
+    h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`),
     refusal ? h(Text, tone('bad'), refusal) : null,
   );
 }

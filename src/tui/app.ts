@@ -37,9 +37,9 @@ import { Output } from './output.ts';
 import { QuickLaunch } from './quick-launch.ts';
 import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useColumns, useRows } from './screen.ts';
-import { TaskDetail } from './task-detail.ts';
+import { modeOf, TaskDetail } from './task-detail.ts';
 import { edit } from './text-input.ts';
-import { Cursor, filled, kindLook, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
+import { Cursor, filled, GLYPH, joined, kindLook, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
 import { UsageStrip, UsageTab } from './usage.ts';
 
 // The screens, in the order of the number keys that switch to them.
@@ -542,7 +542,7 @@ function Header({ tab, needsYou }: { tab: Tab | null; needsYou: number }) {
 // Where the operator is: the screen, then the task drilled into, or the
 // group the task tree is filtered by.
 function Breadcrumb({ screen, task, group }: { screen: string; task: TaskView | undefined; group: string | null }) {
-  const rest = task ? ` › ${task.id} ${task.title}` : group !== null ? ` · group: ${group}` : '';
+  const rest = task ? ` ${GLYPH.crumb} ${task.id} ${task.title}` : group !== null ? ` ${GLYPH.between} group: ${group}` : '';
   return h(Text, { wrap: 'truncate' }, h(Text, tone('fg'), screen), h(Text, tone('dim'), rest));
 }
 
@@ -652,7 +652,7 @@ function rowLayout(tasks: TaskView[], columns: number, compact: boolean): RowLay
 // What a row says past its state: its loop's ticket, its descendants'
 // rollup and its progress.
 function extrasOf(task: TaskView): string {
-  return [loopDetail(task), rollupDetail(task), task.progress].filter(Boolean).join(' · ');
+  return joined([loopDetail(task), rollupDetail(task), task.progress ?? ''].filter(Boolean));
 }
 
 // A task in the tree: its state's glyph, indented by its depth; its id and
@@ -686,7 +686,7 @@ function TaskRow({ task, selected, layout }: { task: TaskView; selected: boolean
     cell(layout.id, quiet(task.id)),
     // On a terminal too narrow for the other columns, the title gives way first.
     h(Box, { width: layout.title, flexShrink: 1 }, title),
-    cell(MODE_WIDTH, quiet(task.autonomy ? `${task.mode} ${task.autonomy}` : task.mode)),
+    cell(MODE_WIDTH, quiet(modeOf(task))),
     cell(STATE_WIDTH, state),
     layout.extras ? cell(layout.extras, quiet(extrasOf(task))) : null,
     layout.groups ? cell(layout.groups, quiet(task.groups.join(', ')), true) : null,
@@ -726,8 +726,8 @@ function loopDetail({ loop }: TaskView): string {
   return `on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
 }
 
-// The widest kind (`repo missing`) and the title's width on a Needs you row.
-const KIND_WIDTH = 12;
+// The widest Needs you kind (`repo missing`) and the title's width on a Needs you row.
+const ITEM_KIND_WIDTH = 12;
 const ITEM_TITLE_WIDTH = 30;
 
 // Needs you, an item a row: its kind lit in its colour, its task's id and
@@ -745,7 +745,7 @@ function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }
         Box,
         { key, gap: 1 },
         h(Cursor, { on: i === cursor }),
-        h(Box, { width: KIND_WIDTH, flexShrink: 0 }, h(Text, { ...tone(look.role), wrap: 'truncate' }, look.kind)),
+        h(Box, { width: ITEM_KIND_WIDTH, flexShrink: 0 }, h(Text, { ...tone(look.role), wrap: 'truncate' }, look.kind)),
         h(Box, { width: id, flexShrink: 0 }, h(Text, tone('dim'), item.taskId ?? '')),
         h(Box, { width: ITEM_TITLE_WIDTH, flexShrink: 0 }, h(Text, { ...tone('fg'), bold: i === cursor, wrap: 'truncate' }, titleOf(item, task))),
         h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, h(Text, { ...tone('dim'), wrap: 'truncate' }, askedFor(item, task))),

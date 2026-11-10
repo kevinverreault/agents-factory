@@ -10,7 +10,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
 import { autonomyText, cycle } from './launch-card.ts';
 import { edit } from './text-input.ts';
-import { Cursor, GLYPH, Sheet, tone } from './theme.ts';
+import { choosable, Cursor, GLYPH, Sheet, tone } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -79,9 +79,9 @@ export function HandoffSheet({ connection, task, run }: Props) {
     brief
       ? h(Box, { flexDirection: 'column' }, ...lines.map((line, i) => h(BriefLine, { key: i, line, brief, selected: i === draft.current.line, first: startsSection(lines, i) })))
       : h(Text, tone('warn'), writing ? 'The agent is writing the brief…' : 'The agent ended its turn without writing the brief: enter asks again.'),
-    h(Field, { label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, `‹ ${draft.current.continueAs} ›`, share && h(Text, tone('dim'), ` ${share}`)),
-    h(Field, { label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, `‹ ${autonomyText(draft.current.autonomy)} ›`),
-    h(Field, { label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, `‹ ${draft.current.tier} ›`),
+    h(Field, { label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, choosable(draft.current.continueAs), share && h(Text, tone('dim'), ` ${share}`)),
+    h(Field, { label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, choosable(autonomyText(draft.current.autonomy))),
+    h(Field, { label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, choosable(draft.current.tier)),
     h(Field, { label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, draft.current.maxTurns || ' '),
     h(Text, tone('dim'), toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
     ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
