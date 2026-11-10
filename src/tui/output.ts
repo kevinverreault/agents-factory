@@ -47,18 +47,31 @@ export function Output({ connection, state, taskId, lines }: { connection: Facto
 }
 
 // An event whole, as the conversation view and a task's detail show it, or
-// `oneLine` as the pane under the task tree glances at it.
+// `oneLine` as the pane under the task tree glances at it: the agent's
+// messages after ◆, the operator's after ›, and tool calls indented in the
+// review colour.
 export function Event({ event, oneLine = false }: { event: ConversationEvent; oneLine?: boolean }) {
   if (event.type === 'toolUse') {
-    return h(Box, { gap: 1, flexShrink: 0 }, h(Text, { color: 'cyan' }, `  ● ${event.tool}`), h(Text, { dimColor: true, wrap: 'truncate' }, oneLine ? flat(event.summary) : event.summary));
+    return h(
+      Box,
+      { gap: 1, flexShrink: 0, paddingLeft: 2 },
+      h(Box, { flexShrink: 0 }, h(Text, tone('review'), event.tool)),
+      h(Text, { ...tone('review'), dimColor: true, wrap: 'truncate' }, oneLine ? flat(event.summary) : event.summary),
+    );
   }
   const operator = event.from === 'operator';
   return h(
     Box,
     { gap: 1, flexShrink: 0 },
-    h(Box, { width: 6, flexShrink: 0 }, h(Text, { bold: true, color: operator ? 'green' : 'magenta' }, operator ? 'you' : 'agent')),
-    oneLine ? h(Text, { wrap: 'truncate' }, flat(event.text)) : h(Text, null, event.text),
+    h(Box, { width: 1, flexShrink: 0 }, h(Text, tone(operator ? 'ok' : 'accent'), operator ? GLYPH.operator : GLYPH.agent)),
+    oneLine ? h(Text, { ...tone('fg'), wrap: 'truncate' }, flat(event.text)) : h(Text, { ...tone('fg'), bold: operator }, event.text),
   );
+}
+
+// A line the factory adds to a conversation, dim after ·: a message queued
+// for the agent's next turn.
+export function SystemLine({ text }: { text: string }) {
+  return h(Box, { gap: 1, flexShrink: 0 }, h(Box, { width: 1, flexShrink: 0 }, h(Text, tone('dim'), GLYPH.system)), h(Text, tone('dim'), text));
 }
 
 // Text on one row: truncating cuts each of its lines, so a message's

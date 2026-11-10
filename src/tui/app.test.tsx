@@ -680,7 +680,7 @@ describe('launching and conversing', () => {
     ]);
     await settle();
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
-    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.[\s\S]*factory\/T1-grill-me-about-the-login-flow[\s\S]*claude-sonnet-5-5/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.\nHITL · claude-sonnet-5-5 · In conversation · factory\/T1-grill-me-about-the-login-flow/));
   });
 
   test('on the launch card, ↑↓ move between fields, ←→ pick another repository, a refusal shows its reason, and esc backs out', async () => {
@@ -949,7 +949,7 @@ describe('launching and conversing', () => {
       { type: 'message', id: 'E3', from: 'agent', text: 'Which identity provider times out?' },
     );
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/you\s+Grill me about the login flow\.[^\n]*\n[\s\S]*Read\s+src\/auth\/sso\.ts[^\n]*\n[\s\S]*agent\s+Which identity provider times out\?/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/›\s+Grill me about the login flow\.[^\n]*\n[\s\S]*Read\s+src\/auth\/sso\.ts[^\n]*\n[\s\S]*◆\s+Which identity provider times out\?/));
 
     await type(app, 'Okta, only on Safarii');
     app.stdin.write('\x7f');
@@ -973,7 +973,7 @@ describe('launching and conversing', () => {
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
     connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Reading the ticket.' });
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/agent\s+Reading the ticket\./));
+    await eventually(() => expect(app.lastFrame()).toMatch(/◆\s+Reading the ticket\./));
 
     await type(app, 'Use the new API');
     app.stdin.write('\r');
@@ -996,7 +996,7 @@ describe('launching and conversing', () => {
 
     connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, queued: ['Also check Safari.'] } }]);
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/queued\s+Also check Safari\./));
+    await eventually(() => expect(app.lastFrame()).toMatch(/·\s+queued\s+Also check Safari\./));
     app.stdin.write('\x1b');
     await settle();
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'interrupt', taskId: 'T1' }));
@@ -2552,14 +2552,14 @@ describe('the screens view', () => {
     const { app, connection } = await started({ ...factoryState([conversing, implementing]), runs });
     await eventually(() => expect(connection.followed).toEqual(['R1']));
     connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Which identity provider times out?' });
-    await eventually(() => expect(app.lastFrame()).toMatch(/LIVE OUTPUT · T1 · R1[\s\S]*agent\s+Which identity provider times out\?/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/LIVE OUTPUT · T1 · R1[\s\S]*◆\s+Which identity provider times out\?/));
 
     await press(app, '\x1b[B');
     await eventually(() => expect(connection.followed).toEqual(['R1', 'R3']));
     connection.serveConversation('R3', { type: 'toolUse', id: 'E2', tool: 'Edit', summary: 'src/store/store.ts' });
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/LIVE OUTPUT · T2 · R3[\s\S]*● Edit\s+src\/store\/store\.ts/);
+      expect(frame).toMatch(/LIVE OUTPUT · T2 · R3[\s\S]*\n {2,}Edit\s+src\/store\/store\.ts/);
       expect(frame).not.toContain('Which identity provider');
     });
 
@@ -2567,7 +2567,7 @@ describe('the screens view', () => {
     await press(app, '\r');
     await eventually(() => expect(connection.followed).toEqual(['R1', 'R3', 'R3']));
     connection.serveConversation('R3', { type: 'message', id: 'E3', from: 'agent', text: 'The store keeps its schema private.' });
-    await eventually(() => expect(app.lastFrame()).toMatch(/Tasks › T2[\s\S]*LIVE OUTPUT · T2 · R3[\s\S]*agent\s+The store keeps its schema private\./));
+    await eventually(() => expect(app.lastFrame()).toMatch(/Tasks › T2[\s\S]*LIVE OUTPUT · T2 · R3[\s\S]*◆\s+The store keeps its schema private\./));
     expect(connection.conversed).toEqual([]);
   });
 
@@ -2588,8 +2588,8 @@ describe('the screens view', () => {
       const frame = app.lastFrame()!;
       expect(frame).toContain('1 Tasks');
       expect(frame).toMatch(/T1\s+Settle the glossary[\s\S]*› \S\s+T2\s+Implement the store/);
-      expect(frame).toMatch(/agent\s+Paragraph 0\. Paragraph 1\./);
-      expect(frame).toMatch(/● Bash\s+npm test --run/);
+      expect(frame).toMatch(/◆\s+Paragraph 0\. Paragraph 1\./);
+      expect(frame).toMatch(/\n {2,}Bash\s+npm test --run/);
       // The two events replace "No runs yet." with two rows.
       expect(frame.split('\n')).toHaveLength(before + 1);
     });
@@ -2661,7 +2661,7 @@ describe('the screens view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).not.toContain('…');
-      expect(frame).toMatch(/you\s+Keep the schema private\.\n\s+And word0/);
+      expect(frame).toMatch(/›\s+Keep the schema private\.\n\s+And word0/);
       expect(unwrapped(frame)).toContain(`And ${wraps} end of mine.`);
       expect(unwrapped(frame)).toContain(`The store ${wraps} end of the agent’s.`);
     });

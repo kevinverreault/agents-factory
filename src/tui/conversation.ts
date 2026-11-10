@@ -15,9 +15,10 @@ import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
 import { AnswerSheet, answerable, cardItem, useAnswering } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
-import { Event } from './output.ts';
+import { Event, SystemLine } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { useRows } from './screen.ts';
+import { border, GLYPH, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
 import { edit } from './text-input.ts';
 import { TaskUsage, UsageStrip } from './usage.ts';
 
@@ -123,17 +124,19 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     rerender();
   }, { isActive: !advancing && !sheet });
   const { draft } = typing.current;
-  const keys = answering
-    ? `digits answer${canTakeOver ? ' · c take over' : ''}`
+  const keys: Hint[] = answering
+    ? [['digits', 'answer'], ...(canTakeOver ? [['c', 'take over'] as Hint] : [])]
     : !takesChat
-      ? `AFK runs take no chat${canTakeOver ? ': c takes it over to talk to it' : ''}`
+      ? [['', `AFK runs take no chat${canTakeOver ? ': c takes it over to talk to it' : ''}`]]
       : question
-        ? 'esc interrupt'
+        ? [['esc', 'interrupt']]
         : midTurn
-          ? 'enter queue · esc interrupt'
-          : 'enter send';
+          ? [['enter', 'queue'], ['esc', 'interrupt']]
+          : [['enter', 'send']];
   const chat = takesChat && !answering;
-  const hint = `${keys}${canAdvance(task) ? ' · ctrl+n advance' : ''}${chat ? ' · /handoff hand off' : ''} · ctrl+b back`;
+  const hint: Hint[] = [...keys, ...(canAdvance(task) ? [['ctrl+n', 'advance'] as Hint] : []), ...(chat ? [['/handoff', 'hand off'] as Hint] : []), ['ctrl+b', 'back']];
+  const label = task?.label ?? '';
+  const what = [task?.autonomy ? `${task.mode} ${task.autonomy}` : task?.mode, task?.stage, run?.model].filter(Boolean);
 
   return h(
     Box,
@@ -143,11 +146,18 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     h(
       Box,
       { flexDirection: 'column', flexShrink: 0 },
-      h(Box, { gap: 2 }, h(Text, { bold: true }, taskId), h(Text, { wrap: 'truncate' }, task?.title ?? '')),
-      h(Text, { dimColor: true }, [task?.branch, task?.stage, run?.model, task?.label].filter(Boolean).join(' · ')),
+      h(Text, { ...tone('accent'), bold: true, wrap: 'truncate' }, `${GLYPH.conversation} ${taskId} ${task?.title ?? ''}`),
+      h(
+        Text,
+        { ...tone('dim'), wrap: 'truncate' },
+        what.length ? `${what.join(' · ')} · ` : '',
+        h(Text, tone(stateLook(label).role), label),
+        task?.branch ? ` · ${task.branch}` : '',
+        midTurn ? h(Text, tone('ok'), ' · agent working…') : null,
+      ),
       // The escape hatch: the same session in the operator's own terminal.
       task?.sessionId
-        ? h(Text, { dimColor: true, wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
+        ? h(Text, { ...tone('dim'), wrap: 'truncate' }, `claude --resume ${task.sessionId}`, task.worktree ? ` (in ${task.worktree})` : '')
         : null,
     ),
     h(
@@ -158,13 +168,12 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         Box,
         { flexDirection: 'column', flexGrow: 1, justifyContent: 'flex-end', overflow: 'hidden' },
         ...events.map((event) => h(Event, { key: event.id, event })),
-        ...(run?.queued ?? []).map((text, i) =>
-          h(Box, { key: `queued-${i}`, gap: 1, flexShrink: 0 }, h(Box, { width: 6, flexShrink: 0 }, h(Text, { dimColor: true }, 'queued')), h(Text, { dimColor: true }, text)),
-        ),
+        ...(run?.queued ?? []).map((text, i) => h(SystemLine, { key: `queued-${i}`, text: `queued ${text}` })),
       ),
+      // The rail, behind a rule.
       h(
         Box,
-        { flexDirection: 'column', width: RAIL_WIDTH, flexShrink: 0, overflow: 'hidden' },
+        { flexDirection: 'column', width: RAIL_WIDTH, flexShrink: 0, overflow: 'hidden', paddingLeft: 1, borderStyle: 'single', borderTop: false, borderBottom: false, borderRight: false, ...border('line') },
         h(TaskUsage, { state, taskId }),
         h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
       ),
@@ -174,24 +183,27 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       { flexDirection: 'column', flexShrink: 0 },
       question ? h(QuestionCard, { question, card }) : null,
       live && run.proposal?.kind === 'advance'
-        ? h(Text, { color: 'yellow' }, `◇ The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
+        ? h(Text, tone('warn'), `${GLYPH.conversation} The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
         : null,
       live && run.proposal?.kind === 'handoff' && !sheet
-        ? h(Text, { color: 'yellow' }, `◇ The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
+        ? h(Text, tone('warn'), `${GLYPH.conversation} The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
         : null,
       sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run }) : null,
       advancing && canAdvance(task)
         ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
         : null,
       request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
-      live && (run.turn === 'operator' || question || run.permission) ? h(Text, { color: 'yellow' }, 'The agent is waiting on you.') : null,
-      refusal ? h(Text, { color: 'red' }, refusal) : null,
-      chat ? h(Text, null, `› ${draft}▏`) : null,
-      h(Text, { dimColor: true }, hint),
+      live && (run.turn === 'operator' || question || run.permission) ? h(Text, tone('warn'), 'The agent is waiting on you.') : null,
+      refusal ? h(Text, tone('bad'), refusal) : null,
+      chat ? h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}▏`) : null,
+      h(Rule, null),
       h(UsageStrip, { state }),
+      h(Rule, null),
+      h(Keys, { keys: hint }),
     ),
   );
 }
 
-const RAIL_WIDTH = 40;
+// Its content 40 columns wide, past the rule and its padding.
+const RAIL_WIDTH = 42;
 

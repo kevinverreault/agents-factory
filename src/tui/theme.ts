@@ -176,8 +176,8 @@ export function Keys({ keys }: { keys: Hint[] }) {
         Text,
         { key: i },
         i === 0 ? null : h(Text, tone('dim'), ' · '),
-        h(Text, { ...tone('fg'), bold: true }, key),
-        does ? h(Text, tone('dim'), ` ${does}`) : null,
+        key ? h(Text, { ...tone('fg'), bold: true }, key) : null,
+        does ? h(Text, tone('dim'), key ? ` ${does}` : does) : null,
       ),
     ),
   );
