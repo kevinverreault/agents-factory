@@ -490,6 +490,8 @@ const UP = '\x1b[A';
 const DOWN = '\x1b[B';
 const RIGHT = '\x1b[C';
 const LEFT = '\x1b[D';
+const PAGE_UP = '\x1b[5~';
+const PAGE_DOWN = '\x1b[6~';
 
 // A frame's text with the card's border and wrapping taken out.
 const unwrapped = (frame: string) => frame.replace(/[│\s]+/g, ' ');
@@ -898,6 +900,59 @@ describe('launching and conversing', () => {
     expect(connection.sent.filter((command) => command.type === 'interrupt')).toHaveLength(1);
   });
 
+  test('a message taller than the screen reads whole: pgup scrolls back to its first lines, pgdn down to the latest again', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
+    Object.defineProperty(app.stdout, 'rows', { value: 20, configurable: true });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    const longMessage = Array.from({ length: 40 }, (_, i) => `Line ${i}.`).join('\n');
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: longMessage });
+    // The pane shows Line 28 to Line 39.
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(20);
+      expect(frame).toMatch(/\bLine 28\.[\s\S]*Line 39\./);
+      expect(frame).not.toContain('Line 27.');
+      expect(frame).toContain('pgup/pgdn scroll');
+      expect(frame).not.toContain('newer below');
+    });
+
+    // A page back keeps the top row in view, to read on from.
+    await press(app, PAGE_UP);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/\bLine 17\.[\s\S]*Line 28\./);
+      expect(frame).not.toContain('Line 16.');
+      expect(frame).not.toContain('Line 29.');
+      expect(frame).toContain('pgup/pgdn scroll (newer below)');
+    });
+
+    await press(app, PAGE_UP, PAGE_UP, PAGE_UP, PAGE_UP);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n')).toHaveLength(20);
+      expect(frame).toMatch(/agent\s+Line 0\./);
+      expect(frame).not.toContain('Line 39.');
+    });
+
+    // Scrolled back, what streams in doesn't pull the view away.
+    connection.serveConversation('R1', { type: 'message', id: 'E2', from: 'agent', text: 'One more thing.' });
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/agent\s+Line 0\./));
+    expect(app.lastFrame()).not.toContain('One more thing.');
+
+    // Down at the latest, it follows them again.
+    await press(app, PAGE_DOWN, PAGE_DOWN, PAGE_DOWN, PAGE_DOWN, PAGE_DOWN);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('One more thing.');
+      expect(frame).not.toMatch(/agent\s+Line 0\./);
+    });
+    connection.serveConversation('R1', { type: 'message', id: 'E3', from: 'agent', text: 'And another.' });
+    await eventually(() => expect(app.lastFrame()).toContain('And another.'));
+  });
+
   const idp = {
     question: 'Which identity provider times out?',
     header: 'IdP',
@@ -1271,6 +1326,29 @@ describe('launching and conversing', () => {
     await type(app, '/handoff');
     app.stdin.write('\r');
     await eventually(() => expect(connection.sent).toEqual([{ type: 'openHandoff', taskId: 'T1' }, { type: 'openHandoff', taskId: 'T1' }]));
+  });
+
+  test('over the handoff sheet, pgup still pages back through the conversation', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief } }]), runs: { R1: run } }, { connection });
+    Object.defineProperty(app.stdout, 'rows', { value: 40, configurable: true });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: Array.from({ length: 60 }, (_, i) => `Line ${i}.`).join('\n') });
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('Hand off T1 to implement (AFK)');
+      expect(frame).toContain('Line 59.');
+      expect(frame).not.toContain('agent Line 0.');
+    });
+
+    await press(app, ...Array.from({ length: 30 }, () => PAGE_UP));
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('Hand off T1 to implement (AFK)');
+      expect(frame).toContain('agent Line 0.');
+      expect(frame).not.toContain('Line 59.');
+    });
   });
 
   test('the sheet waits on the agent’s brief, then the operator edits it, changes continue-as, autonomy level and max turns, and enter hands off', async () => {
