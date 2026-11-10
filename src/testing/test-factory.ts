@@ -17,6 +17,7 @@ import type { AwakeBlock, Processes } from '../os/processes.ts';
 import { openStore, type Store } from '../store/store.ts';
 import { FakeClock } from './fake-clock.ts';
 import { FakeExecutor } from './fake-executor.ts';
+import { FakeDependencies } from './fake-dependencies.ts';
 import { FakeGit } from './fake-git.ts';
 import { FakeGitHub } from './fake-github.ts';
 import { FakeProcesses } from './fake-processes.ts';
@@ -34,6 +35,7 @@ export type TestFactory = {
   secrets: FakeSecrets;
   processes: FakeProcesses;
   skillSets: FakeSkillSets;
+  dependencies: FakeDependencies;
   // The daemon currently running, if any.
   daemon(): Daemon;
   // Connects a client holding the operator's token.
@@ -79,6 +81,7 @@ export async function startTestFactory({
   const github = new FakeGitHub(clock, git);
   const secrets = new FakeSecrets();
   const processes = new FakeProcesses(clock);
+  const dependencies = new FakeDependencies();
   if (!withoutApp) await secrets.write(GITHUB_APP_SECRET, JSON.stringify(await github.createApp(github.manifestCode())));
   const connections: FactoryConnection[] = [];
   const daemons: Daemon[] = [];
@@ -160,6 +163,7 @@ export async function startTestFactory({
         secrets,
         skillSets,
         processes: daemonProcesses,
+        dependencies,
         routingTable: table,
         ...overrides,
         ...more,
@@ -185,6 +189,7 @@ export async function startTestFactory({
     secrets,
     skillSets,
     processes,
+    dependencies,
     daemon: () => daemons.at(-1)!,
     async attach() {
       const connection = await connect(paths);
