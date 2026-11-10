@@ -4,6 +4,7 @@
 import { createElement as h } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { Option } from '../protocol/protocol.ts';
+import { Option as Pick, Sheet, tone } from './theme.ts';
 
 // What a key does on the prompt: take an option, back out, or nothing.
 export function chooseKey(options: Option[], input: string, key: Key): Option | 'back' | null {
@@ -12,12 +13,14 @@ export function chooseKey(options: Option[], input: string, key: Key): Option | 
   return /^[1-9]$/.test(input) ? (options[Number(input) - 1] ?? null) : null;
 }
 
-export function ChoosePrompt({ reason, options }: { reason: string; options: string[] }) {
-  return h(
-    Box,
-    { flexDirection: 'column' },
-    h(Text, { color: 'yellow' }, reason),
-    ...options.map((label, i) => h(Box, { key: label, gap: 1 }, h(Text, { bold: true, color: 'cyan' }, String(i + 1)), h(Text, null, label))),
-    h(Text, { dimColor: true }, `enter ${options[0]} · esc back`),
-  );
+// With a `title`, a sheet of its own in warn; without, inside the sheet
+// whose refusal asks it.
+export function ChoosePrompt({ title, reason, options }: { title?: string; reason: string; options: string[] }) {
+  const hint = `enter ${options[0]} · esc back`;
+  const body = [
+    h(Text, { key: 'reason', ...tone('warn') }, reason),
+    ...options.map((label, i) => h(Pick, { key: label, digit: i + 1 }, label)),
+  ];
+  if (title !== undefined) return h(Sheet, { title, role: 'warn', hint }, ...body);
+  return h(Box, { flexDirection: 'column' }, ...body, h(Text, { key: 'hint', ...tone('dim') }, hint));
 }

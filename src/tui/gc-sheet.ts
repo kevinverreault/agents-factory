@@ -8,6 +8,7 @@ import { createElement as h, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { GcResult, Leftover, LeftoversView } from '../protocol/protocol.ts';
+import { Cursor, Sheet, tone } from './theme.ts';
 
 type Stage =
   | { kind: 'listing' }
@@ -63,36 +64,41 @@ export function GcSheet({ connection, repo, onLeave }: { connection: FactoryConn
     } else if (key.return && ticked.some(Boolean)) remove(view.leftovers.filter((_, i) => ticked[i]).map(({ leftover }) => leftover));
   });
 
-  const title = h(Text, { bold: true }, repo === undefined ? 'Leftovers' : `Leftovers in ${repo}`, h(Text, { dimColor: true }, ' · what belongs to no live task; only what you tick is deleted'));
-  if (stage.kind === 'listing') return column(title, h(Text, { dimColor: true }, 'Looking for leftovers…'));
-  if (stage.kind === 'deleting') return column(title, h(Text, { dimColor: true }, 'Deleting the ticked leftovers…'));
-  if (stage.kind === 'refused') return column(title, h(Text, { color: 'red' }, stage.reason), h(Text, { dimColor: true }, 'esc back'));
+  // The sheet, under its title and what it lists.
+  const sheet = (hint: string | undefined, ...children: ReturnType<typeof h>[]) =>
+    h(
+      Sheet,
+      { title: repo === undefined ? 'Leftovers' : `Leftovers in ${repo}`, hint },
+      h(Text, tone('dim'), 'What belongs to no live task; only what you tick is deleted.'),
+      ...children,
+    );
+  if (stage.kind === 'listing') return sheet(undefined, h(Text, tone('dim'), 'Looking for leftovers…'));
+  if (stage.kind === 'deleting') return sheet(undefined, h(Text, tone('dim'), 'Deleting the ticked leftovers…'));
+  if (stage.kind === 'refused') return sheet('esc back', h(Text, tone('bad'), stage.reason));
   if (stage.kind === 'done') {
     const { deleted, failed } = stage.result;
-    return column(
-      title,
+    return sheet(
+      'esc back',
       h(Text, null, `Deleted ${deleted.length}.`),
-      ...failed.map(({ leftover, reason }, i) => h(Text, { key: `failed-${i}`, color: 'yellow' }, `${describeLeftover(leftover)}: ${reason}`)),
-      h(Text, { dimColor: true }, 'esc back'),
+      ...failed.map(({ leftover, reason }, i) => h(Text, { key: `failed-${i}`, ...tone('warn') }, `${describeLeftover(leftover)}: ${reason}`)),
     );
   }
   const { view, cursor, ticked } = stage;
-  return column(
-    title,
-    ...view.unlisted.map((why, i) => h(Text, { key: `unlisted-${i}`, color: 'yellow' }, why)),
+  return sheet(
+    view.leftovers.length ? 'space tick · a all or none · enter delete the ticked · esc back' : 'esc back',
+    ...view.unlisted.map((why, i) => h(Text, { key: `unlisted-${i}`, ...tone('warn') }, why)),
     ...(view.leftovers.length === 0
-      ? [h(Text, { key: 'none', dimColor: true }, 'Nothing is left over: everything belongs to a live task.')]
+      ? [h(Text, { key: 'none', ...tone('dim') }, 'Nothing is left over: everything belongs to a live task.')]
       : view.leftovers.map(({ leftover, why }, i) =>
           h(
             Box,
             { key: `leftover-${i}`, gap: 1 },
-            h(Text, { color: 'cyan' }, i === cursor ? '›' : ' '),
-            h(Text, null, ticked[i] ? '[x]' : '[ ]'),
+            h(Cursor, { on: i === cursor }),
+            h(Text, ticked[i] ? tone('ok') : tone('dim'), ticked[i] ? '[x]' : '[ ]'),
             h(Box, { width: 13, flexShrink: 0 }, h(Text, { bold: true }, KINDS[leftover.kind])),
             h(Text, null, `${subjectOf(leftover)} · ${why}`),
           ),
         )),
-    h(Text, { dimColor: true }, view.leftovers.length ? 'space tick · a all or none · enter delete the ticked · esc back' : 'esc back'),
   );
 }
 
@@ -116,6 +122,3 @@ function subjectOf(leftover: Leftover): string {
   }
 }
 
-function column(...children: ReturnType<typeof h>[]) {
-  return h(Box, { flexDirection: 'column' }, ...children);
-}

@@ -10,6 +10,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
 import { autonomyText, cycle } from './launch-card.ts';
 import { edit } from './text-input.ts';
+import { Cursor, GLYPH, Sheet, tone } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -73,20 +74,18 @@ export function HandoffSheet({ connection, task, run }: Props) {
   const share = handoff.contextShare === null ? null : `the conversation fills ${Math.round(handoff.contextShare * 100)}% of the context window`;
   const { blockers, toCommit } = handoff.readiness;
   return h(
-    Box,
-    { flexDirection: 'column', borderStyle: 'round', paddingX: 1, flexShrink: 0 },
-    h(Text, { bold: true }, `Hand off ${task.id} ${to}`),
+    Sheet,
+    { title: `Hand off ${task.id} ${to}`, hint: `${brief ? 'enter hand off · ↑↓ line · type to edit · ←→ change' : 'enter ask again'} · esc keep talking` },
     brief
       ? h(Box, { flexDirection: 'column' }, ...lines.map((line, i) => h(BriefLine, { key: i, line, brief, selected: i === draft.current.line, first: startsSection(lines, i) })))
-      : h(Text, { color: 'yellow' }, writing ? 'The agent is writing the brief…' : 'The agent ended its turn without writing the brief: enter asks again.'),
-    h(Field, { label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, `‹ ${draft.current.continueAs} ›`, share && h(Text, { dimColor: true }, ` ${share}`)),
+      : h(Text, tone('warn'), writing ? 'The agent is writing the brief…' : 'The agent ended its turn without writing the brief: enter asks again.'),
+    h(Field, { label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, `‹ ${draft.current.continueAs} ›`, share && h(Text, tone('dim'), ` ${share}`)),
     h(Field, { label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, `‹ ${autonomyText(draft.current.autonomy)} ›`),
     h(Field, { label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, `‹ ${draft.current.tier} ›`),
     h(Field, { label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, draft.current.maxTurns || ' '),
-    h(Text, { dimColor: true }, toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
-    ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, color: 'red' }, `✗ ${blocker}`)),
-    refusal ? h(Text, { color: 'red' }, refusal) : null,
-    h(Text, { dimColor: true }, `${brief ? 'enter hand off · ↑↓ line · type to edit · ←→ change' : 'enter ask again'} · esc keep talking`),
+    h(Text, tone('dim'), toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
+    ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
+    refusal ? h(Text, tone('bad'), refusal) : null,
   );
 }
 
@@ -138,9 +137,9 @@ function BriefLine({ line, brief, selected, first }: { line: Line; brief: Brief;
   return h(
     Box,
     { gap: 1 },
-    h(Text, { color: 'cyan' }, selected ? '›' : ' '),
-    h(Box, { width: LABEL_WIDTH, flexShrink: 0 }, h(Text, { dimColor: true }, label)),
-    text === undefined ? h(Text, { dimColor: true }, selected ? '+ type to add' : '+') : h(Text, null, line.kind === 'goal' ? text : `- ${text}`),
+    h(Cursor, { on: selected }),
+    h(Box, { width: LABEL_WIDTH, flexShrink: 0 }, h(Text, tone('dim'), label)),
+    text === undefined ? h(Text, tone('dim'), selected ? '+ type to add' : '+') : h(Text, null, line.kind === 'goal' ? text : `- ${text}`),
   );
 }
 
@@ -148,8 +147,8 @@ function Field({ label, selected, children }: { label: string; selected: boolean
   return h(
     Box,
     { gap: 1 },
-    h(Text, { color: 'cyan' }, selected ? '›' : ' '),
-    h(Box, { width: LABEL_WIDTH, flexShrink: 0 }, h(Text, { dimColor: true }, label)),
+    h(Cursor, { on: selected }),
+    h(Box, { width: LABEL_WIDTH, flexShrink: 0 }, h(Text, tone('dim'), label)),
     h(Text, null, children),
   );
 }

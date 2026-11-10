@@ -86,8 +86,7 @@ describe('the frame', () => {
     await eventually(() => expect(lines(app).at(-1)).toMatch(/^enter its task’s detail/));
   });
 
-  // Skipped until every screen takes its colours from the theme (#137).
-  test.skip('under NO_COLOR nothing is coloured', async () => {
+  test('under NO_COLOR nothing is coloured, on any screen, sheet or view', async () => {
     const level = chalk.level;
     chalk.level = 3;
     vi.stubEnv('NO_COLOR', '1');
@@ -95,10 +94,23 @@ describe('the frame', () => {
       chalk.level = level;
       vi.unstubAllEnvs();
     });
-    const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running'), task('T2', 'Settle the glossary', 'done', 'Done')]));
+    // Any foreground or background colour, of the 16, the 256 or truecolour.
+    const COLOURED = /\x1b\[(?:3[0-9]|4[0-9]|9[0-7]|10[0-7])(?:;[\d;]*)?m/;
+    const failed: FactoryState['attentionQueue'][number] = {
+      kind: 'attention', recovery: null, deniedHosts: null, taskId: 'T3', repo: 'acme/widgets', requestId: 'A1', attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+    };
+    const { app } = await started(
+      factoryState([task('T1', 'Implement the store', 'running', 'Running'), task('T2', 'Settle the glossary', 'done', 'Done'), task('T3', 'Write the docs', 'waiting', 'Needs you')], [failed]),
+    );
 
     await eventually(() => expect(app.lastFrame()).toContain('Implement the store'));
-    expect(app.lastFrame()).not.toMatch(/\x1b\[(?:3[0-9]|4[0-9]|9[0-7]|10[0-7])(?:;[\d;]*)?m/);
+    expect(app.lastFrame()).not.toMatch(COLOURED);
+    // The answer sheet, the Runs and Usage screens, a detail, the condensed view and help.
+    for (const [keys, shows] of [[['2'], 'FAILURE'], [['3'], 'No runs yet.'], [['4'], '5-hour window'], [['1', '\r'], 'Tasks › T1'], [['v'], 'DETAIL'], [['?'], 'KEYS']] as const) {
+      await press(app, ...keys);
+      await eventually(() => expect(app.lastFrame()!.replace(/\x1b\[[\d;]*m/g, '')).toContain(shows));
+      expect(app.lastFrame()).not.toMatch(COLOURED);
+    }
   });
 });
 
@@ -294,7 +306,7 @@ describe('cancelling', () => {
     await press(app, '\x1b[B', 'x');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        'Cancel T2: factory/T2-implement-the-store has 1 commit that exists nowhere else. 1 Keep branch 2 Discard work enter Keep branch · esc back',
+        'CANCEL T2 factory/T2-implement-the-store has 1 commit that exists nowhere else. [1] Keep branch [2] Discard work enter Keep branch · esc back',
       ),
     );
 
@@ -668,7 +680,7 @@ describe('launching and conversing', () => {
 
     app.stdin.write('N');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/Launch a task[\s\S]*Repository\s+acme\/widgets/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/LAUNCH A TASK[\s\S]*Repository\s+acme\/widgets/));
     await type(app, 'Grill me about the login flow.');
     app.stdin.write('\r');
     await settle();
@@ -704,7 +716,7 @@ describe('launching and conversing', () => {
 
     app.stdin.write('\x1b');
     await settle();
-    await eventually(() => expect(app.lastFrame()).not.toContain('Launch a task'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('LAUNCH A TASK'));
     await eventually(() => expect(app.lastFrame()).toContain('No tasks yet.'));
   });
 
@@ -755,7 +767,7 @@ describe('launching and conversing', () => {
     expect(connection.sent).toContainEqual({ type: 'checkApp', repo: 'acme/widgets' });
     app.stdin.write('\x0f');
     await eventually(() => expect(opened).toEqual([fixUrl]));
-    expect(app.lastFrame()).toContain('Launch a task');
+    expect(app.lastFrame()).toContain('LAUNCH A TASK');
     // Once the operator has installed it, the fresh check lifts the block.
     connection.servePatch([{ op: 'set', path: ['repositories', 'acme/widgets'], value: { ...uninstalled, app: { installed: true, checkedAt: 2 } } }]);
     await eventually(() => expect(app.lastFrame()).not.toContain('works unattended'));
@@ -1260,7 +1272,7 @@ describe('launching and conversing', () => {
     app.stdin.write(CTRL_N);
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain('Advance T1 from grill');
+      expect(frame).toContain('ADVANCE T1 FROM GRILL');
       expect(frame).toMatch(/› glossary opus optional ← advances here spec opus optional tickets opus then implement \(AFK\): the handoff starts it/);
     });
   });
@@ -1271,11 +1283,11 @@ describe('launching and conversing', () => {
     await press(app, '\r', '\r');
     await settle();
     app.stdin.write(CTRL_N);
-    await eventually(() => expect(app.lastFrame()).toContain('Advance T1 from grill'));
+    await eventually(() => expect(app.lastFrame()).toContain('ADVANCE T1 FROM GRILL'));
 
     app.stdin.write('\r');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'advanceStage', taskId: 'T1' }));
-    await eventually(() => expect(app.lastFrame()).not.toContain('Advance T1'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('ADVANCE T1'));
 
     connection.servePatch([
       { op: 'set', path: ['runs', 'R1'], value: { ...run, status: 'ended', outcome: 'completed' } },
@@ -1300,14 +1312,14 @@ describe('launching and conversing', () => {
     app.stdin.write('\r');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'advanceStage', taskId: 'T1', skip: ['glossary', 'spec'] }));
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('tickets can’t start'));
-    expect(app.lastFrame()).toContain('Advance T1 from grill');
+    expect(app.lastFrame()).toContain('ADVANCE T1 FROM GRILL');
 
     // Taking a skip back makes that stage the one advanced to again.
     await press(app, UP, ' ');
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/glossary opus optional · skipped › spec opus optional ← advances here tickets opus/));
 
     app.stdin.write('\x1b');
-    await eventually(() => expect(app.lastFrame()).not.toContain('Advance T1'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('ADVANCE T1'));
     expect(connection.sent.filter((command) => command.type === 'advanceStage')).toHaveLength(1);
     expect(connection.sent.filter((command) => command.type === 'interrupt')).toEqual([]);
   });
@@ -1389,7 +1401,7 @@ describe('launching and conversing', () => {
     await press(app, '\r', '\r');
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain('Hand off T1 to implement (AFK)');
+      expect(frame).toContain('HAND OFF T1 TO IMPLEMENT (AFK)');
       expect(frame).toContain('The agent is writing the brief…');
       expect(frame).toContain('the conversation fills 23% of the context window');
       expect(frame).toContain('The handoff commit takes GLOSSARY.md.');
@@ -1469,7 +1481,7 @@ describe('launching and conversing', () => {
     app.stdin.write('\x1b');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'closeHandoff', taskId: 'T1' }));
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: onLean }]);
-    await eventually(() => expect(app.lastFrame()).not.toContain('Hand off T1'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('HAND OFF T1'));
     await settle();
     await type(app, 'One more thing');
     app.stdin.write('\r');
@@ -1671,7 +1683,7 @@ describe('answering from Needs you', () => {
     await press(app, '2', 'a', '3');
 
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'cancel', taskId: 'T2' }));
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('1 Keep branch 2 Discard work'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[1] Keep branch [2] Discard work'));
     connection.replyTo('cancel', { ok: true });
     await press(app, ENTER);
     await eventually(() => expect(connection.sent.at(-1)).toEqual(keep));
@@ -1931,7 +1943,7 @@ describe('answering from Needs you', () => {
     await press(app, '2', 'a', '3');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        'factory/T3-add-a-logout-button has 2 commits that exist nowhere else. 1 Keep branch 2 Discard work enter Keep branch · esc back',
+        'factory/T3-add-a-logout-button has 2 commits that exist nowhere else. [1] Keep branch [2] Discard work enter Keep branch · esc back',
       ),
     );
 
@@ -2798,7 +2810,7 @@ describe('the screens view', () => {
     await press(app, '?');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', 'v', 'tab', 'f', 'F', ':', 'g', '\\?']) expect(frame).toMatch(new RegExp(`^\\s*${key}\\s{2,}\\S`, 'm'));
+      for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', 'v', 'tab', 'f', 'F', ':', 'g', '\\?']) expect(frame).toMatch(new RegExp(`^[│\\s]*${key}\\s{2,}\\S`, 'm'));
     });
     await press(app, '3', '\x1b');
     await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T1\s+Grill me about the docs/));
@@ -3015,7 +3027,7 @@ describe('quick launch', () => {
     const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': widgets } }, { cwd: '/clones/widgets', connection });
     app.stdin.write('n');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toMatch(/Quick launch[\s\S]*acme\/widgets/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/QUICK LAUNCH[\s\S]*acme\/widgets/));
     for (const char of prompt) app.stdin.write(char);
     await settle();
     app.stdin.write('\r');
@@ -3034,7 +3046,7 @@ describe('quick launch', () => {
 
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/Quick launch T1[\s\S]*Same fields as the table\?[\s\S]*\[1\]\s+Yes\s+One schema/);
+      expect(frame).toMatch(/QUICK LAUNCH T1[\s\S]*Same fields as the table\?[\s\S]*\[1\]\s+Yes\s+One schema/);
       expect(frame).toContain('ctrl+e full conversation');
       // The card, not the full conversation view.
       expect(frame).not.toContain('claude --resume');
@@ -3051,7 +3063,7 @@ describe('quick launch', () => {
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, quick: null, handoff: sheet } }]);
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).toContain('Hand off T1 to implement (AFK)');
+      expect(frame).toContain('HAND OFF T1 TO IMPLEMENT (AFK)');
       expect(frame).toContain('Autonomy ‹ L1 (on this machine) ›');
     });
 
@@ -3063,7 +3075,7 @@ describe('quick launch', () => {
 
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).not.toContain('Hand off T1');
+      expect(frame).not.toContain('HAND OFF T1');
       expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+AFK L1\s+Queued/);
     });
   });
@@ -3093,7 +3105,7 @@ describe('quick launch', () => {
   test('backing out of its handoff sheet keeps the conversation going, in the full conversation view', async () => {
     const { app, connection } = await launched();
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, quick: null, handoff: sheet } }]);
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Hand off T1'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('HAND OFF T1'));
 
     app.stdin.write('\x1b');
     await eventually(() => expect(connection.sent).toEqual([{ type: 'closeHandoff', taskId: 'T1' }]));
@@ -3111,29 +3123,29 @@ describe('quick launch', () => {
     await eventually(() => expect(connection.sent).toEqual([{ type: 'expandQuickLaunch', taskId: 'T1' }]));
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).not.toContain('Quick launch');
+      expect(frame).not.toContain('QUICK LAUNCH');
       expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+HITL\s+In conversation/);
     });
   });
 
   test('a quick launch cancelled meanwhile closes its card', async () => {
     const { app, connection } = await launched();
-    await eventually(() => expect(app.lastFrame()).toContain('Quick launch T1'));
+    await eventually(() => expect(app.lastFrame()).toContain('QUICK LAUNCH T1'));
 
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, state: 'cancelled', label: 'Cancelled', liveRunId: null } }]);
 
-    await eventually(() => expect(app.lastFrame()).not.toContain('Quick launch T1'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('QUICK LAUNCH T1'));
   });
 
   test('esc on the prompt backs out without launching', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': widgets } }, { connection });
     app.stdin.write('n');
-    await eventually(() => expect(app.lastFrame()).toContain('Quick launch'));
+    await eventually(() => expect(app.lastFrame()).toContain('QUICK LAUNCH'));
 
     app.stdin.write('\x1b');
 
-    await eventually(() => expect(app.lastFrame()).not.toContain('Quick launch'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('QUICK LAUNCH'));
     expect(connection.sent).toEqual([]);
   });
 });
@@ -3221,7 +3233,7 @@ describe('the condensed view', () => {
     await press(app, 'g');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/Pick a group/);
+      expect(frame).toMatch(/FILTER BY GROUP/);
       expect(frame).toMatch(/›\s+All tasks/);
       expect(frame).toMatch(/billing\s+2/);
       expect(frame).toMatch(/docs\s+1/);
@@ -3231,7 +3243,7 @@ describe('the condensed view', () => {
     await press(app, '\x1b[B', '\r');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).not.toContain('Pick a group');
+      expect(frame).not.toContain('FILTER BY GROUP');
       expect(frame).toContain('1 Tasks');
       expect(frame).toContain('group: billing');
       expect(frame).toContain('Grill me about invoices');
@@ -3247,7 +3259,7 @@ describe('the condensed view', () => {
     });
 
     await press(app, 'g', '\x1b[B', '\x1b[B', '\x1b');
-    await eventually(() => expect(app.lastFrame()).not.toContain('Pick a group'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('FILTER BY GROUP'));
     expect(app.lastFrame()).not.toContain('Write the docs');
 
     // The picker opens on the current group: All tasks is above it.
@@ -3279,13 +3291,13 @@ describe('the condensed view', () => {
 
     // Typed on the command line, keys do nothing else: x cancels nothing.
     await press(app, ':', 't', 'a', 's', 'x', '\x7f', 'k', ' ', '3');
-    await eventually(() => expect(app.lastFrame()).toMatch(/^:task 3/m));
+    await eventually(() => expect(app.lastFrame()).toMatch(/^│ :task 3/m));
     expect(connection.sent).toEqual([]);
     await press(app, '\r');
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toContain('Tasks › T3 Write the docs');
-      expect(frame).not.toMatch(/^:/m);
+      expect(frame).not.toContain('COMMAND');
     });
 
     await press(app, ':');
@@ -3306,7 +3318,7 @@ describe('the condensed view', () => {
 
     // esc sets the line aside.
     await press(app, ':', 'q', '\x1b');
-    await eventually(() => expect(app.lastFrame()).not.toMatch(/^:q/m));
+    await eventually(() => expect(app.lastFrame()).not.toMatch(/^│ :q/m));
     // The cursor stayed on the task :task jumped to.
     await press(app, 'x');
     await eventually(() => expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T3' }]));
@@ -3442,7 +3454,7 @@ describe('factory gc from the TUI', () => {
     const app = render(<GcSheet connection={connection} repo="acme/widgets" onLeave={() => {}} />);
     apps.push(app);
 
-    await eventually(() => expect(app.lastFrame()).toContain('Leftovers in acme/widgets'));
+    await eventually(() => expect(app.lastFrame()).toContain('LEFTOVERS IN ACME/WIDGETS'));
     expect(connection.sent).toEqual([{ type: 'listLeftovers', repo: 'acme/widgets' }]);
   });
 });

@@ -15,6 +15,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
 import { edit } from './text-input.ts';
+import { Cursor, Sheet, tone, type Role } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -130,30 +131,20 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     return h(
       Box,
       { key: field, gap: 1 },
-      h(Text, { color: 'cyan' }, focused ? '›' : ' '),
-      h(Text, { dimColor: true }, label.padEnd(LABEL)),
+      h(Cursor, { on: focused }),
+      h(Text, tone('dim'), label.padEnd(LABEL)),
       typeof shown === 'string' ? h(Text, null, shown) : shown,
     );
   };
-  const note = (key: string, text: string, color?: string) =>
-    h(Box, { key, marginLeft: LABEL + 3 }, h(Text, color ? { color } : { dimColor: true }, text));
+  const note = (key: string, text: string, role: Role = 'dim') => h(Box, { key, marginLeft: LABEL + 3 }, h(Text, tone(role), text));
 
-  if (!draft.repo) {
-    return h(
-      Box,
-      { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
-      h(Text, { bold: true }, 'Launch a task'),
-      h(Text, { color: 'yellow' }, NO_REPOSITORY),
-      h(Text, { dimColor: true }, 'esc back'),
-    );
-  }
+  if (!draft.repo) return h(Sheet, { title: 'Launch a task', hint: 'esc back' }, h(Text, tone('warn'), NO_REPOSITORY));
   const { listing, choice, start } = card;
   const afk = start?.mode === 'AFK';
   const maxTurnsDefault = `stage default (${start?.maxTurns ?? DEFAULT_MAX_TURNS})`;
   return h(
-    Box,
-    { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
-    h(Text, { bold: true }, 'Launch a task'),
+    Sheet,
+    { title: 'Launch a task', hint: 'enter launch · ↑↓ field · ←→ choose · esc back' },
     row('repo', 'Repository', draft.repo),
     row(
       'preset',
@@ -161,12 +152,12 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
       listing === undefined
         ? 'loading…'
         : 'refusal' in listing
-          ? h(Text, { color: 'red' }, listing.refusal)
+          ? h(Text, tone('bad'), listing.refusal)
           : choice
             ? `${choice.name} (${choice.source})`
             : 'none',
     ),
-    choice && 'error' in choice ? note('error', choice.error, 'red') : null,
+    choice && 'error' in choice ? note('error', choice.error, 'bad') : null,
     choice && 'description' in choice && choice.description ? note('description', choice.description) : null,
     row('stage', 'Start stage', start ? describeStage(start) : '—'),
     row('prompt', 'Prompt', draft.prompt, false),
@@ -178,16 +169,15 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
       ? row(
           'maxTurns',
           'Max turns',
-          draft.maxTurns || draft.field === 'maxTurns' ? draft.maxTurns : h(Text, { dimColor: true }, maxTurnsDefault),
+          draft.maxTurns || draft.field === 'maxTurns' ? draft.maxTurns : h(Text, tone('dim'), maxTurnsDefault),
           false,
         )
       : null,
     afk ? row('priority', 'Priority', draft.priority ?? 'normal') : null,
-    listing && 'warning' in listing && listing.warning ? h(Text, { color: 'yellow' }, listing.warning) : null,
-    blocked ? h(Text, { color: 'red' }, blocked) : null,
-    fixUrl ? h(Text, { dimColor: true }, 'ctrl+o opens its installation settings') : null,
-    refusal ? h(Text, { color: 'red' }, refusal) : null,
-    h(Text, { dimColor: true }, 'enter launch · ↑↓ field · ←→ choose · esc back'),
+    listing && 'warning' in listing && listing.warning ? h(Text, tone('warn'), listing.warning) : null,
+    blocked ? h(Text, tone('bad'), blocked) : null,
+    fixUrl ? h(Text, tone('dim'), 'ctrl+o opens its installation settings') : null,
+    refusal ? h(Text, tone('bad'), refusal) : null,
   );
 }
 

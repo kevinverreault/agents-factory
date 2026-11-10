@@ -422,10 +422,10 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         : null,
       missingSetup
         ? missingSetup.settingUp
-          ? h(Text, { key: 'setup', dimColor: true }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
+          ? h(Text, { key: 'setup', ...tone('dim') }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
           : h(
               Text,
-              { key: 'setup', ...(missingSetup.offered ? { color: 'yellow' } : { dimColor: true }) },
+              { key: 'setup', ...tone(missingSetup.offered ? 'warn' : 'dim') },
               `${missingSetup.reason} `,
               ...(missingSetup.offered ? [h(Text, { key: 's', bold: true }, 's'), ' Set up now · '] : []),
               h(Text, { key: 'R', bold: true }, 'R'),
@@ -435,7 +435,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
       pickerCursor === null ? null : h(GroupPicker, { key: 'picker', groups, cursor: pickerCursor, current: group }),
       cancelSheet
-        ? h(ChoosePrompt, { key: 'cancel', reason: `Cancel ${cancelSheet.taskId}: ${cancelSheet.reason}`, options: cancelSheet.options.map(({ label }) => label) })
+        ? h(ChoosePrompt, { key: 'cancel', title: `Cancel ${cancelSheet.taskId}`, reason: cancelSheet.reason, options: cancelSheet.options.map(({ label }) => label) })
         : null,
       state && view.kind === 'launch'
         ? h(LaunchCard, {
@@ -462,7 +462,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       Box,
       { flexDirection: 'column', flexShrink: 1, overflow: 'hidden' },
       state === null
-        ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
+        ? h(Text, tone('dim'), 'Attaching to the daemon…')
         : help
           ? fixed(h(Help))
         : condensed

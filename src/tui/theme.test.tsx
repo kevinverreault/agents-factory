@@ -4,7 +4,7 @@ import chalk from 'chalk';
 import { Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
-import { ROLES, stateLook, tone } from './theme.ts';
+import { ROLES, Sheet, stateLook, tone } from './theme.ts';
 
 const withLevel = (level: 0 | 1 | 2 | 3) => {
   const was = chalk.level;
@@ -75,5 +75,33 @@ describe('state glyphs', () => {
   test('only a cancelled task is struck through', () => {
     expect(stateLook('Cancelled').strike).toBe(true);
     expect(stateLook('Done').strike).toBe(false);
+  });
+});
+
+describe('the sheet style', () => {
+  test('a sheet has a rounded border, its title in uppercase, its content, then its key hint', () => {
+    const { lastFrame, unmount } = render(
+      <Sheet title="Filter by group" hint="enter filters · esc back">
+        <Text>All tasks</Text>
+      </Sheet>,
+    );
+    const lines = lastFrame()!.split('\n');
+    expect(lines[0]).toMatch(/^╭─+╮$/);
+    expect(lines.slice(1, -1).map((line) => line.replace(/^│\s|\s*│$/g, ''))).toEqual(['FILTER BY GROUP', 'All tasks', 'enter filters · esc back']);
+    expect(lines.at(-1)).toMatch(/^╰─+╯$/);
+    unmount();
+  });
+
+  test('a sheet about a request takes its kind’s colour; any other the accent', () => {
+    withLevel(3);
+    const border = (role?: 'bad') => {
+      const { lastFrame, unmount } = render(<Sheet title="Failure" role={role} />);
+      const frame = lastFrame()!;
+      unmount();
+      return frame;
+    };
+    // Truecolour escapes: #f07575 is 240;117;117, #9fce7e is 159;206;126.
+    expect(border('bad')).toContain('\x1b[38;2;240;117;117m╭');
+    expect(border()).toContain('\x1b[38;2;159;206;126m╭');
   });
 });

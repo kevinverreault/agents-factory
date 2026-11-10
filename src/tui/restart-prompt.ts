@@ -6,6 +6,7 @@ import { Box, Text, useInput } from 'ink';
 import type { RestartWhen } from '../daemon/auto-start.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import { PROTOCOL_VERSION } from '../protocol/protocol.ts';
+import { Option, Sheet, tone } from './theme.ts';
 
 type Props = {
   daemonVersion: number;
@@ -39,17 +40,17 @@ export function RestartPrompt({ daemonVersion, restart, onAttached, onQuit }: Pr
   });
 
   const skew = `The running daemon speaks protocol ${daemonVersion}, and this agents-factory speaks ${PROTOCOL_VERSION}.`;
-  if (stage.kind === 'restarting') return h(Text, null, 'Restarting the daemon…');
+  const title = 'Restart the daemon';
+  if (stage.kind === 'restarting') return h(Sheet, { title }, h(Text, null, 'Restarting the daemon…'));
   if (stage.kind === 'waiting') {
     const runs = stage.activeRuns === 1 ? 'its active run ends' : `its ${stage.activeRuns} active runs end`;
-    return h(Box, { flexDirection: 'column' }, h(Text, null, `The daemon restarts once ${runs}. You can close this and come back.`), h(Text, { dimColor: true }, 'q quit'));
+    return h(Sheet, { title, hint: 'q quit' }, h(Text, null, `The daemon restarts once ${runs}. You can close this and come back.`));
   }
   return h(
-    Box,
-    { flexDirection: 'column' },
+    Sheet,
+    { title, role: 'warn', hint: 'q quit' },
     h(Text, null, skew),
-    stage.problem ? h(Text, { color: 'yellow' }, stage.problem) : null,
-    ...CHOICES.map(([when, label], i) => h(Box, { key: when, gap: 1 }, h(Text, { bold: true, color: 'cyan' }, String(i + 1)), h(Text, null, label))),
-    h(Text, { dimColor: true }, 'q quit'),
+    stage.problem ? h(Text, tone('warn'), stage.problem) : null,
+    ...CHOICES.map(([when, label], i) => h(Option, { key: when, digit: i + 1 }, label)),
   );
 }

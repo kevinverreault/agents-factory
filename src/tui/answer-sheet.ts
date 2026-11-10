@@ -393,7 +393,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
     h(
       Sheet,
       { title: look.kind, role: look.role, hint: hint ?? undefined },
-      question ? h(QuestionCard, { question, card, ownWords: false }) : h(Text, null, askedFor(item, task)),
+      question ? h(QuestionCard, { question, card, ownWords: false, nested: true }) : h(Text, null, askedFor(item, task)),
       ...choicesFor(item, task).map((choice, i) => h(Pick, { key: choice.label, digit: i + 1 }, choice.label)),
       // With more than one field, › marks the one being typed into.
       ...(form?.fields ?? []).map(({ prompt, value }, i) =>

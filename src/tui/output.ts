@@ -56,7 +56,7 @@ export function Event({ event, oneLine = false }: { event: ConversationEvent; on
       Box,
       { gap: 1, flexShrink: 0, paddingLeft: 2 },
       h(Box, { flexShrink: 0 }, h(Text, tone('review'), event.tool)),
-      h(Text, { ...tone('review'), dimColor: true, wrap: 'truncate' }, oneLine ? flat(event.summary) : event.summary),
+      h(Text, { ...tone('review'), wrap: 'truncate' }, oneLine ? flat(event.summary) : event.summary),
     );
   }
   const operator = event.from === 'operator';
