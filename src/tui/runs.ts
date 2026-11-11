@@ -60,7 +60,7 @@ export function RunsList({ state, runs, cursor }: { state: FactoryState; runs: R
           { key: run.id, gap: 1 },
           h(Cursor, { on: i === cursor }),
           ...cells.map((text, at) => cell(COLUMNS[at]![1], text, at === cells.length - 1 && role === 'fg' ? 'ok' : role, at === TITLE_COLUMN && i === cursor)),
-          tokensCell(tokens(tokensOf(overall(run.usage))), 'dim'),
+          tokensCell(tokens(tokensOf(overall(run.usage))), role),
         );
       }),
     }),

@@ -657,19 +657,21 @@ function rowLayout(tasks: TaskView[], columns: number, compact: boolean): RowLay
 // What a row says past its state: its loop's ticket, its descendants'
 // rollup and its progress.
 function extrasOf(task: TaskView): string {
-  return joined([loopDetail(task), rollupDetail(task), task.progress ?? ''].filter(Boolean));
+  return joined([loopDetail(task), rollupDetail(task), task.progress]);
 }
 
 // A task in the tree: its state's glyph, indented by its depth; its id and
 // title; its mode and autonomy; its state, lit as its glyph is; its extras;
 // and its groups. A finished task is dim, a cancelled one struck through
-// too, and the selected one's title bold.
+// too, and the selected one's title bold in fg, finished or not.
 function TaskRow({ task, selected, layout }: { task: TaskView; selected: boolean; layout: RowLayout }) {
   const look = stateLook(task.label);
   const quiet = (text: string) => h(Text, { ...tone('dim'), wrap: 'truncate' }, text);
   const cell = (width: number | undefined, content: ReactNode, right = false) =>
     h(Box, { width, flexShrink: 0, justifyContent: right ? 'flex-end' : 'flex-start' }, content);
-  const title = h(Text, { ...tone(finished(task) ? 'dim' : 'fg'), bold: selected, strikethrough: look.strike, wrap: 'truncate' }, task.title);
+  // A finished task's title is dim, but the selected one's is bold fg as
+  // every selected title is: the cursor lights it, struck through or not.
+  const title = h(Text, { ...tone(finished(task) && !selected ? 'dim' : 'fg'), bold: selected, strikethrough: look.strike, wrap: 'truncate' }, task.title);
   const state = h(Text, { ...tone(look.role), wrap: 'truncate' }, task.label);
   const indent = '  '.repeat(task.depth);
   if (layout.compact) {

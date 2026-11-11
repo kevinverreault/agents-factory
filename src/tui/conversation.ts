@@ -157,7 +157,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const scroll: Hint[] = pager.overflows ? [['pgup/pgdn', `scroll${pager.scrolledBack ? ' (newer below)' : ''}`]] : [];
   const hint: Hint[] = [...keys, ...(canAdvance(task) ? [['ctrl+n', 'advance'] as Hint] : []), ...(chat ? [['/handoff', 'hand off'] as Hint] : []), ['ctrl+b', 'back'], ...scroll];
   const label = task?.label ?? '';
-  const what = [task ? modeOf(task) : null, task?.stage, run?.model].filter((part): part is string => Boolean(part));
+  const what = joined([task ? modeOf(task) : null, task?.stage, run?.model]);
 
   return h(
     Box,
@@ -171,7 +171,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       h(
         Text,
         { ...tone('dim'), wrap: 'truncate' },
-        what.length ? `${joined(what)} ${GLYPH.between} ` : '',
+        what ? `${what} ${GLYPH.between} ` : '',
         h(Text, tone(stateLook(label).role), label),
         task?.branch ? ` ${GLYPH.between} ${task.branch}` : '',
         midTurn ? h(Text, tone('ok'), ` ${GLYPH.between} agent working…`) : null,
