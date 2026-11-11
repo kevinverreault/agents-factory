@@ -17,7 +17,7 @@ import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event, SystemLine } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
-import { usePager, useRows } from './screen.ts';
+import { fixed, usePager, useRows } from './screen.ts';
 import { modeOf } from './task-detail.ts';
 import { GLYPH, joined, Keys, Rule, Section, stateLook, tone, type Hint } from './theme.ts';
 import { edit } from './text-input.ts';
@@ -183,7 +183,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     ),
     h(
       Box,
-      { flexGrow: 1, gap: 1 },
+      // Sized to the screen, it takes only the room left, to give the
+      // handoff sheet all it needs before that sheet gives way.
+      { flexGrow: 1, flexBasis: height === undefined ? undefined : 0, gap: 1 },
       // The latest events stay in view, older ones scrolling off the top,
       // until pgup pages back to them.
       h(
@@ -202,28 +204,34 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
       ),
     ),
+    // Of what is below the conversation, only the handoff sheet gives way,
+    // once the conversation has none left to give.
     h(
       Box,
-      { flexDirection: 'column', flexShrink: 0 },
-      question ? h(QuestionCard, { question, card }) : null,
-      live && run.proposal?.kind === 'advance'
-        ? h(Text, tone('warn'), `${GLYPH.conversation} The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
-        : null,
-      live && run.proposal?.kind === 'handoff' && !sheet
-        ? h(Text, tone('warn'), `${GLYPH.conversation} The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
-        : null,
+      { flexDirection: 'column', flexShrink: 1, overflow: 'hidden' },
+      fixed(
+        question ? h(QuestionCard, { key: 'question', question, card }) : null,
+        live && run.proposal?.kind === 'advance'
+          ? h(Text, { key: 'advance', ...tone('warn') }, `${GLYPH.conversation} The agent proposes advancing: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+n'), ' review')
+          : null,
+        live && run.proposal?.kind === 'handoff' && !sheet
+          ? h(Text, { key: 'handoff', ...tone('warn') }, `${GLYPH.conversation} The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
+          : null,
+      ),
       sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run }) : null,
-      advancing && canAdvance(task)
-        ? h(AdvanceSheet, { connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
-        : null,
-      request ? h(AnswerSheet, { item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
-      live && (run.turn === 'operator' || question || run.permission) ? h(Text, tone('warn'), 'The agent is waiting on you.') : null,
-      refusal ? h(Text, tone('bad'), refusal) : null,
-      chat ? h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`) : null,
-      h(Rule, null),
-      h(UsageStrip, { state }),
-      h(Rule, null),
-      h(Keys, { keys: hint }),
+      fixed(
+        advancing && canAdvance(task)
+          ? h(AdvanceSheet, { key: 'advance', connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
+          : null,
+        request ? h(AnswerSheet, { key: 'request', item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
+        live && (run.turn === 'operator' || question || run.permission) ? h(Text, { key: 'waiting', ...tone('warn') }, 'The agent is waiting on you.') : null,
+        refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
+        chat ? h(Text, { key: 'chat' }, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`) : null,
+        h(Rule, { key: 'strip-rule' }),
+        h(UsageStrip, { key: 'strip', state }),
+        h(Rule, { key: 'footer-rule' }),
+        h(Keys, { key: 'keys', keys: hint }),
+      ),
     ),
   );
 }
