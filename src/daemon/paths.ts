@@ -25,6 +25,9 @@ export type FactoryPaths = {
   runsRoot: string;
   // Each ended task's session transcripts, by task id (ADR 0011).
   transcriptsRoot: string;
+  // The code intelligence plugin AFK runs on the host load, written at
+  // each daemon start for the factory's own install.
+  lspPlugin: string;
   // What the factory's secrets are named under in the OS credential store
   // (ADR 0004): a moved home keeps its own.
   credentialPrefix: string;
@@ -47,6 +50,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     permissionsPath: join(shortHome, 'permissions.yaml'),
     runsRoot: join(shortHome, 'runs'),
     transcriptsRoot: join(shortHome, 'transcripts'),
+    lspPlugin: join(shortHome, 'lsp'),
     credentialPrefix: env.AGENTS_FACTORY_HOME ? `agents-factory-${hashOf(home)}` : 'agents-factory',
   };
 }

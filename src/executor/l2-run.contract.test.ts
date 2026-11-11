@@ -21,7 +21,7 @@ import { windowsCredentials } from '../secrets/secrets.ts';
 import type { RunSnapshot } from '../git/git.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, Executor, RunStart } from './executor.ts';
-import { afkRun, typesOf } from './sdk-test-support.ts';
+import { afkRun, CODE_INTELLIGENCE_ERROR, CODE_INTELLIGENCE_TASK, typeScriptProject, typesOf } from './sdk-test-support.ts';
 
 // The operator's own factory home, as `setup token` wrote it.
 async function storedToken(): Promise<string> {
@@ -52,15 +52,17 @@ type L2Run = {
 };
 
 // Starts an L2 run of `firstMessage` in a fresh task's container, as the
-// daemon would, and cleans the task up after `body`.
-async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void>): Promise<void> {
+// daemon would, over a repo of a README and `files`, and cleans the task up
+// after `body`.
+async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void>, files: Record<string, string> = {}): Promise<void> {
   const token = await storedToken();
   const root = mkdtempSync(join(tmpdir(), 'factory-l2-run-'));
   const clonePath = join(root, 'clone');
   const worktree = join(root, 'worktree');
   git(root, 'init', '--quiet', '--initial-branch=main', clonePath);
   writeFileSync(join(clonePath, 'README.md'), 'widgets\n');
-  git(clonePath, 'add', 'README.md');
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(clonePath, name), content);
+  git(clonePath, 'add', '--all');
   git(clonePath, 'commit', '--quiet', '-m', 'Start');
   git(clonePath, 'worktree', 'add', '--quiet', '-b', BRANCH, worktree, 'main');
   const start = git(worktree, 'rev-parse', 'HEAD');
@@ -152,4 +154,18 @@ test('an L2 run’s question reaches the operator as an attention request, holds
       expect(typesOf(reported)).toEqual(['runStarted', 'attentionRaised', 'runCompleted']);
       expect(live.some((event) => event.type === 'message' && event.from === 'agent' && /blue/i.test(event.text))).toBe(true);
     },
+  ), 600_000);
+
+test('an L2 run looks up symbols through its container’s language server, and sees the type error its edit introduces', () =>
+  withL2Run(
+    CODE_INTELLIGENCE_TASK,
+    async ({ container, reported, live, ended }) => {
+      await waitFor(ended, 290_000);
+
+      expect(typesOf(reported)).toEqual(['runStarted', 'runCompleted']);
+      expect(live).toContainEqual(expect.objectContaining({ type: 'toolUse', tool: 'LSP' }));
+      expect(live.at(-1)).toMatchObject({ type: 'message', from: 'agent', text: expect.stringContaining(CODE_INTELLIGENCE_ERROR) });
+      expect(await container.deniedHosts()).toEqual([]);
+    },
+    typeScriptProject(),
   ), 600_000);

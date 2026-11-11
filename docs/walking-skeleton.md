@@ -16,6 +16,7 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | Keep-awake helper holds an idle-sleep block | Holds | `src/os/windows-processes.contract.test.ts` |
 | Descendant sweep: a run's tree, by its job and by parent PID, never a reused PID (#62) | Holds | `src/os/windows-processes.contract.test.ts` |
 | Factory plugin loads, `/factory:<skill> args`, cross-skill calls | Holds. No `.claude/skills/` fallback needed | `src/skills/plugin.contract.test.ts` |
+| TypeScript code intelligence plugin: the `LSP` tool, and type errors shown after an edit, on the host and in an L2 container | Holds, with `typescript-language-server` over a pinned TypeScript 6. Diagnostics reach only runs with a shell tool | `src/executor/code-intelligence.contract.test.ts`, `src/sandbox/docker.contract.test.ts`, `src/executor/l2-run.contract.test.ts` |
 | `gh` re-reads a refreshed `hosts.yml` | Holds | `src/github/gh-config.contract.test.ts` |
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
 | L2 sandbox: bundle round trip, restart, no credentials (#64) | Holds on Docker Desktop 27 (WSL 2 engine) | `src/sandbox/docker.contract.test.ts` |
@@ -75,6 +76,16 @@ For the autonomy gate (later tickets):
 - The plugin loads (`system/init` lists `factory` with no `plugin_errors`, and `factory:skeleton-echo` among the slash commands).
 - `/factory:skeleton-echo alpha beta` as the prompt runs the skill with `$ARGUMENTS` = `alpha beta`.
 - A skill that names another skill bare ("invoke the `skeleton-callee` skill") reaches it. In the runs recorded, the model called the Skill tool with `factory:skeleton-callee` (the test accepts the bare name too). Upstream cross-skill references such as wayfinder → `research` should resolve the same way. **The `.claude/skills/` + `.git/info/exclude` fallback isn't needed.**
+
+## TypeScript code intelligence
+
+`buildLspPlugin()` (`src/code-intelligence/code-intelligence.ts`) writes a local plugin, `factory-lsp`, whose `lspServers.typescript` gives a run the read-only `LSP` tool and the type errors its edits introduce. The daemon writes it to `~/.agent-factory/lsp` at start, and L1 runs load it. Its server is the pinned `typescript-language-server`, run as `node <its cli.mjs> --stdio`, so it needs no global install and no `.cmd` shim on `PATH`. The command is the bare `node`, not the daemon's own Node path: Claude Code refuses a `command` with a space in it ("Command should not contain spaces"), and `C:\Program Files\nodejs\node.exe` has one. It runs the repo's own `tsserver` when the repo has one, and otherwise falls back to the pinned TypeScript 6 (`typescript-6`, an npm alias, through `initializationOptions.tsserver.fallbackPath`). The L2 image installs the same two versions globally and holds the same plugin, owned by root, at `/opt/factory/lsp`. HITL runs act as the operator, so they get the operator's own code intelligence plugins and no second TypeScript server. Recorded on 2026-11-10:
+
+- TypeScript 7's own `tsc --lsp --stdio` serves navigation, but it pushes no diagnostics for files: it only answers `textDocument/diagnostic` pulls. Claude Code 2.1.312 only takes pushed `publishDiagnostics`, so a run on it would never see its type errors. A repo on TypeScript 7, like this one, has no `tsserver.js`, so the language server skips it and gets TypeScript 6's diagnostics.
+- Claude Code delivers LSP diagnostics only to a session that has the Bash or PowerShell tool. A run with only `LSP`, `Edit` and `Read` gets them registered but never shown.
+- Diagnostics come 0.4 to 1.5 s after the edit, and are delivered before the run's next API call. If the model replies right after the edit, it never sees them. The contract tests have the run `sleep 5` after the edit, which an L1 run is allowed through an extra rule.
+- In an L1 run, the `LSP` tool runs without reaching the gate. Claude Code counts it as a read, and the factory's allow list also names it, so a later CLI that doesn't can't send it to the gate. In an L2 run, it runs in the container, with nothing denied.
+- The `typescript-6` alias declares `tsc` and `tsserver` bins, and npm links them over TypeScript 7's in `node_modules/.bin`. So `npm run typecheck` runs TypeScript 7's `tsc` by its path, and a bare `npx tsc` in this repo runs TypeScript 6.
 
 ## `gh` and a refreshed `hosts.yml` (ADR 0004)
 

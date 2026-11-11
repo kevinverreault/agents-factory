@@ -45,6 +45,9 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
   'Glob',
   'Grep',
   'LS',
+  // Code intelligence's symbol lookups. Claude Code already counts them as
+  // reads, but a later CLI needn't.
+  'LSP',
   'NotebookRead',
   'TodoWrite',
   'Task',
