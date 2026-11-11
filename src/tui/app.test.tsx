@@ -279,7 +279,7 @@ describe('re-tiering', () => {
 
     connection.servePatch([{ op: 'set', path: ['tasks', 'T2', 'tier'], value: 'opus' }]);
     await press(app, '\r');
-    await eventually(() => expect(app.lastFrame()).toMatch(/AFK L1 · Running · .*opus/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/AFK L1 · .*opus · Running/));
     app.stdin.write('t');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'retier', taskId: 'T2', tier: 'sonnet' }));
   });
@@ -2725,7 +2725,9 @@ describe('the screens view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toMatch(/^T2 Implement the store$/m);
-      expect(frame).toContain('AFK L1 · Running · implement · claude-sonnet-5-5 · opus · factory/T2-implement-the-store · store, billing · child of T1 Grill me about the docs (awaited)');
+      expect(frame).toMatch(/^AFK L1 · claude-sonnet-5-5 · opus · Running · store, billing · parent T1 Grill me about the docs \(awaited\)$/m);
+      // Where it is, on a line of its own.
+      expect(frame).toMatch(/^implement · factory\/T2-implement-the-store$/m);
       expect(unwrapped(frame)).toContain('FAILURE The agent hit max turns. a answer');
       expect(frame).toMatch(/RUNS[\s\S]*USAGE[\s\S]*ARTIFACTS[\s\S]*● LIVE OUTPUT · T2 · R3/);
       // Each section in a border of its own, its heading on the top edge.
@@ -2754,7 +2756,7 @@ describe('the screens view', () => {
 
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/AFK L1 · Running · implement/);
+      expect(frame).toMatch(/^AFK L1 · claude-sonnet-5-5 · sonnet · Running\n\s*implement$/m);
       expect(frame).toMatch(/R1\s+AFK\s+implement\s+claude-sonnet-5-5\s+failed\s+1\.1k\s+\$0\.50[^\n]*\n[^\n]*R2\s+AFK\s+review\s+claude-opus-5-5\s+interrupted\s+22\.0k\s+\$1\.25[^\n]*\n[^\n]*R3\s+AFK\s+implement\s+claude-sonnet-5-5\s+live\s+0\s+\$0\.00/);
       expect(frame).not.toContain('R4');
       expect(frame).toMatch(/committed\s+src\/store\/store\.ts/);

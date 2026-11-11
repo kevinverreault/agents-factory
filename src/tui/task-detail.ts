@@ -19,9 +19,12 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
   // The model its live run is on, or its last run was.
   const model = (task.liveRunId ? state.runs[task.liveRunId] : runs.at(-1))?.model;
   const parent = task.parent ? state.tasks[task.parent] : undefined;
-  const child = task.parent ? `child of ${task.parent}${parent ? ` ${parent.title}` : ''}${task.child ? (task.child.awaited ? ' (awaited)' : ' (fire-and-forget)') : ''}` : null;
-  const before = [modeOf(task)];
-  const after = [task.stage, model, task.tier, task.branch, task.groups.join(', '), child].filter((part): part is string => Boolean(part));
+  const parentage = task.parent ? `parent ${task.parent}${parent ? ` ${parent.title}` : ''}${task.child ? (task.child.awaited ? ' (awaited)' : ' (fire-and-forget)') : ''}` : null;
+  // What it runs as, then its state, then what it belongs to. Where it is,
+  // its stage and branch, has a line of its own.
+  const runsAs = joined([modeOf(task), model, task.tier]);
+  const belongsTo = joined([task.groups.join(', '), parentage]);
+  const whereItIs = joined([task.stage, task.branch]);
   const request = state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === task.id);
   return h(
     Box,
@@ -32,11 +35,12 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
       h(
         Text,
         { ...tone('dim'), wrap: 'truncate' },
-        `${joined(before)} ${GLYPH.between} `,
+        runsAs ? `${runsAs} ${GLYPH.between} ` : '',
         h(Text, tone(stateLook(task.label).role), task.label),
-        after.length ? ` ${GLYPH.between} ${joined(after)}` : '',
+        belongsTo ? ` ${GLYPH.between} ${belongsTo}` : '',
       ),
-      task.progress ? h(Text, { wrap: 'truncate' }, task.progress) : null,
+      whereItIs ? h(Text, { ...tone('dim'), wrap: 'truncate' }, whereItIs) : null,
+      task.progress ? h(Text, { ...tone('dim'), wrap: 'truncate' }, task.progress) : null,
       request?.kind === 'attention'
         ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: answerable(request, task) ? 'a answer' : undefined }, h(Text, null, askedFor(request, task)))
         : null,

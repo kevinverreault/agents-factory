@@ -288,5 +288,5 @@ function words(text: string): string[] {
 }
 
 function describeStage({ id, mode, model }: StartStage): string {
-  return joined([id, mode, model].filter((part): part is string => Boolean(part)));
+  return joined([id, mode, model]);
 }

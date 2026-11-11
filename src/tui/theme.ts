@@ -160,9 +160,10 @@ export function choosable(value: string): string {
   return `${GLYPH.chooseBefore} ${value} ${GLYPH.chooseAfter}`;
 }
 
-// Parts of a line that says what something is, `·` between them.
-export function joined(parts: string[]): string {
-  return parts.join(` ${GLYPH.between} `);
+// Parts of a line that says what something is, `·` between them. A part
+// something hasn't got (empty, null or undefined) is left out.
+export function joined(parts: (string | null | undefined)[]): string {
+  return parts.filter(Boolean).join(` ${GLYPH.between} `);
 }
 
 // A share (0 to 1) as a bar of `cells`.
