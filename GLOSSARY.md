@@ -79,6 +79,10 @@ _Avoid_: Model map, aliases
 The pinned collection of skills a task's stages invoke: an upstream skill library at one fixed revision plus the factory's own skills. A task freezes its skill set when it launches, and only an explicit upgrade moves the pin for later tasks.
 _Avoid_: Bundle, plugin, skill pack
 
+**Code intelligence plugin**:
+The local plugin, `factory-lsp`, that gives AFK runs a pinned TypeScript language server, so they get the `LSP` tool and see the type errors their edits introduce. It's not part of the skill set, and it's the same for every task.
+_Avoid_: LSP plugin (for the domain term), language server
+
 **Ralph loop**:
 A run sequence that takes one ready ticket per iteration with fresh context, until every ticket is done, the loop stalls, or the operator ends it early.
 _Avoid_: Agent loop, autopilot

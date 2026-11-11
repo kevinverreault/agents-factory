@@ -18,11 +18,21 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { lspPluginManifest, pinnedLanguageServerVersions, type LanguageServer, type LanguageServerVersions } from '../code-intelligence/code-intelligence.ts';
 import { GitError, guardChecks } from '../git/git.ts';
 import { RUN_DIR, SandboxError, type Container, type ContainerListing, type ContainerSpec, type GitResult, type ImageListing, type Sandbox } from './sandbox.ts';
 
 const WORKDIR = '/work';
 const PLUGIN_DIR = '/opt/factory/plugin';
+// The code intelligence plugin the image holds, for the language server it
+// installs globally.
+const LSP_PLUGIN_DIR = '/opt/factory/lsp';
+const GLOBAL_MODULES = '/usr/local/lib/node_modules';
+const CONTAINER_SERVER: LanguageServer = {
+  command: 'typescript-language-server',
+  args: ['--stdio'],
+  fallbackTsserver: `${GLOBAL_MODULES}/typescript/lib/tsserver.js`,
+};
 // The CLI's project directory for runs in `WORKDIR`, as Claude Code names it.
 const SESSIONS_DIR = '/home/agent/.claude/projects/-work';
 const USER = 'agent';
@@ -56,14 +66,21 @@ const PROXY_ENV = {
 
 // The image's recipe. The CLI is the Linux build of the one the pinned SDK
 // bundles, so a run in the container is the same Claude Code as on the host.
-export function sandboxDockerfile(sdkVersion: string): string {
+// So are the language server and its fallback TypeScript, with the code
+// intelligence plugin for them, owned by root.
+export function sandboxDockerfile(sdkVersion: string, languageServer: LanguageServerVersions): string {
+  const manifest = Buffer.from(JSON.stringify(lspPluginManifest(CONTAINER_SERVER))).toString('base64');
   return [
     'FROM node:24-bookworm-slim',
     'RUN apt-get update \\',
     ' && apt-get install --yes --no-install-recommends git ca-certificates gh curl \\',
     ' && rm -rf /var/lib/apt/lists/*',
-    `RUN npm install --global @anthropic-ai/claude-agent-sdk-linux-x64@${sdkVersion} \\`,
-    ' && ln -s "$(npm root --global)/@anthropic-ai/claude-agent-sdk-linux-x64/claude" /usr/local/bin/claude',
+    `RUN npm install --global @anthropic-ai/claude-agent-sdk-linux-x64@${sdkVersion} typescript-language-server@${languageServer.server} typescript@${languageServer.typescript} \\`,
+    ' && ln -s "$(npm root --global)/@anthropic-ai/claude-agent-sdk-linux-x64/claude" /usr/local/bin/claude \\',
+    // The plugin names the fallback tsserver by its path there.
+    ` && test "$(npm root --global)" = ${GLOBAL_MODULES}`,
+    `RUN mkdir -p ${LSP_PLUGIN_DIR}/.claude-plugin \\`,
+    ` && echo ${manifest} | base64 --decode > ${LSP_PLUGIN_DIR}/.claude-plugin/plugin.json`,
     // The clone it fetches from is mounted, so owned by someone else.
     "RUN git config --system safe.directory '*' \\",
     ` && useradd --create-home --uid 10001 ${USER} \\`,
@@ -81,7 +98,7 @@ export type DockerSandboxOptions = {
 };
 
 export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
-  const dockerfile = sandboxDockerfile(pinnedSdkVersion());
+  const dockerfile = sandboxDockerfile(pinnedSdkVersion(), pinnedLanguageServerVersions());
   const image = `${REPOSITORY}:${createHash('sha256').update(dockerfile).digest('hex').slice(0, 12)}`;
   let built: Promise<void> | null = null;
   const nameOf = (taskId: string) => `${namespace}-${taskId}`.toLowerCase();
@@ -242,6 +259,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       taskId: spec.taskId,
       workdir: WORKDIR,
       plugin: spec.plugin === null ? null : PLUGIN_DIR,
+      lspPlugin: LSP_PLUGIN_DIR,
       checks: guardChecks({
         async output(cwd, args) {
           const result = await gitIn(spec.taskId, args, cwd);

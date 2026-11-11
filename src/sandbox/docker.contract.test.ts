@@ -6,8 +6,9 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { beforeAll, describe, expect, test } from 'vitest';
+import { pinnedLanguageServerVersions } from '../code-intelligence/code-intelligence.ts';
 import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import { dockerSandbox } from './docker.ts';
 import { inRunDir, type Container, type Sandbox } from './sandbox.ts';
@@ -150,6 +151,19 @@ describe('the Docker sandbox: containment', () => {
       expect((await container.git(['push', '--quiet', 'origin', 'HEAD:refs/heads/pushed'])).code).not.toBe(0);
       expect((await sh(container, `cat ${container.plugin}/SKILL.md`)).stdout).toBe('skill\n');
       expect((await sh(container, `touch ${container.plugin}/SKILL.md`)).code).not.toBe(0);
+    }));
+
+  test('the container holds its own code intelligence plugin, read-only, for the pinned language server and TypeScript it installs', () =>
+    withTask(async (_f, _sandbox, container) => {
+      const pinned = pinnedLanguageServerVersions();
+      const manifest = JSON.parse((await sh(container, `cat ${container.lspPlugin}/.claude-plugin/plugin.json`)).stdout);
+      const { command, initializationOptions } = manifest.lspServers.typescript;
+      const typescript = posix.join(posix.dirname(initializationOptions.tsserver.fallbackPath), '..', 'package.json');
+
+      expect(manifest.name).toBe('factory-lsp');
+      expect((await sh(container, `${command} --version`)).stdout.trim()).toBe(pinned.server);
+      expect(JSON.parse((await sh(container, `cat ${typescript}`)).stdout).version).toBe(pinned.typescript);
+      expect((await sh(container, `touch ${container.lspPlugin}/.claude-plugin/plugin.json`)).code).not.toBe(0);
     }));
 
   test('egress that goes around the proxy fails: no outside name resolves and no outside address routes', () =>

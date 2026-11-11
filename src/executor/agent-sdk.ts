@@ -80,9 +80,16 @@ const RELAY_HOOK = { command: process.execPath, args: [fileURLToPath(new URL('..
 // change. The operator's own `claude` sessions still sweep with their own period.
 const RETENTION = { cleanupPeriodDays: 3650 };
 
-// `adopt` puts each CLI, right after spawn, into its run's job (ADR 0003),
-// so that what it starts goes down with the run.
-export function agentSdkExecutor({ adopt }: { adopt?: Processes['adopt'] } = {}): Executor {
+export type AgentSdkExecutorOptions = {
+  // Puts each CLI, right after spawn, into its run's job (ADR 0003), so
+  // that what it starts goes down with the run.
+  adopt?: Processes['adopt'];
+  // The code intelligence plugin's directory on the host, which L1 runs
+  // load (see `codeIntelligenceOf`). Without it, L1 runs have no LSP.
+  lspPlugin?: string;
+};
+
+export function agentSdkExecutor({ adopt, lspPlugin }: AgentSdkExecutorOptions = {}): Executor {
   const runs = new Map<string, LiveRun>();
 
   function say(runId: string, text: string): void {
@@ -116,6 +123,10 @@ export function agentSdkExecutor({ adopt }: { adopt?: Processes['adopt'] } = {})
       // run's asks with a card in its conversation, an L1 run's with a
       // request. An L2 run's container prompts for nothing but questions.
       const canUseTool = askTheOperator(start.runId, spawning, gateCall(spawning));
+      // Skills dispatch as `/factory:<skill>`, so no other copy can shadow
+      // them. An L2 run loads the container's copies of its plugins.
+      const skills = start.plugin === null ? null : (start.container?.plugin ?? start.plugin);
+      const plugins = [skills, codeIntelligenceOf(start, lspPlugin)].flatMap((path) => (path === null ? [] : [{ type: 'local' as const, path }]));
       const options: Options = {
         ...(start.mode === 'HITL'
           ? hitlOptions(start.credential, canUseTool, hitlFactoryTools(start.runId, sink, start))
@@ -124,9 +135,7 @@ export function agentSdkExecutor({ adopt }: { adopt?: Processes['adopt'] } = {})
             : l1Options(start, canUseTool, afkFactoryTools(start.runId, sink, start.reports, start))),
         cwd: start.cwd!,
         model: start.model,
-        // Skills dispatch as `/factory:<skill>`, so no other copy can shadow
-        // them. An L2 run loads the container's copy.
-        ...(start.plugin !== null && { plugins: [{ type: 'local', path: start.container?.plugin ?? start.plugin }] }),
+        ...(plugins.length > 0 && { plugins }),
         ...(start.resumesSession ? { resume: start.sessionId } : { sessionId: start.sessionId }),
         spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) => {
           // In a container, its own Linux CLI takes the same arguments; the
@@ -318,6 +327,15 @@ function archiveStore(dir: string): SessionStore {
       return text.split('\n').filter(Boolean).map((line) => JSON.parse(line));
     },
   };
+}
+
+// The code intelligence plugin a run loads, or null: an L1 run the host's,
+// an L2 run its container's own. A HITL run acts as the operator (ADR 0005),
+// so it has whatever code intelligence their own plugins give it, and no
+// second TypeScript server beside theirs.
+function codeIntelligenceOf(start: RunStart, host: string | undefined): string | null {
+  if (start.mode === 'HITL') return null;
+  return start.container ? start.container.lspPlugin : (host ?? null);
 }
 
 // HITL runs act as the operator (ADR 0005): every settings source loads,

@@ -1,4 +1,5 @@
 // The daemon's entry point, started detached by the TUI (or by hand).
+import { buildLspPlugin, hostTypeScriptServer } from '../code-intelligence/code-intelligence.ts';
 import { lockfileDependencies } from '../dependencies/dependencies.ts';
 import { agentSdkExecutor } from '../executor/agent-sdk.ts';
 import { gitCli } from '../git/git.ts';
@@ -21,7 +22,7 @@ try {
     ...paths,
     store,
     clock: systemClock,
-    executor: agentSdkExecutor({ adopt: processes.adopt }),
+    executor: agentSdkExecutor({ adopt: processes.adopt, lspPlugin: buildLspPlugin(paths.lspPlugin, hostTypeScriptServer()) }),
     git: gitCli,
     github: gitHubApi(),
     sandbox: dockerSandbox({ namespace: paths.credentialPrefix }),

@@ -18,6 +18,7 @@ Runs must be reproducible, so the skills a stage invokes can't drift under a tas
   - AFK runs: `settingSources: ['project']`, the plugin, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. That excludes personal skills, user `CLAUDE.md`, user hooks and settings, `settings.local.json` and auto memory.
   - HITL runs: all setting sources plus the plugin, because they act as the operator.
   - The target repo's committed `.claude/skills/` load in both, versioned with the commit the task branched from.
+  - AFK runs also load the **code intelligence plugin**, `factory-lsp`, a second local plugin that gives them a pinned TypeScript language server. L1 runs load the host copy the daemon writes, and L2 runs load the copy in their image. HITL runs don't load it: they get the operator's own code intelligence plugins, and two TypeScript servers would conflict. Added 2026-11-10, see the walking skeleton's TypeScript code intelligence findings.
 - **L2 containers.** At container creation the factory `docker cp`s the cached `<hash>` directory to `/opt/agent-factory/skills/<hash>`, root-owned and read-only, and passes that path to the SDK. A container reused after a requeue is checked against the task's hash first.
 - **The operator's personal install is left alone.** `factory skills status` shows whether personal copies exist and how they differ from the pin.
 
