@@ -133,6 +133,14 @@ export function startStages(preset: ResolvedPreset): StartStage[] {
   });
 }
 
+// The launch inputs a launch lacks to start at a stage: those of its `needs`
+// it has no value for, or none once it has what starts it (all of its needs,
+// or any one with `anyOf`).
+export function lackingInputs(start: Pick<StartStage, 'needs' | 'anyOf'>, { prompt, issues }: LaunchInputs): LaunchInput[] {
+  const lacking = start.needs.filter((input) => (input === 'prompt' ? !prompt.trim() : issues.length === 0));
+  return start.anyOf && lacking.length < start.needs.length ? [] : lacking;
+}
+
 // The first message of a start stage's first run: its skill, from the
 // factory plugin (ADR 0005), invoked on its args filled from the launch
 // inputs. A run with no skill sends its args alone. A loop stage with a
@@ -202,11 +210,11 @@ export function planStart(
         `It can start at ${or(starts.map(({ id }) => id))}.`,
     };
   }
-  if (start.anyOf && !inputs.prompt.trim() && inputs.issues.length === 0) {
-    return { error: `Starting ${preset.name} at ${stage.id} needs issue refs or a prompt.` };
+  const lacking = lackingInputs(start, inputs);
+  if (lacking.length) {
+    const asks = { prompt: 'a prompt', issues: 'issue refs' };
+    return { error: `Starting ${preset.name} at ${stage.id} needs ${start.anyOf ? 'issue refs or a prompt' : asks[lacking[0]!]}.` };
   }
-  if (!start.anyOf && start.needs.includes('prompt') && !inputs.prompt.trim()) return { error: `Starting ${preset.name} at ${stage.id} needs a prompt.` };
-  if (!start.anyOf && start.needs.includes('issues') && inputs.issues.length === 0) return { error: `Starting ${preset.name} at ${stage.id} needs issue refs.` };
   return { stage, opening: openingMessage(stage, inputs) };
 }
 

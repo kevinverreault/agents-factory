@@ -83,6 +83,10 @@ describe('built-in presets', () => {
 
     expect(fillOpening(tickets, () => null)).toEqual({ missing: ['artifacts.spec'] });
     expect(fillOpening(resolved([], 'implement').stages[0]!, () => null)).toEqual({ missing: ['artifacts.tickets', 'prompt'] });
+    // At a stage boundary too, an either-input stage opens on the one it has.
+    const either = resolved([], 'implement').stages[0]!;
+    expect(fillOpening(either, (variable) => (variable === 'prompt' ? 'Fix it.' : null))).toEqual({ opening: '/factory:implement Fix it.' });
+    expect(fillOpening(either, (variable) => (variable === 'prompt' ? null : 'acme/widgets#3'))).toEqual({ opening: '/factory:implement acme/widgets#3' });
   });
 
   test('quick, child and setup resolve too', () => {
