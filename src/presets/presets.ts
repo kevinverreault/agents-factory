@@ -109,8 +109,9 @@ export type LaunchInputs = { prompt: string; issues: string[] };
 export type LaunchInput = 'prompt' | 'issues';
 
 // A stage a task can start at, skipping the ones before it, and the launch
-// inputs it needs. `maxTurns` is its `max_turns`, when it sets one.
-export type StartStage = { id: string; mode: Stage['mode']; model: Tier | null; maxTurns?: number; needs: LaunchInput[] };
+// inputs it needs. `maxTurns` is its `max_turns`, when it sets one. With
+// `anyOf`, any one of its `needs` starts it rather than all of them.
+export type StartStage = { id: string; mode: Stage['mode']; model: Tier | null; maxTurns?: number; needs: LaunchInput[]; anyOf?: true };
 
 // The stages whose args the launch inputs can fill: the prompt fills
 // `{{prompt}}`, and issue refs stand for the issue artifacts (map, spec,
@@ -127,7 +128,8 @@ export function startStages(preset: ResolvedPreset): StartStage[] {
     }
     if (i > 0 && needs.size === 0) return [];
     const maxTurns = stage.max_turns === undefined ? {} : { maxTurns: stage.max_turns };
-    return [{ id: stage.id, mode: stage.mode, model: stage.model ?? null, ...maxTurns, needs: [...needs] }];
+    const anyOf = takesEither(stage) ? { anyOf: true as const } : {};
+    return [{ id: stage.id, mode: stage.mode, model: stage.model ?? null, ...maxTurns, needs: [...needs], ...anyOf }];
   });
 }
 
@@ -140,8 +142,17 @@ export function openingMessage(stage: Stage, { prompt, issues }: LaunchInputs): 
   return 'opening' in filled ? filled.opening : '';
 }
 
+// Whether a stage's args name both the prompt and an issue artifact: either
+// one is enough to fill it, and the other fills as empty (implement, on issue
+// refs or a prompt). Any other stage needs every variable of its args.
+function takesEither(stage: Stage): boolean {
+  const variables = variablesOf(stage);
+  return variables.includes('prompt') && variables.some((variable) => ISSUE_KINDS.has(variable.slice('artifacts.'.length)));
+}
+
 // A stage's first message, its args filled by `valueOf` (`prompt`,
-// `artifacts.spec`…), or the variables it has no value for.
+// `artifacts.spec`…), or the variables it has no value for. A stage that
+// takes either input is missing variables only when none has a value.
 export function fillOpening(stage: Stage, valueOf: (variable: string) => string | null): { opening: string } | { missing: string[] } {
   const missing: string[] = [];
   const args = (stage.args ?? '')
@@ -151,8 +162,15 @@ export function fillOpening(stage: Stage, valueOf: (variable: string) => string 
       return value ?? '';
     })
     .trim();
-  if (missing.length) return { missing };
+  // Each variable counts once, however often the args repeat it.
+  const unfilled = new Set(missing);
+  if (unfilled.size && !(takesEither(stage) && unfilled.size < new Set(variablesOf(stage)).size)) return { missing: [...unfilled] };
   return { opening: stage.skill === undefined ? args : `/factory:${stage.skill}${args ? ` ${args}` : ''}` };
+}
+
+// Whether a stage's args name the launch prompt.
+export function namesPrompt(stage: Stage): boolean {
+  return variablesOf(stage).includes('prompt');
 }
 
 // Whether the stage is a work loop over a map (wayfinder's `work`): a HITL
@@ -184,8 +202,11 @@ export function planStart(
         `It can start at ${or(starts.map(({ id }) => id))}.`,
     };
   }
-  if (start.needs.includes('prompt') && !inputs.prompt.trim()) return { error: `Starting ${preset.name} at ${stage.id} needs a prompt.` };
-  if (start.needs.includes('issues') && inputs.issues.length === 0) return { error: `Starting ${preset.name} at ${stage.id} needs issue refs.` };
+  if (start.anyOf && !inputs.prompt.trim() && inputs.issues.length === 0) {
+    return { error: `Starting ${preset.name} at ${stage.id} needs issue refs or a prompt.` };
+  }
+  if (!start.anyOf && start.needs.includes('prompt') && !inputs.prompt.trim()) return { error: `Starting ${preset.name} at ${stage.id} needs a prompt.` };
+  if (!start.anyOf && start.needs.includes('issues') && inputs.issues.length === 0) return { error: `Starting ${preset.name} at ${stage.id} needs issue refs.` };
   return { stage, opening: openingMessage(stage, inputs) };
 }
 

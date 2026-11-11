@@ -253,13 +253,15 @@ export function cycle<T>(values: readonly T[], current: T, by: number): T {
 }
 
 // What enter sends, or null while the card can't launch: it needs a
-// repository and the launch inputs the start stage needs (a prompt, when the
-// card has no listing to know). Defaults are left to the daemon when the
-// card has no listing to choose from.
+// repository and the launch inputs the start stage needs (all of them, or
+// one when it takes either; a prompt, when the card has no listing to know).
+// Defaults are left to the daemon when the card has no listing to choose from.
 function launchCommand(draft: Draft, card: Card): LaunchCommand | null {
   const issues = card.fields.includes('issues') ? words(draft.issues) : [];
   const needs = card.start?.needs ?? (card.choice ? [] : ['prompt']);
-  if (!draft.repo || (needs.includes('prompt') && !draft.prompt.trim()) || (needs.includes('issues') && issues.length === 0)) return null;
+  const lacking = [...(needs.includes('prompt') && !draft.prompt.trim() ? ['prompt'] : []), ...(needs.includes('issues') && issues.length === 0 ? ['issues'] : [])];
+  // A stage that takes either input is lacking only when it has neither.
+  if (!draft.repo || (card.start?.anyOf ? lacking.length === needs.length : lacking.length > 0)) return null;
   const groups = words(draft.groups);
   // The handoff fields go only for an AFK start stage, and only when changed.
   const afk = card.start?.mode === 'AFK';

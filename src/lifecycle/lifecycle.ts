@@ -10,7 +10,7 @@ import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../m
 import { issueRef } from '../artifacts/capture.ts';
 import type { Issue, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
-import { artifactKindsIn, fillOpening, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
+import { artifactKindsIn, fillOpening, isWorkLoop, namesPrompt, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   correction,
@@ -1393,10 +1393,13 @@ export function pullRequestOf(state: Lifecycle, task: Task): { title: string; bo
 
 // What a Ralph loop's iteration on `ticket` opens on (ADR 0006): its stage's
 // skill on the ticket alone, and the factory context its fresh session
-// starts from. `tickets` is the ticket set as just read.
+// starts from, with the launch prompt as guidance if the stage's args take it.
+// `tickets` is the ticket set as just read.
 function iterationOpening(state: Lifecycle, task: Task, stage: Stage, ticket: string, tickets: Issue[]): string {
   const specs = issuesFor(state, task, 'spec');
   const done = task.closedTickets ?? [];
+  // The launch prompt rides along as guidance when the stage's args take it (implement).
+  const guidance = namesPrompt(stage) ? task.inputs?.prompt.trim() : null;
   const facts = [
     ...(specs.length ? [`- Spec: ${specs.join(', ')}`] : []),
     `- Progress: ${tickets.filter(({ open }) => !open).length} of ${tickets.length} tickets closed.`,
@@ -1408,6 +1411,7 @@ function iterationOpening(state: Lifecycle, task: Task, stage: Stage, ticket: st
       `onto the task branch ${task.worktree?.branch} and leave the tree clean. The factory closes the ticket once it judges ` +
       'the iteration: don’t close it yourself, and don’t start another ticket.',
     facts.join('\n'),
+    ...(guidance ? [`## Operator instructions\n${guidance}`] : []),
     ...(task.brief ? [task.brief] : []),
   ];
   return `/factory:${stage.skill} ${ticket}\n\n${context.join('\n\n')}`;
