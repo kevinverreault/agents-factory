@@ -60,6 +60,8 @@ export function QuestionCard({ question, card, ownWords = true, nested = false }
       h(Text, { ...tone('fg'), bold: true }, asked.question),
       count > 1 ? h(Text, tone('dim'), `(${card.index + 1}/${count})`) : null,
     ),
+    // A line each, unlike the answer sheet's `[1] …   [2] …`: each option
+    // carries its description, which wouldn't read along one line.
     ...asked.options.map((option, i) =>
       h(
         Box,

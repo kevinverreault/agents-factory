@@ -1744,7 +1744,8 @@ describe('answering from Needs you', () => {
       // A rule says which item the sheet under it answers.
       expect(frame).toMatch(/── 1\/2 ── T2 Implement the store ─+/);
       expect(frame).toContain('FAILURE The agent hit max turns. [1] Retry [2] Take over [3] Cancel a answer');
-      // The options share a line rather than stacking: unwrapped would hide which.
+      // The options share a line rather than stacking. unwrapped() turns
+      // newlines into spaces, so this one reads the raw frame.
       expect(app.lastFrame()!).toMatch(/\[1\] Retry +\[2\] Take over +\[3\] Cancel/);
     });
 
