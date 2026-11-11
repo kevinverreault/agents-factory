@@ -78,7 +78,7 @@ function applySgr(from: Style, params: string, palette: Palette): Style {
     else if (code === 39) style.fg = null;
     else if (code === 49) style.bg = null;
     else if ((code === 38 || code === 48) && codes[i + 1] === 2) {
-      const hex = '#' + codes.slice(i + 2, i + 5).map((part) => part.toString(16).padStart(2, '0')).join('');
+      const hex = toHex(codes.slice(i + 2, i + 5));
       if (code === 38) style.fg = hex;
       else style.bg = hex;
       i += 4;
@@ -97,8 +97,17 @@ const CUBE_LEVELS = [0, 95, 135, 175, 215, 255];
 // One of the 256 colours: the palette’s 16, then a 6×6×6 cube, then 24 greys.
 function colour256(n: number, palette: Palette): string {
   if (n < 16) return palette.ansi[n]!;
-  const hex = (...channels: number[]) => '#' + channels.map((channel) => channel.toString(16).padStart(2, '0')).join('');
-  if (n >= 232) return hex(...Array(3).fill(8 + 10 * (n - 232)));
+  if (n >= 232) return toHex(Array(3).fill(8 + 10 * (n - 232)));
   const cube = n - 16;
-  return hex(CUBE_LEVELS[Math.floor(cube / 36)]!, CUBE_LEVELS[Math.floor(cube / 6) % 6]!, CUBE_LEVELS[cube % 6]!);
+  return toHex([CUBE_LEVELS[Math.floor(cube / 36)]!, CUBE_LEVELS[Math.floor(cube / 6) % 6]!, CUBE_LEVELS[cube % 6]!]);
+}
+
+// Red, green and blue, 0 to 255 each, as #rrggbb.
+export function toHex(channels: number[]): string {
+  return '#' + channels.map((channel) => channel.toString(16).padStart(2, '0')).join('');
+}
+
+// A frame with its SGR codes taken out: what it says, unstyled.
+export function plainText(frame: string): string {
+  return frame.replace(/\x1b\[[\d;]*m/g, '');
 }

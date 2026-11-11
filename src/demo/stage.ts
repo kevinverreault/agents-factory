@@ -14,7 +14,7 @@ export type Step =
   // Keys pressed, each a whole key sequence, shown once all are in.
   | { keys: string[] }
   // Text typed a character at a time, `pace` ms apart, each its own frame.
-  | { type: string; pace: number }
+  | { text: string; pace: number }
   // A change from the daemon.
   | { patch: PatchOp[] }
   // A run's conversation goes on.
@@ -30,7 +30,7 @@ export type Frame = { text: string; ms: number };
 export type Played = { frames: Frame[]; stills: { name: string; text: string }[] };
 
 // How long a step's frame shows when the scene doesn't say.
-const BEAT_MS = 600;
+const BEAT_MS = 400;
 // The TUI has taken in a step once its frame holds still this long, in real
 // time: Ink throttles its frames and React runs effects on its own
 // schedule, so a step can take a few frames to show. It gets at most
@@ -78,12 +78,13 @@ export async function play(scene: Scene): Promise<Played> {
           await settle();
         }
         show(BEAT_MS);
-      } else if ('type' in step)
-        for (const char of step.type) {
+      } else if ('text' in step) {
+        for (const char of step.text) {
           app.stdin.write(char);
           await settle();
           show(step.pace);
-        } else if ('patch' in step) {
+        }
+      } else if ('patch' in step) {
         connection.servePatch(step.patch);
         await settle();
         show(BEAT_MS);

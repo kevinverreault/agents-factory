@@ -7,5 +7,6 @@ import { render } from 'ink';
 import { App } from '../tui/app.ts';
 import { DEMO_CWD, DemoConnection } from './demo-factory.ts';
 
-process.env.TZ ??= 'UTC';
+// Times show in the machine's zone: the demo pins it, as the media do.
+process.env.TZ = 'UTC';
 await render(h(App, { connection: new DemoConnection(), cwd: DEMO_CWD })).waitUntilExit();

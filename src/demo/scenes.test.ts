@@ -3,8 +3,8 @@
 import { describe, expect, test } from 'vitest';
 import { GIFS, STILLS } from './scenes.ts';
 import { play, type Scene } from './stage.ts';
+import { plainText } from './terminal-frame.ts';
 
-const plain = (text: string) => text.replace(/\x1b\[[\d;]*m/g, '');
 const scene = (name: string): Scene => [...GIFS, ...STILLS].find((scene) => scene.name === name)!;
 
 // Each scene's moments, in the order its frames come to them.
@@ -20,7 +20,7 @@ describe('the README’s scenes', () => {
     const { frames } = await play(scene(name));
     let at = 0;
     for (const moment of MOMENTS[name]!) {
-      const found = frames.findIndex((frame, i) => i >= at && moment.test(plain(frame.text)));
+      const found = frames.findIndex((frame, i) => i >= at && moment.test(plainText(frame.text)));
       expect(found, `${name}: ${moment}`).toBeGreaterThanOrEqual(0);
       at = found;
     }
@@ -28,7 +28,7 @@ describe('the README’s scenes', () => {
 
   test('the stills are of the four screens and the condensed view', async () => {
     const { stills } = await play(scene('screens'));
-    const headed = Object.fromEntries(stills.map(({ name, text }) => [name, plain(text).split('\n')[2]!.trim()]));
+    const headed = Object.fromEntries(stills.map(({ name, text }) => [name, plainText(text).split('\n')[2]!.trim()]));
     expect(headed).toEqual({ tasks: 'Tasks · group: all', 'needs-you': 'Needs you', runs: 'Runs', usage: 'Usage', condensed: 'Condensed · group: all' });
   }, 30_000);
 });

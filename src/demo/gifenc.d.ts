@@ -13,8 +13,8 @@ declare module 'gifenc' {
   };
   const gifenc: {
     GIFEncoder(): Encoder;
-    quantize(rgba: Uint8Array | Uint8ClampedArray, maxColors: number, options?: { format?: 'rgb565' | 'rgb444' | 'rgba4444' }): Palette;
-    applyPalette(rgba: Uint8Array | Uint8ClampedArray, palette: Palette, format?: 'rgb565' | 'rgb444' | 'rgba4444'): Uint8Array;
+    quantize(rgba: Uint8Array | Uint8ClampedArray, maxColors: number): Palette;
+    applyPalette(rgba: Uint8Array | Uint8ClampedArray, palette: Palette): Uint8Array;
   };
   export default gifenc;
 }

@@ -3,6 +3,9 @@
 // still. Nothing runs but this process: no daemon, terminal, GitHub or
 // Claude. `npm run media -- <name>…` plays only the scenes named, and
 // `-- --text` prints each scene's frames as text instead of drawing them.
+// It stands in for vhs, which needs ttyd, ffmpeg and a browser: the media
+// were first recorded where only the npm registry could be reached, and
+// this needs nothing more.
 // Plain .ts (no JSX) so Node runs it without a build step.
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -11,7 +14,7 @@ import gifenc from 'gifenc';
 import { drawFrame, SCHEME } from './draw.ts';
 import { GIFS, STILLS } from './scenes.ts';
 import { play, type Frame, type Scene } from './stage.ts';
-import { parseFrame } from './terminal-frame.ts';
+import { parseFrame, plainText } from './terminal-frame.ts';
 
 // Times show in the machine's zone, and colours only on a terminal: the
 // media pin both, in truecolour as Windows Terminal shows them.
@@ -28,10 +31,10 @@ const PALETTE_FRAMES = 8;
 const args = process.argv.slice(2);
 const asText = args.includes('--text');
 const named = args.filter((arg) => !arg.startsWith('--'));
-const scenes = [...GIFS, ...STILLS].map((scene) => scene.name);
-const unknown = named.filter((name) => !scenes.includes(name));
+const sceneNames = [...GIFS, ...STILLS].map((scene) => scene.name);
+const unknown = named.filter((name) => !sceneNames.includes(name));
 if (unknown.length > 0) {
-  console.error(`No scene named ${unknown.join(', ')}. The scenes: ${scenes.join(', ')}.`);
+  console.error(`No scene named ${unknown.join(', ')}. The scenes: ${sceneNames.join(', ')}.`);
   process.exit(1);
 }
 const chosen = (scenes: Scene[]) => scenes.filter((scene) => named.length === 0 || named.includes(scene.name));
@@ -46,8 +49,10 @@ for (const scene of chosen(STILLS)) {
   const { stills } = await play(scene);
   for (const still of stills) {
     if (asText) printFrames({ ...scene, name: still.name }, [{ text: still.text, ms: 0 }]);
-    else await writeFile(join(MEDIA, `${still.name}.png`), await drawFrame(still.text, scene.columns, Math.min(scene.rows, linesOf(still.text))).encode('png'));
-    if (!asText) console.log(`docs/media/${still.name}.png`);
+    else {
+      await writeFile(join(MEDIA, `${still.name}.png`), await drawFrame(still.text, scene.columns, Math.min(scene.rows, linesOf(still.text))).encode('png'));
+      console.log(`docs/media/${still.name}.png`);
+    }
   }
 }
 
@@ -62,7 +67,11 @@ async function writeGif(path: string, scene: Scene, frames: Frame[]): Promise<vo
   const step = Math.max(1, Math.ceil(frames.length / PALETTE_FRAMES));
   const sampled = frames.filter((_, i) => i % step === 0 || i === frames.length - 1).map((frame) => rgbaOf(frame).rgba);
   const pixels = new Uint8ClampedArray(sampled.reduce((total, rgba) => total + rgba.length, 0));
-  sampled.reduce((at, rgba) => (pixels.set(rgba, at), at + rgba.length), 0);
+  let at = 0;
+  for (const rgba of sampled) {
+    pixels.set(rgba, at);
+    at += rgba.length;
+  }
   const palette = gifenc.quantize(pixels, COLOURS - 1);
   const unchanged = palette.length;
   // Its colour is never matched: frames are mapped onto the palette without it.
@@ -72,11 +81,12 @@ async function writeGif(path: string, scene: Scene, frames: Frame[]): Promise<vo
   for (const frame of frames) {
     const { width, height, rgba } = rgbaOf(frame);
     const index = gifenc.applyPalette(rgba, palette);
-    if (before)
+    if (before) {
       for (let pixel = 0; pixel < index.length; pixel++) {
         const at = pixel * 4;
         if (rgba[at] === before[at] && rgba[at + 1] === before[at + 1] && rgba[at + 2] === before[at + 2]) index[pixel] = unchanged;
       }
+    }
     gif.writeFrame(index, width, height, { palette: withUnchanged, delay: frame.ms, repeat: 0, transparent: before !== null, transparentIndex: unchanged, dispose: 1 });
     before = rgba;
   }
@@ -95,6 +105,6 @@ function linesOf(text: string): number {
 function printFrames(scene: Scene, frames: Frame[]): void {
   for (const [i, frame] of frames.entries()) {
     console.log(`── ${scene.name} ${i + 1}/${frames.length} · ${frame.ms} ms ──`);
-    console.log(frame.text.replace(/\x1b\[[\d;]*m/g, '').split('\n').slice(0, scene.rows).join('\n'));
+    console.log(plainText(frame.text).split('\n').slice(0, scene.rows).join('\n'));
   }
 }

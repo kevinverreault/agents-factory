@@ -1,12 +1,12 @@
 // The README's media, each a scene played on the demo factory: a GIF of
 // what the operator does, or the stills of the screens as they stand.
-import type { RunView, TaskView } from '../protocol/factory-state.ts';
-import { CONVERSING, demoState, GRILLING } from './demo-factory.ts';
+import type { PatchOp, RunView, TaskView } from '../protocol/factory-state.ts';
+import { CONVERSING, demoState, GRILLING, MINUTE } from './demo-factory.ts';
 import type { Scene } from './stage.ts';
 
 const [UP, DOWN, ENTER, ESC, CTRL_N, CTRL_B] = ['\x1b[A', '\x1b[B', '\r', '\x1b', '\x0e', '\x02'];
 // A typist's pace, ms a key.
-const TYPING = 45;
+const TYPING = 30;
 const COLUMNS = 120;
 const ROWS = 34;
 
@@ -49,30 +49,33 @@ const quickRun: RunView = {
   },
 };
 
+// A change from the daemon to one task or one run.
+const setTask = (task: TaskView): PatchOp => ({ op: 'set', path: ['tasks', task.id], value: task });
+const setRun = (run: RunView): PatchOp => ({ op: 'set', path: ['runs', run.id], value: run });
+
 const tasksAndLaunch: Scene = {
   name: 'tasks-and-launch',
   columns: COLUMNS,
   rows: ROWS,
   steps: [
-    { hold: 1200 },
+    { hold: 600 },
     { keys: [DOWN] },
-    { hold: 1800 },
+    { hold: 900 },
     { keys: ['n'] },
-    { type: QUICK_PROMPT, pace: TYPING },
-    { hold: 400 },
+    { text: QUICK_PROMPT, pace: TYPING },
     { keys: [ENTER] },
+    { patch: [setTask(quickTask), setRun(quickRun)] },
+    { hold: 1200 },
+    { keys: ['1'] },
+    { patch: [setRun({ ...quickRun, question: null })] },
     {
-      patch: [
-        { op: 'set', path: ['tasks', 'T10'], value: quickTask },
-        { op: 'set', path: ['runs', 'R10'], value: quickRun },
+      converse: 'R10',
+      events: [
+        { type: 'toolUse', id: 'E1', tool: 'Read', summary: 'src/sync/command.ts' },
+        { type: 'message', id: 'E2', from: 'agent', text: 'A diff it is. Should --dry-run exit non-zero when something would change?' },
       ],
     },
-    { hold: 2200 },
-    { keys: ['1'] },
-    { patch: [{ op: 'set', path: ['runs', 'R10'], value: { ...quickRun, question: null } }] },
-    { converse: 'R10', events: [{ type: 'toolUse', id: 'E1', tool: 'Read', summary: 'src/sync/command.ts' }] },
-    { converse: 'R10', events: [{ type: 'message', id: 'E2', from: 'agent', text: 'A diff it is. Should --dry-run exit non-zero when something would change?' }] },
-    { hold: 2200 },
+    { hold: 1000 },
   ],
 };
 
@@ -82,52 +85,45 @@ const needsYou: Scene = {
   rows: ROWS,
   steps: [
     { keys: ['2'] },
-    { hold: 1400 },
+    { hold: 700 },
     { keys: ['a'] },
-    { hold: 600 },
     { keys: ['1'] },
     {
       patch: [
         { op: 'set', path: ['attentionQueue'], value: seeded.attentionQueue.slice(1) },
-        { op: 'set', path: ['tasks', 'T5'], value: { ...T5, state: 'running', label: 'Running' } },
-        { op: 'set', path: ['runs', 'R5'], value: { ...R5, question: null } },
+        setTask({ ...T5, state: 'running', label: 'Running' }),
+        setRun({ ...R5, question: null }),
       ],
     },
-    { hold: 2000 },
+    { hold: 900 },
     { keys: [DOWN] },
-    { hold: 2000 },
+    { hold: 900 },
   ],
 };
 
+const REPLY = 'Only 5xx and timeouts. Never 4xx.';
 const taskDetail: Scene = {
   name: 'task-detail',
   columns: COLUMNS,
   rows: ROWS,
   steps: [
-    { hold: 600 },
-    { keys: [DOWN] },
-    { keys: [ENTER] },
-    { hold: 2400 },
-    { keys: [ESC] },
-    { keys: [UP] },
-    { keys: [ENTER] },
+    { keys: [DOWN, ENTER] },
     { hold: 1000 },
+    { keys: [ESC, UP, ENTER, ENTER] },
+    { hold: 600 },
+    { text: REPLY, pace: TYPING },
     { keys: [ENTER] },
-    { hold: 1400 },
-    { type: 'Only 5xx and timeouts. Never 4xx.', pace: TYPING },
-    { hold: 300 },
-    { keys: [ENTER] },
-    {
-      patch: [{ op: 'set', path: ['runs', 'R1'], value: { ...GRILLING, turn: 'agent' } }],
-    },
-    { converse: 'R1', events: [{ type: 'message', id: 'E5', from: 'operator', text: 'Only 5xx and timeouts. Never 4xx.' }] },
-    { converse: 'R1', events: [{ type: 'toolUse', id: 'E6', tool: 'Read', summary: 'src/webhooks/queue.ts' }] },
+    { patch: [setRun({ ...GRILLING, turn: 'agent' })] },
     {
       converse: 'R1',
-      events: [{ type: 'message', id: 'E7', from: 'agent', text: 'Settled: 5xx and timeouts retry, 4xx never. How many attempts before a delivery is dead-lettered?' }],
+      events: [
+        { type: 'message', id: 'E5', from: 'operator', text: REPLY },
+        { type: 'toolUse', id: 'E6', tool: 'Read', summary: 'src/webhooks/queue.ts' },
+        { type: 'message', id: 'E7', from: 'agent', text: 'Settled: 5xx and timeouts retry, 4xx never. How many attempts before a delivery is dead-lettered?' },
+      ],
     },
-    { patch: [{ op: 'set', path: ['runs', 'R1'], value: GRILLING }] },
-    { hold: 2500 },
+    { patch: [setRun(GRILLING)] },
+    { hold: 1200 },
   ],
 };
 
@@ -155,41 +151,26 @@ const handoff: Scene = {
   rows: ROWS,
   steps: [
     { keys: [ENTER, ENTER] },
-    { hold: 800 },
-    { patch: [{ op: 'set', path: ['runs', 'R1'], value: { ...GRILLING, proposal: { kind: 'advance', reason: 'The retry policy is settled.' } } }] },
-    { hold: 1200 },
+    { patch: [setRun({ ...GRILLING, proposal: { kind: 'advance', reason: 'The retry policy is settled.' } })] },
     { keys: [CTRL_N] },
-    { hold: 2200 },
+    { hold: 900 },
     { keys: [ESC] },
-    { patch: [{ op: 'set', path: ['runs', 'R1'], value: { ...GRILLING, proposal: { kind: 'handoff', reason: 'The retry policy is settled: it is ready to build.' } } }] },
-    { hold: 1000 },
-    { type: '/handoff', pace: 70 },
+    { patch: [setRun({ ...GRILLING, proposal: { kind: 'handoff', reason: 'The retry policy is settled: it is ready to build.' } })] },
+    { text: '/handoff', pace: TYPING },
     { keys: [ENTER] },
     // The agent writes the brief, on its turn.
-    {
-      patch: [
-        { op: 'set', path: ['tasks', 'T1'], value: { ...CONVERSING, handoff: handoffSheet } },
-        { op: 'set', path: ['runs', 'R1'], value: { ...GRILLING, turn: 'agent' } },
-      ],
-    },
-    { hold: 1000 },
-    {
-      patch: [
-        { op: 'set', path: ['tasks', 'T1'], value: { ...CONVERSING, handoff: { ...handoffSheet, brief: BRIEF } } },
-        { op: 'set', path: ['runs', 'R1'], value: GRILLING },
-      ],
-    },
-    { hold: 3200 },
+    { patch: [setTask({ ...CONVERSING, handoff: handoffSheet }), setRun({ ...GRILLING, turn: 'agent' })] },
+    { patch: [setTask({ ...CONVERSING, handoff: { ...handoffSheet, brief: BRIEF } }), setRun(GRILLING)] },
+    { hold: 1600 },
     { keys: [ENTER] },
     {
       patch: [
-        { op: 'set', path: ['tasks', 'T1'], value: { ...CONVERSING, mode: 'AFK', autonomy: 'L1', state: 'queued', label: 'Queued', stage: 'implement', tier: 'sonnet', liveRunId: null, handoff: null } },
-        { op: 'set', path: ['runs', 'R1'], value: { ...GRILLING, status: 'ended', outcome: 'handed off', endedAt: GRILLING.startedAt + 15 * 60_000 } },
+        setTask({ ...CONVERSING, mode: 'AFK', autonomy: 'L1', state: 'queued', label: 'Queued', stage: 'implement', tier: 'sonnet', liveRunId: null, handoff: null }),
+        setRun({ ...GRILLING, status: 'ended', outcome: 'handed off', endedAt: GRILLING.startedAt + 15 * MINUTE }),
       ],
     },
-    { hold: 1000 },
     { keys: [CTRL_B] },
-    { hold: 2000 },
+    { hold: 1200 },
   ],
 };
 

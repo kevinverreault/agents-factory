@@ -75,11 +75,13 @@ A task follows its **workflow preset**, a sequence of stages ([presets](docs/pre
 
 ### The other screens
 
-**Runs** (`3`) lists every run, live ones first. **Usage** (`4`) shows the usage windows, the parallel slots, and tokens and API-equivalent cost by model, task tree, group, stage and ticket. `v` switches to the condensed view: Needs you, the task tree and the selected task's detail, side by side.
+The stills below show Needs you with its answer sheet. **Runs** (`3`) lists every run, live ones first. **Usage** (`4`) shows the usage windows, the parallel slots, and tokens and API-equivalent cost by model, task tree, group, stage and ticket. `v` switches to the condensed view: Needs you, the task tree and the selected task's detail, side by side.
 
-| Runs | Usage | Condensed view |
-|---|---|---|
-| ![The Runs screen](docs/media/runs.png) | ![The Usage screen](docs/media/usage.png) | ![The condensed view](docs/media/condensed.png) |
+| Needs you | Runs |
+|---|---|
+| ![The Needs you screen, with the selected question's answer sheet](docs/media/needs-you.png) | ![The Runs screen](docs/media/runs.png) |
+| **Usage** | **Condensed view** |
+| ![The Usage screen](docs/media/usage.png) | ![The condensed view](docs/media/condensed.png) |
 
 ## Commands
 
@@ -114,7 +116,7 @@ npm run test:contract    # contract tests against the real platform; see docs/wa
 
 ### Re-recording the media
 
-The GIFs and screenshots in `docs/media/` are played from scripted scenes on the real TUI, headless. A seeded fake connection stands in for the daemon (`src/demo/`), so recording needs no daemon, terminal, GitHub or Claude credentials.
+The GIFs and screenshots in `docs/media/` are played from scripted scenes on the real TUI, headless. A seeded fake connection stands in for the daemon (`src/demo/`), so recording needs no daemon, terminal, GitHub or Claude credentials. The recorder draws the frames itself, with npm packages only, instead of using vhs: vhs needs ttyd, ffmpeg and a browser, which the machine the media were first recorded on could not install.
 
 ```bash
 npm run media                      # every scene, into docs/media/

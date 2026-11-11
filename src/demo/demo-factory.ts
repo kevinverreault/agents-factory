@@ -15,7 +15,7 @@ export const DEMO_CWD = '/clones/widgets';
 // Every time the demo shows comes from the fake clock's start, never the
 // machine's: re-recording draws the same frames.
 const NOW = new FakeClock().now();
-const MINUTE = 60_000;
+export const MINUTE = 60_000;
 
 const widgets: RepositoryView = { id: 'acme/widgets', path: DEMO_CWD, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
 const gadgets: RepositoryView = { ...widgets, id: 'acme/gadgets', path: '/clones/gadgets' };

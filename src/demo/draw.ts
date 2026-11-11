@@ -5,7 +5,7 @@
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { createCanvas, GlobalFonts, type Canvas, type SKRSContext2D } from '@napi-rs/canvas';
-import { parseFrame, type Cell, type Palette } from './terminal-frame.ts';
+import { parseFrame, toHex, type Cell, type Palette } from './terminal-frame.ts';
 
 // The Windows Terminal scheme's colours, in ANSI order.
 export const SCHEME: Palette = {
@@ -62,11 +62,11 @@ function drawCell(context: SKRSContext2D, cell: Cell, x: number, y: number, widt
   if (cell.char === ' ') return;
   context.fillStyle = fg;
   context.strokeStyle = fg;
+  context.lineWidth = 1;
   if (!drawShape(context, cell.char, x, y, width)) {
     context.font = `${cell.italic ? 'italic ' : ''}${cell.bold ? 'bold ' : ''}${FONT_SIZE}px "${FAMILY}", "DejaVu Sans"`;
     context.fillText(cell.char, x, y + CELL_HEIGHT / 2);
   }
-  context.lineWidth = 1;
   if (cell.underline) context.fillRect(x, y + CELL_HEIGHT - 3, width, 1);
   if (cell.strike) context.fillRect(x, y + CELL_HEIGHT / 2, width, 1);
 }
@@ -81,13 +81,11 @@ function drawShape(context: SKRSContext2D, char: string, x: number, y: number, w
   const right = x + width;
   const bottom = y + CELL_HEIGHT;
   const line = (points: [number, number][]) => {
-    context.lineWidth = 1;
     context.beginPath();
     points.forEach(([px, py], i) => (i === 0 ? context.moveTo(px, py) : context.lineTo(px, py)));
     context.stroke();
   };
   const corner = (fromX: number, fromY: number, toX: number, toY: number) => {
-    context.lineWidth = 1;
     context.beginPath();
     context.moveTo(fromX, fromY);
     context.quadraticCurveTo(midX, midY, toX, toY);
@@ -157,5 +155,5 @@ function drawShape(context: SKRSContext2D, char: string, x: number, y: number, w
 function blend(from: string, to: string, by: number): string {
   const channels = (hex: string) => [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16));
   const [a, b] = [channels(from), channels(to)];
-  return '#' + a.map((value, i) => Math.round(value + (b[i]! - value) * by).toString(16).padStart(2, '0')).join('');
+  return toHex(a.map((value, i) => Math.round(value + (b[i]! - value) * by)));
 }
