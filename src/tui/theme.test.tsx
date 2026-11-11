@@ -4,8 +4,8 @@ import chalk from 'chalk';
 import { Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
-import { label, type Task, type TaskState } from '../lifecycle/lifecycle.ts';
-import { ROLES, Section, Sheet, stateLook, tone } from './theme.ts';
+import { label, type AttentionKind, type Task, type TaskState } from '../lifecycle/lifecycle.ts';
+import { kindLook, ROLES, Section, Sheet, stateLook, tone } from './theme.ts';
 
 const withLevel = (level: 0 | 1 | 2 | 3) => {
   const was = chalk.level;
@@ -119,6 +119,32 @@ describe('the sheet style', () => {
     // Truecolour escapes: #f07575 is 240;117;117, #9fce7e is 159;206;126.
     expect(border('bad')).toContain('\x1b[38;2;240;117;117m╭');
     expect(border()).toContain('\x1b[38;2;159;206;126m╭');
+  });
+});
+
+// Every attention kind's name and role: keyed by the kind, so a kind added
+// without its look fails the typecheck here.
+const ATTENTION_LOOKS = {
+  question: ['question', 'accent'],
+  permission: ['permission', 'warn'],
+  failure: ['failure', 'bad'],
+  'stage-blocked': ['blocked', 'warn'],
+  'github-write': ['github', 'bad'],
+  'pr-closed-unmerged': ['PR closed', 'warn'],
+  'repo-missing': ['repo missing', 'bad'],
+  'recovery-report': ['recovered', 'accent'],
+} as const satisfies Record<AttentionKind, readonly [string, string]>;
+
+describe('Needs you kinds', () => {
+  test.each(Object.entries(ATTENTION_LOOKS).map(([attention, [kind, role]]) => [attention as AttentionKind, kind, role]))('a %s request is named %s, in %s', (attention, kind, role) => {
+    expect(kindLook({ kind: 'attention', attention })).toEqual({ kind, role });
+  });
+
+  test.each([
+    ['ready', 'your turn', 'accent'],
+    ['review', 'review', 'review'],
+  ] as const)('a %s item is named %s, in %s', (item, kind, role) => {
+    expect(kindLook({ kind: item })).toEqual({ kind, role });
   });
 });
 
