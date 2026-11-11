@@ -17,6 +17,7 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | Descendant sweep: a run's tree, by its job and by parent PID, never a reused PID (#62) | Holds | `src/os/windows-processes.contract.test.ts` |
 | Factory plugin loads, `/factory:<skill> args`, cross-skill calls | Holds. No `.claude/skills/` fallback needed | `src/skills/plugin.contract.test.ts` |
 | TypeScript code intelligence plugin: the `LSP` tool, and type errors shown after an edit, on the host and in an L2 container | Holds, with `typescript-language-server` over a pinned TypeScript 6. Diagnostics reach only runs with a shell tool | `src/executor/code-intelligence.contract.test.ts`, `src/sandbox/docker.contract.test.ts`, `src/executor/l2-run.contract.test.ts` |
+| Security guidance plugin: its edit hook warns about a dangerous pattern, with no review that calls a model, through the bash and Python on the host | Holds. The hook needs bash and Python 3 on `PATH` | `src/security-guidance/security-guidance.contract.test.ts` |
 | `gh` re-reads a refreshed `hosts.yml` | Holds | `src/github/gh-config.contract.test.ts` |
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
 | L2 sandbox: bundle round trip, restart, no credentials (#64) | Holds on Docker Desktop 27 (WSL 2 engine) | `src/sandbox/docker.contract.test.ts` |
@@ -86,6 +87,19 @@ For the autonomy gate (later tickets):
 - Diagnostics come 0.4 to 1.5 s after the edit, and are delivered before the run's next API call. If the model replies right after the edit, it never sees them. The contract tests have the run `sleep 5` after the edit, which an L1 run is allowed through an extra rule.
 - In an L1 run, the `LSP` tool runs without reaching the gate. Claude Code counts it as a read, and the factory's allow list also names it, so a later CLI that doesn't can't send it to the gate. In an L2 run, it runs in the container, with nothing denied.
 - The `typescript-6` alias declares `tsc` and `tsserver` bins, and npm links them over TypeScript 7's in `node_modules/.bin`. So `npm run typecheck` runs TypeScript 7's `tsc` by its path, and a bare `npx tsc` in this repo runs TypeScript 6.
+
+## Security guidance (ADR 0005)
+
+`src/security-guidance/plugin/` is a local plugin, `factory-security`: upstream's `security-guidance` hook scripts, vendored as they are (see `src/security-guidance/UPSTREAM.md`), under a manifest and `hooks.json` of the factory's own. It wires one hook, PostToolUse on `Edit|Write|MultiEdit|NotebookEdit`, through `pattern-only.sh`, which sets `ENABLE_CODE_SECURITY_REVIEW=0` before upstream's Python launcher runs. L1 runs load it from the package. The L2 image copies it to `/opt/factory/security`, root-owned, with the plugin directory as the build context, and installs `python3` for it. The plugin's digest is a label in the image's recipe, so a change to it builds a new image. Recorded on 2026-11-11:
+
+- The pattern warning reaches the run as the edit's `additionalContext`. An L1 run on haiku that wrote `child_process.exec` with a template string answered that it was shown a security warning, and the same run without the plugin answered that it wasn't. That was a probe, not a contract test.
+- With the reviews on and no credentials in the hook's environment, it tells the run, at most once a week, that the reviews can't run, and starts a background `pip install` of the Python Agent SDK. With them off, it does neither. The contract test edits inside a git repo, where the notice would show, and checks that neither happens. The bootstrap check only means something on a machine where the Python Agent SDK isn't already importable.
+- Upstream runs every hook as `bash <launcher> <script>`, with Claude Code filling in `${CLAUDE_PLUGIN_ROOT}`. That works under Claude Code on Windows, with Git Bash's `bash` and a python.org Python on `PATH`. Its launcher skips the Microsoft Store `python3` stub. With no Python, the hook exits 1, which Claude Code shows without blocking the edit.
+- `core.autocrlf=true` would check out `sg-python.sh` with CRLF line endings, which bash can't run. `.gitattributes` marks the vendored plugin `-text`.
+- The hook keeps its state and debug log in `~/.claude/security/`. For L1 runs that's the operator's own, shared with any copy of the plugin they've installed themselves, and keyed by session. It also reads custom patterns from `~/.claude/` there. In L2 it's the container user's home.
+- In the L2 image, Debian bookworm's Python 3.11 runs the hook to the same warning, and the run's user can't write the plugin. That was a probe with `docker run` on the built image, not a contract test, and no L2 run was recorded getting the warning.
+
+AFK runs load no marketplace plugin. These findings are probes too. Without a policy, a run on `settingSources: ['project']` loaded a plugin that the repo's project settings enabled, from the operator's own plugin cache. A marketplace that project settings only declare (`extraKnownMarketplaces`) isn't installed by a headless run. With `strictKnownMarketplaces: []` in the policy tier, the project-enabled plugin stays out and local plugins still load. Like the policy tier's allow rules, that holds only on a machine with no managed settings of its own. Any managed settings also seat Claude Code's built-in `cc-plugin-sec-default`, which L1 runs already had, through the factory's other managed settings.
 
 ## `gh` and a refreshed `hosts.yml` (ADR 0004)
 

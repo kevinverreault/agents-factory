@@ -85,11 +85,14 @@ export type AgentSdkExecutorOptions = {
   // that what it starts goes down with the run.
   adopt?: Processes['adopt'];
   // The code intelligence plugin's directory on the host, which L1 runs
-  // load (see `codeIntelligenceOf`). Without it, L1 runs have no LSP.
+  // load (see `afkPluginsOf`). Without it, L1 runs have no LSP.
   lspPlugin?: string;
+  // The security guidance plugin's directory on the host, which L1 runs
+  // load (see `afkPluginsOf`). Without it, L1 runs get no pattern warnings.
+  securityPlugin?: string;
 };
 
-export function agentSdkExecutor({ adopt, lspPlugin }: AgentSdkExecutorOptions = {}): Executor {
+export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkExecutorOptions = {}): Executor {
   const runs = new Map<string, LiveRun>();
 
   function say(runId: string, text: string): void {
@@ -126,7 +129,7 @@ export function agentSdkExecutor({ adopt, lspPlugin }: AgentSdkExecutorOptions =
       // Skills dispatch as `/factory:<skill>`, so no other copy can shadow
       // them. An L2 run loads the container's copies of its plugins.
       const skills = start.plugin === null ? null : (start.container?.plugin ?? start.plugin);
-      const plugins = [skills, codeIntelligenceOf(start, lspPlugin)].flatMap((path) => (path === null ? [] : [{ type: 'local' as const, path }]));
+      const plugins = [skills, ...afkPluginsOf(start, { lspPlugin, securityPlugin })].flatMap((path) => (path === null ? [] : [{ type: 'local' as const, path }]));
       const options: Options = {
         ...(start.mode === 'HITL'
           ? hitlOptions(start.credential, canUseTool, hitlFactoryTools(start.runId, sink, start))
@@ -329,14 +332,23 @@ function archiveStore(dir: string): SessionStore {
   };
 }
 
-// The code intelligence plugin a run loads, or null: an L1 run the host's,
-// an L2 run its container's own. A HITL run acts as the operator (ADR 0005),
-// so it has whatever code intelligence their own plugins give it, and no
-// second TypeScript server beside theirs.
-function codeIntelligenceOf(start: RunStart, host: string | undefined): string | null {
-  if (start.mode === 'HITL') return null;
-  return start.container ? start.container.lspPlugin : (host ?? null);
+// The plugins an AFK run loads beside the skill set: the code intelligence
+// and security guidance plugins, an L1 run the host's copies, an L2 run its
+// container's own. A HITL run acts as the operator (ADR 0005), so it has
+// whatever their own plugins give it, and no second TypeScript server or
+// security hook beside theirs.
+function afkPluginsOf(start: RunStart, host: Pick<AgentSdkExecutorOptions, 'lspPlugin' | 'securityPlugin'>): (string | null)[] {
+  if (start.mode === 'HITL') return [];
+  if (start.container) return [start.container.lspPlugin, start.container.securityPlugin];
+  return [host.lspPlugin ?? null, host.securityPlugin ?? null];
 }
+
+// What an AFK run's policy tier says about plugins: no marketplace is
+// allowed, so a plugin the target repo's project settings enable never loads
+// from the operator's own install (ADR 0005). Only the factory's local
+// plugins do. Like the policy tier's allow rules, it holds only while the
+// machine has no managed settings of its own (see `l1Options`).
+const AFK_PLUGIN_POLICY = { strictKnownMarketplaces: [] };
 
 // HITL runs act as the operator (ADR 0005): every settings source loads,
 // plus the skill set plugin and the factory MCP server. Edits and the
@@ -395,7 +407,7 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
     // hands it only while the machine has no managed settings of its own.
     // With them, it drops this tier unless their admin opts in, and even then
     // keeps no allow rules, so every call that would prompt reaches the gate.
-    managedSettings: { allowManagedPermissionRulesOnly: true, permissions: { allow: [...allowRules], deny: [...HARD_DENY_RULES] } },
+    managedSettings: { ...AFK_PLUGIN_POLICY, allowManagedPermissionRulesOnly: true, permissions: { allow: [...allowRules], deny: [...HARD_DENY_RULES] } },
     settings: {
       ...RETENTION,
       hooks: { PostToolUse: [{ hooks: [{ type: 'command', ...RELAY_HOOK, async: true, timeout: 30 }] }] },
@@ -433,7 +445,7 @@ function l2Options({ maxTurns, guards, token, container }: RunStart, canUseTool:
     settingSources: ['project'],
     mcpServers: { factory: factory.server },
     strictMcpConfig: true,
-    managedSettings: { allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
+    managedSettings: { ...AFK_PLUGIN_POLICY, allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
     settings: { ...RETENTION, attribution: { commit: '', pr: '' } },
     hooks: { PreToolUse: [{ hooks: [hardDenies(container!.workdir, guards!.start, (args) => container!.git(args).then(({ code }) => code))] }] },
     ...(maxTurns !== null && { maxTurns }),

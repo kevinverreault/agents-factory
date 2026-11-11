@@ -178,6 +178,7 @@ export class FakeSandbox implements Sandbox {
       workdir: this.workdirOf(spec.taskId),
       plugin: spec.plugin === null ? null : '/opt/factory/plugin',
       lspPlugin: '/opt/factory/lsp',
+      securityPlugin: '/opt/factory/security',
       checks: this.git,
       git: () => Promise.reject(new Error('The fake sandbox runs no git command.')),
       deniedHosts: async () => [...container.denied],

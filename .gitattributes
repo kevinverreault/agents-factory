@@ -1,0 +1,3 @@
+# The vendored security guidance plugin, byte for byte as upstream ships it:
+# no line-ending conversion, so bash can run its scripts on Windows too.
+src/security-guidance/plugin/** -text

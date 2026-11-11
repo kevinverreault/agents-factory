@@ -20,6 +20,7 @@ import { dirname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { lspPluginManifest, pinnedLanguageServerVersions, type LanguageServer, type LanguageServerVersions } from '../code-intelligence/code-intelligence.ts';
 import { GitError, guardChecks } from '../git/git.ts';
+import { SECURITY_PLUGIN, securityPluginDigest } from '../security-guidance/security-guidance.ts';
 import { RUN_DIR, SandboxError, type Container, type ContainerListing, type ContainerSpec, type GitResult, type ImageListing, type Sandbox } from './sandbox.ts';
 
 const WORKDIR = '/work';
@@ -27,6 +28,9 @@ const PLUGIN_DIR = '/opt/factory/plugin';
 // The code intelligence plugin the image holds, for the language server it
 // installs globally.
 const LSP_PLUGIN_DIR = '/opt/factory/lsp';
+// The security guidance plugin the image holds, copied from the package,
+// for the python3 it installs.
+const SECURITY_PLUGIN_DIR = '/opt/factory/security';
 const GLOBAL_MODULES = '/usr/local/lib/node_modules';
 const CONTAINER_SERVER: LanguageServer = {
   command: 'typescript-language-server',
@@ -67,13 +71,15 @@ const PROXY_ENV = {
 // The image's recipe. The CLI is the Linux build of the one the pinned SDK
 // bundles, so a run in the container is the same Claude Code as on the host.
 // So are the language server and its fallback TypeScript, with the code
-// intelligence plugin for them, owned by root.
-export function sandboxDockerfile(sdkVersion: string, languageServer: LanguageServerVersions): string {
+// intelligence plugin for them, owned by root. The security guidance plugin
+// is the build context, which holds that plugin's directory alone, and its
+// digest is in the recipe, so a change to the plugin builds a new image.
+export function sandboxDockerfile(sdkVersion: string, languageServer: LanguageServerVersions, securityDigest: string): string {
   const manifest = Buffer.from(JSON.stringify(lspPluginManifest(CONTAINER_SERVER))).toString('base64');
   return [
     'FROM node:24-bookworm-slim',
     'RUN apt-get update \\',
-    ' && apt-get install --yes --no-install-recommends git ca-certificates gh curl \\',
+    ' && apt-get install --yes --no-install-recommends git ca-certificates gh curl python3 \\',
     ' && rm -rf /var/lib/apt/lists/*',
     `RUN npm install --global @anthropic-ai/claude-agent-sdk-linux-x64@${sdkVersion} typescript-language-server@${languageServer.server} typescript@${languageServer.typescript} \\`,
     ' && ln -s "$(npm root --global)/@anthropic-ai/claude-agent-sdk-linux-x64/claude" /usr/local/bin/claude \\',
@@ -81,6 +87,8 @@ export function sandboxDockerfile(sdkVersion: string, languageServer: LanguageSe
     ` && test "$(npm root --global)" = ${GLOBAL_MODULES}`,
     `RUN mkdir -p ${LSP_PLUGIN_DIR}/.claude-plugin \\`,
     ` && echo ${manifest} | base64 --decode > ${LSP_PLUGIN_DIR}/.claude-plugin/plugin.json`,
+    `LABEL agents-factory.security-plugin=${securityDigest}`,
+    `COPY . ${SECURITY_PLUGIN_DIR}`,
     // The clone it fetches from is mounted, so owned by someone else.
     "RUN git config --system safe.directory '*' \\",
     ` && useradd --create-home --uid 10001 ${USER} \\`,
@@ -98,7 +106,7 @@ export type DockerSandboxOptions = {
 };
 
 export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
-  const dockerfile = sandboxDockerfile(pinnedSdkVersion(), pinnedLanguageServerVersions());
+  const dockerfile = sandboxDockerfile(pinnedSdkVersion(), pinnedLanguageServerVersions(), securityPluginDigest());
   const image = `${REPOSITORY}:${createHash('sha256').update(dockerfile).digest('hex').slice(0, 12)}`;
   let built: Promise<void> | null = null;
   const nameOf = (taskId: string) => `${namespace}-${taskId}`.toLowerCase();
@@ -111,7 +119,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
   function ensureImage(): Promise<void> {
     built ??= (async () => {
       if ((await docker(['image', 'inspect', image]).catch(() => null)) === null) {
-        await docker(['build', '--quiet', '--label', `${IMAGE_LABEL}=true`, '--tag', image, '-'], { input: dockerfile });
+        await docker(['build', '--quiet', '--label', `${IMAGE_LABEL}=true`, '--tag', image, '--file', '-', SECURITY_PLUGIN], { input: dockerfile });
       }
       const ours = (await docker(['image', 'ls', '--filter', `label=${IMAGE_LABEL}=true`, '--format', '{{.Repository}}:{{.Tag}}'])).split(/\r?\n/);
       for (const older of ours.filter((ref) => ref && ref !== image)) await docker(['image', 'rm', older]).catch(() => {});
@@ -260,6 +268,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       workdir: WORKDIR,
       plugin: spec.plugin === null ? null : PLUGIN_DIR,
       lspPlugin: LSP_PLUGIN_DIR,
+      securityPlugin: SECURITY_PLUGIN_DIR,
       checks: guardChecks({
         async output(cwd, args) {
           const result = await gitIn(spec.taskId, args, cwd);
