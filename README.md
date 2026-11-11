@@ -116,13 +116,15 @@ npm run test:contract    # contract tests against the real platform; see docs/wa
 
 ### Re-recording the media
 
-The GIFs and screenshots in `docs/media/` are played from scripted scenes on the real TUI, headless. A seeded fake connection stands in for the daemon (`src/demo/`), so recording needs no daemon, terminal, GitHub or Claude credentials. The recorder draws the frames itself, with npm packages only, instead of using vhs: vhs needs ttyd, ffmpeg and a browser, which the machine the media were first recorded on could not install.
+The GIFs and screenshots in `docs/media/` come from scripted scenes in `src/demo/scenes.ts`, played on the real TUI over a made-up factory (`src/demo/demo-factory.ts`). The demo's connection answers the TUI's commands as the daemon would, so a scene is only keys and text, and recording needs no daemon, GitHub or Claude credentials. Two recorders play the same scenes:
 
 ```bash
-npm run media                      # every scene, into docs/media/
+npm run media:vhs                  # with vhs (needs vhs, ttyd and ffmpeg on the PATH): the GIFs
+npm run media                      # headless, with npm packages only: the GIFs and the screenshots
 npm run media -- handoff           # only the scenes named
 npm run media -- --text needs-you  # print a scene's frames as text instead
+npm run tapes                      # rewrite docs/media/tapes/*.tape after changing a scene
 npm run demo                       # look around the same made-up factory, interactively
 ```
 
-The scenes are in `src/demo/scenes.ts` and the made-up factory is in `src/demo/demo-factory.ts`. `src/demo/scenes.test.ts` checks every scene still reaches its key moments, so a TUI change that breaks one fails `npm test`. Re-record after changing how the TUI looks.
+The committed media were drawn by the headless recorder, because vhs can't run inside an L2 run's container. [docs/media/README.md](docs/media/README.md) explains why, and how to record with vhs instead. `npm test` checks every scene still reaches its key moments, and that the committed tapes match the scenes.

@@ -3,9 +3,8 @@
 // still. Nothing runs but this process: no daemon, terminal, GitHub or
 // Claude. `npm run media -- <name>…` plays only the scenes named, and
 // `-- --text` prints each scene's frames as text instead of drawing them.
-// It stands in for vhs, which needs ttyd, ffmpeg and a browser: the media
-// were first recorded where only the npm registry could be reached, and
-// this needs nothing more.
+// It plays the same scenes as vhs (tapes.ts) where vhs can't run, such as an
+// L2 run's container: see docs/media/README.md. It also draws the stills.
 // Plain .ts (no JSX) so Node runs it without a build step.
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';

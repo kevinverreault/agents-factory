@@ -12,7 +12,7 @@ const MOMENTS: Record<string, RegExp[]> = {
   'tasks-and-launch': [/LIVE OUTPUT · T2 · R2/, /QUICK LAUNCH[\s\S]*Add a --dry-run flag to sync\.▏/, /QUICK LAUNCH T10[\s\S]*\[1\] Yes, as a diff/, /A diff it is\./],
   'needs-you': [/› question\s+T5/, /digits answer · esc back/, /› review\s+T6[\s\S]*REVIEW/, /› your turn\s+T7/],
   'task-detail': [/Tasks › T2 Add a status --json flag/, /CONVERSATION[\s\S]*The agent is waiting on you\./, /› Only 5xx and timeouts\. Never 4xx\.▏/, /◆ Settled: 5xx and timeouts retry/],
-  handoff: [/The agent proposes advancing/, /ADVANCE T1 FROM GRILL/, /› \/handoff▏/, /The agent is writing the brief…/, /› Goal\s+Failed webhook deliveries/, /AFK L1 · claude-opus-5-5 · sonnet · Queued/],
+  handoff: [/› Five attempts, with backoff\.▏/, /The agent proposes advancing/, /ADVANCE T1 FROM GRILL/, /› \/handoff▏/, /› Goal\s+Failed webhook deliveries/, /AFK L1 · claude-opus-5-5 · sonnet · Queued/],
 };
 
 describe('the README’s scenes', () => {

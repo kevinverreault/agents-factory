@@ -1,11 +1,12 @@
 // A made-up factory for the README's media and `npm run demo`: the acme
 // repositories, tasks in every state, a live HITL conversation and an AFK
 // run with output, and what Needs you holds. No daemon, GitHub or Claude
-// behind it: a FakeConnection serves the state, and each run's conversation
-// to whoever opens or follows it.
+// behind it: a FakeConnection serves the state and each run's conversation,
+// and answers the operator's commands as the daemon would.
 import type { ConversationEvent } from '../executor/executor.ts';
 import type { ConversationListener } from '../protocol/client.ts';
-import type { FactoryState, RepositoryView, RunView, TaskView } from '../protocol/factory-state.ts';
+import type { FactoryState, PatchOp, RepositoryView, RunView, TaskView } from '../protocol/factory-state.ts';
+import type { Command, Reply } from '../protocol/protocol.ts';
 import { FakeClock } from '../testing/fake-clock.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
 
@@ -15,7 +16,7 @@ export const DEMO_CWD = '/clones/widgets';
 // Every time the demo shows comes from the fake clock's start, never the
 // machine's: re-recording draws the same frames.
 const NOW = new FakeClock().now();
-export const MINUTE = 60_000;
+const MINUTE = 60_000;
 
 const widgets: RepositoryView = { id: 'acme/widgets', path: DEMO_CWD, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
 const gadgets: RepositoryView = { ...widgets, id: 'acme/gadgets', path: '/clones/gadgets' };
@@ -61,7 +62,7 @@ const mainFlow: NonNullable<TaskView['preset']> = {
 };
 
 // T1, the HITL conversation the media open: grilling on the main flow.
-export const CONVERSING: TaskView = task('T1', 'Retry failed webhook deliveries', 'running', 'In conversation', {
+const CONVERSING: TaskView = task('T1', 'Retry failed webhook deliveries', 'running', 'In conversation', {
   mode: 'HITL',
   liveRunId: 'R1',
   branch: 'factory/T1-retry-failed-webhook-deliveries',
@@ -72,13 +73,13 @@ export const CONVERSING: TaskView = task('T1', 'Retry failed webhook deliveries'
   tier: 'opus',
   groups: ['webhooks'],
 });
-export const GRILLING: RunView = run('R1', 'T1', { mode: 'HITL', autonomy: null, stage: 'grill', tier: 'opus', model: 'claude-opus-5-5', maxTurns: null, turn: 'operator', startedAt: NOW - 12 * MINUTE, usage: { 'claude-opus-5-5': usage(48_200, 6_100, 310_000, 2.41) } });
+const GRILLING: RunView = run('R1', 'T1', { mode: 'HITL', autonomy: null, stage: 'grill', tier: 'opus', model: 'claude-opus-5-5', maxTurns: null, turn: 'operator', startedAt: NOW - 12 * MINUTE, usage: { 'claude-opus-5-5': usage(48_200, 6_100, 310_000, 2.41) } });
 
 // T2's run, live, whose output the Tasks screen shows under the tree.
 const implementing = run('R2', 'T2', { ticket: 'acme/widgets#31', usage: { 'claude-sonnet-5-5': usage(122_000, 18_400, 1_900_000, 1.86) } });
 
 // T5 asks which identity provider times out.
-export const QUESTION = {
+const QUESTION = {
   id: 'toolu_01',
   questions: [
     {
@@ -93,7 +94,7 @@ export const QUESTION = {
   ],
 };
 
-export function demoState(): FactoryState {
+function demoState(): FactoryState {
   const tasks: TaskView[] = [
     CONVERSING,
     task('T2', 'Add a status --json flag', 'running', 'Running', {
@@ -150,7 +151,7 @@ export function demoState(): FactoryState {
 }
 
 // What each run has said so far, served to the TUI as it opens or follows it.
-export const CONVERSATIONS: Record<string, ConversationEvent[]> = {
+const CONVERSATIONS: Record<string, ConversationEvent[]> = {
   R1: [
     { type: 'message', id: 'E1', from: 'operator', text: 'Grill me about retrying failed webhook deliveries.' },
     { type: 'toolUse', id: 'E2', tool: 'Read', summary: 'src/webhooks/deliver.ts' },
@@ -166,18 +167,131 @@ export const CONVERSATIONS: Record<string, ConversationEvent[]> = {
   ],
 };
 
-// The demo's connection: a FakeConnection that knows the widgets clone and
-// serves each run's conversation as the TUI opens or follows it.
+// What the agents do once the operator acts, as the daemon would report it.
+
+// A quick launch: one prompt, grilled on its own card, its first question
+// asked at once.
+const QUICK_TASK = 'T10';
+function quickLaunched(prompt: string): { task: TaskView; run: RunView } {
+  const task: TaskView = {
+    ...CONVERSING,
+    id: QUICK_TASK,
+    title: prompt,
+    liveRunId: 'R10',
+    branch: 'factory/T10-add-a-dry-run-flag-to-sync',
+    worktree: '/worktrees/acme-widgets/T10',
+    preset: null,
+    groups: [],
+    quick: { questions: 0, done: false },
+  };
+  const question = {
+    id: 'toolu_10',
+    questions: [
+      {
+        question: 'Should --dry-run print the changes it would make?',
+        header: 'Output',
+        options: [
+          { label: 'Yes, as a diff', description: 'One line per file, + and -' },
+          { label: 'Only a count', description: '“12 files would change”' },
+        ],
+        multiSelect: false,
+      },
+    ],
+  };
+  return { task, run: { ...GRILLING, id: 'R10', taskId: QUICK_TASK, usage: {}, question } };
+}
+
+// The brief the agent writes for T1's handoff.
+const BRIEF = {
+  goal: 'Failed webhook deliveries are retried with backoff, then dead-lettered.',
+  decided: ['Retry 5xx and timeouts only, never 4xx.', 'Five attempts, exponential backoff from 30 s.'],
+  doneWhen: ['A delivery failing with 503 is retried until it succeeds.', 'The fifth failure lands in the dead-letter queue.'],
+  outOfScope: ['Replaying dead-lettered deliveries.'],
+  links: ['acme/widgets#27', 'src/webhooks/deliver.ts'],
+};
+const HANDOFF_SHEET: NonNullable<TaskView['handoff']> = {
+  brief: BRIEF,
+  stage: 'implement',
+  continueAs: 'resume',
+  autonomy: 'L1',
+  tier: 'sonnet',
+  maxTurns: 300,
+  contextShare: 0.23,
+  readiness: { blockers: [], toCommit: ['GLOSSARY.md'] },
+};
+
+// The demo's connection: a FakeConnection that knows the widgets clone,
+// serves each run's conversation as the TUI opens or follows it, and
+// answers what the operator does as the daemon would: a quick launch is
+// grilled, an answer is taken, a message is answered, a handoff goes
+// through. So the TUI needs only keys to play a scene, typed by a test, by
+// the recorder or by vhs.
 export class DemoConnection extends FakeConnection {
   private readonly said: Record<string, ConversationEvent[]>;
+  private now: FactoryState;
 
   constructor(state: FactoryState = demoState(), said: Record<string, ConversationEvent[]> = CONVERSATIONS) {
     super();
-    this.said = said;
+    this.said = structuredClone(said);
+    this.now = state;
     this.replyTo('inspectClone', { ok: true, value: { repo: 'acme/widgets', path: DEMO_CWD } });
-    // A launch gets the next task id; nothing launches it.
-    this.replyTo('launchTask', { ok: true, value: { taskId: 'T10' } });
+    this.replyTo('launchTask', { ok: true, value: { taskId: QUICK_TASK } });
     this.serveSnapshot(state);
+    this.subscribe((next) => (this.now = next));
+  }
+
+  override async send(command: Command): Promise<Reply> {
+    const reply = await super.send(command);
+    // After the reply, as the daemon's patches follow its acknowledgement.
+    queueMicrotask(() => this.react(command));
+    return reply;
+  }
+
+  private react(command: Command): void {
+    if (command.type === 'launchTask' && command.quick) {
+      const { task, run } = quickLaunched(command.prompt ?? '');
+      this.servePatch([setTask(task), setRun(run)]);
+    } else if (command.type === 'answerQuestion' && command.taskId === QUICK_TASK) {
+      this.servePatch([setRun({ ...this.run('R10'), question: null })]);
+      this.say('R10', [
+        { type: 'toolUse', id: 'E1', tool: 'Read', summary: 'src/sync/command.ts' },
+        { type: 'message', id: 'E2', from: 'agent', text: 'A diff it is. Should --dry-run exit non-zero when something would change?' },
+      ]);
+    } else if (command.type === 'answer') {
+      const task = this.now.tasks[command.taskId]!;
+      const run = task.liveRunId ? this.now.runs[task.liveRunId] : undefined;
+      this.servePatch([
+        { op: 'set', path: ['attentionQueue'], value: this.now.attentionQueue.filter((item) => item.taskId !== command.taskId) },
+        setTask({ ...task, state: 'running', label: 'Running' }),
+        ...(run ? [setRun({ ...run, question: null })] : []),
+      ]);
+    } else if (command.type === 'sendMessage' && command.taskId === 'T1') {
+      const turn = (this.said.R1?.length ?? 0) + 1;
+      this.say('R1', [
+        { type: 'message', id: `E${turn}`, from: 'operator', text: command.text },
+        { type: 'toolUse', id: `E${turn + 1}`, tool: 'Read', summary: 'src/webhooks/queue.ts' },
+        { type: 'message', id: `E${turn + 2}`, from: 'agent', text: 'Settled: 5xx and timeouts retry, 4xx never, five attempts with backoff.' },
+      ]);
+      this.servePatch([setRun({ ...this.run('R1'), proposal: { kind: 'advance', reason: 'The retry policy is settled.' } })]);
+    } else if (command.type === 'openHandoff' && command.taskId === 'T1') {
+      this.servePatch([setTask({ ...this.now.tasks.T1!, handoff: HANDOFF_SHEET })]);
+    } else if (command.type === 'handoff' && command.taskId === 'T1') {
+      const grilling = this.run('R1');
+      this.servePatch([
+        setTask({ ...this.now.tasks.T1!, mode: 'AFK', autonomy: command.autonomy, state: 'queued', label: 'Queued', stage: 'implement', tier: command.tier, liveRunId: null, handoff: null }),
+        setRun({ ...grilling, status: 'ended', outcome: 'handed off', proposal: null, endedAt: grilling.startedAt + 15 * MINUTE }),
+      ]);
+    }
+  }
+
+  private run(id: string): RunView {
+    return this.now.runs[id]!;
+  }
+
+  // A run says more: kept for whoever opens its conversation later.
+  private say(runId: string, events: ConversationEvent[]): void {
+    (this.said[runId] ??= []).push(...events);
+    this.serveConversation(runId, ...events);
   }
 
   override converse(runId: string, listener: ConversationListener): () => void {
@@ -193,9 +307,12 @@ export class DemoConnection extends FakeConnection {
   }
 
   private replay(runId: string, listener: ConversationListener): void {
-    const events = this.said[runId] ?? [];
+    const events = [...(this.said[runId] ?? [])];
     queueMicrotask(() => {
       for (const event of events) listener(event);
     });
   }
 }
+
+const setTask = (task: TaskView): PatchOp => ({ op: 'set', path: ['tasks', task.id], value: task });
+const setRun = (run: RunView): PatchOp => ({ op: 'set', path: ['runs', run.id], value: run });
