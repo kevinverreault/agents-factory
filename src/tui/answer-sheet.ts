@@ -403,8 +403,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
       Sheet,
       { title: look.kind, role: look.role, hint: hint ?? undefined },
       question ? h(QuestionCard, { question, card, ownWords: false, nested: true }) : h(Text, null, askedFor(item, task)),
-      // The options along a line, `[1] …   [2] …`, wrapping where it runs out.
-      h(Box, { flexWrap: 'wrap', columnGap: 3 }, ...choicesFor(item, task).map((choice, i) => h(Pick, { key: choice.label, digit: i + 1 }, choice.label))),
+      ...choicesFor(item, task).map((choice, i) => h(Pick, { key: choice.label, digit: i + 1 }, choice.label)),
       // With more than one field, › marks the one being typed into.
       ...(form?.fields ?? []).map(({ prompt, value }, i) =>
         h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? `${GLYPH.selected} ` : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(value)),
