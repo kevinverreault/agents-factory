@@ -9,6 +9,7 @@ import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
 import { autonomyText, cycle } from './launch-card.ts';
+import { CursorWindow, fixed } from './screen.ts';
 import { edit } from './text-input.ts';
 import { choosable, Cursor, GLYPH, Sheet, tone } from './theme.ts';
 
@@ -73,19 +74,28 @@ export function HandoffSheet({ connection, task, run }: Props) {
   const to = handoff.stage ? `to ${handoff.stage} (AFK)` : 'to one AFK run on the brief';
   const share = handoff.contextShare === null ? null : `the conversation fills ${Math.round(handoff.contextShare * 100)}% of the context window`;
   const { blockers, toCommit } = handoff.readiness;
+  // The brief's lines, before the fields: on a field, the brief shows its end.
+  const briefLines = lines.filter((line) => line.kind !== 'field');
   return h(
     Sheet,
-    { title: `Hand off ${task.id} ${to}`, hint: `${brief ? 'enter hand off · ↑↓ line · type to edit · ←→ change' : 'enter ask again'} · esc keep talking` },
+    { title: `Hand off ${task.id} ${to}`, hint: `${brief ? 'enter hand off · ↑↓ line · type to edit · ←→ change' : 'enter ask again'} · esc keep talking`, shrinks: true },
+    // On a short screen only the brief gives way, scrolled to keep the
+    // selected line in view: the fields and what blocks the handoff stay.
     brief
-      ? h(Box, { flexDirection: 'column' }, ...lines.map((line, i) => h(BriefLine, { key: i, line, brief, selected: i === draft.current.line, first: startsSection(lines, i) })))
-      : h(Text, tone('warn'), writing ? 'The agent is writing the brief…' : 'The agent ended its turn without writing the brief: enter asks again.'),
-    h(Field, { label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, choosable(draft.current.continueAs), share && h(Text, tone('dim'), ` ${share}`)),
-    h(Field, { label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, choosable(autonomyText(draft.current.autonomy))),
-    h(Field, { label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, choosable(draft.current.tier)),
-    h(Field, { label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, draft.current.maxTurns || ' '),
-    h(Text, tone('dim'), toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
-    ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
-    refusal ? h(Text, tone('bad'), refusal) : null,
+      ? h(CursorWindow, {
+          cursor: Math.min(draft.current.line, briefLines.length - 1),
+          items: briefLines.map((line, i) => h(BriefLine, { key: i, line, brief, selected: i === draft.current.line, first: startsSection(lines, i) })),
+        })
+      : fixed(h(Text, tone('warn'), writing ? 'The agent is writing the brief…' : 'The agent ended its turn without writing the brief: enter asks again.')),
+    fixed(
+      h(Field, { key: 'continueAs', label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, choosable(draft.current.continueAs), share && h(Text, tone('dim'), ` ${share}`)),
+      h(Field, { key: 'autonomy', label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, choosable(autonomyText(draft.current.autonomy))),
+      h(Field, { key: 'tier', label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, choosable(draft.current.tier)),
+      h(Field, { key: 'maxTurns', label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, draft.current.maxTurns || ' '),
+      h(Text, { key: 'commit', ...tone('dim') }, toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
+      ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
+      refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
+    ),
   );
 }
 

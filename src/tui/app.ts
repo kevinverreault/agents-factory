@@ -51,6 +51,9 @@ const TAB_NAMES: Record<Tab, string> = { tasks: 'Tasks', 'needs-you': 'Needs you
 type View = { kind: 'tabs' } | { kind: 'launch' } | { kind: 'quick' } | { kind: 'gc' } | { kind: 'conversation'; taskId: string };
 // How many of the selected task's latest events the pane under the task tree shows.
 const OUTPUT_PANE_LINES = 6;
+// The screen's pane's weight in giving way against the quick launch card's 1:
+// enough that the card keeps all but a fraction of a row until the pane is gone.
+const PANE_GIVES_WAY_FIRST = 1000;
 // The row a pane's cursor is on, and where it was, for when that row is gone.
 type Cursor = { row: string | null; index: number };
 
@@ -459,19 +462,27 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
           })
         : null,
       view.kind === 'gc' ? h(GcSheet, { key: 'gc', connection, onLeave: toTabs }) : null,
-      state && view.kind === 'quick'
-        ? h(QuickLaunch, {
+    ),
+    // The quick launch card gives way too, as its handoff sheet's brief
+    // does, but only once the screen's pane has none left to give.
+    state && view.kind === 'quick'
+      ? h(
+          Box,
+          { flexDirection: 'column', flexShrink: 1, overflow: 'hidden' },
+          h(QuickLaunch, {
             connection,
             state,
             here: clone?.repo ?? null,
             onExpand: (taskId: string) => setView({ kind: 'conversation', taskId }),
             onLeave: toTabs,
-          })
-        : null,
-    ),
+          }),
+        )
+      : null,
     h(
       Box,
-      { flexDirection: 'column', flexShrink: 1, overflow: 'hidden' },
+      // Boxes give way in proportion to their weight times their height:
+      // this one's outweighs the quick launch card's.
+      { flexDirection: 'column', flexShrink: PANE_GIVES_WAY_FIRST, overflow: 'hidden' },
       state === null
         ? h(Text, tone('dim'), 'Attaching to the daemon…')
         : help

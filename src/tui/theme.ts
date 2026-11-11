@@ -215,14 +215,16 @@ export function Keys({ keys }: { keys: Hint[] }) {
 
 // The one style of every sheet, card, picker and prompt: a rounded border
 // in the accent, or the kind's role when it is about a request; an
-// uppercase title; and a dim key hint at the bottom.
-export function Sheet({ title, role = 'accent', hint, children }: { title: string; role?: Role; hint?: ReactNode; children?: ReactNode }) {
+// uppercase title; and a dim key hint at the bottom. It stays whole, unless
+// it `shrinks` on a short screen: then what of its content gives way does,
+// its title and hint staying.
+export function Sheet({ title, role = 'accent', hint, shrinks = false, children }: { title: string; role?: Role; hint?: ReactNode; shrinks?: boolean; children?: ReactNode }) {
   return h(
     Box,
-    { flexDirection: 'column', borderStyle: 'round', ...border(role), paddingX: 1, flexShrink: 0 },
-    h(Text, { ...tone(role), bold: true, wrap: 'truncate' }, title.toUpperCase()),
+    { flexDirection: 'column', borderStyle: 'round', ...border(role), paddingX: 1, flexShrink: shrinks ? 1 : 0, overflow: shrinks ? 'hidden' : 'visible' },
+    h(Box, { flexShrink: 0 }, h(Text, { ...tone(role), bold: true, wrap: 'truncate' }, title.toUpperCase())),
     children,
-    typeof hint === 'string' ? h(Text, tone('dim'), hint) : (hint ?? null),
+    hint ? h(Box, { flexDirection: 'column', flexShrink: 0 }, typeof hint === 'string' ? h(Text, tone('dim'), hint) : hint) : null,
   );
 }
 

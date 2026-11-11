@@ -1490,6 +1490,35 @@ describe('launching and conversing', () => {
     });
   });
 
+  test('a brief taller than the screen scrolls inside the sheet, its fields, hint and the footer staying in view', async () => {
+    const connection = new FakeConnection();
+    const long = { ...brief, decided: Array.from({ length: 40 }, (_, i) => `Decision ${i}.`) };
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief: long } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    Object.defineProperty(app.stdout, 'rows', { value: 24, configurable: true });
+    await press(app, '\r', '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n').length).toBeLessThanOrEqual(24);
+      const flat = unwrapped(frame);
+      expect(flat).toContain('HAND OFF T1 TO IMPLEMENT (AFK)');
+      expect(flat).toContain('Goal Failed webhook deliveries are retried.');
+      expect(flat).not.toContain('Decision 39.');
+      expect(flat).toContain('Max turns 300');
+      expect(flat).toContain('esc keep talking');
+      expect(flat).toContain('ctrl+b back');
+    });
+
+    // The selected line stays in view as ↓ walks the brief.
+    await press(app, ...Array.from({ length: 40 }, () => DOWN));
+    await eventually(() => {
+      const flat = unwrapped(app.lastFrame()!);
+      expect(flat).toContain('› - Decision 39.');
+      expect(flat).not.toContain('Goal Failed webhook');
+      expect(flat).toContain('Max turns 300');
+      expect(flat).toContain('ctrl+b back');
+    });
+  });
+
   test('the sheet waits on the agent’s brief, then the operator edits it, changes continue-as, autonomy level and max turns, and enter hands off', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([{ ...onLean, handoff: sheet }]), runs: { R1: run } }, { connection });
@@ -3228,6 +3257,25 @@ describe('quick launch', () => {
       const frame = app.lastFrame()!;
       expect(frame).not.toContain('HAND OFF T1');
       expect(frame).toMatch(/T1\s+Add a --json flag to status\.\s+AFK L1\s+Queued/);
+    });
+  });
+
+  test('a handoff sheet taller than the screen keeps its fields, hint and the footer in view', async () => {
+    const { app, connection } = await launched();
+    Object.defineProperty(app.stdout, 'rows', { value: 24, configurable: true });
+    app.stdout.emit('resize');
+    const long = { ...sheet.brief, decided: Array.from({ length: 40 }, (_, i) => `Decision ${i}.`) };
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...grilling, quick: null, handoff: { ...sheet, brief: long } } }]);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.split('\n').length).toBeLessThanOrEqual(24);
+      const flat = unwrapped(frame);
+      expect(flat).toContain('HAND OFF T1 TO IMPLEMENT (AFK)');
+      expect(flat).toContain('Goal status --json prints JSON.');
+      expect(flat).not.toContain('Decision 39.');
+      expect(flat).toContain('Max turns 300');
+      expect(flat).toContain('esc keep talking');
+      expect(flat).toContain('slots ○○ 0/2');
     });
   });
 
