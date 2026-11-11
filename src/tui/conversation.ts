@@ -19,7 +19,7 @@ import { Event, SystemLine } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { useRows } from './screen.ts';
 import { modeOf } from './task-detail.ts';
-import { border, GLYPH, joined, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
+import { GLYPH, joined, Keys, Rule, Section, stateLook, tone, type Hint } from './theme.ts';
 import { edit } from './text-input.ts';
 import { TaskUsage, UsageStrip } from './usage.ts';
 
@@ -175,18 +175,18 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     ),
     h(
       Box,
-      { flexGrow: 1, marginY: 1, gap: 2 },
+      { flexGrow: 1, gap: 1 },
       // The latest events stay in view; older ones scroll off the top.
       h(
-        Box,
-        { flexDirection: 'column', flexGrow: 1, justifyContent: 'flex-end', overflow: 'hidden' },
+        Section,
+        { title: 'Conversation', flexGrow: 1, flexShrink: 1, flexBasis: 0, bottom: true },
         ...events.map((event) => h(Event, { key: event.id, event })),
         ...(run?.queued ?? []).map((text, i) => h(SystemLine, { key: `queued-${i}`, text: `queued ${text}` })),
       ),
-      // The rail, behind a rule.
+      // The rail: the task's usage and artifacts, each in its section.
       h(
         Box,
-        { flexDirection: 'column', width: RAIL_WIDTH, flexShrink: 0, overflow: 'hidden', paddingLeft: 1, borderStyle: 'single', borderTop: false, borderBottom: false, borderRight: false, ...border('line') },
+        { flexDirection: 'column', width: RAIL_WIDTH, flexShrink: 0, overflow: 'hidden' },
         h(TaskUsage, { state, taskId }),
         h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === taskId) }),
       ),
@@ -217,6 +217,6 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   );
 }
 
-// Its content 40 columns wide, past the rule and its padding.
-const RAIL_WIDTH = 42;
+// Its content 40 columns wide, inside its sections' borders and padding.
+const RAIL_WIDTH = 44;
 

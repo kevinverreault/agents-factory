@@ -5,7 +5,7 @@ import { Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 import { label, type Task, type TaskState } from '../lifecycle/lifecycle.ts';
-import { ROLES, Sheet, stateLook, tone } from './theme.ts';
+import { ROLES, Section, Sheet, stateLook, tone } from './theme.ts';
 
 const withLevel = (level: 0 | 1 | 2 | 3) => {
   const was = chalk.level;
@@ -119,5 +119,21 @@ describe('the sheet style', () => {
     // Truecolour escapes: #f07575 is 240;117;117, #9fce7e is 159;206;126.
     expect(border('bad')).toContain('\x1b[38;2;240;117;117m╭');
     expect(border()).toContain('\x1b[38;2;159;206;126m╭');
+  });
+});
+
+describe('sections', () => {
+  test('a section is a border of its own, its heading in uppercase on the top edge, its lead before it', () => {
+    const { lastFrame, unmount } = render(
+      <Section title="Live output · T2" lead={<Text>●</Text>}>
+        <Text>Read the brief</Text>
+      </Section>,
+    );
+    const lines = lastFrame()!.split('\n');
+    expect(lines[0]).toMatch(/^╭─ ● LIVE OUTPUT · T2 ─+╮$/);
+    expect(lines[1]).toMatch(/^│ Read the brief\s+│$/);
+    expect(lines[2]).toMatch(/^╰─+╯$/);
+    expect(lines).toHaveLength(3);
+    unmount();
   });
 });

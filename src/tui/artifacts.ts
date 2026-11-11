@@ -3,15 +3,14 @@ import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import { issueRef } from '../artifacts/capture.ts';
 import type { ArtifactView } from '../protocol/factory-state.ts';
-import { Heading, tone } from './theme.ts';
+import { Section, tone } from './theme.ts';
 
 // What the task produced so far, live: captured from the run's tool calls.
 // The newest come first, so a full rail cuts off the oldest.
 export function ArtifactRail({ artifacts }: { artifacts: ArtifactView[] }) {
   return h(
-    Box,
-    { flexDirection: 'column', overflow: 'hidden' },
-    h(Heading, { text: 'Artifacts' }),
+    Section,
+    { title: 'Artifacts', flexShrink: 1 },
     artifacts.length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
     ...artifacts.toReversed().map((artifact) =>
       h(

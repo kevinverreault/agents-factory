@@ -11,7 +11,7 @@ import { ArtifactRail } from './artifacts.ts';
 import { Output } from './output.ts';
 import { runOutcome, runsOf } from './runs.ts';
 import { fixed } from './screen.ts';
-import { GLYPH, Heading, joined, kindLook, Sheet, stateLook, tone } from './theme.ts';
+import { GLYPH, joined, kindLook, Section, Sheet, stateLook, tone } from './theme.ts';
 import { dollars, tokens, TaskUsage } from './usage.ts';
 
 export function TaskDetail({ connection, state, task }: { connection: FactoryConnection; state: FactoryState; task: TaskView }) {
@@ -41,9 +41,8 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
         ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: answerable(request, task) ? 'a answer' : undefined }, h(Text, null, askedFor(request, task)))
         : null,
       h(
-        Box,
-        { flexDirection: 'column', marginY: 1 },
-        h(Heading, { text: 'Runs' }),
+        Section,
+        { title: 'Runs' },
         runs.length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
         ...runs.map((run) => h(RunRow, { key: run.id, run })),
       ),

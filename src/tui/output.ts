@@ -8,7 +8,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { runsOf } from './runs.ts';
 import { fixed } from './screen.ts';
-import { GLYPH, Heading, tone } from './theme.ts';
+import { GLYPH, Section, tone } from './theme.ts';
 
 // With `lines`, a glance: that many of the latest events, a row each. Without
 // it, the whole: every event in full, giving way on a short screen so the
@@ -24,25 +24,20 @@ export function Output({ connection, state, taskId, lines }: { connection: Facto
     return connection.follow(runId, (event) => setEvents((events) => (lines === undefined ? [...events, event] : [...events, event].slice(-lines))));
   }, [connection, runId, lines]);
 
+  const live = run && run.status !== 'ended';
+  // Its section: live output while its run is, the last output once it
+  // ended. Squeezed, the whole clips its oldest events rather than draw over
+  // what follows.
   return h(
-    Box,
-    // Squeezed below its title, it clips rather than draws over what follows.
-    { flexDirection: 'column', flexShrink: whole ? 1 : 0, overflow: 'hidden', marginTop: 1 },
-    // Its title: live output while its run is, the last output once it ended.
-    fixed(
-      h(
-        Box,
-        { gap: 1 },
-        run && run.status !== 'ended' ? h(Text, tone('ok'), GLYPH.live) : null,
-        h(Heading, { text: `${!run ? 'Output' : run.status === 'ended' ? 'Last output' : 'Live output'} · ${taskId}${run ? ` · ${run.id}` : ''}` }),
-      ),
-      events.length === 0 ? h(Text, tone('dim'), run ? 'Nothing yet.' : 'No runs yet.') : null,
-    ),
-    h(
-      Box,
-      { flexDirection: 'column', flexShrink: 1, justifyContent: 'flex-end', overflow: 'hidden' },
-      ...events.map((event) => h(Event, { key: event.id, event, oneLine: !whole })),
-    ),
+    Section,
+    {
+      title: `${!run ? 'Output' : live ? 'Live output' : 'Last output'} ${GLYPH.between} ${taskId}${run ? ` ${GLYPH.between} ${run.id}` : ''}`,
+      lead: live ? h(Text, tone('ok'), GLYPH.live) : undefined,
+      flexShrink: whole ? 1 : 0,
+      bottom: true,
+    },
+    events.length === 0 ? fixed(h(Text, tone('dim'), run ? 'Nothing yet.' : 'No runs yet.')) : null,
+    ...events.map((event) => h(Event, { key: event.id, event, oneLine: !whole })),
   );
 }
 

@@ -1236,6 +1236,8 @@ describe('launching and conversing', () => {
       expect(app.lastFrame()).toContain('ARTIFACTS');
       expect(app.lastFrame()).toMatch(/uncommitted\s+GLOSSARY\.md/);
     });
+    // The events and each of the rail's sections in borders of their own.
+    for (const heading of ['CONVERSATION', 'USAGE', 'ARTIFACTS']) expect(app.lastFrame()).toMatch(new RegExp(`╭─ ${heading} ─+╮`));
     expect(app.lastFrame()).not.toContain('0009-elsewhere');
 
     connection.servePatch([
@@ -2437,9 +2439,11 @@ describe('usage', () => {
       expect(frame).toMatch(/Parallel slots\s+●○ 1\/2 running · 0 queued/);
       expect(frame).toMatch(/Tokens \/ hour, 12h\s+▁▁▁▁▁▁▁▁▁▂▅█/);
       // The largest model's and group's bars full, the others scaled to them.
-      expect(frame).toMatch(/claude-sonnet-5-5\s+3\.0k\s+300\s+2\.0M\s+50\.0k\s+\$1\.75\s+█{20}$/m);
-      expect(frame).toMatch(/claude-haiku-5-5\s+300\s+30\s+0\s+0\s+\$0\.13\s+░{20}$/m);
-      expect(frame).toMatch(/login\s+2\.1M tokens\s+\$1\.88\s+█{20}$/m);
+      expect(frame).toMatch(/claude-sonnet-5-5\s+3\.0k\s+300\s+2\.0M\s+50\.0k\s+\$1\.75\s+█{16}\s*│$/m);
+      expect(frame).toMatch(/claude-haiku-5-5\s+300\s+30\s+0\s+0\s+\$0\.13\s+░{16}\s*│$/m);
+      expect(frame).toMatch(/login\s+2\.1M tokens\s+\$1\.88\s+█{16}\s*│$/m);
+      // The gauges, the models and each breakdown in borders of their own.
+      for (const heading of ['WINDOWS AND SLOTS', 'MODELS', 'TASK TREES', 'GROUPS', 'STAGES', 'TICKETS']) expect(frame).toMatch(new RegExp(`^╭─ ${heading} ─+╮$`, 'm'));
     });
   });
 
@@ -2581,6 +2585,10 @@ describe('the screens view', () => {
       expect(frame).toContain('AFK L1 · Running · implement · claude-sonnet-5-5 · opus · factory/T2-implement-the-store · store, billing · child of T1 Grill me about the docs (awaited)');
       expect(unwrapped(frame)).toContain('FAILURE The agent hit max turns. a answer');
       expect(frame).toMatch(/RUNS[\s\S]*USAGE[\s\S]*ARTIFACTS[\s\S]*● LIVE OUTPUT · T2 · R3/);
+      // Each section in a border of its own, its heading on the top edge.
+      for (const heading of ['RUNS', 'USAGE', 'ARTIFACTS', '● LIVE OUTPUT · T2 · R3']) expect(frame).toMatch(new RegExp(`^╭─ ${heading} ─+╮$`, 'm'));
+      // Theirs and the request sheet's.
+      expect(frame.match(/^╰─+╯$/gm)).toHaveLength(5);
     });
   });
 
@@ -2604,7 +2612,7 @@ describe('the screens view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).toMatch(/AFK L1 · Running · implement/);
-      expect(frame).toMatch(/R1\s+AFK\s+implement\s+claude-sonnet-5-5\s+failed\s+1\.1k\s+\$0\.50\n[^\n]*R2\s+AFK\s+review\s+claude-opus-5-5\s+interrupted\s+22\.0k\s+\$1\.25\n[^\n]*R3\s+AFK\s+implement\s+claude-sonnet-5-5\s+live\s+0\s+\$0\.00/);
+      expect(frame).toMatch(/R1\s+AFK\s+implement\s+claude-sonnet-5-5\s+failed\s+1\.1k\s+\$0\.50[^\n]*\n[^\n]*R2\s+AFK\s+review\s+claude-opus-5-5\s+interrupted\s+22\.0k\s+\$1\.25[^\n]*\n[^\n]*R3\s+AFK\s+implement\s+claude-sonnet-5-5\s+live\s+0\s+\$0\.00/);
       expect(frame).not.toContain('R4');
       expect(frame).toMatch(/committed\s+src\/store\/store\.ts/);
       expect(frame).toMatch(/issue\s+acme\/widgets#14/);
@@ -2625,7 +2633,7 @@ describe('the screens view', () => {
     connection.serveConversation('R3', { type: 'toolUse', id: 'E2', tool: 'Edit', summary: 'src/store/store.ts' });
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/LIVE OUTPUT · T2 · R3[\s\S]*\n {2,}Edit\s+src\/store\/store\.ts/);
+      expect(frame).toMatch(/LIVE OUTPUT · T2 · R3[\s\S]*\n│ {3,}Edit\s+src\/store\/store\.ts/);
       expect(frame).not.toContain('Which identity provider');
     });
 
@@ -2655,7 +2663,7 @@ describe('the screens view', () => {
       expect(frame).toContain('1 Tasks');
       expect(frame).toMatch(/T1\s+Settle the glossary[\s\S]*› \S\s+T2\s+Implement the store/);
       expect(frame).toMatch(/◆\s+Paragraph 0\. Paragraph 1\./);
-      expect(frame).toMatch(/\n {2,}Bash\s+npm test --run/);
+      expect(frame).toMatch(/\n│ {3,}Bash\s+npm test --run/);
       // The two events replace "No runs yet." with two rows.
       expect(frame.split('\n')).toHaveLength(before + 1);
     });
@@ -2727,7 +2735,7 @@ describe('the screens view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame).not.toContain('…');
-      expect(frame).toMatch(/›\s+Keep the schema private\.\n\s+And word0/);
+      expect(frame).toMatch(/›\s+Keep the schema private\.[^\n]*\n│\s+And word0/);
       expect(unwrapped(frame)).toContain(`And ${wraps} end of mine.`);
       expect(unwrapped(frame)).toContain(`The store ${wraps} end of the agent’s.`);
     });

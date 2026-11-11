@@ -4,7 +4,7 @@ import { createElement as h, type ReactNode } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { overall, tokensOf, usageViews, type ModelUsage, type Usage } from '../usage/usage.ts';
-import { bar, GLYPH, Heading, spentRole, tone } from './theme.ts';
+import { bar, GLYPH, Section, spentRole, tone } from './theme.ts';
 
 export function tokens(count: number): string {
   if (count < 1_000) return String(count);
@@ -16,8 +16,10 @@ export function dollars(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
 
+// Each token kind's column; with the model's name and its bar, the models'
+// rows fit the Usage tab's section on a terminal of 100 columns.
 const TOKEN_KIND_WIDTH = 12;
-const LABEL_WIDTH = 20;
+const LABEL_WIDTH = 16;
 const ID_WIDTH = 4;
 const TITLE_WIDTH = 40;
 const TOKENS_WIDTH = 16;
@@ -25,25 +27,25 @@ const COST_WIDTH = 10;
 
 const GAUGE_LABEL_WIDTH = 22;
 const GAUGE_CELLS = 40;
-const TOKEN_BAR_CELLS = 20;
+const TOKEN_BAR_CELLS = 16;
 
-// The Usage tab: gauges of the usage windows, the slots and the last hours'
-// tokens; then each model's tokens by kind and API-equivalent cost, then
-// each task tree (by its root), group, stage and Ralph loop ticket that used
-// anything. Each model's and group's tokens are barred against the largest.
+// The Usage tab, each part in its section: gauges of the usage windows, the
+// slots and the last hours' tokens; then each model's tokens by kind and
+// API-equivalent cost, then each task tree (by its root), group, stage and
+// Ralph loop ticket that used anything. Each model's and group's tokens are
+// barred against the largest.
 export function UsageTab({ state }: { state: FactoryState }) {
   const views = usageViews(state);
   const gauges = h(Gauges, { state });
-  if (Object.keys(views.models).length === 0) return h(Box, { flexDirection: 'column' }, gauges, h(Box, { marginTop: 1 }, h(Text, tone('dim'), 'No usage yet.')));
+  if (Object.keys(views.models).length === 0) return h(Box, { flexDirection: 'column' }, gauges, h(Section, { title: 'Models' }, h(Text, tone('dim'), 'No usage yet.')));
   const roots = Object.entries(views.trees).filter(([id]) => !state.tasks[id]?.parent);
   const section = (title: string, rows: [string, string | null, ModelUsage][], barred = false) => {
     const of = barred ? mostTokens(rows.map(([, , usage]) => overall(usage))) : 1;
     return rows.length === 0
       ? null
       : h(
-          Box,
-          { key: title, flexDirection: 'column', marginTop: 1 },
-          h(Heading, { text: title }),
+          Section,
+          { key: title, title },
           ...rows.map(([key, label, usage]) => h(UsageRow, { key, name: key, label, usage: overall(usage), share: barred ? tokensOf(overall(usage)) / of : null })),
         );
   };
@@ -53,9 +55,13 @@ export function UsageTab({ state }: { state: FactoryState }) {
     Box,
     { flexDirection: 'column' },
     gauges,
-    h(Box, { marginTop: 1 }, h(KindsRow, { name: 'Model', cells: ['input', 'output', 'cache read', 'cache write', 'cost'], bold: true })),
-    ...models.map(([model, usage]) => h(KindsRow, { key: model, name: model, cells: kinds(usage), share: tokensOf(usage) / ofModels })),
-    h(KindsRow, { key: 'total', name: 'Total', cells: kinds(overall(views.models)), bold: true }),
+    h(
+      Section,
+      { title: 'Models' },
+      h(KindsRow, { name: 'Model', cells: ['input', 'output', 'cache read', 'cache write', 'cost'], bold: true, share: null }),
+      ...models.map(([model, usage]) => h(KindsRow, { key: model, name: model, cells: kinds(usage), share: tokensOf(usage) / ofModels })),
+      h(KindsRow, { key: 'total', name: 'Total', cells: kinds(overall(views.models)), bold: true, share: null }),
+    ),
     section('Task trees', roots.map(([id, usage]) => [id, state.tasks[id]?.title ?? '', usage])),
     section('Groups', Object.entries(views.groups).map(([group, usage]) => [group, null, usage]), true),
     section('Stages', Object.entries(views.stages).map(([stage, usage]) => [stage, null, usage])),
@@ -87,8 +93,8 @@ function Gauges({ state }: { state: FactoryState }) {
   const row = (label: string, ...value: ReactNode[]) =>
     h(Box, { key: label }, h(Box, { width: GAUGE_LABEL_WIDTH, flexShrink: 0 }, h(Text, null, label)), h(Text, { wrap: 'truncate' }, ...value));
   return h(
-    Box,
-    { flexDirection: 'column', flexShrink: 0 },
+    Section,
+    { title: 'Windows and slots' },
     row('5-hour window', h(Spent, { window, cells: GAUGE_CELLS }), window ? h(Text, tone('dim'), ` ${GLYPH.between} resets ${clockTime(window.resetsAt)}`) : null),
     row('Weekly window', h(Spent, { window: weekly, cells: GAUGE_CELLS })),
     row('Parallel slots', h(Text, tone('ok'), slots(active, cap)), ` ${active}/${cap} running · ${queued} queued`),
@@ -100,14 +106,15 @@ function kinds(usage: Usage): string[] {
   return [tokens(usage.input), tokens(usage.output), tokens(usage.cacheRead), tokens(usage.cacheWrite), dollars(usage.cost)];
 }
 
-// `bar` is the row's share of the largest's tokens, if it is barred.
+// `share` is the row's share of the largest's tokens, if it is barred; a
+// row of a barred table that isn't (its header, its total) keeps the bar's
+// room blank with null, so every row's columns line up.
 function TokenBar({ share }: { share: number | null | undefined }) {
-  if (share === null || share === undefined) return null;
-  return h(Box, { marginLeft: 2, flexShrink: 0 }, h(Text, tone('accent'), bar(share, TOKEN_BAR_CELLS)));
+  if (share === undefined) return null;
+  return h(Box, { marginLeft: 2, width: TOKEN_BAR_CELLS, flexShrink: 0 }, share === null ? null : h(Text, tone('accent'), bar(share, TOKEN_BAR_CELLS)));
 }
 
-// `share` is the row's share of the largest's tokens, if it is barred.
-function KindsRow({ name, cells, bold = false, share }: { name: string; cells: string[]; bold?: boolean; share?: number }) {
+function KindsRow({ name, cells, bold = false, share }: { name: string; cells: string[]; bold?: boolean; share?: number | null }) {
   return h(
     Box,
     null,
@@ -145,9 +152,8 @@ export function TaskUsage({ state, taskId }: { state: FactoryState; taskId: stri
       h(Text, tone(dim ? 'dim' : 'fg'), dollars(usage.cost)),
     );
   return h(
-    Box,
-    { flexDirection: 'column', flexShrink: 0, marginBottom: 1 },
-    h(Heading, { text: 'Usage' }),
+    Section,
+    { title: 'Usage' },
     Object.keys(own).length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
     ...Object.entries(own).map(([model, usage]) => line(model, model, usage)),
     hasChildren ? line('tree', 'task tree', overall(views.trees[taskId] ?? {}), true) : null,

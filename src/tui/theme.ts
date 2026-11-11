@@ -148,6 +148,9 @@ export const GLYPH = {
   // Around a value ←→ changes.
   chooseBefore: '‹',
   chooseAfter: '›',
+  // A section's top corners, as its rounded border has them.
+  cornerTopLeft: '╭',
+  cornerTopRight: '╮',
   // A sparkline's bars, lowest to highest.
   spark: '▁▂▃▄▅▆▇█',
 } as const;
@@ -220,6 +223,50 @@ export function Sheet({ title, role = 'accent', hint, children }: { title: strin
     h(Text, { ...tone(role), bold: true, wrap: 'truncate' }, title.toUpperCase()),
     children,
     typeof hint === 'string' ? h(Text, tone('dim'), hint) : (hint ?? null),
+  );
+}
+
+// A section of a screen in a border of its own, in the line colour, its
+// heading on the top edge: `╭─ RUNS ───╮`. `lead` goes before the heading,
+// as live output's ●. `size` sizes it as any box: `flexGrow` to take the
+// room left, `flexShrink` to give way on a short screen. `bottom` keeps
+// its latest lines in view, its content held to the bottom edge.
+export function Section({
+  title,
+  lead,
+  bottom = false,
+  children,
+  ...size
+}: {
+  title: string;
+  lead?: ReactNode;
+  bottom?: boolean;
+  children?: ReactNode;
+  flexGrow?: number;
+  flexShrink?: number;
+  flexBasis?: number;
+  width?: number;
+}) {
+  const edge = (text: string) => h(Text, tone('line'), text);
+  const line = h(Box, { flexGrow: 1, borderStyle: 'single', borderTop: true, borderBottom: false, borderLeft: false, borderRight: false, ...border('line') });
+  return h(
+    Box,
+    { flexDirection: 'column', flexShrink: 0, ...size },
+    h(
+      Box,
+      { flexShrink: 0 },
+      edge(`${GLYPH.cornerTopLeft}${GLYPH.rule} `),
+      lead ? h(Box, { flexShrink: 0, marginRight: 1 }, lead) : null,
+      h(Box, { flexShrink: 1 }, h(Text, { ...tone('dim'), wrap: 'truncate' }, title.toUpperCase())),
+      edge(' '),
+      line,
+      edge(GLYPH.cornerTopRight),
+    ),
+    h(
+      Box,
+      { flexDirection: 'column', flexGrow: 1, flexShrink: 1, overflow: 'hidden', justifyContent: bottom ? 'flex-end' : 'flex-start', borderStyle: 'round', borderTop: false, ...border('line'), paddingX: 1 },
+      children,
+    ),
   );
 }
 
