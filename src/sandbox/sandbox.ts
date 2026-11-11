@@ -77,6 +77,9 @@ export type Container = {
   // The code intelligence plugin's directory, in the container: the image's
   // own, for the language server it installs.
   lspPlugin: string;
+  // The security guidance plugin's directory, in the container: the
+  // image's own copy, for the python3 it installs.
+  securityPlugin: string;
   // The git checks of an AFK run (ADR 0007), made on the container's clone,
   // at `workdir`.
   checks: Pick<Git, 'snapshot' | 'violations'>;

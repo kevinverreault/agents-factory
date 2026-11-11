@@ -1,0 +1,4 @@
+{
+  "name": "factory-security",
+  "description": "Security guidance's pattern warnings on edits, for factory runs, with no review that calls a model"
+}

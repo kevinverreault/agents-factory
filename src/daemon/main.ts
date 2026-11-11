@@ -8,6 +8,7 @@ import { routingTable } from '../models/routing-table.ts';
 import { osProcesses } from '../os/processes.ts';
 import { dockerSandbox } from '../sandbox/docker.ts';
 import { windowsCredentials } from '../secrets/secrets.ts';
+import { SECURITY_PLUGIN } from '../security-guidance/security-guidance.ts';
 import { skillSetManager } from '../skills/skill-set.ts';
 import { openStore } from '../store/store.ts';
 import { systemClock } from './clock.ts';
@@ -22,7 +23,7 @@ try {
     ...paths,
     store,
     clock: systemClock,
-    executor: agentSdkExecutor({ adopt: processes.adopt, lspPlugin: buildLspPlugin(paths.lspPlugin, hostTypeScriptServer()) }),
+    executor: agentSdkExecutor({ adopt: processes.adopt, lspPlugin: buildLspPlugin(paths.lspPlugin, hostTypeScriptServer()), securityPlugin: SECURITY_PLUGIN }),
     git: gitCli,
     github: gitHubApi(),
     sandbox: dockerSandbox({ namespace: paths.credentialPrefix }),
