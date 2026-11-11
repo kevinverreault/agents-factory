@@ -537,3 +537,62 @@ describe('with no ticket set', () => {
     expect(factory.github.writes).toEqual([]);
   });
 });
+
+describe('the implement preset', () => {
+  test('on issue refs loops over their tickets as main-flow does, with no operator instructions', async () => {
+    const { factory, operator, tui } = await withSpec();
+
+    expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', issues: ['#10'] })).toMatchObject({ ok: true });
+
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
+    const [first] = factory.executor.started;
+    expect(first!.firstMessage).toMatch(/^\/factory:implement acme\/widgets#11\n\n/);
+    expect(first!.firstMessage).not.toContain('Operator instructions');
+    expect(tui.state().runs.R1).toMatchObject({ stage: 'implement', ticket: 'acme/widgets#11' });
+    await commit(factory, tui.state().tasks.T1!.worktree!, 'src/logout.ts');
+
+    factory.executor.report('R1', { type: 'runCompleted' });
+
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    expect(factory.executor.started[1]!.firstMessage).toMatch(/^\/factory:implement acme\/widgets#12\n\n/);
+  });
+
+  test('on issue refs and a prompt carries the prompt into every iteration as instructions', async () => {
+    const { factory, operator, tui } = await withSpec();
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', issues: ['#10'], prompt: 'Mind the accessibility.' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
+    await commit(factory, tui.state().tasks.T1!.worktree!, 'src/logout.ts');
+
+    factory.executor.report('R1', { type: 'runCompleted' });
+
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    const [first, second] = factory.executor.started;
+    expect(first!.firstMessage).toMatch(/^\/factory:implement acme\/widgets#11\n\n/);
+    expect(second!.firstMessage).toMatch(/^\/factory:implement acme\/widgets#12\n\n/);
+    for (const { firstMessage } of [first!, second!]) expect(firstMessage).toContain('## Operator instructions\nMind the accessibility.');
+  });
+
+  test('on a prompt alone is one implement run, whose completing moves the task on to its review', async () => {
+    const { factory, operator, tui } = await withSpec();
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', prompt: 'Fix the login bug.' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
+    expect(factory.executor.started.map(({ firstMessage }) => firstMessage)).toEqual(['/factory:implement Fix the login bug.']);
+    expect(tui.state().tasks.T1?.loop ?? null).toBeNull();
+
+    factory.executor.report('R1', { type: 'runCompleted' });
+
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    expect(tui.state().tasks.T1).toMatchObject({ mode: 'AFK', stage: 'review' });
+    expect(factory.executor.started[1]!.firstMessage).toMatch(/^\/factory:code-review/);
+    expect(factory.github.writes).toEqual([]);
+  });
+
+  test('on neither is refused', async () => {
+    const { operator } = await withSpec();
+
+    expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement' })).toEqual({
+      ok: false,
+      reason: 'Starting implement at implement needs issue refs or a prompt.',
+    });
+  });
+});

@@ -847,6 +847,42 @@ describe('launching and conversing', () => {
     );
   });
 
+  test('a start stage that takes either input launches on issue refs or a prompt, and not on neither', async () => {
+    const connection = inWidgets();
+    connection.replyTo('listPresets', {
+      ok: true,
+      value: {
+        defaultPreset: 'implement',
+        warning: null,
+        presets: [
+          {
+            name: 'implement',
+            source: 'built-in',
+            description: null,
+            startStages: [{ id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['issues', 'prompt'], anyOf: true }],
+            appStages: ['implement'],
+          },
+        ],
+      },
+    });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/Issues/));
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'launchTask')).toEqual([]);
+    await type(app, 'Fix the login bug');
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', stage: 'implement', prompt: 'Fix the login bug' }),
+    );
+  });
+
   test('an AFK start stage shows the handoff fields, and the card sends the autonomy level, max turns and priority the operator set', async () => {
     const connection = inWidgets();
     connection.replyTo('listPresets', { ok: true, value: presetsView });

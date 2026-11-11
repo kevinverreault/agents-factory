@@ -10,7 +10,7 @@ import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
 import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, PRIORITIES, type AutonomyLevel, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
-import { appBlock, type PresetChoice, type StartStage } from '../presets/presets.ts';
+import { appBlock, lackingInputs, type PresetChoice, type StartStage } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
@@ -253,13 +253,13 @@ export function cycle<T>(values: readonly T[], current: T, by: number): T {
 }
 
 // What enter sends, or null while the card can't launch: it needs a
-// repository and the launch inputs the start stage needs (a prompt, when the
-// card has no listing to know). Defaults are left to the daemon when the
-// card has no listing to choose from.
+// repository and the launch inputs the start stage needs (all of them, or
+// one when it takes either; a prompt, when the card has no listing to know).
+// Defaults are left to the daemon when the card has no listing to choose from.
 function launchCommand(draft: Draft, card: Card): LaunchCommand | null {
   const issues = card.fields.includes('issues') ? words(draft.issues) : [];
   const needs = card.start?.needs ?? (card.choice ? [] : ['prompt']);
-  if (!draft.repo || (needs.includes('prompt') && !draft.prompt.trim()) || (needs.includes('issues') && issues.length === 0)) return null;
+  if (!draft.repo || lackingInputs({ needs, anyOf: card.start?.anyOf }, { prompt: draft.prompt, issues }).length > 0) return null;
   const groups = words(draft.groups);
   // The handoff fields go only for an AFK start stage, and only when changed.
   const afk = card.start?.mode === 'AFK';

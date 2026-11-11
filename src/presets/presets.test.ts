@@ -1,6 +1,6 @@
 // Preset resolution and schema validation: pure, so tested directly.
 import { describe, expect, test } from 'vitest';
-import { builtInPresets, issueRefs, openingMessage, resolvePreset, startStages, type PresetFile } from './presets.ts';
+import { builtInPresets, fillOpening, issueRefs, openingMessage, planStart, resolvePreset, startStages, type PresetFile } from './presets.ts';
 
 const user = (name: string, content: string): PresetFile => ({ scope: 'user', name, path: `~/.agent-factory/presets/${name}.preset.yaml`, content });
 const repo = (name: string, content: string): PresetFile => ({ scope: 'repo', name, path: `.agent-factory/presets/${name}.preset.yaml`, content });
@@ -52,24 +52,41 @@ describe('built-in presets', () => {
     });
   });
 
-  test('implement runs the implement skill on the prompt AFK, then reviews and opens a PR as quick does', () => {
+  test('implement starts main-flow at its implement loop, on issue refs, a prompt or both, then reviews and opens a PR', () => {
     const preset = resolved([], 'implement');
+    const mainFlow = resolved([], 'main-flow');
 
     expect(preset.stages.map((stage) => stage.id)).toEqual(['implement', 'review', 'pr-body', 'open-pr']);
     expect(preset.stages[0]).toEqual({
       id: 'implement',
-      kind: 'run',
+      kind: 'loop',
       skill: 'implement',
-      args: '{{prompt}}',
+      args: '{{artifacts.tickets}} {{prompt}}',
       mode: 'AFK',
       model: 'sonnet',
-      exit: 'run-completed',
+      context: 'fresh',
+      exit: 'tickets-closed',
     });
-    expect(preset.stages.at(-1)).toMatchObject({ id: 'open-pr', kind: 'action', requires: 'L2' });
-    expect(startStages(preset)).toEqual([{ id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['prompt'] }]);
-    expect(openingMessage(preset.stages[0]!, { prompt: 'Add a dark mode toggle.', issues: [] })).toBe('/factory:implement Add a dark mode toggle.');
-    // An issue number pasted in the prompt reaches the skill, which fetches it.
-    expect(openingMessage(preset.stages[0]!, { prompt: '#12', issues: [] })).toBe('/factory:implement #12');
+    expect(preset.stages.slice(1)).toEqual(mainFlow.stages.slice(-3));
+    // Either input starts it: its needs are alternatives.
+    expect(startStages(preset)).toEqual([{ id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['issues', 'prompt'], anyOf: true }]);
+    const stage = preset.stages[0]!;
+    expect(openingMessage(stage, { prompt: 'Add a dark mode toggle.', issues: [] })).toBe('/factory:implement Add a dark mode toggle.');
+    expect(openingMessage(stage, { prompt: '', issues: ['acme/widgets#12', 'acme/widgets#13'] })).toBe('/factory:implement acme/widgets#12 acme/widgets#13');
+    expect(openingMessage(stage, { prompt: 'Mind the a11y.', issues: ['acme/widgets#12'] })).toBe('/factory:implement acme/widgets#12 Mind the a11y.');
+    // An issue number pasted in the prompt is not parsed into a ref.
+    expect(openingMessage(stage, { prompt: '#12', issues: [] })).toBe('/factory:implement #12');
+  });
+
+  test('a stage whose args name one launch input, or one kind of them, still needs every variable filled', () => {
+    const tickets = resolved([], 'main-flow').stages.find((stage) => stage.id === 'tickets')!;
+
+    expect(fillOpening(tickets, () => null)).toEqual({ missing: ['artifacts.spec'] });
+    expect(fillOpening(resolved([], 'implement').stages[0]!, () => null)).toEqual({ missing: ['artifacts.tickets', 'prompt'] });
+    // At a stage boundary too, an either-input stage opens on the one it has.
+    const either = resolved([], 'implement').stages[0]!;
+    expect(fillOpening(either, (variable) => (variable === 'prompt' ? 'Fix it.' : null))).toEqual({ opening: '/factory:implement Fix it.' });
+    expect(fillOpening(either, (variable) => (variable === 'prompt' ? null : 'acme/widgets#3'))).toEqual({ opening: '/factory:implement acme/widgets#3' });
   });
 
   test('quick, child and setup resolve too', () => {
@@ -221,6 +238,9 @@ describe('starting at a stage', () => {
       { id: 'tickets', mode: 'HITL', model: 'opus', needs: ['issues'] },
       { id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['issues'] },
     ]);
+    expect(planStart(resolved([], 'implement'), undefined, { prompt: '', issues: [] })).toEqual({ error: 'Starting implement at implement needs issue refs or a prompt.' });
+    expect(planStart(resolved([], 'implement'), undefined, { prompt: 'Do it.', issues: [] })).toMatchObject({ opening: '/factory:implement Do it.' });
+    expect(planStart(resolved([], 'implement'), 'implement', { prompt: '', issues: ['#3'] })).toMatchObject({ opening: '/factory:implement #3' });
     expect(startStages(resolved([], 'wayfinder')).map((stage) => stage.id)).toEqual(['chart', 'work', 'spec', 'tickets', 'implement']);
     // The first stage starts a task even when it needs no input.
     expect(startStages(resolved([], 'setup'))).toEqual([{ id: 'setup', mode: 'HITL', model: 'sonnet', needs: [] }]);
