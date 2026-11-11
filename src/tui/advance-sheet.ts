@@ -6,6 +6,7 @@ import { createElement as h, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
+import { Cursor, GLYPH, Sheet, tone } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -60,37 +61,33 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
   const ticket = task.loop && !task.loop.cleared ? task.loop.ticket : null;
   if (ticket) {
     return h(
-      Box,
-      { flexDirection: 'column', borderStyle: 'round', paddingX: 1, flexShrink: 0 },
-      h(Text, { bold: true }, `Advance ${task.id} from ${task.stage}`),
+      Sheet,
+      { title: `Advance ${task.id} from ${task.stage}`, hint: 'enter finish the ticket · esc back' },
       h(Text, null, `Finish ${ticket}: the factory reads the map again for its next frontier.`),
-      refusal ? h(Text, { color: 'red' }, refusal) : null,
-      h(Text, { dimColor: true }, 'enter finish the ticket · esc back'),
+      refusal ? h(Text, tone('bad'), refusal) : null,
     );
   }
   const then = handoff
     ? rows.length === 0
-      ? h(Text, { color: 'yellow' }, `The next stage, ${handoff.id}, is AFK: hand ${task.id} off to start it.`)
-      : h(Text, { dimColor: true }, `then ${handoff.id} (AFK): the handoff starts it`)
+      ? h(Text, tone('warn'), `The next stage, ${handoff.id}, is AFK: hand ${task.id} off to start it.`)
+      : h(Text, tone('dim'), `then ${handoff.id} (AFK): the handoff starts it`)
     : rows.length === 0
-      ? h(Text, { color: 'yellow' }, `${task.stage} is the last stage: advancing puts ${task.id} in review.`)
-      : h(Text, { dimColor: true }, 'then In review');
+      ? h(Text, tone('warn'), `${task.stage} is the last stage: advancing puts ${task.id} in review.`)
+      : h(Text, tone('dim'), 'then In review');
   return h(
-    Box,
-    { flexDirection: 'column', borderStyle: 'round', paddingX: 1, flexShrink: 0 },
-    h(Text, { bold: true }, `Advance ${task.id} from ${task.stage}`),
+    Sheet,
+    { title: `Advance ${task.id} from ${task.stage}`, hint: `enter advance${rows.some((stage) => stage.optional) ? ' · ↑↓ stage · space skip' : ''} · esc back` },
     ...rows.map((stage, i) =>
       h(
         Box,
         { key: stage.id, gap: 1 },
-        h(Text, { color: 'cyan' }, i === sheet.cursor ? '›' : ' '),
-        h(Box, { width: 16 }, h(Text, { bold: i === to, dimColor: i < to }, stage.id)),
-        h(Text, { dimColor: true }, [stage.model, stage.optional && 'optional', i < to && '· skipped'].filter(Boolean).join(' ')),
-        i === to ? h(Text, { color: 'green' }, '← advances here') : null,
+        h(Cursor, { on: i === sheet.cursor }),
+        h(Box, { width: 16 }, h(Text, { ...tone(i < to ? 'dim' : 'fg'), bold: i === to }, stage.id)),
+        h(Text, tone('dim'), [stage.model, stage.optional && 'optional', i < to && '· skipped'].filter(Boolean).join(' ')),
+        i === to ? h(Text, tone('ok'), `${GLYPH.advances} advances here`) : null,
       ),
     ),
     then,
-    refusal ? h(Text, { color: 'red' }, refusal) : null,
-    h(Text, { dimColor: true }, `enter advance${rows.some((stage) => stage.optional) ? ' · ↑↓ stage · space skip' : ''} · esc back`),
+    refusal ? h(Text, tone('bad'), refusal) : null,
   );
 }

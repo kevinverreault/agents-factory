@@ -15,6 +15,7 @@ import { cycle, defaultRepo, NO_REPOSITORY } from './launch-card.ts';
 import { Output } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
+import { choosable, GLYPH, Sheet, tone } from './theme.ts';
 
 // The preset a quick launch runs.
 const QUICK_PRESET = 'quick';
@@ -127,25 +128,22 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
   if (task && sheet) return h(HandoffSheet, { connection, task: { ...task, handoff: sheet }, run });
   if (!task) {
     return h(
-      Box,
-      { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
-      h(Text, { bold: true }, 'Quick launch'),
+      Sheet,
+      { title: 'Quick launch', hint: `enter launch, at most three questions${repositories.length > 1 ? ' · ←→ repository' : ''} · esc back` },
       repo
-        ? h(Box, { gap: 1 }, h(Text, { dimColor: true }, 'Repository'), h(Text, null, repositories.length > 1 ? `‹ ${repo} ›` : repo))
-        : h(Text, { color: 'yellow' }, NO_REPOSITORY),
-      h(Text, null, `› ${draft}▏`),
-      taskId ? h(Text, { dimColor: true }, 'Starting the grill…') : null,
-      refusal ? h(Text, { color: 'red' }, refusal) : null,
-      h(Text, { dimColor: true }, `enter launch, at most three questions${repositories.length > 1 ? ' · ←→ repository' : ''} · esc back`),
+        ? h(Box, { gap: 1 }, h(Text, tone('dim'), 'Repository'), h(Text, null, repositories.length > 1 ? choosable(repo) : repo))
+        : h(Text, tone('warn'), NO_REPOSITORY),
+      h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`),
+      taskId ? h(Text, tone('dim'), 'Starting the grill…') : null,
+      refusal ? h(Text, tone('bad'), refusal) : null,
     );
   }
   return h(
-    Box,
-    { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
-    h(Box, { gap: 1 }, h(Text, { bold: true }, `Quick launch ${task.id}`), h(Text, { wrap: 'truncate' }, task.title)),
-    question ? h(QuestionCard, { question, card }) : h(Output, { connection, state, taskId: task.id, lines: OUTPUT_LINES }),
-    h(Text, null, `› ${draft}▏`),
-    refusal ? h(Text, { color: 'red' }, refusal) : null,
-    h(Text, { dimColor: true }, 'ctrl+h or /handoff hand off · ctrl+e full conversation · esc leave it as a conversation'),
+    Sheet,
+    { title: `Quick launch ${task.id}`, hint: 'ctrl+h or /handoff hand off · ctrl+e full conversation · esc leave it as a conversation' },
+    h(Text, { ...tone('fg'), bold: true, wrap: 'truncate' }, task.title),
+    question ? h(QuestionCard, { question, card, nested: true }) : h(Output, { connection, state, taskId: task.id, lines: OUTPUT_LINES }),
+    h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`),
+    refusal ? h(Text, tone('bad'), refusal) : null,
   );
 }

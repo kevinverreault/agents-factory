@@ -6,6 +6,7 @@
 import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryState } from '../protocol/factory-state.ts';
+import { Sheet, tone } from './theme.ts';
 
 // Where a line takes the operator, or why it can't.
 export type Jump = { to: 'task'; taskId: string } | { to: 'group'; group: string | null } | { to: 'gc' } | { refused: string };
@@ -26,7 +27,11 @@ export function runCommand(line: string, state: FactoryState): Jump {
   return { refused: `Unknown command :${line.trim()}. Try :task <id>, :group <name> or :gc.` };
 }
 
-// The line being typed, its cursor at the end.
+// The line being typed, its cursor at the end, on a sheet naming what it runs.
 export function CommandLine({ draft }: { draft: string }) {
-  return h(Box, null, h(Text, null, `:${draft}`), h(Text, { inverse: true }, ' '));
+  return h(
+    Sheet,
+    { title: 'Command', hint: 'task <id> · group <name> · group · gc · enter run · esc back' },
+    h(Box, null, h(Text, null, `:${draft}`), h(Text, { inverse: true }, ' ')),
+  );
 }

@@ -24,7 +24,7 @@ import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
-import { AnswerSheet, answerable, reopens, titleOf, useAnswering, waitingFor } from './answer-sheet.ts';
+import { AnswerSheet, answerable, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { CommandLine, runCommand, type Jump } from './command-line.ts';
 import { Condensed, groupCounts, PANES, Sidebar, type Pane } from './condensed.ts';
@@ -36,9 +36,10 @@ import { LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
 import { QuickLaunch } from './quick-launch.ts';
 import { liveFirst, RunsList } from './runs.ts';
-import { CursorWindow, fixed, useRows } from './screen.ts';
-import { TaskDetail } from './task-detail.ts';
+import { CursorWindow, fixed, useColumns, useRows } from './screen.ts';
+import { modeOf, TaskDetail } from './task-detail.ts';
 import { edit } from './text-input.ts';
+import { Cursor, filled, GLYPH, joined, kindLook, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
 import { UsageStrip, UsageTab } from './usage.ts';
 
 // The screens, in the order of the number keys that switch to them.
@@ -385,6 +386,34 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   );
 
   const toTabs = () => setView({ kind: 'tabs' });
+  // The keys the screen on show takes, and those of the selection's only when
+  // they apply. While a sheet holds the keys, its own hint says what they do.
+  const footer = (): Hint[] => {
+    if (view.kind !== 'tabs' || pickerCursor !== null || cancelSheet || command !== null) return [];
+    if (help) return [['?', 'or esc closes']];
+    if (condensed) return [['tab', 'focus'], ['f', 'zoom'], ['g', 'group'], [':', 'command'], ['v', 'screens'], ['?', 'keys']];
+    if (drilled) {
+      const answers = queue.some((item) => item.taskId === drilled.id && answerable(item, drilled));
+      return [['enter', 'open conversation'], ['c', 'converse or take over'], ...(answers ? [['a', 'answer'] as Hint] : []), ['x', 'cancel'], ['esc', 'back'], ['?', 'keys']];
+    }
+    if (tab === 'tasks') {
+      return [
+        ['enter', 'detail'],
+        ['c', 'converse or take over'],
+        ['t', 're-tier'],
+        ['x', 'cancel'],
+        ...(finishable(tasks[cursor]) ? [['F', 'finish after this ticket'] as Hint] : []),
+        ...(failedTask(state, tasks[cursor]) ? [['y', 'retry'] as Hint] : []),
+        ['g', 'group'],
+        ['n', 'quick launch'],
+        ['N', 'launch'],
+        ['?', 'keys'],
+      ];
+    }
+    if (tab === 'needs-you') return [['↑↓', 'move'], ['a', 'answer'], ['c', 'converse or take over'], ['x', 'cancel'], ['?', 'keys']];
+    if (tab === 'runs') return [['enter', 'its task’s detail'], ['c', 'converse or take over'], ['x', 'cancel its task'], ['?', 'keys']];
+    return [['1–4', 'screens'], ['?', 'keys']];
+  };
   if (state && view.kind === 'conversation') {
     return h(Conversation, { connection, state, taskId: view.taskId, onLeave: toTabs });
   }
@@ -395,29 +424,29 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     // On a full screen only the screen's pane gives way: squeezed, wrapped
     // text would draw its lines over the next ones.
     fixed(
-      condensed
-        ? h(Text, { key: 'condensed', dimColor: true }, 'Condensed · tab focus · f zoom · g group · : command · v screens · ? keys')
-        : h(Tabs, { tab, needsYou: state?.attentionQueue.length ?? 0 }),
+      h(Header, { key: 'header', tab: condensed ? null : tab, needsYou: state?.attentionQueue.length ?? 0 }),
+      h(Rule, { key: 'header-rule' }),
+      h(Breadcrumb, { key: 'crumb', screen: condensed ? 'Condensed' : TAB_NAMES[tab], task: condensed ? undefined : drilled, group: tab === 'tasks' || condensed ? (group ?? 'all') : null }),
+      h(Rule, { key: 'crumb-rule' }),
       unregistered
         ? h(Text, { key: 'register' }, `${unregistered.repo} is not registered. `, h(Text, { bold: true }, 'r'), ' Register this repo')
         : null,
       missingSetup
         ? missingSetup.settingUp
-          ? h(Text, { key: 'setup', dimColor: true }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
+          ? h(Text, { key: 'setup', ...tone('dim') }, `${missingSetup.repo} is being set up for the skill set in ${missingSetup.settingUp}.`)
           : h(
               Text,
-              { key: 'setup', ...(missingSetup.offered ? { color: 'yellow' } : { dimColor: true }) },
+              { key: 'setup', ...tone(missingSetup.offered ? 'warn' : 'dim') },
               `${missingSetup.reason} `,
               ...(missingSetup.offered ? [h(Text, { key: 's', bold: true }, 's'), ' Set up now · '] : []),
               h(Text, { key: 'R', bold: true }, 'R'),
               ' re-check',
             )
         : null,
-      group === null ? null : h(Text, { key: 'group' }, 'Group ', h(Text, { bold: true }, group), h(Text, { dimColor: true }, ' · g picks another')),
-      refusal ? h(Text, { key: 'refusal', color: 'red' }, refusal) : null,
+      refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
       pickerCursor === null ? null : h(GroupPicker, { key: 'picker', groups, cursor: pickerCursor, current: group }),
       cancelSheet
-        ? h(ChoosePrompt, { key: 'cancel', reason: `Cancel ${cancelSheet.taskId}: ${cancelSheet.reason}`, options: cancelSheet.options.map(({ label }) => label) })
+        ? h(ChoosePrompt, { key: 'cancel', title: `Cancel ${cancelSheet.taskId}`, reason: cancelSheet.reason, options: cancelSheet.options.map(({ label }) => label) })
         : null,
       state && view.kind === 'launch'
         ? h(LaunchCard, {
@@ -444,21 +473,22 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       Box,
       { flexDirection: 'column', flexShrink: 1, overflow: 'hidden' },
       state === null
-        ? h(Text, { dimColor: true }, 'Attaching to the daemon…')
+        ? h(Text, tone('dim'), 'Attaching to the daemon…')
         : help
           ? fixed(h(Help))
         : condensed
           ? h(Condensed, {
               focus,
               zoom,
+              group,
               sidebar: h(Sidebar, { state, cursor: at(cursors['needs-you'], queue.map(rowOf)), focused: focus === 'sidebar', groups, group }),
               tree: h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
-              detail: followed ? h(TaskDetail, { connection, state, task: followed, from: null }) : h(Text, { dimColor: true }, 'Nothing selected.'),
+              detail: followed ? h(TaskDetail, { connection, state, task: followed }) : h(Text, tone('dim'), 'Nothing selected.'),
             })
         : drilled
-          ? h(TaskDetail, { connection, state, task: drilled, from: TAB_NAMES[tab] })
+          ? h(TaskDetail, { connection, state, task: drilled })
         : tab === 'tasks'
-          ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor, retries: failedTask(state, tasks[cursor]) })
+          ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor })
           : tab === 'needs-you'
             ? h(NeedsYouList, { state, cursor })
             : tab === 'runs'
@@ -466,10 +496,15 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
               : fixed(h(UsageTab, { state })),
     ),
     fixed(
-      state && item ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm }) : null,
-      closed ? h(Text, { color: 'red' }, 'The daemon connection closed.') : null,
+      state && item
+        ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm, position: { at: cursor + 1, of: queue.length } })
+        : null,
+      closed ? h(Text, { ...tone('bad') }, 'The daemon connection closed.') : null,
       command === null ? null : h(CommandLine, { draft: command }),
+      h(Rule, { key: 'strip-rule' }),
       state ? h(UsageStrip, { state }) : null,
+      h(Rule, { key: 'footer-rule' }),
+      h(Keys, { keys: footer() }),
     ),
   );
 }
@@ -493,41 +528,27 @@ function withoutSetup(
   return { repo: found.id, reason: found.skills.reason, settingUp, offered: !settingUp && !found.skills.failed };
 }
 
-function Tabs({ tab, needsYou }: { tab: Tab; needsYou: number }) {
+// The factory's name, then the screens' tabs, the one on show filled, and
+// Needs you lit while anything needs the operator. In the condensed view,
+// which has no tabs, its name and Needs you's count.
+function Header({ tab, needsYou }: { tab: Tab | null; needsYou: number }) {
   const label = (key: Tab, text: string) =>
-    h(Text, { key, bold: tab === key, inverse: tab === key }, ` ${text} `);
-  return h(
-    Box,
-    { gap: 1, marginBottom: 1 },
-    ...TABS.map((key, i) => label(key, `${i + 1} ${TAB_NAMES[key]}${key === 'needs-you' ? ` (${needsYou})` : ''}`)),
-  );
-}
-
-// A compact row, as the condensed view's tree has, gives its title whatever
-// room is left rather than a fixed column.
-function Row({
-  id,
-  title,
-  detail,
-  selected = false,
-  dim = false,
-  compact = false,
-}: {
-  id: string;
-  title: string;
-  detail: string;
-  selected?: boolean;
-  dim?: boolean;
-  compact?: boolean;
-}) {
+    h(Text, { key, ...(tab === key ? { ...filled(), bold: true } : tone(key === 'needs-you' && needsYou > 0 ? 'warn' : 'dim')) }, ` ${text} `);
   return h(
     Box,
     { gap: 1 },
-    h(Box, { flexShrink: 0 }, h(Text, { color: 'cyan' }, selected ? '›' : ' ')),
-    h(Box, { flexShrink: 0 }, h(Text, { bold: true, dimColor: dim }, id.padEnd(4))),
-    h(Box, compact ? { flexGrow: 1, flexShrink: 1, flexBasis: 0 } : { width: 40 }, h(Text, { wrap: 'truncate', dimColor: dim }, title)),
-    compact ? h(Box, { flexShrink: 0 }, h(Text, { dimColor: dim }, detail)) : h(Text, { dimColor: dim }, detail),
+    h(Text, { ...tone('accent'), bold: true }, 'agents-factory'),
+    ...(tab === null
+      ? [h(Text, { key: 'condensed', ...tone('dim') }, ' Condensed '), h(Text, { key: 'needs-you', ...tone(needsYou > 0 ? 'warn' : 'dim') }, ` Needs you (${needsYou}) `)]
+      : TABS.map((key, i) => label(key, `${i + 1} ${TAB_NAMES[key]}${key === 'needs-you' ? ` (${needsYou})` : ''}`))),
   );
+}
+
+// Where the operator is: the screen, then the task drilled into, or the
+// group the task tree is filtered by.
+function Breadcrumb({ screen, task, group }: { screen: string; task: TaskView | undefined; group: string | null }) {
+  const rest = task ? ` ${GLYPH.crumb} ${task.id} ${task.title}` : group !== null ? ` ${GLYPH.between} group: ${group}` : '';
+  return h(Text, { wrap: 'truncate' }, h(Text, tone('fg'), screen), h(Text, tone('dim'), rest));
 }
 
 // The task tree, Done and Cancelled tasks dimmed, and the selected task's
@@ -539,7 +560,6 @@ function TaskList({
   tasks,
   hidden,
   cursor,
-  retries = false,
   focused = true,
   compact = false,
 }: {
@@ -548,38 +568,26 @@ function TaskList({
   tasks: TaskView[];
   hidden: number | null;
   cursor: number;
-  retries?: boolean;
   // Whether the cursor shows: in the condensed view, only while the tree has the focus.
   focused?: boolean;
   // In the condensed view: the rows narrow, without the keys or the output,
   // which the detail beside it shows.
   compact?: boolean;
 }) {
-  if (tasks.length === 0) return h(Text, { dimColor: true }, hidden ? `Every task is finished. H shows the ${hidden}.` : 'No tasks yet. n quick-launches one, N launches one.');
-  const rows = tasks.map((task, i) =>
-    h(Row, {
-      key: task.id,
-      id: task.id,
-      title: `${'  '.repeat(task.depth)}${task.depth ? '└ ' : ''}${task.title}`,
-      detail: compact ? task.label : `${task.label} · ${task.tier}${loopDetail(task)}${rollupDetail(task)}${task.progress ? ` · ${task.progress}` : ''}`,
-      selected: focused && i === cursor,
-      dim: finished(task),
-      compact,
-    }),
-  );
+  const columns = useColumns();
+  if (tasks.length === 0) return h(Text, tone('dim'), hidden ? `Every task is finished. H shows the ${hidden}.` : 'No tasks yet. n quick-launches one, N launches one.');
+  const layout = rowLayout(tasks, columns, compact);
+  const rows = tasks.map((task, i) => h(TaskRow, { key: task.id, task, selected: focused && i === cursor, layout }));
   if (compact) {
     return column([
       h(CursorWindow, { key: 'tree', cursor, items: rows }),
-      hidden === null ? null : fixed(h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`)),
+      hidden === null ? null : fixed(h(Text, { key: 'hidden', ...tone('dim') }, `${hidden} finished hidden · H shows them`)),
     ]);
   }
-  const finishes = finishable(tasks[cursor]) ? ' · F finish after this ticket' : '';
-  const retry = retries ? ' · y retry' : '';
   return column([
     h(CursorWindow, { key: 'tree', cursor, items: rows }),
     fixed(
-      h(Text, { key: 'keys', dimColor: true }, `enter detail · c converse or take over · t re-tier · x cancel${finishes}${retry} · n quick launch · N launch · ? keys`),
-      hidden === null ? null : h(Text, { key: 'hidden', dimColor: true }, `${hidden} finished hidden · H shows them`),
+      hidden === null ? null : h(Text, { key: 'hidden', ...tone('dim') }, `${hidden} finished hidden · H shows them`),
       h(Output, { key: 'output', connection, state, taskId: tasks[cursor]!.id, lines: OUTPUT_PANE_LINES }),
     ),
   ]);
@@ -613,6 +621,83 @@ function keepingAncestors(tree: TaskView[], keep: (task: TaskView) => boolean): 
   return tree.filter((task) => kept.has(task.id));
 }
 
+// The columns below which a task row gives up its groups, then its extras.
+const GROUPS_COLUMNS = 100;
+const EXTRAS_COLUMNS = 90;
+// The widest mode and autonomy (`HITL`, `AFK L2`) and state label (`Waiting on children`).
+const MODE_WIDTH = 6;
+const STATE_WIDTH = 19;
+// The narrowest a title gets for the extras to have room, and the widest the groups get.
+const MIN_TITLE_WIDTH = 20;
+const MAX_GROUPS_WIDTH = 24;
+
+// Each column's width, the same on every row so the columns line up. The
+// title takes what the others leave, all of it but what keeps the widest
+// extras whole, and never less than its least. The condensed view's rows
+// are `compact`: only the glyph, id, title and state, the title taking what
+// the pane leaves.
+type RowLayout = { compact: boolean; glyph: number; id: number; title: number; extras: number; groups: number };
+
+function rowLayout(tasks: TaskView[], columns: number, compact: boolean): RowLayout {
+  const widest = (texts: string[]) => Math.max(0, ...texts.map((text) => text.length));
+  const glyph = Math.max(1, ...tasks.map(({ depth }) => depth * 2 + 1));
+  const id = widest(tasks.map(({ id }) => id));
+  if (compact) return { compact, glyph, id, title: 0, extras: 0, groups: 0 };
+  // Narrower than the TUI is designed for, a row gives up its groups, then its extras.
+  const groups = columns >= GROUPS_COLUMNS ? Math.min(widest(tasks.map((task) => task.groups.join(', '))), MAX_GROUPS_WIDTH) : 0;
+  const extras = columns >= EXTRAS_COLUMNS ? widest(tasks.map(extrasOf)) : 0;
+  // The cursor, glyph, id, title, mode and state, each with a gap after it but the last.
+  const fixed = 1 + glyph + id + MODE_WIDTH + STATE_WIDTH + 5 + (groups ? groups + 1 : 0);
+  const rest = Math.max(columns - fixed, 1);
+  if (!extras || rest - 1 < MIN_TITLE_WIDTH + 4) return { compact, glyph, id, title: rest, extras: 0, groups };
+  const title = Math.max(MIN_TITLE_WIDTH, rest - 1 - extras);
+  return { compact, glyph, id, title, extras: rest - 1 - title, groups };
+}
+
+// What a row says past its state: its loop's ticket, its descendants'
+// rollup and its progress.
+function extrasOf(task: TaskView): string {
+  return joined([loopDetail(task), rollupDetail(task), task.progress ?? ''].filter(Boolean));
+}
+
+// A task in the tree: its state's glyph, indented by its depth; its id and
+// title; its mode and autonomy; its state, lit as its glyph is; its extras;
+// and its groups. A finished task is dim, a cancelled one struck through
+// too, and the selected one's title bold.
+function TaskRow({ task, selected, layout }: { task: TaskView; selected: boolean; layout: RowLayout }) {
+  const look = stateLook(task.label);
+  const quiet = (text: string) => h(Text, { ...tone('dim'), wrap: 'truncate' }, text);
+  const cell = (width: number | undefined, content: ReactNode, right = false) =>
+    h(Box, { width, flexShrink: 0, justifyContent: right ? 'flex-end' : 'flex-start' }, content);
+  const title = h(Text, { ...tone(finished(task) ? 'dim' : 'fg'), bold: selected, strikethrough: look.strike, wrap: 'truncate' }, task.title);
+  const state = h(Text, { ...tone(look.role), wrap: 'truncate' }, task.label);
+  const indent = '  '.repeat(task.depth);
+  if (layout.compact) {
+    return h(
+      Box,
+      { gap: 1 },
+      h(Cursor, { on: selected }),
+      cell(layout.glyph, h(Text, tone(look.role), `${indent}${look.glyph}`)),
+      cell(layout.id, quiet(task.id)),
+      h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, title),
+      cell(undefined, state),
+    );
+  }
+  return h(
+    Box,
+    { gap: 1 },
+    h(Cursor, { on: selected }),
+    cell(layout.glyph, h(Text, tone(look.role), `${indent}${look.glyph}`)),
+    cell(layout.id, quiet(task.id)),
+    // On a terminal too narrow for the other columns, the title gives way first.
+    h(Box, { width: layout.title, flexShrink: 1 }, title),
+    cell(MODE_WIDTH, quiet(modeOf(task))),
+    cell(STATE_WIDTH, state),
+    layout.extras ? cell(layout.extras, quiet(extrasOf(task))) : null,
+    layout.groups ? cell(layout.groups, quiet(task.groups.join(', ')), true) : null,
+  );
+}
+
 // A tree row's rollup of its descendants (ADR 0009), and on a root the
 // failures waiting on the operator below it.
 function rollupDetail({ rollup, parent }: TaskView): string {
@@ -626,7 +711,7 @@ function rollupDetail({ rollup, parent }: TaskView): string {
     ] as const
   ).flatMap(([count, one, many]) => (count ? [`${count} ${count === 1 ? one : many}`] : []));
   const failed = !parent && rollup.failed.length ? ` · ${rollup.failed.map(({ taskId }) => `${taskId} failed`).join(', ')}` : '';
-  return ` · [${counts.join(', ')}]${failed}`;
+  return `[${counts.join(', ')}]${failed}`;
 }
 
 // Whether the task's run failed and waits on the operator's Retry.
@@ -642,20 +727,34 @@ function finishable(task: TaskView | undefined): boolean {
 // The ticket a task's loop works, and whether it ends after it.
 function loopDetail({ loop }: TaskView): string {
   if (!loop) return '';
-  if (!loop.ticket) return loop.finishing ? ' · finishing' : '';
-  return ` · on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
+  if (!loop.ticket) return loop.finishing ? 'finishing' : '';
+  return `on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
 }
 
+// The widest Needs you kind (`repo missing`) and the title's width on a Needs you row.
+const ITEM_KIND_WIDTH = 12;
+const ITEM_TITLE_WIDTH = 30;
+
+// Needs you, an item a row: its kind lit in its colour, its task's id and
+// bright title, and what it asks, dim.
 function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }) {
-  if (state.attentionQueue.length === 0) return h(Text, { dimColor: true }, 'Nothing needs you.');
+  if (state.attentionQueue.length === 0) return h(Text, tone('dim'), 'Nothing needs you.');
+  const id = Math.max(2, ...state.attentionQueue.map(({ taskId }) => (taskId ?? '').length));
   return h(CursorWindow, {
     cursor,
     items: state.attentionQueue.map((item, i) => {
       const key = item.kind === 'attention' ? item.requestId : `${item.kind}-${item.taskId}`;
-      const { taskId } = item;
-      const task = taskId === null ? undefined : state.tasks[taskId];
-      const title = titleOf(item, task);
-      return h(Row, { key, id: taskId ?? '', title, detail: waitingFor(item, task), selected: i === cursor });
+      const task = item.taskId === null ? undefined : state.tasks[item.taskId];
+      const look = kindLook(item);
+      return h(
+        Box,
+        { key, gap: 1 },
+        h(Cursor, { on: i === cursor }),
+        h(Box, { width: ITEM_KIND_WIDTH, flexShrink: 0 }, h(Text, { ...tone(look.role), wrap: 'truncate' }, look.kind)),
+        h(Box, { width: id, flexShrink: 0 }, h(Text, tone('dim'), item.taskId ?? '')),
+        h(Box, { width: ITEM_TITLE_WIDTH, flexShrink: 0 }, h(Text, { ...tone('fg'), bold: i === cursor, wrap: 'truncate' }, titleOf(item, task))),
+        h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, h(Text, { ...tone('dim'), wrap: 'truncate' }, askedFor(item, task))),
+      );
     }),
   });
 }

@@ -14,7 +14,7 @@ afterEach(() => {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
-const flat = (frame: string | undefined) => (frame ?? '').replace(/\s+/g, ' ');
+const flat = (frame: string | undefined) => (frame ?? '').replace(/[│\s]+/g, ' ');
 
 function prompted() {
   const asked: RestartWhen[] = [];
@@ -43,8 +43,8 @@ describe('a daemon of another version', () => {
     await eventually(() => {
       const frame = flat(app.lastFrame());
       expect(frame).toContain(`The running daemon speaks protocol 3, and this agents-factory speaks ${PROTOCOL_VERSION}.`);
-      expect(frame).toContain('1 Restart now: active AFK runs are requeued, losing their in-flight turn; the rest are parked.');
-      expect(frame).toContain('2 Restart when idle: the daemon starts no new run, and restarts once no run is active.');
+      expect(frame).toContain('[1] Restart now: active AFK runs are requeued, losing their in-flight turn; the rest are parked.');
+      expect(frame).toContain('[2] Restart when idle: the daemon starts no new run, and restarts once no run is active.');
       expect(frame).toContain('q quit');
     });
   });
@@ -82,7 +82,7 @@ describe('a daemon of another version', () => {
 
     fail(new Error('The running daemon is too old to restart when idle.'));
 
-    await eventually(() => expect(flat(app.lastFrame())).toContain('The running daemon is too old to restart when idle. 1 Restart now'));
+    await eventually(() => expect(flat(app.lastFrame())).toContain('The running daemon is too old to restart when idle. [1] Restart now'));
     app.stdin.write('1');
     await eventually(() => expect(asked).toEqual(['idle', 'now']));
   });

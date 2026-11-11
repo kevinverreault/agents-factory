@@ -14,6 +14,7 @@ import type { Command, Option, Reply } from '../protocol/protocol.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
+import { GLYPH, kindLook, Option as Pick, Rule, Sheet, tone } from './theme.ts';
 
 // What a digit on the sheet does. A choice that `opens` takes the operator
 // into the task's conversation once the daemon accepts it; one with `fields`
@@ -211,8 +212,16 @@ function keyOf(item: AttentionQueueItem): string {
 // What the operator is asked for: the attention request, or else the task's
 // own label (Ready for you, In review).
 export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined): string {
-  if (item.kind === 'attention' && item.attention === 'recovery-report') return item.reason ?? '';
-  if (item.kind === 'attention') return item.reason ? `${item.attention}: ${item.reason}` : item.attention;
+  if (item.kind !== 'attention') return askedFor(item, task);
+  if (item.attention === 'recovery-report') return item.reason ?? '';
+  return item.reason ? `${item.attention}: ${item.reason}` : item.attention;
+}
+
+// What an item asks of the operator, without its kind, which its row and
+// sheet name apart: the request's reason or question, or else the task's
+// own label (Ready for you, In review).
+export function askedFor(item: AttentionQueueItem, task: TaskView | undefined): string {
+  if (item.kind === 'attention') return item.reason ?? item.question?.questions[0]?.question ?? '';
   if (item.kind === 'ready' && task?.loop?.cleared) return `${task.label}: the map has cleared`;
   return task?.label ?? '';
 }
@@ -363,9 +372,13 @@ type Props = {
   // Whether esc gives the digits back to the screens: on Needs you, not in a
   // conversation, whose own hint says what its keys do.
   escBack?: boolean;
+  // Where the item is in Needs you, on Needs you.
+  position?: { at: number; of: number } | null;
 };
 
-export function AnswerSheet({ item, task, card, answering, form, confirm = null, escBack = true }: Props) {
+// The item's sheet, under an accent rule naming its task and, on Needs you,
+// where it is in the queue; the sheet's border in the item's kind's colour.
+export function AnswerSheet({ item, task, card, answering, form, confirm = null, escBack = true, position = null }: Props) {
   const title = titleOf(item, task, { withId: true });
   const question = item.kind === 'attention' ? item.question : null;
   const hint = answerable(item, task)
@@ -381,20 +394,22 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
       : item.kind === 'attention' && item.attention === 'repo-missing'
         ? 'Put the clone back, or run `agents-factory repo move <new-path>`.'
         : null;
+  const look = kindLook(item);
   return h(
     Box,
-    { flexDirection: 'column', marginTop: 1 },
-    h(Text, { dimColor: true, wrap: 'truncate' }, `── ${title} ──`),
-    question ? h(QuestionCard, { question, card, ownWords: false }) : h(Text, null, waitingFor(item, task)),
-    ...choicesFor(item, task).map((choice, i) =>
-      h(Box, { key: choice.label, gap: 1 }, h(Text, { bold: true, color: 'cyan' }, String(i + 1)), h(Text, null, choice.label)),
+    { flexDirection: 'column', marginTop: 1, flexShrink: 0 },
+    h(Rule, { role: 'accent', label: position ? `${position.at}/${position.of} ── ${title}` : title }),
+    h(
+      Sheet,
+      { title: look.kind, role: look.role, hint: hint ?? undefined },
+      question ? h(QuestionCard, { question, card, ownWords: false, nested: true }) : h(Text, null, askedFor(item, task)),
+      ...choicesFor(item, task).map((choice, i) => h(Pick, { key: choice.label, digit: i + 1 }, choice.label)),
+      // With more than one field, › marks the one being typed into.
+      ...(form?.fields ?? []).map(({ prompt, value }, i) =>
+        h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? `${GLYPH.selected} ` : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(value)),
+      ),
+      confirm?.options ? h(ChoosePrompt, { reason: confirm.reason, options: confirm.options }) : null,
+      confirm && !confirm.options ? h(Text, tone('warn'), confirm.reason) : null,
     ),
-    // With more than one field, › marks the one being typed into.
-    ...(form?.fields ?? []).map(({ prompt, value }, i) =>
-      h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? '› ' : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(value)),
-    ),
-    confirm?.options ? h(ChoosePrompt, { reason: confirm.reason, options: confirm.options }) : null,
-    confirm && !confirm.options ? h(Text, { color: 'yellow' }, confirm.reason) : null,
-    hint ? h(Text, { dimColor: true }, hint) : null,
   );
 }

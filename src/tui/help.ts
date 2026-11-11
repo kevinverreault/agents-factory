@@ -1,6 +1,7 @@
 // `?` help: every key the screens and the condensed view take, until `?` or `esc` closes it.
 import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
+import { Sheet, tone } from './theme.ts';
 
 const KEYS: [string, string][] = [
   ['1–4', 'Tasks · Needs you · Runs · Usage, leaving any task’s detail or the condensed view'],
@@ -28,12 +29,11 @@ const KEYS: [string, string][] = [
   ['?', 'this help'],
 ];
 
+// The footer under it says what closes it.
 export function Help() {
   return h(
-    Box,
-    { flexDirection: 'column' },
-    h(Text, { bold: true }, 'Keys'),
-    ...KEYS.map(([key, does]) => h(Box, { key, gap: 2 }, h(Box, { width: 10, flexShrink: 0 }, h(Text, { bold: true }, key)), h(Text, null, does))),
-    h(Text, { dimColor: true }, '? or esc closes'),
+    Sheet,
+    { title: 'Keys' },
+    ...KEYS.map(([key, does]) => h(Box, { key, gap: 2 }, h(Box, { width: 10, flexShrink: 0 }, h(Text, { ...tone('accent'), bold: true }, key)), h(Text, null, does))),
   );
 }

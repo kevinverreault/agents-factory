@@ -5,6 +5,7 @@
 import { createElement as h } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { Answers, Question } from '../lifecycle/lifecycle.ts';
+import { Sheet, tone } from './theme.ts';
 
 export type Card = {
   // The question being answered.
@@ -45,32 +46,31 @@ export function cardKey(question: Question, card: Card, draft: string, input: st
 }
 
 // `ownWords` says whether typed text can answer too: not on an answer sheet.
-export function QuestionCard({ question, card, ownWords = true }: { question: Question; card: Card; ownWords?: boolean }) {
+// `nested` in a sheet of its own (an answer sheet, quick launch), the card
+// is that sheet's; alone, as in a conversation, it is a sheet itself.
+export function QuestionCard({ question, card, ownWords = true, nested = false }: { question: Question; card: Card; ownWords?: boolean; nested?: boolean }) {
   const asked = question.questions[card.index]!;
   const count = question.questions.length;
-  return h(
-    Box,
-    { flexDirection: 'column', borderStyle: 'round', paddingX: 1, flexShrink: 0 },
+  const hint = `${asked.multiSelect ? 'digits toggle · enter confirm' : 'digit picks'}${ownWords ? ' · or type your own answer' : ''}`;
+  const body = [
     h(
       Box,
-      { gap: 1 },
-      h(Text, { inverse: true }, ` ${asked.header} `),
-      h(Text, { bold: true }, asked.question),
-      count > 1 ? h(Text, { dimColor: true }, `(${card.index + 1}/${count})`) : null,
+      { key: 'asked', gap: 1 },
+      h(Text, { inverse: true, bold: true }, ` ${asked.header} `),
+      h(Text, { ...tone('fg'), bold: true }, asked.question),
+      count > 1 ? h(Text, tone('dim'), `(${card.index + 1}/${count})`) : null,
     ),
     ...asked.options.map((option, i) =>
       h(
         Box,
         { key: option.label, gap: 1 },
-        h(Text, { bold: true, color: 'cyan' }, String(i + 1)),
-        h(Text, null, asked.multiSelect ? `${card.picked.includes(i) ? '[x]' : '[ ]'} ${option.label}` : option.label),
-        h(Text, { dimColor: true }, option.description),
+        h(Text, { ...tone('accent'), bold: true }, `[${i + 1}]`),
+        asked.multiSelect ? h(Text, tone(card.picked.includes(i) ? 'ok' : 'dim'), card.picked.includes(i) ? '[x]' : '[ ]') : null,
+        h(Text, null, option.label),
+        h(Text, tone('dim'), option.description),
       ),
     ),
-    h(
-      Text,
-      { dimColor: true },
-      `${asked.multiSelect ? 'digits toggle · enter confirm' : 'digit picks'}${ownWords ? ' · or type your own answer' : ''}`,
-    ),
-  );
+  ];
+  if (!nested) return h(Sheet, { title: 'Question', hint }, ...body);
+  return h(Box, { flexDirection: 'column', flexShrink: 0 }, ...body, h(Text, { key: 'hint', ...tone('dim') }, hint));
 }

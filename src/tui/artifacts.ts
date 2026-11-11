@@ -3,20 +3,20 @@ import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import { issueRef } from '../artifacts/capture.ts';
 import type { ArtifactView } from '../protocol/factory-state.ts';
+import { Section, tone } from './theme.ts';
 
 // What the task produced so far, live: captured from the run's tool calls.
 // The newest come first, so a full rail cuts off the oldest.
 export function ArtifactRail({ artifacts }: { artifacts: ArtifactView[] }) {
   return h(
-    Box,
-    { flexDirection: 'column', overflow: 'hidden' },
-    h(Text, { bold: true }, 'Artifacts'),
-    artifacts.length === 0 ? h(Text, { dimColor: true }, 'None yet.') : null,
+    Section,
+    { title: 'Artifacts', flexShrink: 1 },
+    artifacts.length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
     ...artifacts.toReversed().map((artifact) =>
       h(
         Box,
         { key: artifact.id, gap: 1 },
-        h(Box, { width: 11, flexShrink: 0 }, h(Text, { dimColor: true }, artifactState(artifact))),
+        h(Box, { width: 11, flexShrink: 0 }, h(Text, tone('dim'), artifactState(artifact))),
         h(Text, { wrap: 'truncate-start' }, artifactName(artifact)),
       ),
     ),
