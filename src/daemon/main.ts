@@ -1,4 +1,5 @@
 // The daemon's entry point, started detached by the TUI (or by hand).
+import { lockfileDependencies } from '../dependencies/dependencies.ts';
 import { agentSdkExecutor } from '../executor/agent-sdk.ts';
 import { gitCli } from '../git/git.ts';
 import { gitHubApi } from '../github/github.ts';
@@ -27,6 +28,7 @@ try {
     secrets: windowsCredentials(paths.credentialPrefix),
     skillSets: skillSetManager({ root: paths.skillsRoot, lockPath: paths.skillsLock }),
     processes,
+    dependencies: lockfileDependencies(),
     routingTable: routingTable(paths.modelsTable),
   });
   await daemon.stopped;

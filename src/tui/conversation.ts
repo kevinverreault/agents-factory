@@ -12,7 +12,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
-import { AnswerSheet, answerable, cardItem, useAnswering } from './answer-sheet.ts';
+import { AnswerSheet, answerable, cardItem, reopens, useAnswering } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event, SystemLine } from './output.ts';
@@ -115,6 +115,16 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     } else if (onCard.kind === 'card') {
       typed.card = onCard.card;
       if (onCard.clearDraft) typed.draft = '';
+    } else if (key.return && !live && reopens(task)) {
+      // Parked while open: it reopens first, then takes the message, if any.
+      const text = typed.draft.trim() ? typed.draft : null;
+      void connection.send({ type: 'open', taskId }).then((reply) => {
+        tell(reply);
+        if (reply.ok && text) void connection.send({ type: 'sendMessage', taskId, text }).then(tell);
+        else if (!reply.ok && text && !typing.current.draft) Object.assign(typing.current, { draft: text });
+        rerender();
+      });
+      typed.draft = '';
     } else if (key.return) {
       if (!typed.draft.trim()) return;
       void connection.send({ type: 'sendMessage', taskId, text: typed.draft }).then(tell);
@@ -133,7 +143,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         ? [['esc', 'interrupt']]
         : midTurn
           ? [['enter', 'queue'], ['esc', 'interrupt']]
-          : [['enter', 'send']];
+          : !live && reopens(task)
+            ? [['enter', 'reopens and sends']]
+            : [['enter', 'send']];
   const chat = takesChat && !answering;
   const hint: Hint[] = [...keys, ...(canAdvance(task) ? [['ctrl+n', 'advance'] as Hint] : []), ...(chat ? [['/handoff', 'hand off'] as Hint] : []), ['ctrl+b', 'back']];
   const label = task?.label ?? '';

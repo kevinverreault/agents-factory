@@ -6,6 +6,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { capture } from '../artifacts/capture.ts';
+import { DependenciesError, type Dependencies } from '../dependencies/dependencies.ts';
 import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart, type Verdict } from '../executor/executor.ts';
 import { DELETION_ORDER, listedLeftovers, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
@@ -151,6 +152,8 @@ export type DaemonOptions = {
   // The OS's processes (ADR 0003): each run's CLI tree, swept once it ends,
   // and the idle-sleep block held while AFK work runs.
   processes: Processes;
+  // What installs a worktree's dependencies before a run on the host starts in it (ADR 0010).
+  dependencies: Dependencies;
   // The routing table each run's tier resolves through when it starts (ADR 0009).
   routingTable: RoutingTableFile;
   worktreeRoot: string;
@@ -206,7 +209,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   mkdirSync(dirname(options.tokenPath), { recursive: true });
   writeFileSync(options.tokenPath, token, { mode: 0o600 });
 
-  const { store, clock, executor, git, github, sandbox, secrets, skillSets, routingTable } = options;
+  const { store, clock, executor, git, github, sandbox, secrets, skillSets, routingTable, dependencies } = options;
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
   // Whether the daemon before this one stopped gracefully (ADR 0003).
   const cleanStart = store.takeCleanShutdown();
@@ -2007,6 +2010,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
   }
 
+  // Installs the dependencies of the worktree at `cwd`, or says why it couldn't.
+  async function installDependencies(cwd: string): Promise<string | null> {
+    try {
+      await dependencies.install(cwd);
+      return null;
+    } catch (error) {
+      if (!(error instanceof DependenciesError)) throw error;
+      return error.message;
+    }
+  }
+
   // Starts the run on the executor. An AFK run in a worktree starts guarded
   // (ADR 0007), once its worktree is snapshotted, unless it ended meanwhile.
   // An L2 run starts in its task's container (ADR 0007), prepared with the
@@ -2023,6 +2037,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // The CLI resumes a session only from its file (ADR 0011).
     if (run.resumesSession && cwd && task.sessionId) {
       await restoreTranscript(task, task.sessionId);
+      if (lifecycle.runs[run.id]?.status !== 'active') return;
+    }
+    // A run on the host finds its worktree's dependencies installed (ADR
+    // 0010); an L2 run's container installs its own. One that failed holds
+    // the run back no more than a missing lockfile would.
+    let uninstalled: string | null = null;
+    if (cwd && run.autonomy !== 'L2') {
+      uninstalled = await installDependencies(cwd);
       if (lifecycle.runs[run.id]?.status !== 'active') return;
     }
     if (run.mode === 'AFK' && cwd) {
@@ -2085,7 +2107,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       sessionId: task.sessionId!,
       resumesSession: run.resumesSession,
       cwd,
-      firstMessage: run.opening,
+      firstMessage: withInstallNote(run.opening, uninstalled),
       model: run.model,
       maxTurns: run.maxTurns ?? null,
       // The scheduler's choice (ADR 0001): an L2 run's token goes into its container alone.
@@ -2596,6 +2618,16 @@ type Guarded = {
 };
 
 // What the executor hands a call the operator answered.
+// A run's opening, with a factory note after it when its worktree's
+// dependencies didn't install: after, so a skill it invokes stays first. A
+// run with no opening resumes a conversation and hears nothing; its agent
+// may install them itself, as the allow list lets it.
+function withInstallNote(opening: string | null, uninstalled: string | null): string | null {
+  if (opening === null || uninstalled === null) return opening;
+  const note = `The factory couldn’t install this worktree’s dependencies before the run started: ${uninstalled} Install them in the worktree from its lockfile before you need them, rather than reading or running another clone’s.`;
+  return `${opening}\n\n## Factory note\n\n${note}`;
+}
+
 function verdictOf(answer: PermissionAnswer): Verdict {
   return 'deny' in answer ? { allow: false, message: `The operator denied this: ${answer.deny.trim()}` } : { allow: true };
 }

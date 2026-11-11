@@ -24,7 +24,7 @@ import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
-import { AnswerSheet, answerable, askedFor, titleOf, useAnswering } from './answer-sheet.ts';
+import { AnswerSheet, answerable, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { CommandLine, runCommand, type Jump } from './command-line.ts';
 import { Condensed, groupCounts, PANES, Sidebar, type Pane } from './condensed.ts';
@@ -156,9 +156,9 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   const item = tab === 'needs-you' && !drilled ? queue[cursor] : undefined;
   const itemTask = item?.taskId ? state?.tasks[item.taskId] : undefined;
   const ready = item?.kind === 'ready' ? itemTask : undefined;
-  // What enter opens: a drilled-into task's conversation, or a live one
-  // Ready for you. On the Tasks and Runs screens it drills in instead.
-  const opens = drilled ? drilled.id : ready?.liveRunId ? ready.id : undefined;
+  // What enter opens: a drilled-into task's conversation, or one Ready for
+  // you, live or to reopen. On the Tasks and Runs screens it drills in instead.
+  const opens = drilled ? drilled.id : ready?.liveRunId || reopens(ready) ? ready!.id : undefined;
   const drills = drilled || tab === 'needs-you' ? undefined : selected?.id;
   // In the condensed view the focus is where the screens' state is: on a
   // task drilled into, the detail; on Needs you, the sidebar; else the tree.
@@ -243,6 +243,11 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       setRefusal(reply.ok ? null : reply.reason);
       if (reply.ok) setView({ kind: 'conversation', taskId: command.taskId });
     });
+  // Opens the task's conversation, reopening it first when no run is live.
+  const openConversation = (taskId: string) => {
+    if (reopens(state?.tasks[taskId])) sendThenOpen({ type: 'open', taskId });
+    else setView({ kind: 'conversation', taskId });
+  };
   // Hands the selected HITL task off from its conversation, where the
   // handoff sheet opens: a parked one first resumes to write the brief.
   const handOff = () => {
@@ -253,7 +258,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // one taken over into it.
   const converse = () => {
     const task = selected ?? itemTask;
-    if (task?.mode === 'HITL') setView({ kind: 'conversation', taskId: task.id });
+    if (task?.mode === 'HITL') openConversation(task.id);
     else if (task) sendThenOpen({ type: 'takeOver', taskId: task.id });
   };
   // Cancels the selected task and its subtree, or opens the cancel sheet on
@@ -337,7 +342,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         else if (input === 'c') converse();
         else if (key.upArrow) move(-1);
         else if (key.downArrow) move(1);
-        else if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
+        else if (key.return && opens) openConversation(opens);
         else answers.key(input, key);
         return;
       }
@@ -362,7 +367,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (input === 'H' && tab === 'tasks' && !drilled) setHideFinished((hide) => !hide);
       if (key.upArrow && !drilled) move(-1);
       if (key.downArrow && !drilled) move(1);
-      if (key.return && opens) setView({ kind: 'conversation', taskId: opens });
+      if (key.return && opens) openConversation(opens);
       if (key.return && drills) setDetail(drills);
       if (input === 't') retier();
       if (input === 'c') converse();
