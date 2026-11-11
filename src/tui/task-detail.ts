@@ -19,9 +19,11 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
   // The model its live run is on, or its last run was.
   const model = (task.liveRunId ? state.runs[task.liveRunId] : runs.at(-1))?.model;
   const parent = task.parent ? state.tasks[task.parent] : undefined;
-  const child = task.parent ? `child of ${task.parent}${parent ? ` ${parent.title}` : ''}${task.child ? (task.child.awaited ? ' (awaited)' : ' (fire-and-forget)') : ''}` : null;
-  const before = [modeOf(task)];
-  const after = [task.stage, model, task.tier, task.branch, task.groups.join(', '), child].filter((part): part is string => Boolean(part));
+  const parentage = task.parent ? `parent ${task.parent}${parent ? ` ${parent.title}` : ''}${task.child ? (task.child.awaited ? ' (awaited)' : ' (fire-and-forget)') : ''}` : null;
+  // What it runs as, its state, what it belongs to, then where it is: its
+  // stage and its branch.
+  const before = [modeOf(task), model, task.tier].filter((part): part is string => Boolean(part));
+  const after = [task.groups.join(', '), parentage, task.stage, task.branch].filter((part): part is string => Boolean(part));
   const request = state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === task.id);
   return h(
     Box,
