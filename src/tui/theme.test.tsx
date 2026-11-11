@@ -5,7 +5,7 @@ import { Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 import { label, type Task, type TaskState } from '../lifecycle/lifecycle.ts';
-import { ROLES, Section, Sheet, stateLook, tone } from './theme.ts';
+import { kindLook, ROLES, Section, Sheet, stateLook, tone } from './theme.ts';
 
 const withLevel = (level: 0 | 1 | 2 | 3) => {
   const was = chalk.level;
@@ -119,6 +119,16 @@ describe('the sheet style', () => {
     // Truecolour escapes: #f07575 is 240;117;117, #9fce7e is 159;206;126.
     expect(border('bad')).toContain('\x1b[38;2;240;117;117m╭');
     expect(border()).toContain('\x1b[38;2;159;206;126m╭');
+  });
+});
+
+describe('Needs you kinds', () => {
+  test('questions and the operator’s turn are lit in the accent, permissions in warn, failures in bad, reviews in review', () => {
+    expect(kindLook({ kind: 'attention', attention: 'question' })).toEqual({ kind: 'question', role: 'accent' });
+    expect(kindLook({ kind: 'ready' })).toEqual({ kind: 'your turn', role: 'accent' });
+    expect(kindLook({ kind: 'attention', attention: 'permission' })).toEqual({ kind: 'permission', role: 'warn' });
+    expect(kindLook({ kind: 'attention', attention: 'failure' })).toEqual({ kind: 'failure', role: 'bad' });
+    expect(kindLook({ kind: 'review' })).toEqual({ kind: 'review', role: 'review' });
   });
 });
 
