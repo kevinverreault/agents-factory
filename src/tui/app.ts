@@ -392,8 +392,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   // The keys the screen on show takes, and those of the selection's only when
   // they apply. While a sheet holds the keys, its own hint says what they do.
   const footer = (): Hint[] => {
-    if (view.kind !== 'tabs' || pickerCursor !== null || cancelSheet || command !== null) return [];
-    if (help) return [['?', 'or esc closes']];
+    if (view.kind !== 'tabs' || pickerCursor !== null || cancelSheet || command !== null || help) return [];
     if (condensed) return [['tab', 'focus'], ['f', 'zoom'], ['g', 'group'], [':', 'command'], ['v', 'screens'], ['?', 'keys']];
     if (drilled) {
       const answers = queue.some((item) => item.taskId === drilled.id && answerable(item, drilled));

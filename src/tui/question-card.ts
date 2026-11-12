@@ -5,7 +5,7 @@
 import { createElement as h } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { Answers, Question } from '../lifecycle/lifecycle.ts';
-import { Sheet, tone } from './theme.ts';
+import { GLYPH, Option, Sheet, tone } from './theme.ts';
 
 export type Card = {
   // The question being answered.
@@ -62,12 +62,15 @@ export function QuestionCard({ question, card, ownWords = true, nested = false }
     ),
     ...asked.options.map((option, i) =>
       h(
-        Box,
-        { key: option.label, gap: 1 },
-        h(Text, { ...tone('accent'), bold: true }, `[${i + 1}]`),
-        asked.multiSelect ? h(Text, tone(card.picked.includes(i) ? 'ok' : 'dim'), card.picked.includes(i) ? '[x]' : '[ ]') : null,
-        h(Text, null, option.label),
-        h(Text, tone('dim'), option.description),
+        Option,
+        { key: option.label, digit: i + 1 },
+        h(
+          Box,
+          { gap: 1 },
+          asked.multiSelect ? h(Text, tone(card.picked.includes(i) ? 'ok' : 'dim'), card.picked.includes(i) ? GLYPH.ticked : GLYPH.unticked) : null,
+          h(Text, null, option.label),
+          h(Text, tone('dim'), option.description),
+        ),
       ),
     ),
   ];

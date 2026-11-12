@@ -29,11 +29,10 @@ const KEYS: [string, string][] = [
   ['?', 'this help'],
 ];
 
-// The footer under it says what closes it.
 export function Help() {
   return h(
     Sheet,
-    { title: 'Keys' },
+    { title: 'Keys', hint: '? or esc close' },
     ...KEYS.map(([key, does]) => h(Box, { key, gap: 2 }, h(Box, { width: 10, flexShrink: 0 }, h(Text, { ...tone('accent'), bold: true }, key)), h(Text, null, does))),
   );
 }

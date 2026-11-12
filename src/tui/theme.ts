@@ -151,6 +151,11 @@ export const GLYPH = {
   // A section's top corners, as its rounded border has them.
   cornerTopLeft: '╭',
   cornerTopRight: '╮',
+  // A box ticked, or not, on a sheet that takes several.
+  ticked: '[x]',
+  unticked: '[ ]',
+  // Where a line broke, on a line that shows it whole.
+  newline: '↵',
   // A sparkline's bars, lowest to highest.
   spark: '▁▂▃▄▅▆▇█',
 } as const;

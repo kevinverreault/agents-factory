@@ -3018,6 +3018,8 @@ describe('the screens view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', 'v', 'tab', 'f', 'F', ':', 'g', '\\?']) expect(frame).toMatch(new RegExp(`^[│\\s]*${key}\\s{2,}\\S`, 'm'));
+      // Like every sheet, its own hint says what closes it, inside its border.
+      expect(frame).toMatch(/^\s*│\s*\? or esc close\s*│/m);
     });
     await press(app, '3', '\x1b');
     await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T1\s+Grill me about the docs/));

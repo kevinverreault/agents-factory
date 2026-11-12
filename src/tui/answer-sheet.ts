@@ -59,7 +59,7 @@ function byRules(taskId: string, permission: Permission, { label, enter, answer 
 // whole script, so its lines are joined by ↵, and a long rule keeps its start
 // and its end, where the operator types, around an ellipsis.
 function shownRule(rule: string): string {
-  const line = rule.replace(/[ \t]*\r?\n[ \t]*/g, ' ↵ ');
+  const line = rule.replace(/[ \t]*\r?\n[ \t]*/g, ` ${GLYPH.newline} `);
   return line.length <= SHOWN_RULE ? line : `${line.slice(0, SHOWN_RULE / 2)} … ${line.slice(-SHOWN_RULE / 2)}`;
 }
 const SHOWN_RULE = 120;
@@ -398,7 +398,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
   return h(
     Box,
     { flexDirection: 'column', marginTop: 1, flexShrink: 0 },
-    h(Rule, { role: 'accent', label: position ? `${position.at}/${position.of} ── ${title}` : title }),
+    h(Rule, { role: 'accent', label: position ? `${position.at}/${position.of} ${GLYPH.rule.repeat(2)} ${title}` : title }),
     h(
       Sheet,
       { title: look.kind, role: look.role, hint: hint ?? undefined },

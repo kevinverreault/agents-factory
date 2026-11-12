@@ -8,7 +8,7 @@ import { createElement as h, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { GcResult, Leftover, LeftoversView } from '../protocol/protocol.ts';
-import { Cursor, Sheet, tone } from './theme.ts';
+import { Cursor, GLYPH, Sheet, tone } from './theme.ts';
 
 type Stage =
   | { kind: 'listing' }
@@ -94,7 +94,7 @@ export function GcSheet({ connection, repo, onLeave }: { connection: FactoryConn
             Box,
             { key: `leftover-${i}`, gap: 1 },
             h(Cursor, { on: i === cursor }),
-            h(Text, ticked[i] ? tone('ok') : tone('dim'), ticked[i] ? '[x]' : '[ ]'),
+            h(Text, ticked[i] ? tone('ok') : tone('dim'), ticked[i] ? GLYPH.ticked : GLYPH.unticked),
             h(Box, { width: 13, flexShrink: 0 }, h(Text, { bold: true }, KINDS[leftover.kind])),
             h(Text, null, `${subjectOf(leftover)} · ${why}`),
           ),
