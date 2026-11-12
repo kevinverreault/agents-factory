@@ -204,7 +204,7 @@ describe('usage limits on AFK runs', () => {
 
     let state = await tui.until((state) => state.tasks.T1?.label === 'Waiting for window');
     expect(state.runs.R1).toMatchObject({ status: 'active', waitingForWindow: resetsAt });
-    expect(state.slots).toEqual({ active: 1, cap: 2 });
+    expect(state.slots).toEqual({ active: 1, cap: 8 });
     expect(state.attentionQueue).toEqual([]);
 
     // Past the reset, the CLI's retry goes through and the run streams again.

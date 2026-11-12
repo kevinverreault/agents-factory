@@ -888,7 +888,7 @@ export type LifecycleAction =
 
 export type Reduction = { state: Lifecycle; refusal: string | null };
 
-export const DEFAULT_SLOT_CAP = 2;
+export const DEFAULT_SLOT_CAP = 8;
 // The global default for an AFK run's max turns, under a stage's `max_turns`.
 export const DEFAULT_MAX_TURNS = 300;
 // What a resumed AFK run opens on: it takes no chat, so nothing else would

@@ -44,7 +44,7 @@ describe('runs', () => {
     await operator.send({ type: 'createTask', repo: 'acme/widgets', title: 'Implement the store', mode: 'AFK', submit: true });
 
     const state = await tui.until((state) => state.tasks.T1?.label === 'Running');
-    expect(state.slots).toEqual({ active: 1, cap: 2 });
+    expect(state.slots).toEqual({ active: 1, cap: 8 });
     expect(factory.executor.started).toEqual([
       { runId: 'R1', taskId: 'T1', mode: 'AFK', autonomy: 'L1', sessionId: 'S1', resumesSession: false, cwd: null, firstMessage: null, model: 'claude-sonnet-5-5', maxTurns: 300, credential: 'subscription-host', token: null, container: null, plugin: null, guards: null, allowRules: FACTORY_ALLOW_LIST, reports: [], child: false, spawns: true },
     ]);
