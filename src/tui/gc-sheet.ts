@@ -8,7 +8,7 @@ import { createElement as h, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { GcResult, Leftover, LeftoversView } from '../protocol/protocol.ts';
-import { Cursor, GLYPH, Sheet, tone } from './theme.ts';
+import { Cursor, Sheet, Tick, tone } from './theme.ts';
 
 type Stage =
   | { kind: 'listing' }
@@ -65,15 +65,15 @@ export function GcSheet({ connection, repo, onLeave }: { connection: FactoryConn
   });
 
   // The sheet, under its title and what it lists.
-  const sheet = (hint: string | undefined, ...children: ReturnType<typeof h>[]) =>
+  const sheet = (hint: string, ...children: ReturnType<typeof h>[]) =>
     h(
       Sheet,
       { title: repo === undefined ? 'Leftovers' : `Leftovers in ${repo}`, hint },
       h(Text, tone('dim'), 'What belongs to no live task; only what you tick is deleted.'),
       ...children,
     );
-  if (stage.kind === 'listing') return sheet(undefined, h(Text, tone('dim'), 'Looking for leftovers…'));
-  if (stage.kind === 'deleting') return sheet(undefined, h(Text, tone('dim'), 'Deleting the ticked leftovers…'));
+  if (stage.kind === 'listing') return sheet('esc back', h(Text, tone('dim'), 'Looking for leftovers…'));
+  if (stage.kind === 'deleting') return sheet('esc back', h(Text, tone('dim'), 'Deleting the ticked leftovers…'));
   if (stage.kind === 'refused') return sheet('esc back', h(Text, tone('bad'), stage.reason));
   if (stage.kind === 'done') {
     const { deleted, failed } = stage.result;
@@ -94,7 +94,7 @@ export function GcSheet({ connection, repo, onLeave }: { connection: FactoryConn
             Box,
             { key: `leftover-${i}`, gap: 1 },
             h(Cursor, { on: i === cursor }),
-            h(Text, ticked[i] ? tone('ok') : tone('dim'), ticked[i] ? GLYPH.ticked : GLYPH.unticked),
+            h(Tick, { on: !!ticked[i] }),
             h(Box, { width: 13, flexShrink: 0 }, h(Text, { bold: true }, KINDS[leftover.kind])),
             h(Text, null, `${subjectOf(leftover)} · ${why}`),
           ),

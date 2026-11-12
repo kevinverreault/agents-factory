@@ -5,7 +5,7 @@
 import { createElement as h } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { Answers, Question } from '../lifecycle/lifecycle.ts';
-import { GLYPH, Option, Sheet, tone } from './theme.ts';
+import { Option, Sheet, Tick, tone } from './theme.ts';
 
 export type Card = {
   // The question being answered.
@@ -67,7 +67,7 @@ export function QuestionCard({ question, card, ownWords = true, nested = false }
         h(
           Box,
           { gap: 1 },
-          asked.multiSelect ? h(Text, tone(card.picked.includes(i) ? 'ok' : 'dim'), card.picked.includes(i) ? GLYPH.ticked : GLYPH.unticked) : null,
+          asked.multiSelect ? h(Tick, { on: card.picked.includes(i) }) : null,
           h(Text, null, option.label),
           h(Text, tone('dim'), option.description),
         ),

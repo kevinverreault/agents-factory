@@ -187,6 +187,11 @@ export function Cursor({ on }: { on: boolean }) {
   return h(Box, { flexShrink: 0 }, h(Text, tone('accent'), on ? GLYPH.selected : ' '));
 }
 
+// A box on a sheet that takes several: ticked in ok, or not, dim.
+export function Tick({ on }: { on: boolean }) {
+  return h(Text, tone(on ? 'ok' : 'dim'), on ? GLYPH.ticked : GLYPH.unticked);
+}
+
 // A full-width rule, or one led by a label in the label's role.
 export function Rule({ role = 'line', label }: { role?: Role; label?: string }) {
   const line = h(Box, { flexGrow: 1, borderStyle: 'single', borderTop: true, borderBottom: false, borderLeft: false, borderRight: false, ...border(role) });

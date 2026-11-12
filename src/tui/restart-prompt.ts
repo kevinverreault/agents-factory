@@ -41,7 +41,7 @@ export function RestartPrompt({ daemonVersion, restart, onAttached, onQuit }: Pr
 
   const skew = `The running daemon speaks protocol ${daemonVersion}, and this agents-factory speaks ${PROTOCOL_VERSION}.`;
   const title = 'Restart the daemon';
-  if (stage.kind === 'restarting') return h(Sheet, { title }, h(Text, null, 'Restarting the daemon…'));
+  if (stage.kind === 'restarting') return h(Sheet, { title, hint: 'q quit' }, h(Text, null, 'Restarting the daemon…'));
   if (stage.kind === 'waiting') {
     const runs = stage.activeRuns === 1 ? 'its active run ends' : `its ${stage.activeRuns} active runs end`;
     return h(Sheet, { title, hint: 'q quit' }, h(Text, null, `The daemon restarts once ${runs}. You can close this and come back.`));

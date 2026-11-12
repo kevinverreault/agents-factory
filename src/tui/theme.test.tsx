@@ -168,6 +168,7 @@ describe('sections', () => {
 
 describe('the screens', () => {
   // Every screen's source but the theme's own, its comments left out.
+  // key-probe.ts is no screen: it prints the keys a terminal sends.
   const screens = () =>
     readdirSync(import.meta.dirname)
       .filter((file) => file.endsWith('.ts') && file !== 'theme.ts' && file !== 'key-probe.ts' && !file.includes('.test.'))
