@@ -1,12 +1,12 @@
-// Seam 1: naming a root task at launch. A small model reads the prompt and
-// writes the task's title, its branch slug and a summary; when it fails or
+// Seam 1: naming a root task at launch. A cheap run of the executor (ADR
+// 0001) on the routing table's haiku model reads the prompt and writes the
+// task's title, its branch slug and its launch summary; when it fails or
 // takes too long, the task is named from the prompt's first line as before,
 // and the launch goes on. The PR takes the title the PR body stage wrote,
-// and the summary as its body when no stage wrote one.
+// and the launch summary as its body when no stage wrote one.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
-import type { Namer } from '../naming/task-naming.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch } from '../testing/watch.ts';
 
@@ -26,16 +26,12 @@ const NAME = {
   summary: 'Names tasks, branches and PRs with a model instead of cropping the prompt.',
 };
 
-// A namer answering `reply` (or failing as `reply` does), recording what it was asked.
-function namer(reply: () => Promise<string>): Namer & { asked: string[] } {
-  const asked: string[] = [];
-  return { asked, name: (request) => (asked.push(request), reply()) };
-}
-
-// A factory, its repository registered, with `stages` as the `unattended` preset.
-async function factoryWith(namer: Namer | undefined, stages: string[], more: { namingTimeoutMs?: number } = {}) {
-  const factory = await startTestFactory({ ...(namer && { namer }), ...more });
+// A factory, its repository registered, with `stages` as the `unattended`
+// preset, whose cheap runs answer as `reply` does.
+async function factoryWith(reply: () => Promise<string>, stages: string[], more: { namingTimeoutMs?: number } = {}) {
+  const factory = await startTestFactory(more);
   factories.push(factory);
+  factory.executor.answerCompletions(reply);
   mkdirSync(factory.paths.presetsDir, { recursive: true });
   writeFileSync(join(factory.paths.presetsDir, 'unattended.preset.yaml'), ['stages:', ...stages.map((stage) => `  - ${stage}`), ''].join('\n'));
   await factory.registerRepo();
@@ -48,36 +44,47 @@ const PR_BODY = '{ id: pr-body, kind: run, mode: AFK, skill: pr, model: haiku, e
 const OPEN_PR = '{ id: open-pr, kind: action, mode: AFK, requires: L2 }';
 
 describe('naming a task at launch', () => {
-  test('the namer’s title, branch slug and summary name the task, from its prompt', async () => {
-    const naming = namer(async () => JSON.stringify(NAME));
-    const { factory, operator, tui } = await factoryWith(naming, [BUILD]);
+  test('a cheap run’s title, branch slug and summary name the task, from its prompt', async () => {
+    const { factory, operator, tui } = await factoryWith(async () => JSON.stringify(NAME), [BUILD]);
 
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'unattended', prompt: PROMPT })).toEqual({ ok: true, value: { taskId: 'T1' } });
 
     const state = await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
-    expect(naming.asked).toEqual([PROMPT]);
-    expect(state.tasks.T1).toMatchObject({ title: NAME.title, branch: 'factory/T1-agent-written-task-names', summary: NAME.summary });
+    expect(factory.executor.completions).toEqual([{ model: 'claude-haiku-5-5', system: expect.stringContaining('JSON'), prompt: PROMPT, credential: 'subscription-host' }]);
+    expect(state.tasks.T1).toMatchObject({ title: NAME.title, branch: 'factory/T1-agent-written-task-names', launchSummary: NAME.summary });
     expect((await factory.git.worktrees(clone)).map(({ branch }) => branch)).toContain('factory/T1-agent-written-task-names');
   });
 
+  test('a launch on issue refs alone is named from them and its preset', async () => {
+    const { factory, operator, tui } = await factoryWith(async () => JSON.stringify(NAME), [BUILD]);
+    factory.github.addIssue('acme/widgets#10');
+    factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
+
+    const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'] });
+
+    expect(launched).toEqual({ ok: true, value: { taskId: 'T1' } });
+    expect(factory.executor.completions.map(({ prompt }) => prompt)).toEqual(['Work on the issues acme/widgets#10 with the main-flow workflow.']);
+    expect((await tui.until((state) => !!state.tasks.T1)).tasks.T1).toMatchObject({ title: NAME.title, branch: 'factory/T1-agent-written-task-names' });
+  });
+
   test.each([
-    ['fails', {}, () => Promise.reject(new Error('The namer is offline.'))],
+    ['fails', {}, () => Promise.reject(new Error('The model is unreachable.'))],
     ['takes too long', { namingTimeoutMs: 20 }, () => new Promise<string>(() => {})],
     ['answers with nothing usable', {}, async () => 'Sure! Here is a name: logout'],
-  ])('when the namer %s, the launch goes on, named from the prompt’s first line', async (_, more, reply) => {
-    const { operator, tui } = await factoryWith(namer(reply), [BUILD], more);
+  ])('when the cheap run %s, the launch goes on, named from the prompt’s first line', async (_, more, reply) => {
+    const { operator, tui } = await factoryWith(reply, [BUILD], more);
 
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'unattended', prompt: PROMPT })).toEqual({ ok: true, value: { taskId: 'T1' } });
 
     const state = await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
     expect(state.tasks.T1!.title).toBe('Improve the task naming, branch naming, and PR description. It should n…');
-    expect(state.tasks.T1).toMatchObject({ branch: 'factory/T1-improve-the-task-naming-branch-naming', summary: null });
+    expect(state.tasks.T1).toMatchObject({ branch: 'factory/T1-improve-the-task-naming-branch-naming', launchSummary: null });
   });
 });
 
 describe('the PR of a named task', () => {
   async function inReview(stages: string[], prBody?: { body: string; title?: string }) {
-    const { factory, operator, tui } = await factoryWith(namer(async () => JSON.stringify(NAME)), stages);
+    const { factory, operator, tui } = await factoryWith(async () => JSON.stringify(NAME), stages);
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'unattended', prompt: PROMPT });
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
     factory.git.editFile(tui.state().tasks.T1!.worktree!, 'src/naming.ts', 'export {};\n');

@@ -108,7 +108,7 @@ import {
   type SetupView,
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
-import type { Routes } from '../models/routing.ts';
+import { route, type Routes } from '../models/routing.ts';
 import { addOperatorRules, readAllowRules, trackScripts, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
@@ -133,7 +133,7 @@ import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
-import { nameTask, type Namer } from '../naming/task-naming.ts';
+import { NAMING_INSTRUCTIONS, nameTask, namingRequest, type Namer } from '../naming/task-naming.ts';
 import type { Clock } from './clock.ts';
 
 export type DaemonOptions = {
@@ -168,10 +168,8 @@ export type DaemonOptions = {
   transcriptsRoot: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
-  // What names a root task at launch from its prompt. Without one, or when it
-  // fails or takes longer than `namingTimeoutMs`, the title is the prompt's
-  // first line, cut to fit, and the branch slug comes from it.
-  namer?: Namer;
+  // How long a launch waits for the cheap run that names it before it is
+  // named from its prompt's first line instead.
   namingTimeoutMs?: number;
 };
 
@@ -705,8 +703,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // outside the queue, so a slow namer holds up no other command; a launch
   // refused out of hand names nothing.
   async function launch(command: LaunchCommand): Promise<Reply> {
-    const named = !stopping && !!lifecycle.repositories[command.repo];
-    const name = named ? await nameTask(options.namer, command.prompt ?? '', options.namingTimeoutMs) : null;
+    const refs = issueRefs(command.issues ?? [], command.repo);
+    const nameable = !stopping && !!lifecycle.repositories[command.repo] && !('error' in refs);
+    const name = nameable ? await nameTask(namer(), namingRequest(command.prompt ?? '', refs.issues, command.preset), options.namingTimeoutMs) : null;
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
       const { repo, prompt = '' } = command;
@@ -765,7 +764,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       action.stage = start.stage.id;
       action.opening = start.opening;
       action.title = name?.title ?? titleFrom(prompt.trim() || action.issues.join(' ') || resolved.preset.name);
-      action.summary = name?.summary ?? null;
+      action.launchSummary = name?.summary ?? null;
       action.worktree = taskWorktree(options.worktreeRoot, repository!, taskId, name?.slug ?? action.title);
       try {
         action.skillSet = (await skillSets.current()).version;
@@ -1355,6 +1354,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // The routing table, read afresh for each action, so `models update`
   // reaches the next run that starts.
+  // What names a root task at launch: a cheap run of the routing table's
+  // haiku model on the operator's subscription (ADR 0001), or nothing while
+  // the table is unreadable.
+  function namer(): Namer | undefined {
+    const table = routes();
+    if ('unreadable' in table) return undefined;
+    const model = route(table, 'haiku').model;
+    return (prompt, signal) => executor.complete({ model, system: NAMING_INSTRUCTIONS, prompt, credential: 'subscription-host' }, signal);
+  }
+
   function routes(): Routes {
     try {
       return routingTable.current();

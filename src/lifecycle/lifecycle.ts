@@ -12,6 +12,7 @@ import type { Issue, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isWorkLoop, namesPrompt, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
+import { cutToFit, oneLineOf } from '../text/lines.ts';
 import {
   correction,
   grown,
@@ -350,9 +351,9 @@ export type Task = {
   // The PR title its `artifact:pr-body` stage wrote with the body, if any:
   // without one, the PR takes the task's title.
   prTitle?: string | null;
-  // What the task was launched to do, summarised by the model that named it
-  // at launch, if it did: the PR body without a written one or a brief.
-  summary?: string | null;
+  // Its launch summary: what it was launched to do, as the cheap run that
+  // named it summarised it, if it did. The PR body without a written one or a brief.
+  launchSummary?: string | null;
   // True once the operator requested changes on it in review: past its last
   // stage, each of its runs that completes puts it back In review.
   changesRequested?: boolean;
@@ -744,8 +745,8 @@ export type TaskLaunched = {
   type: 'taskLaunched';
   repo: string;
   title: string;
-  // What the launch asks for, summarised by the model that named the task, if it did.
-  summary?: string | null;
+  // What the launch asks for, summarised by the cheap run that named the task, if it did.
+  launchSummary?: string | null;
   // The launch inputs: those its start stage needs, at least.
   prompt: string;
   issues: string[];
@@ -1378,8 +1379,7 @@ const PR_TITLE_LENGTH = 256;
 // The PR title an agent wrote, on one line and within GitHub's cap, or null
 // without one.
 function prTitleOf(title: string | undefined): string | null {
-  const line = (title ?? '').replace(/\s+/g, ' ').trim();
-  return line.length > PR_TITLE_LENGTH ? `${line.slice(0, PR_TITLE_LENGTH - 1).trimEnd()}…` : line || null;
+  return cutToFit(oneLineOf(title ?? ''), PR_TITLE_LENGTH) || null;
 }
 
 // The draft PR the root opens (ADR 0004): its PR title (or its task's
@@ -1406,7 +1406,7 @@ export function pullRequestOf(state: Lifecycle, task: Task): { title: string; bo
     '',
     `Total tokens: ${tokens.toLocaleString('en-US')}`,
   ];
-  const body = task.prBody ?? prBody(task, task.brief?.trim() || task.summary?.trim() || task.title);
+  const body = task.prBody ?? prBody(task, task.brief?.trim() || task.launchSummary?.trim() || task.title);
   return { title: task.prTitle || task.title, body: `${body}\n\n${footer.join('\n')}` };
 }
 
@@ -2841,7 +2841,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const launched: Task = {
         id: nextId(state, 'task'),
         title: action.title,
-        summary: action.summary?.trim() || null,
+        launchSummary: action.launchSummary?.trim() || null,
         repo: action.repo,
         mode,
         autonomy: mode === 'AFK' ? action.autonomy : null,

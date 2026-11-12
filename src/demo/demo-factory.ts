@@ -27,7 +27,7 @@ function task(id: string, title: string, state: TaskView['state'], label: string
     id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null,
     priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null,
     tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null,
-    summary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null,
+    launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null,
     ...more,
   };
 }

@@ -6,7 +6,7 @@
 // the repository. Where the factory's App isn't installed, a preset with
 // AFK stages shows why its launch is blocked, and `ctrl+o` opens the
 // App's installation settings.
-import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
 import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, PRIORITIES, type AutonomyLevel, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
@@ -15,7 +15,8 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
 import { edit } from './text-input.ts';
-import { choosable, Cursor, GLYPH, joined, LAUNCHING, Sheet, Spinner, tone, type Role } from './theme.ts';
+import { choosable, Cursor, GLYPH, joined, Sheet, tone, type Role } from './theme.ts';
+import { useLaunch } from './use-launch.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -75,12 +76,8 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   }));
   const [listings, setListings] = useState<Record<string, Listing>>({});
   const [refusal, setRefusal] = useState<string | null>(null);
-  // While the daemon names and launches the task: keys typed in one burst
-  // arrive before a re-render, so a second enter reads the ref.
   // A launch the operator backed out of goes on, but takes them nowhere.
-  const launching = useRef(false);
-  const [, setLaunching] = useState(false);
-  const left = useRef(false);
+  const launching = useLaunch(connection);
 
   useEffect(() => {
     const { repo } = draft;
@@ -114,7 +111,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
 
   useInput((input, key) => {
     if (key.escape) {
-      left.current = true;
+      launching.leave();
       return onCancel();
     }
     if (key.ctrl && input === 'o') {
@@ -122,19 +119,15 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
       return;
     }
     // The launch under way takes no other key.
-    if (launching.current) return;
+    if (launching.busy()) return;
     if (key.return) {
       const command = launchCommand(draft, card);
       if (!command) return;
-      launching.current = true;
-      setLaunching(true);
       setRefusal(null);
-      void connection.send(command).then((reply) => {
-        launching.current = false;
-        if (left.current) return;
-        setLaunching(false);
-        if (reply.ok) onLaunched((reply.value as { taskId: string }).taskId);
-        else setRefusal(reply.reason);
+      launching.launch(command, (launched) => {
+        if (launched.left) return;
+        if (launched.ok) onLaunched(launched.taskId);
+        else setRefusal(launched.reason);
       });
       return;
     }
@@ -194,7 +187,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     listing && 'warning' in listing && listing.warning ? h(Text, tone('warn'), listing.warning) : null,
     blocked ? h(Text, tone('bad'), blocked) : null,
     fixUrl ? h(Text, tone('dim'), 'ctrl+o opens its installation settings') : null,
-    launching.current ? h(Spinner, { label: LAUNCHING }) : null,
+    launching.indicator,
     refusal ? h(Text, tone('bad'), refusal) : null,
   );
 }

@@ -1,5 +1,6 @@
 import {
   ArchiveError,
+  type Completion,
   type ConversationEvent,
   type Delegation,
   type DelegationReply,
@@ -37,6 +38,10 @@ export class FakeExecutor implements Executor {
   private readonly resumable = new Set<string>();
   private events = 0;
   private held: Promise<void> = Promise.resolve();
+  // Each cheap run asked for, and how the next ones answer: by default they
+  // fail, as on a machine with no model to reach.
+  readonly completions: Completion[] = [];
+  private completing: (completion: Completion, signal: AbortSignal) => Promise<string> = () => Promise.reject(new Error('No cheap run is scripted.'));
 
   start(run: RunStart, sink: RunSink): void {
     this.started.push(run);
@@ -86,6 +91,16 @@ export class FakeExecutor implements Executor {
     if (this.transcripts.has(sessionId)) return;
     const copy = this.archives.get(dir)?.get(sessionId);
     if (copy) this.transcripts.set(sessionId, [...copy]);
+  }
+
+  complete(completion: Completion, signal: AbortSignal): Promise<string> {
+    this.completions.push(completion);
+    return this.completing(completion, signal);
+  }
+
+  // Later cheap runs answer as `answer` does.
+  answerCompletions(answer: (completion: Completion, signal: AbortSignal) => Promise<string>): void {
+    this.completing = answer;
   }
 
   sessionsDir(cwd: string): string {

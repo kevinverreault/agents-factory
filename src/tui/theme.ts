@@ -120,6 +120,8 @@ export function kindRole(item: Item): Role {
 
 // The glyphs the screens share.
 export const GLYPH = {
+  // The frames a spinner turns through.
+  spinner: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
   selected: '›',
   current: '✓',
   live: '●',
@@ -193,8 +195,7 @@ export function Cursor({ on }: { on: boolean }) {
   return h(Box, { flexShrink: 0 }, h(Text, tone('accent'), on ? GLYPH.selected : ' '));
 }
 
-// The frames a spinner turns through, and how long each shows.
-export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+// How long each spinner frame shows.
 const SPINNER_MS = 80;
 
 // Something under way the TUI waits on, such as a launch the daemon is
@@ -203,14 +204,11 @@ const SPINNER_MS = 80;
 export function Spinner({ label }: { label: string }) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
-    const timer = setInterval(() => setFrame((frame) => (frame + 1) % SPINNER_FRAMES.length), SPINNER_MS);
+    const timer = setInterval(() => setFrame((frame) => (frame + 1) % GLYPH.spinner.length), SPINNER_MS);
     return () => clearInterval(timer);
   }, []);
-  return h(Text, null, h(Text, tone('accent'), SPINNER_FRAMES[frame]), h(Text, tone('dim'), ` ${label}`));
+  return h(Text, null, h(Text, tone('accent'), GLYPH.spinner[frame]), h(Text, tone('dim'), ` ${label}`));
 }
-
-// What a launch shows until the daemon answers it: it names the task meanwhile.
-export const LAUNCHING = 'Naming the task…';
 
 // A box on a sheet that takes several: ticked in ok, or not, dim.
 export function Tick({ on }: { on: boolean }) {

@@ -2,17 +2,16 @@
 // names the task, rather than the factory cutting the prompt's first line to
 // fit. The model's text is checked here; anything unusable, an error or a
 // call that takes too long leaves the task named the old way.
+import { oneLineOf, wordsWithin } from '../text/lines.ts';
 import { SLUG_LENGTH, slugOf, TITLE_LENGTH } from '../worktree/task-worktree.ts';
 
 // The task's name: a title for its row, the slug its branch takes after
 // `factory/<id>-`, and a short summary of the request.
 export type TaskName = { title: string; slug: string; summary: string | null };
 
-// What names a task: the model's raw reply to `request`. It stops when
-// `signal` aborts.
-export interface Namer {
-  name(request: string, signal: AbortSignal): Promise<string>;
-}
+// What names a task: the model's raw reply to `request`, through a cheap
+// run of the executor (ADR 0001). It stops when `signal` aborts.
+export type Namer = (request: string, signal: AbortSignal) => Promise<string>;
 
 // How long a launch waits for its name before falling back.
 export const NAMING_TIMEOUT_MS = 12_000;
@@ -28,6 +27,15 @@ export const NAMING_INSTRUCTIONS = [
   'Do not carry out the request, ask questions, or add anything outside the JSON object.',
 ].join('\n');
 
+// What a launch asks to be named from: its prompt, or without one the issue
+// refs it works on and the preset it runs, or the preset alone.
+export function namingRequest(prompt: string, issues: readonly string[], preset: string | undefined): string {
+  if (prompt.trim()) return prompt.trim();
+  const workflow = preset ? `the ${preset} workflow` : '';
+  if (issues.length) return `Work on the issues ${issues.join(', ')}${workflow ? ` with ${workflow}` : ''}.`;
+  return workflow ? `Run ${workflow}.` : '';
+}
+
 // The name for `request`, or null when there is no namer or request, or the
 // namer fails, takes longer than `timeoutMs` or answers with nothing usable.
 export async function nameTask(namer: Namer | undefined, request: string, timeoutMs = NAMING_TIMEOUT_MS): Promise<TaskName | null> {
@@ -41,7 +49,7 @@ export async function nameTask(namer: Namer | undefined, request: string, timeou
     }, timeoutMs);
   });
   try {
-    const text = await Promise.race([namer.name(request.trim(), controller.signal), timedOut]);
+    const text = await Promise.race([namer(request.trim(), controller.signal), timedOut]);
     return text === null ? null : parseName(text);
   } catch {
     return null;
@@ -66,19 +74,11 @@ export function parseName(text: string): TaskName | null {
   } catch {
     return null;
   }
-  const words = (value: unknown) => (typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '');
-  const title = fitted(words(fields.title).replace(/[.\s]+$/, ''));
+  const words = (value: unknown) => (typeof value === 'string' ? oneLineOf(value) : '');
+  const title = wordsWithin(words(fields.title).replace(/[.\s]+$/, ''), TITLE_LENGTH);
   if (!title) return null;
   const slug = slugOf(words(fields.slug)) || slugOf(title);
   if (!slug) return null;
   const summary = typeof fields.summary === 'string' ? fields.summary.trim() : '';
   return { title, slug, summary: summary || null };
-}
-
-// `title` within TITLE_LENGTH, cut after its last whole word that fits.
-function fitted(title: string): string {
-  if (title.length <= TITLE_LENGTH) return title;
-  const cut = title.slice(0, TITLE_LENGTH + 1);
-  const space = cut.lastIndexOf(' ');
-  return (space > 0 ? cut.slice(0, space) : title.slice(0, TITLE_LENGTH)).replace(/[\s,;:–—-]+$/, '');
 }

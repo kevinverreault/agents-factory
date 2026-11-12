@@ -15,7 +15,8 @@ import { cycle, defaultRepo, NO_REPOSITORY } from './launch-card.ts';
 import { Output } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
-import { choosable, GLYPH, LAUNCHING, Sheet, Spinner, tone } from './theme.ts';
+import { choosable, GLYPH, Sheet, tone } from './theme.ts';
+import { useLaunch } from './use-launch.ts';
 
 // The preset a quick launch runs.
 const QUICK_PRESET = 'quick';
@@ -37,10 +38,9 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
   const [repo, setRepo] = useState(() => defaultRepo(state, here));
   const [taskId, setTaskId] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
-  // While the daemon names and launches the task, and whether the operator
-  // left meanwhile: the grill they left then goes on as a conversation.
-  const launching = useRef(false);
-  const left = useRef(false);
+  // While the daemon names and launches the task. Left meanwhile, the grill
+  // it launches goes on as an ordinary conversation, as after any esc.
+  const launching = useLaunch(connection);
   // Keys typed in one burst arrive before a re-render, so what they edit is
   // kept here: the prompt, then a typed answer, and the card it answers.
   const typing = useRef<{ draft: string; card: Card; cardFor: string | null; answered: string | null }>({ draft: '', card: newCard(), cardFor: null, answered: null });
@@ -65,18 +65,13 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
 
   const launch = () => {
     const prompt = typing.current.draft.trim();
-    if (!repo || !prompt || launching.current) return;
-    launching.current = true;
+    if (!repo || !prompt) return;
     setRefusal(null);
-    rerender();
-    void connection.send({ type: 'launchTask', repo, preset: QUICK_PRESET, prompt, quick: true }).then((reply) => {
-      launching.current = false;
-      if (reply.ok && left.current) return void connection.send({ type: 'expandQuickLaunch', taskId: (reply.value as { taskId: string }).taskId });
-      tell(reply);
-      rerender();
-      if (!reply.ok) return;
+    launching.launch({ type: 'launchTask', repo, preset: QUICK_PRESET, prompt, quick: true }, (launched) => {
+      if (launched.ok && launched.left) return void connection.send({ type: 'expandQuickLaunch', taskId: launched.taskId });
+      if (!launched.ok) return setRefusal(launched.reason);
       typing.current.draft = '';
-      setTaskId((reply.value as { taskId: string }).taskId);
+      setTaskId(launched.taskId);
     });
   };
   const handOff = (id: string) => void connection.send({ type: 'openHandoff', taskId: id }).then(tell);
@@ -94,12 +89,12 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
     if (key.escape) {
       // A launched grill goes on as an ordinary conversation, opening no sheet itself.
       if (taskId) void connection.send({ type: 'expandQuickLaunch', taskId });
-      left.current = true;
+      launching.leave();
       return onLeave();
     }
     if (!task) {
       // The launch under way takes no other key.
-      if (taskId || launching.current) return;
+      if (taskId || launching.busy()) return;
       if (key.return) return launch();
       if (key.leftArrow || key.rightArrow) return setRepo((repo) => cycle(repositories, repo, key.leftArrow ? -1 : 1));
       typed.draft = edit(typed.draft, input, key) ?? typed.draft;
@@ -146,7 +141,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
         ? h(Box, { gap: 1 }, h(Text, tone('dim'), 'Repository'), h(Text, null, repositories.length > 1 ? choosable(repo) : repo))
         : h(Text, tone('warn'), NO_REPOSITORY),
       h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`),
-      launching.current ? h(Spinner, { label: LAUNCHING }) : taskId ? h(Text, tone('dim'), 'Starting the grill…') : null,
+      launching.indicator ?? (taskId ? h(Text, tone('dim'), 'Starting the grill…') : null),
       refusal ? h(Text, tone('bad'), refusal) : null,
     );
   }

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
-import { nameTask, parseName, type Namer } from './task-naming.ts';
+import { nameTask, namingRequest, parseName, type Namer } from './task-naming.ts';
 
-const replying = (text: string): Namer => ({ name: async () => text });
+const replying = (text: string): Namer => async () => text;
 
 describe('parseName', () => {
   test('reads the model’s JSON, fenced or not', () => {
@@ -32,6 +32,16 @@ describe('parseName', () => {
   });
 });
 
+describe('namingRequest', () => {
+  test('is the prompt, or without one the issue refs and preset, or the preset alone', () => {
+    expect(namingRequest('  Add a logout button.  ', ['#12'], 'implement')).toBe('Add a logout button.');
+    expect(namingRequest('', ['acme/widgets#12', 'acme/widgets#13'], 'implement')).toBe('Work on the issues acme/widgets#12, acme/widgets#13 with the implement workflow.');
+    expect(namingRequest('', ['acme/widgets#12'], undefined)).toBe('Work on the issues acme/widgets#12.');
+    expect(namingRequest('', [], 'setup')).toBe('Run the setup workflow.');
+    expect(namingRequest('', [], undefined)).toBe('');
+  });
+});
+
 describe('nameTask', () => {
   test('names the request through the namer', async () => {
     expect(await nameTask(replying('{"title": "Add logout", "slug": "add-logout", "summary": "Adds a logout button."}'), 'Add a logout button.')).toEqual({
@@ -44,9 +54,9 @@ describe('nameTask', () => {
   test('is null without a namer or a request, when the namer fails, and when it takes too long, which aborts it', async () => {
     expect(await nameTask(undefined, 'Add a logout button.')).toBeNull();
     expect(await nameTask(replying('{"title": "x"}'), '   ')).toBeNull();
-    expect(await nameTask({ name: () => Promise.reject(new Error('offline')) }, 'Add a logout button.')).toBeNull();
+    expect(await nameTask(() => Promise.reject(new Error('offline')), 'Add a logout button.')).toBeNull();
     let aborted = false;
-    const hanging: Namer = { name: (_request, signal) => new Promise(() => signal.addEventListener('abort', () => (aborted = true))) };
+    const hanging: Namer = (_request, signal) => new Promise(() => signal.addEventListener('abort', () => (aborted = true)));
     expect(await nameTask(hanging, 'Add a logout button.', 20)).toBeNull();
     expect(aborted).toBe(true);
   });
