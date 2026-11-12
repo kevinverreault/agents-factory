@@ -18,7 +18,6 @@ import {
   type HookCallback,
   type Options,
   type Query,
-  type SDKControlGetUsageResponse,
   type SDKRateLimitInfo,
   type SDKResultMessage,
   type SessionKey,
@@ -28,12 +27,13 @@ import {
 import { HARD_DENY_RULES, refusal, runHistoryIn } from '../guards/hard-denies.ts';
 import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
-import type { ModelUsage, Usage, UsageWindowKind, UsageWindowStatus } from '../usage/usage.ts';
+import type { ModelUsage, Usage, UsageWindowStatus } from '../usage/usage.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import type { Processes } from '../os/processes.ts';
 import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
 import { afkFactoryTools, hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
+import { READ_EVERY_MS, shareSpent, subscriptionWindowReader } from './subscription-windows.ts';
 
 type LiveRun = {
   input: StreamedInput;
@@ -70,12 +70,6 @@ export const RETRY_WATCHDOG_ENV = {
 // not an ordinary backoff.
 const WINDOW_WAIT_MS = 60_000;
 
-// How often a run asks its CLI for the plan's usage windows (Claude Code's
-// `/usage`), across all runs: they share the account. A `rate_limit_event`
-// comes only when a window's status changes, and rarely says how much of it
-// is spent, so without asking the windows read unknown.
-const PLAN_USAGE_EVERY_MS = 5 * 60_000;
-
 // The `hook` CLI, which relays each PostToolUse hook event to the daemon for
 // artifact capture. Spawned directly by Claude Code, with no shell between.
 const RELAY_HOOK = { command: process.execPath, args: [fileURLToPath(new URL('../cli.ts', import.meta.url)), 'hook'] };
@@ -102,8 +96,8 @@ export type AgentSdkExecutorOptions = {
 
 export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkExecutorOptions = {}): Executor {
   const runs = new Map<string, LiveRun>();
-  // When a run last asked for the plan's usage windows, in ms.
-  let planAskedAt = -Infinity;
+  // Reads the usage windows through whichever run asks, as often as any run does.
+  const windows = subscriptionWindowReader();
 
   function say(runId: string, text: string): void {
     const run = runs.get(runId);
@@ -258,23 +252,24 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
     // How to sign in again, once Claude Code couldn't sign in for the run.
     let signIn: string | null = null;
     const failed = (reason: string) => report({ type: 'runFailed', runId, reason: signIn ? `${reason}\n\n${signIn}` : reason });
-    // Reads the plan's usage windows, at most every `PLAN_USAGE_EVERY_MS`
-    // across runs. Display only (ADR 0008): a CLI that can't say says nothing.
-    const askPlanUsage = () => {
-      const now = Date.now();
-      if (now - planAskedAt < PLAN_USAGE_EVERY_MS) return;
-      planAskedAt = now;
-      run.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).then(
-        (usage) => {
-          for (const seen of snapshotsOfPlan(usage.rate_limits)) report({ type: 'usageSnapshotSeen', runId, ...seen });
+    // Reads the usage windows through the run's CLI, as its `/usage` does:
+    // with each message, and on a timer while a conversation waits on the
+    // operator. Display only (ADR 0008): a CLI that can't say says nothing.
+    const readWindows = () =>
+      windows.read(
+        () => run.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).then((usage) => usage.rate_limits),
+        (readings) => {
+          if (run.stopped || ended) return false;
+          for (const reading of readings) report({ type: 'usageSnapshotSeen', runId, ...reading });
+          return true;
         },
-        () => {},
       );
-    };
+    const windowTimer = setInterval(readWindows, READ_EVERY_MS);
+    windowTimer.unref();
     try {
       for await (const message of run.query) {
         if (run.stopped) return;
-        askPlanUsage();
+        readWindows();
         if (message.type === 'system' && message.subtype === 'init' && !run.reportedStart && run.cli) {
           run.reportedStart = true;
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
@@ -326,6 +321,7 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
       // The SDK throws once the CLI returns an error result.
       failed(error instanceof Error ? error.message : String(error));
     } finally {
+      clearInterval(windowTimer);
       runs.delete(runId);
     }
   }
@@ -659,27 +655,8 @@ function sampleOf(message: unknown): { messageId: string; model: string; usage: 
 // window is no snapshot.
 function snapshotOf({ rateLimitType, status, utilization, resetsAt }: SDKRateLimitInfo) {
   if (!rateLimitType) return null;
-  const spent = typeof utilization === 'number' ? Math.min(Math.max(utilization > 1 ? utilization / 100 : utilization, 0), 1) : null;
+  const spent = typeof utilization === 'number' ? shareSpent(utilization > 1 ? utilization / 100 : utilization) : null;
   return { window: rateLimitType, status, spent, resetsAt: typeof resetsAt === 'number' ? resetsAt * 1000 : null };
-}
-
-// The plan's usage windows as the CLI's `/usage` reads them: null when the
-// account has none, as with an API key.
-type PlanUsageWindows = SDKControlGetUsageResponse['rate_limits'];
-// The windows `/usage` reads that the factory keeps snapshots of.
-const PLAN_WINDOWS = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet'] as const satisfies readonly UsageWindowKind[];
-
-// The plan's usage windows as snapshots: each window `/usage` reads a share
-// of, spent at 100%.
-export function snapshotsOfPlan(limits: PlanUsageWindows) {
-  return PLAN_WINDOWS.flatMap((window) => {
-    const reading = limits?.[window];
-    if (typeof reading?.utilization !== 'number') return [];
-    const spent = Math.min(Math.max(reading.utilization / 100, 0), 1);
-    const resetsAt = reading.resets_at ? Date.parse(reading.resets_at) : NaN;
-    const status: UsageWindowStatus = spent >= 1 ? 'rejected' : 'allowed';
-    return [{ window, status, spent, resetsAt: Number.isNaN(resetsAt) ? null : resetsAt }];
-  });
 }
 
 // The session's usage so far, per model, with the client's API-equivalent cost.

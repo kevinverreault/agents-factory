@@ -241,6 +241,34 @@ describe('usage limits on AFK runs', () => {
     ]);
   });
 
+  test('a reading that says nothing of the status keeps a weekly limit spent, so the run’s failure still names the reset time', async () => {
+    const { factory, operator, tui } = await running();
+    const resetsAt = Date.UTC(2026, 10, 2, 14, 30);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'rejected', spent: 1, resetsAt });
+    // The CLI's `/usage` reads the share, not the status, rounded below 100%.
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: null, spent: 0.996, resetsAt: resetsAt + 400 });
+    await settled(operator);
+    factory.executor.report('R1', { type: 'runFailed', reason: 'API Error: 429 usage limit' });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.attentionQueue).toEqual([
+      expect.objectContaining({ reason: 'API Error: 429 usage limit. The weekly usage limit is spent: it resets Mon 2 Nov, 14:30.' }),
+    ]);
+  });
+
+  test('a reading that says nothing of the status of a window seen spent at last reads it spent', async () => {
+    const { factory, operator, tui } = await running();
+    const resetsAt = Date.UTC(2026, 10, 2, 14, 30);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: null, spent: 1, resetsAt });
+    await settled(operator);
+    factory.executor.report('R1', { type: 'runFailed', reason: 'API Error: 429 usage limit' });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.attentionQueue).toEqual([
+      expect.objectContaining({ reason: 'API Error: 429 usage limit. The weekly usage limit is spent: it resets Mon 2 Nov, 14:30.' }),
+    ]);
+  });
+
   test('a weekly limit that resets within the wait cap is waited out like a 5-hour one (ADR 0008)', async () => {
     const { factory, tui } = await running();
     const resetsAt = factory.clock.now() + hours(4);

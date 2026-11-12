@@ -132,17 +132,27 @@ export function windowView(snapshot: UsageSnapshot | undefined, at: number): Win
   return { spent: snapshot.spent, resetsAt: snapshot.resetsAt };
 }
 
+// A window's reading as a run sees it: a snapshot, but one that may say
+// nothing of the window's status, as the CLI's `/usage` doesn't.
+export type UsageReading = Omit<UsageSnapshot, 'status'> & { status: UsageWindowStatus | null };
+
 // How far apart two readings' resets may be and still be the same window's:
 // the CLI's `/usage` names them to the millisecond, its `rate_limit_event`s
 // to the second.
 const SAME_RESET_MS = 60_000;
 
-// The window's reading `seen` brings: what it says, and what was spent as
-// the last reading had it when it says nothing of that for the same window.
-export function updatedSnapshot(last: UsageSnapshot | undefined, seen: UsageSnapshot): UsageSnapshot {
-  if (seen.spent !== null || !last) return seen;
-  const sameReset = last.resetsAt === seen.resetsAt || (last.resetsAt !== null && seen.resetsAt !== null && Math.abs(last.resetsAt - seen.resetsAt) <= SAME_RESET_MS);
-  return sameReset ? { ...seen, spent: last.spent } : seen;
+function sameReset(a: number | null, b: number | null): boolean {
+  return a === b || (a !== null && b !== null && Math.abs(a - b) <= SAME_RESET_MS);
+}
+
+// The window's reading `seen` brings: what it says, and, for the same
+// window, what the last reading had of what it says nothing of. A reading
+// silent on the status of a window with none to keep reads it spent at 100%.
+export function updatedSnapshot(last: UsageSnapshot | undefined, seen: UsageReading): UsageSnapshot {
+  const same = last !== undefined && sameReset(last.resetsAt, seen.resetsAt);
+  const spent = seen.spent ?? (same ? last.spent : null);
+  const status = seen.status ?? (same ? last.status : null) ?? (spent !== null && spent >= 1 ? 'rejected' : 'allowed');
+  return { ...seen, spent, status };
 }
 
 const HOUR_MS = 3_600_000;
