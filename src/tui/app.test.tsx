@@ -3018,8 +3018,13 @@ describe('the screens view', () => {
     await eventually(() => {
       const frame = app.lastFrame()!;
       for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', 'v', 'tab', 'f', 'F', ':', 'g', '\\?']) expect(frame).toMatch(new RegExp(`^[│\\s]*${key}\\s{2,}\\S`, 'm'));
-      // Like every sheet, its own hint says what closes it, inside its border.
-      expect(frame).toMatch(/^\s*│\s*\? or esc close\s*│/m);
+      // Its own hint says what closes it, once, under the last key it lists
+      // and not on the footer, the screen's last line, which gives way to it.
+      const lines = frame.trimEnd().split('\n');
+      const hint = lines.findIndex((line) => line.includes('? or esc close'));
+      expect(lines.filter((line) => line.includes('? or esc close'))).toHaveLength(1);
+      expect(hint).toBeGreaterThan(lines.findIndex((line) => /\?\s{2,}this help/.test(line)));
+      expect(hint).toBeLessThan(lines.length - 1);
     });
     await press(app, '3', '\x1b');
     await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T1\s+Grill me about the docs/));

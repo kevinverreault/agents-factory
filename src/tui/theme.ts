@@ -154,6 +154,8 @@ export const GLYPH = {
   // A box ticked, or not, on a sheet that takes several.
   ticked: '[x]',
   unticked: '[ ]',
+  // What a line too long to show whole leaves out, between its start and end.
+  elided: '…',
   // Where a line broke, on a line that shows it whole.
   newline: '↵',
   // A sparkline's bars, lowest to highest.
@@ -192,11 +194,12 @@ export function Tick({ on }: { on: boolean }) {
   return h(Text, tone(on ? 'ok' : 'dim'), on ? GLYPH.ticked : GLYPH.unticked);
 }
 
-// A full-width rule, or one led by a label in the label's role.
-export function Rule({ role = 'line', label }: { role?: Role; label?: string }) {
+// A full-width rule, or one led by a label in the label's role: a label
+// of several parts has a stretch of rule between each.
+export function Rule({ role = 'line', label }: { role?: Role; label?: string | string[] }) {
   const line = h(Box, { flexGrow: 1, borderStyle: 'single', borderTop: true, borderBottom: false, borderLeft: false, borderRight: false, ...border(role) });
   if (label === undefined) return h(Box, { flexShrink: 0 }, line);
-  return h(Box, { flexShrink: 0, gap: 1 }, h(Box, { flexShrink: 1 }, h(Text, { ...tone(role), wrap: 'truncate' }, `${GLYPH.rule.repeat(2)} ${label}`)), line);
+  return h(Box, { flexShrink: 0, gap: 1 }, h(Box, { flexShrink: 1 }, h(Text, { ...tone(role), wrap: 'truncate' }, [label].flat().map((part) => `${GLYPH.rule.repeat(2)} ${part}`).join(' '))), line);
 }
 
 // A section heading: dim and uppercase, or accent on a focused pane.
