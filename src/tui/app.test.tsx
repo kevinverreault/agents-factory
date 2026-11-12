@@ -1846,6 +1846,18 @@ describe('answering from Needs you', () => {
       expect(frame).toContain('✓ Answered T1 Fix the login bug: Which identity provider times out? → Auth0');
       expect(frame).not.toContain('T2 Implement the store: Retry');
     });
+
+    // The condensed view's Needs you says it too.
+    await press(app, ESC, 'v');
+    await eventually(() => expect(app.lastFrame()).toContain('DETAIL'));
+    expect(app.lastFrame()).toContain('✓ Answered T1 Fix the login bug');
+
+    // Left, however it is left, Needs you no longer says it.
+    await press(app, ':', ...'task 1', ENTER, 'v');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T1'));
+    await press(app, '2');
+    await eventually(() => expect(app.lastFrame()).toContain('Nothing needs you.'));
+    expect(app.lastFrame()).not.toContain('Answered');
   });
 
   test('a digit can take a failed AFK task over, into its conversation; esc gives the digits back to the screens', async () => {

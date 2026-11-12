@@ -147,6 +147,8 @@ export const GLYPH = {
   advances: '←',
   // Between a question and the operator's answer to it.
   answers: '→',
+  // What leads a line saying the operator's answer went through.
+  answered: '✓',
   // Around a value ←→ changes.
   chooseBefore: '‹',
   chooseAfter: '›',

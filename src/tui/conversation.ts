@@ -12,7 +12,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
-import { AnswerSheet, answerable, cardItem, reopens, useAnswering } from './answer-sheet.ts';
+import { AnswerSheet, answerable, answeredLine, cardItem, reopens, useAnswering } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event, SystemLine } from './output.ts';
@@ -40,6 +40,8 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   // before it, so its answer shows where it was given: the session file
   // holds the agent's question, but not the operator's answer as a message.
   const [answered, setAnswered] = useState<{ id: string; at: number; text: string }[]>([]);
+  // Numbers the answers from the answer sheet, which have no question of their own to name them.
+  const sheetAnswers = useRef(0);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [advancing, setAdvancing] = useState(false);
   // Keys typed in one burst arrive before a re-render, so what they edit is
@@ -82,7 +84,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const answers = useAnswering(connection, request, task, {
     onReply: ({ reply, answer }) => {
       tell(reply);
-      if (reply.ok) setAnswered((lines) => [...lines, { id: `request-${lines.length}`, at: events.length, text: `${GLYPH.current} Answered ${answer}` }]);
+      if (reply.ok) setAnswered((lines) => [...lines, { id: `request-${(sheetAnswers.current += 1)}`, at: events.length, text: answeredLine(answer) }]);
     },
   });
   const answering = answerable(request, task);
@@ -122,17 +124,17 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     if (question && typed.cardFor !== question.id) Object.assign(typed, { card: newCard(), cardFor: question.id });
     const onCard = question ? cardKey(question, typed.card, typed.draft, input, key) : { kind: 'ignored' as const };
     if (onCard.kind === 'answered') {
-      const answered = question!.id;
-      const line = { id: answered, at: events.length, text: `${GLYPH.current} Answered ${answersText(onCard.answers)}` };
-      setAnswered((lines) => [...lines.filter(({ id }) => id !== answered), line]);
-      void connection.send({ type: 'answerQuestion', taskId, questionId: answered, answers: onCard.answers }).then((reply) => {
+      const questionId = question!.id;
+      const line = { id: questionId, at: events.length, text: answeredLine(answersText(onCard.answers)) };
+      setAnswered((lines) => [...lines.filter(({ id }) => id !== questionId), line]);
+      void connection.send({ type: 'answerQuestion', taskId, questionId, answers: onCard.answers }).then((reply) => {
         tell(reply);
-        if (!reply.ok) setAnswered((lines) => lines.filter(({ id }) => id !== answered));
+        if (!reply.ok) setAnswered((lines) => lines.filter(({ id }) => id !== questionId));
         // A refused answer leaves the card up, so the operator sees what is still open.
-        if (!reply.ok && typed.answered === answered) Object.assign(typed, { answered: null, card: newCard() });
+        if (!reply.ok && typed.answered === questionId) Object.assign(typed, { answered: null, card: newCard() });
         rerender();
       });
-      Object.assign(typed, { answered, draft: '' });
+      Object.assign(typed, { answered: questionId, draft: '' });
     } else if (onCard.kind === 'card') {
       typed.card = onCard.card;
       if (onCard.clearDraft) typed.draft = '';

@@ -232,9 +232,10 @@ export function askedFor(item: AttentionQueueItem, task: TaskView | undefined): 
 // answered: the item's title, and the choice or the card's answers.
 export type Answered = { reply: Reply; taskId: string | null; opens: boolean; title: string; answer: string };
 
-// The line that tells the operator their answer went through, and what it was.
-export function answeredLine({ title, answer }: Pick<Answered, 'title' | 'answer'>): string {
-  return `${GLYPH.current} Answered ${title}: ${answer}`;
+// The line that tells the operator their answer went through, and what it
+// was: with the item's title where it isn't already the screen's.
+export function answeredLine(answer: string, title?: string): string {
+  return `${GLYPH.answered} Answered ${title === undefined ? '' : `${title}: `}${answer}`;
 }
 
 // What an item's row and sheet are titled by: its task, or else the

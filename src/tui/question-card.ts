@@ -45,10 +45,15 @@ export function cardKey(question: Question, card: Card, draft: string, input: st
   return { kind: 'card', card: { ...card, picked }, clearDraft: false };
 }
 
+// A question with the operator's answer to it.
+function answerOf(question: string, answer: string): string {
+  return `${question} ${GLYPH.answers} ${answer}`;
+}
+
 // A card's answers on one line: each question, then its answer.
 export function answersText(answers: Answers): string {
   return Object.entries(answers)
-    .map(([question, answer]) => `${question} ${GLYPH.answers} ${answer}`)
+    .map(([question, answer]) => answerOf(question, answer))
     .join(` ${GLYPH.between} `);
 }
 
@@ -61,7 +66,7 @@ export function QuestionCard({ question, card, ownWords = true, nested = false }
   const hint = `${asked.multiSelect ? 'digits toggle · enter confirm' : 'digit picks'}${ownWords ? ' · or type your own answer' : ''}`;
   // The card's questions already answered, each with its answer, over the one asked now.
   const answered = question.questions.slice(0, card.index).map(({ question: text }) =>
-    h(Text, { key: `answered-${text}`, ...tone('ok') }, `${GLYPH.current} ${text} ${GLYPH.answers} ${card.answers[text] ?? ''}`),
+    h(Text, { key: `answered-${text}`, ...tone('ok') }, `${GLYPH.answered} ${answerOf(text, card.answers[text] ?? '')}`),
   );
   const body = [
     ...answered,

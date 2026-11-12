@@ -128,8 +128,11 @@ export function App({
   const [clone, setClone] = useState<CloneView | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   // What the operator last answered on Needs you, once the daemon took it,
-  // until they leave Needs you.
+  // until they leave Needs you, however they do.
   const [answered, setAnswered] = useState<string | null>(null);
+  useEffect(() => {
+    if (tab !== 'needs-you') setAnswered(null);
+  }, [tab]);
   const [view, setView] = useState<View>({ kind: 'tabs' });
   // Each pane's cursor. It stays on the row it was on while the rows move,
   // so leaving a conversation comes back to exactly where the operator was.
@@ -228,7 +231,6 @@ export function App({
   // A number key switches to its screen, leaving any detail behind.
   const show = (next: Tab) => {
     setTab(next);
-    if (next !== 'needs-you') setAnswered(null);
     setDetail(null);
   };
   // Where the command line jumps: a task's detail, the tree under the cursor
@@ -259,7 +261,7 @@ export function App({
     onSend: () => setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } })),
     onReply: ({ reply, taskId, opens, title, answer }) => {
       setRefusal(reply.ok ? null : reply.reason);
-      setAnswered(reply.ok ? answeredLine({ title, answer }) : null);
+      setAnswered(reply.ok ? answeredLine(answer, title) : null);
       if (reply.ok && opens && taskId) setView({ kind: 'conversation', taskId });
     },
   });
@@ -492,7 +494,8 @@ export function App({
             )
         : null,
       refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
-      answered && tab === 'needs-you' && !condensed ? h(Text, { key: 'answered', ...tone('ok') }, answered) : null,
+      // A refusal since says more about where things stand.
+      answered && tab === 'needs-you' && !refusal ? h(Text, { key: 'answered', ...tone('ok') }, answered) : null,
       pickerCursor === null ? null : h(GroupPicker, { key: 'picker', groups, cursor: pickerCursor, current: group }),
       cancelSheet
         ? h(ChoosePrompt, { key: 'cancel', title: `Cancel ${cancelSheet.taskId}`, reason: cancelSheet.reason, options: cancelSheet.options.map(({ label }) => label) })
