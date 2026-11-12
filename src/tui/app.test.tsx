@@ -3460,7 +3460,7 @@ describe('the condensed view', () => {
     await press(app, 'f');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/^\s*DETAIL · ZOOMED/m);
+      expect(frame).toMatch(/^\s*DETAIL · zoomed/m);
       expect(frame).not.toContain('TASKS · all');
     });
   });

@@ -33,10 +33,10 @@ export function Condensed({
   detail: ReactNode;
 }) {
   // Each pane's title: the tree's names the group it is filtered by.
-  const titles: Record<Pane, { text: string; group?: string } | null> = {
+  const titles: Record<Pane, { text: string; suffix?: string } | null> = {
     sidebar: null,
-    tree: { text: 'Tasks', group: group ?? 'all' },
-    detail: { text: zoom ? `Detail ${GLYPH.between} zoomed` : 'Detail' },
+    tree: { text: 'Tasks', suffix: group ?? 'all' },
+    detail: { text: 'Detail', suffix: zoom ? 'zoomed' : undefined },
   };
   const pane = (id: Pane, content: ReactNode, size: { width?: number; flexGrow?: number; flexBasis?: number }, divided: boolean) =>
     h(
@@ -93,7 +93,7 @@ export function Sidebar({
           cursor,
           items: queue.map((item, i) => h(Item, { key: keyOf(item), item, task: item.taskId ? state.tasks[item.taskId] : undefined, selected: focused && i === cursor })),
         }),
-    h(Box, { marginTop: 1 }, h(Heading, { text: 'Groups' })),
+    h(Box, { marginTop: 1 }, h(Heading, { text: 'Groups', role: focused ? 'accent' : 'dim' })),
     groups.length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
     ...groups.map(([name, count]) =>
       h(

@@ -189,10 +189,11 @@ export function Rule({ role = 'line', label }: { role?: Role; label?: string }) 
   return h(Box, { flexShrink: 0, gap: 1 }, h(Box, { flexShrink: 1 }, h(Text, { ...tone(role), wrap: 'truncate' }, `${GLYPH.rule.repeat(2)} ${label}`)), line);
 }
 
-// A section heading: dim and uppercase, or accent on a focused pane. The
-// `group` a pane is filtered by follows it, `·` between, in its own case.
-export function Heading({ text, group, role = 'dim' }: { text: string; group?: string; role?: Role }) {
-  return h(Text, { ...tone(role), wrap: 'truncate' }, text.toUpperCase(), group === undefined ? '' : ` ${GLYPH.between} ${group}`);
+// A section heading: dim and uppercase, or accent on a focused pane. A
+// `suffix` follows it, `·` between, in its own case: the group a pane is
+// filtered by, say.
+export function Heading({ text, suffix, role = 'dim' }: { text: string; suffix?: string; role?: Role }) {
+  return h(Text, { ...tone(role), wrap: 'truncate' }, text.toUpperCase(), suffix === undefined ? '' : ` ${GLYPH.between} ${suffix}`);
 }
 
 // Key hints: each key bold, what it does dim, `·` between them. They

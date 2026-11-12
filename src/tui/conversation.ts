@@ -167,7 +167,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     h(
       Box,
       { flexDirection: 'column', flexShrink: 0 },
-      h(Text, { ...tone('accent'), bold: true, wrap: 'truncate' }, `${GLYPH.conversation} ${taskId} ${task?.title ?? ''}`),
+      h(Text, { ...tone('accent'), wrap: 'truncate' }, `${GLYPH.conversation} ${taskId} ${task?.title ?? ''}`),
       h(
         Text,
         { ...tone('dim'), wrap: 'truncate' },
