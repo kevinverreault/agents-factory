@@ -13,7 +13,7 @@ import type { TaskView } from '../protocol/factory-state.ts';
 import type { Command, Option, Reply } from '../protocol/protocol.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
-import { edit } from './text-input.ts';
+import { edit, withCaret, type Caret } from './text-input.ts';
 import { GLYPH, kindLook, Option as Pick, Rule, Sheet, tone } from './theme.ts';
 
 // What a digit on the sheet does. A choice that `opens` takes the operator
@@ -243,8 +243,9 @@ export function titleOf(item: AttentionQueueItem, task: TaskView | undefined, { 
 export type Ask = { reason: string; options: string[] | null };
 
 // The fields the operator is filling in for a choice, as they stand: `at`
-// is the one they are typing into, and `enter` what enter does.
-export type Form = { fields: Field[]; at: number; enter: string };
+// is the one they are typing into, `caret` where in it, and `enter` what
+// enter does.
+export type Form = { fields: Field[]; at: number; caret: Caret; enter: string };
 
 // The operator answering an item on its sheet: `key` takes a key while the
 // digits are the sheet's. Keys typed in one burst arrive before a re-render,
@@ -263,7 +264,7 @@ export function useAnswering(
   const sheet = useRef<{
     card: Card;
     cardFor: string | null;
-    form: { for: string; choice: number; values: string[]; at: number } | null;
+    form: { for: string; choice: number; values: string[]; at: number; caret: Caret } | null;
     // Options with `yesNo` ask whether to go ahead, with the one command that does.
     confirm: { for: string; reason: string; options: Option[]; yesNo: boolean } | null;
     sent: Set<string>;
@@ -313,7 +314,7 @@ export function useAnswering(
     const index = /^[1-9]$/.test(input) ? Number(input) - 1 : -1;
     const choice = choicesFor(item, task)[index];
     if (choice && 'fields' in choice) {
-      sheet.current.form = { for: itemKey, choice: index, values: choice.fields.map(({ value }) => value), at: 0 };
+      sheet.current.form = { for: itemKey, choice: index, values: choice.fields.map(({ value }) => value), at: 0, caret: null };
       rerender();
     } else if (choice) send(choice.command, choice.opens);
   };
@@ -328,9 +329,13 @@ export function useAnswering(
       if (command) {
         sheet.current.form = null;
         send(command);
-      } else if (key.upArrow) form.at = Math.max(form.at - 1, 0);
-      else if (key.downArrow || key.tab) form.at = Math.min(form.at + 1, form.values.length - 1);
-      else form.values[form.at] = edit(form.values[form.at]!, input, key) ?? form.values[form.at]!;
+      } else if (key.upArrow || key.downArrow || key.tab) {
+        const at = key.upArrow ? Math.max(form.at - 1, 0) : Math.min(form.at + 1, form.values.length - 1);
+        if (at !== form.at) Object.assign(form, { at, caret: null });
+      } else {
+        const typed = edit(form.values[form.at]!, form.caret, input, key);
+        if (typed) [form.values[form.at], form.caret] = [typed.text, typed.caret];
+      }
     }
     rerender();
   };
@@ -350,6 +355,7 @@ export function useAnswering(
     form: filling && {
       fields: filling.choice.fields.map(({ prompt }, i) => ({ prompt, value: filling.form.values[i]! })),
       at: filling.form.at,
+      caret: filling.form.caret,
       enter: filling.choice.enter,
     },
     // What a refusal asks back, if anything: while it does, every key is its answer's.
@@ -406,7 +412,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
       ...choicesFor(item, task).map((choice, i) => h(Pick, { key: choice.label, digit: i + 1 }, choice.label)),
       // With more than one field, › marks the one being typed into.
       ...(form?.fields ?? []).map(({ prompt, value }, i) =>
-        h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? `${GLYPH.selected} ` : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(value)),
+        h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? `${GLYPH.selected} ` : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(i === form!.at ? withCaret(value, form!.caret) : value)),
       ),
       confirm?.options ? h(ChoosePrompt, { reason: confirm.reason, options: confirm.options }) : null,
       confirm && !confirm.options ? h(Text, tone('warn'), confirm.reason) : null,

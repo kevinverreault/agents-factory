@@ -20,7 +20,7 @@ import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { fixed, usePager, useRows } from './screen.ts';
 import { modeOf } from './task-detail.ts';
 import { GLYPH, joined, Keys, Rule, Section, stateLook, tone, type Hint } from './theme.ts';
-import { edit } from './text-input.ts';
+import { edit, withCaret, type Caret } from './text-input.ts';
 import { TaskUsage, UsageStrip } from './usage.ts';
 
 type Props = {
@@ -40,8 +40,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const [advancing, setAdvancing] = useState(false);
   // Keys typed in one burst arrive before a re-render, so what they edit is
   // kept here: the draft, and the card for the question it answers.
-  const typing = useRef<{ draft: string; card: Card; cardFor: string | null; answered: string | null }>({
+  const typing = useRef<{ draft: string; caret: Caret; card: Card; cardFor: string | null; answered: string | null }>({
     draft: '',
+    caret: null,
     card: newCard(),
     cardFor: null,
     answered: null,
@@ -128,7 +129,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       void connection.send({ type: 'open', taskId }).then((reply) => {
         tell(reply);
         if (reply.ok && text) void connection.send({ type: 'sendMessage', taskId, text }).then(tell);
-        else if (!reply.ok && text && !typing.current.draft) Object.assign(typing.current, { draft: text });
+        else if (!reply.ok && text && !typing.current.draft) Object.assign(typing.current, { draft: text, caret: null });
         rerender();
       });
       typed.draft = '';
@@ -137,11 +138,12 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
       void connection.send({ type: 'sendMessage', taskId, text: typed.draft }).then(tell);
       typed.draft = '';
     } else {
-      typed.draft = edit(typed.draft, input, key) ?? typed.draft;
+      const edited = edit(typed.draft, typed.caret, input, key);
+      if (edited) Object.assign(typed, { draft: edited.text, caret: edited.caret });
     }
     rerender();
   }, { isActive: !advancing && !sheet });
-  const { draft } = typing.current;
+  const { draft, caret } = typing.current;
   const keys: Hint[] = answering
     ? [['digits', 'answer'], ...(canTakeOver ? [['c', 'take over'] as Hint] : [])]
     : !takesChat
@@ -227,7 +229,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         request ? h(AnswerSheet, { key: 'request', item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
         live && (run.turn === 'operator' || question || run.permission) ? h(Text, { key: 'waiting', ...tone('warn') }, 'The agent is waiting on you.') : null,
         refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
-        chat ? h(Text, { key: 'chat' }, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`) : null,
+        chat ? h(Text, { key: 'chat' }, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)) : null,
         h(Rule, { key: 'strip-rule' }),
         h(UsageStrip, { key: 'strip', state }),
         h(Rule, { key: 'footer-rule' }),
