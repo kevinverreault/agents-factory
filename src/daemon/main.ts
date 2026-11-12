@@ -9,6 +9,7 @@ import { osProcesses } from '../os/processes.ts';
 import { dockerSandbox } from '../sandbox/docker.ts';
 import { windowsCredentials } from '../secrets/secrets.ts';
 import { SECURITY_PLUGIN } from '../security-guidance/security-guidance.ts';
+import { claudeNamer } from '../naming/claude-namer.ts';
 import { skillSetManager } from '../skills/skill-set.ts';
 import { openStore } from '../store/store.ts';
 import { systemClock } from './clock.ts';
@@ -32,6 +33,7 @@ try {
     processes,
     dependencies: lockfileDependencies(),
     routingTable: routingTable(paths.modelsTable),
+    namer: claudeNamer(),
   });
   await daemon.stopped;
 } catch (error) {

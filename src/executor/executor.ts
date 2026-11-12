@@ -92,6 +92,8 @@ export type Delegation =
       type: 'spawnChild';
       toolUseId: string;
       goal: string;
+      // A short title for the child's row, if the agent gave one.
+      title?: string;
       skill?: string;
       tier?: Tier;
       autonomy?: AutonomyLevel;

@@ -23,7 +23,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 2_000, interval: 10 });
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, prBody: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, summary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -751,6 +751,31 @@ describe('launching and conversing', () => {
     await settle();
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
     await eventually(() => expect(app.lastFrame()).toMatch(/◇ T1 Grill me about the login flow\.\n[^\n]*In conversation/));
+  });
+
+  test('while the daemon names the launch, the card shows a turning spinner, and a second enter launches nothing more', async () => {
+    const connection = inWidgets();
+    const answer = connection.holdReplies('launchTask');
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/LAUNCH A TASK/));
+    await type(app, 'Grill me about the login flow.');
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() => expect(app.lastFrame()).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Naming the task…/));
+    const spinner = () => app.lastFrame()!.match(/([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Naming the task…/)?.[1];
+    const first = spinner();
+    await eventually(() => expect(spinner()).not.toBe(first));
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'launchTask')).toHaveLength(1);
+
+    answer({ ok: false, reason: 'The daemon is stopping.' });
+    await eventually(() => expect(app.lastFrame()).toContain('The daemon is stopping.'));
+    expect(app.lastFrame()).not.toContain('Naming the task…');
   });
 
   test('on the launch card, ↑↓ move between fields, ←→ pick another repository, a refusal shows its reason, and esc backs out', async () => {
@@ -3553,6 +3578,52 @@ describe('quick launch', () => {
     connection.sent.length = 0;
     return { connection, app };
   }
+
+  test('while the daemon names the launch, the quick launch shows a turning spinner, and a second enter launches nothing more', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('inspectClone', { ok: true, value: { repo: 'acme/widgets', path: widgets.path } });
+    const answer = connection.holdReplies('launchTask');
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': widgets } }, { cwd: '/clones/widgets', connection });
+    app.stdin.write('n');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/QUICK LAUNCH[\s\S]*acme\/widgets/));
+    for (const char of prompt) app.stdin.write(char);
+    await settle();
+
+    app.stdin.write('\r');
+
+    await eventually(() => expect(app.lastFrame()).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Naming the task…/));
+    const spinner = () => app.lastFrame()!.match(/([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Naming the task…/)?.[1];
+    const first = spinner();
+    await eventually(() => expect(spinner()).not.toBe(first));
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'launchTask')).toHaveLength(1);
+
+    answer({ ok: true, value: { taskId: 'T1' } });
+    await eventually(() => expect(app.lastFrame()).toContain('Starting the grill…'));
+    expect(app.lastFrame()).not.toContain('Naming the task…');
+  });
+
+  test('esc while the daemon names the launch leaves, and the grill launched meanwhile goes on as a conversation', async () => {
+    const connection = new FakeConnection();
+    connection.replyTo('inspectClone', { ok: true, value: { repo: 'acme/widgets', path: widgets.path } });
+    const answer = connection.holdReplies('launchTask');
+    const { app } = await started({ ...factoryState([]), repositories: { 'acme/widgets': widgets } }, { cwd: '/clones/widgets', connection });
+    app.stdin.write('n');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/QUICK LAUNCH/));
+    for (const char of prompt) app.stdin.write(char);
+    await settle();
+    app.stdin.write('\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Naming the task…'));
+
+    app.stdin.write('\x1b');
+    await eventually(() => expect(app.lastFrame()).not.toContain('Naming the task…'));
+    answer({ ok: true, value: { taskId: 'T1' } });
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'expandQuickLaunch', taskId: 'T1' }));
+  });
 
   test('n takes one prompt into a small card that shows the agent’s question, which a digit answers', async () => {
     const { app, connection } = await launched({ ...run, question });

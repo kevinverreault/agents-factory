@@ -347,6 +347,12 @@ export type Task = {
   // The PR body, once its `artifact:pr-body` stage wrote it: the agent's
   // text with what the factory adds (ADR 0006).
   prBody?: string | null;
+  // The PR title its `artifact:pr-body` stage wrote with the body, if any:
+  // without one, the PR takes the task's title.
+  prTitle?: string | null;
+  // What the task was launched to do, summarised by the model that named it
+  // at launch, if it did: the PR body without a written one or a brief.
+  summary?: string | null;
   // True once the operator requested changes on it in review: past its last
   // stage, each of its runs that completes puts it back In review.
   changesRequested?: boolean;
@@ -662,7 +668,7 @@ export type RunEvent =
   // `report_findings`; its fix pass reports those it left unfixed.
   | { type: 'findingsReported'; runId: string; findings: string[] }
   // A PR body stage's AFK run wrote the body through `write_pr_body`.
-  | { type: 'prBodyWritten'; runId: string; body: string }
+  | { type: 'prBodyWritten'; runId: string; body: string; title?: string }
   // An AFK run set its task's one-line status through `report_progress`.
   | { type: 'progressReported'; runId: string; status: string }
   // A child task's run reported its result through `report_result`.
@@ -738,6 +744,8 @@ export type TaskLaunched = {
   type: 'taskLaunched';
   repo: string;
   title: string;
+  // What the launch asks for, summarised by the model that named the task, if it did.
+  summary?: string | null;
   // The launch inputs: those its start stage needs, at least.
   prompt: string;
   issues: string[];
@@ -1364,8 +1372,19 @@ function prBody(task: Task, body: string): string {
   ].join('\n\n');
 }
 
-// The draft PR the root opens (ADR 0004): its title, and its PR body (or,
-// without one, its brief or title, with the tickets it closed) above the
+// GitHub caps a PR title at 256 characters.
+const PR_TITLE_LENGTH = 256;
+
+// The PR title an agent wrote, on one line and within GitHub's cap, or null
+// without one.
+function prTitleOf(title: string | undefined): string | null {
+  const line = (title ?? '').replace(/\s+/g, ' ').trim();
+  return line.length > PR_TITLE_LENGTH ? `${line.slice(0, PR_TITLE_LENGTH - 1).trimEnd()}…` : line || null;
+}
+
+// The draft PR the root opens (ADR 0004): its PR title (or its task's
+// title), and its PR body (or, without one, its brief, launch summary or
+// title, with the tickets it closed) above the
 // factory's footer, which names the task, each stage's models in preset
 // order, and the tokens its whole tree took.
 export function pullRequestOf(state: Lifecycle, task: Task): { title: string; body: string } {
@@ -1387,8 +1406,8 @@ export function pullRequestOf(state: Lifecycle, task: Task): { title: string; bo
     '',
     `Total tokens: ${tokens.toLocaleString('en-US')}`,
   ];
-  const body = task.prBody ?? prBody(task, task.brief?.trim() || task.title);
-  return { title: task.title, body: `${body}\n\n${footer.join('\n')}` };
+  const body = task.prBody ?? prBody(task, task.brief?.trim() || task.summary?.trim() || task.title);
+  return { title: task.prTitle || task.title, body: `${body}\n\n${footer.join('\n')}` };
 }
 
 // What a Ralph loop's iteration on `ticket` opens on (ADR 0006): its stage's
@@ -2822,6 +2841,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const launched: Task = {
         id: nextId(state, 'task'),
         title: action.title,
+        summary: action.summary?.trim() || null,
         repo: action.repo,
         mode,
         autonomy: mode === 'AFK' ? action.autonomy : null,
@@ -3359,6 +3379,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     }
     case 'prBodyWritten':
       task.prBody = prBody(task, action.body);
+      task.prTitle = prTitleOf(action.title);
       break;
     case 'runFailed': {
       // The request a suspended run waited on can't resume it any more.

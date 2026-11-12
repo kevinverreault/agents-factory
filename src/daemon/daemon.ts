@@ -133,6 +133,7 @@ import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
+import { nameTask, type Namer } from '../naming/task-naming.ts';
 import type { Clock } from './clock.ts';
 
 export type DaemonOptions = {
@@ -167,6 +168,11 @@ export type DaemonOptions = {
   transcriptsRoot: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
+  // What names a root task at launch from its prompt. Without one, or when it
+  // fails or takes longer than `namingTimeoutMs`, the title is the prompt's
+  // first line, cut to fit, and the branch slug comes from it.
+  namer?: Namer;
+  namingTimeoutMs?: number;
 };
 
 export const IDLE_EXIT_MS = 10 * 60_000;
@@ -695,8 +701,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Freshly fetches the base branch, resolves the preset there and freezes it
   // with the pinned skill set (ADR 0005), cuts the task's worktree, and
   // starts the task at its start stage there (ADR 0010). The Lifecycle waits
-  // meanwhile: the task id is in the branch name.
-  function launch(command: LaunchCommand): Promise<Reply> {
+  // meanwhile: the task id is in the branch name. The task is named first,
+  // outside the queue, so a slow namer holds up no other command; a launch
+  // refused out of hand names nothing.
+  async function launch(command: LaunchCommand): Promise<Reply> {
+    const named = !stopping && !!lifecycle.repositories[command.repo];
+    const name = named ? await nameTask(options.namer, command.prompt ?? '', options.namingTimeoutMs) : null;
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
       const { repo, prompt = '' } = command;
@@ -754,8 +764,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       action.stage = start.stage.id;
       action.opening = start.opening;
-      action.title = titleFrom(prompt.trim() || action.issues.join(' ') || resolved.preset.name);
-      action.worktree = taskWorktree(options.worktreeRoot, repository!, taskId, action.title);
+      action.title = name?.title ?? titleFrom(prompt.trim() || action.issues.join(' ') || resolved.preset.name);
+      action.summary = name?.summary ?? null;
+      action.worktree = taskWorktree(options.worktreeRoot, repository!, taskId, name?.slug ?? action.title);
       try {
         action.skillSet = (await skillSets.current()).version;
       } catch (error) {
@@ -2184,7 +2195,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         type: 'childSpawned',
         runId,
         toolUseId: request.toolUseId,
-        title: titleFrom(goal),
+        title: titleFrom((typeof request.title === 'string' && request.title.trim()) || goal),
         goal,
         skill: request.skill?.trim() || null,
         tier: request.tier ?? null,
