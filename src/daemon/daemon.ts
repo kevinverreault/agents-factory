@@ -108,7 +108,7 @@ import {
   type SetupView,
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
-import type { Routes } from '../models/routing.ts';
+import { route, type Routes } from '../models/routing.ts';
 import { addOperatorRules, readAllowRules, trackScripts, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
@@ -133,6 +133,7 @@ import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
+import { NAMING_INSTRUCTIONS, nameTask, namingRequest, type Namer } from '../naming/task-naming.ts';
 import type { Clock } from './clock.ts';
 
 export type DaemonOptions = {
@@ -167,6 +168,9 @@ export type DaemonOptions = {
   transcriptsRoot: string;
   // How long the daemon waits with nothing needing a clock before it exits.
   idleExitMs?: number;
+  // How long a launch waits for the cheap run that names it before it is
+  // named from its prompt's first line instead.
+  namingTimeoutMs?: number;
 };
 
 export const IDLE_EXIT_MS = 10 * 60_000;
@@ -695,8 +699,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Freshly fetches the base branch, resolves the preset there and freezes it
   // with the pinned skill set (ADR 0005), cuts the task's worktree, and
   // starts the task at its start stage there (ADR 0010). The Lifecycle waits
-  // meanwhile: the task id is in the branch name.
-  function launch(command: LaunchCommand): Promise<Reply> {
+  // meanwhile: the task id is in the branch name. The task is named first,
+  // outside the queue, so a slow namer holds up no other command; a launch
+  // refused out of hand names nothing.
+  async function launch(command: LaunchCommand): Promise<Reply> {
+    const refs = issueRefs(command.issues ?? [], command.repo);
+    const nameable = !stopping && !!lifecycle.repositories[command.repo] && !('error' in refs);
+    const name = nameable ? await nameTask(namer(), namingRequest(command.prompt ?? '', refs.issues, command.preset), options.namingTimeoutMs) : null;
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
       const { repo, prompt = '' } = command;
@@ -754,8 +763,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       action.stage = start.stage.id;
       action.opening = start.opening;
-      action.title = titleFrom(prompt.trim() || action.issues.join(' ') || resolved.preset.name);
-      action.worktree = taskWorktree(options.worktreeRoot, repository!, taskId, action.title);
+      action.title = name?.title ?? titleFrom(prompt.trim() || action.issues.join(' ') || resolved.preset.name);
+      action.launchSummary = name?.summary ?? null;
+      action.worktree = taskWorktree(options.worktreeRoot, repository!, taskId, name?.slug ?? action.title);
       try {
         action.skillSet = (await skillSets.current()).version;
       } catch (error) {
@@ -1344,6 +1354,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // The routing table, read afresh for each action, so `models update`
   // reaches the next run that starts.
+  // What names a root task at launch: a cheap run of the routing table's
+  // haiku model on the operator's subscription (ADR 0001), or nothing while
+  // the table is unreadable.
+  function namer(): Namer | undefined {
+    const table = routes();
+    if ('unreadable' in table) return undefined;
+    const model = route(table, 'haiku').model;
+    return (prompt, signal) => executor.complete({ model, system: NAMING_INSTRUCTIONS, prompt, credential: 'subscription-host' }, signal);
+  }
+
   function routes(): Routes {
     try {
       return routingTable.current();
@@ -2184,7 +2204,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         type: 'childSpawned',
         runId,
         toolUseId: request.toolUseId,
-        title: titleFrom(goal),
+        title: titleFrom((typeof request.title === 'string' && request.title.trim()) || goal),
         goal,
         skill: request.skill?.trim() || null,
         tier: request.tier ?? null,

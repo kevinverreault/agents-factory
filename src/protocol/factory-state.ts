@@ -92,8 +92,11 @@ export type TaskView = {
   loop: { ticket: string | null; finishing: boolean; frontier: FrontierTicket[] | null; cleared: boolean } | null;
   // Once it is cancelled, while the tickets it closed aren't all reopened, and why it last failed to.
   reopening: Reopening | null;
-  // Its PR body, once its PR body stage wrote it.
+  // Its launch summary, if the cheap run that named it wrote one.
+  launchSummary: string | null;
+  // Its PR body, once its PR body stage wrote it, and the PR title written with it, if any.
   prBody: string | null;
+  prTitle: string | null;
   // Its Push & open draft PR while under way, and why its step last failed;
   // and the draft PR it opened.
   publishing: Publishing | null;
@@ -198,7 +201,9 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
           }
         : null,
       reopening: task.reopening ? structuredClone(task.reopening) : null,
+      launchSummary: task.launchSummary ?? null,
       prBody: task.prBody ?? null,
+      prTitle: task.prTitle ?? null,
       publishing: task.publishing ? { ...task.publishing } : null,
       pr: task.pr ? { ...task.pr } : null,
       pushed: task.pushed ?? false,

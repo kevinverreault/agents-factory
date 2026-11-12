@@ -4,15 +4,16 @@
 import { join } from 'node:path';
 import { GitError, type Git } from '../git/git.ts';
 import { researchBranch } from '../github/research-branch.ts';
+import { cutToFit } from '../text/lines.ts';
 import type { Repository, TaskWorktree } from '../lifecycle/lifecycle.ts';
 
-const TITLE_LENGTH = 72;
-const SLUG_LENGTH = 40;
+export const TITLE_LENGTH = 72;
+export const SLUG_LENGTH = 40;
 
 // A task's title: the first line of its prompt, cut to fit a row.
 export function titleFrom(prompt: string): string {
   const line = prompt.trim().split(/\r?\n/, 1)[0]!.trim();
-  return line.length > TITLE_LENGTH ? `${line.slice(0, TITLE_LENGTH - 1).trimEnd()}…` : line;
+  return cutToFit(line, TITLE_LENGTH);
 }
 
 // Where task `taskId` of `repository` works: `factory/<id>-<slug>`, in
@@ -65,7 +66,9 @@ export async function cutWorktree(git: Git, repository: Repository, worktree: Ta
   return null;
 }
 
-function slugOf(title: string): string {
+// A branch-safe slug of `title`: ASCII, lowercase words joined by `-`,
+// whole words up to SLUG_LENGTH.
+export function slugOf(title: string): string {
   const words = title
     .normalize('NFKD')
     .replace(/[̀-ͯ]/g, '')

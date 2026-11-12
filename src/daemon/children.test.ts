@@ -84,6 +84,19 @@ describe('spawning a child', () => {
     expect(started).toMatchObject({ mode: 'AFK', child: true, cwd: state.tasks.T2!.worktree });
   });
 
+  test('a child takes the short title its parent gave it, and without one its goal’s first line, cut to fit', async () => {
+    const { factory, tui } = await running();
+    const goal = 'Survey how the app signs users out today, across the web client, the mobile client and the API, and list every place a session ends.';
+
+    await spawn(factory, 'R1', goal, { title: 'Survey sign-out paths' });
+    await spawn(factory, 'R1', goal);
+
+    const state = await tui.until((state) => !!state.tasks.T3);
+    expect(state.tasks.T2!.title).toBe('Survey sign-out paths');
+    expect(state.tasks.T3!.title).toMatch(/^Survey how the app signs users out today, .*…$/);
+    expect(state.tasks.T3!.title.length).toBe(72);
+  });
+
   test('a replay of the same spawn call returns the child it spawned', async () => {
     const { factory, tui } = await running();
     const call = { type: 'spawnChild' as const, toolUseId: 'toolu_same', goal: 'Survey sign-out.', await: false };

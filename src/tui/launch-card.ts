@@ -16,6 +16,7 @@ import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
 import { choosable, Cursor, joined, Sheet, tone, type Role } from './theme.ts';
+import { useLaunch } from './use-launch.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -78,6 +79,8 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   }));
   const [listings, setListings] = useState<Record<string, Listing>>({});
   const [refusal, setRefusal] = useState<string | null>(null);
+  // A launch the operator backed out of goes on, but takes them nowhere.
+  const launching = useLaunch(connection);
 
   useEffect(() => {
     const { repo } = draft;
@@ -110,17 +113,24 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const fixUrl = blocked && app && !app.installed ? app.fixUrl : null;
 
   useInput((input, key) => {
-    if (key.escape) return onCancel();
+    if (key.escape) {
+      launching.leave();
+      return onCancel();
+    }
     if (key.ctrl && input === 'o') {
       if (fixUrl) openUrl(fixUrl);
       return;
     }
+    // The launch under way takes no other key.
+    if (launching.busy()) return;
     if (key.return) {
       const command = launchCommand(draft, card);
       if (!command) return;
-      void connection.send(command).then((reply) => {
-        if (reply.ok) onLaunched((reply.value as { taskId: string }).taskId);
-        else setRefusal(reply.reason);
+      setRefusal(null);
+      launching.launch(command, (launched) => {
+        if (launched.left) return;
+        if (launched.ok) onLaunched(launched.taskId);
+        else setRefusal(launched.reason);
       });
       return;
     }
@@ -180,6 +190,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     listing && 'warning' in listing && listing.warning ? h(Text, tone('warn'), listing.warning) : null,
     blocked ? h(Text, tone('bad'), blocked) : null,
     fixUrl ? h(Text, tone('dim'), 'ctrl+o opens its installation settings') : null,
+    launching.indicator,
     refusal ? h(Text, tone('bad'), refusal) : null,
   );
 }

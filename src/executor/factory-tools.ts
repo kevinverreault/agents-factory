@@ -81,11 +81,14 @@ export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly 
   );
   const writePrBody = tool(
     'write_pr_body',
-    'Write the body of this task’s pull request, in Markdown: the factory opens the PR with it. ' +
-      'Calling it again replaces what you wrote.',
-    { body: z.string().min(1).describe('The PR body, in Markdown.') },
-    async ({ body }) => {
-      sink.report({ type: 'prBodyWritten', runId, body });
+    'Write the body of this task’s pull request, in Markdown, and optionally its title: the factory opens the PR with them. ' +
+      'Without a title, the PR takes the task’s. Calling it again replaces what you wrote.',
+    {
+      body: z.string().min(1).describe('The PR body, in Markdown.'),
+      title: z.string().optional().describe('The PR title: one short line saying what the change does, written from the finished work.'),
+    },
+    async ({ body, title }) => {
+      sink.report({ type: 'prBodyWritten', runId, body, ...(title?.trim() && { title: title.trim() }) });
       return { content: [{ type: 'text', text: 'The factory has the PR body.' }] };
     },
   );
@@ -120,6 +123,7 @@ function childTools(sink: RunSink, mode: keyof typeof WAITING): [SdkTool, SdkToo
       'Returns the child’s id, or why it can’t be spawned (such as a depth or fan-out limit): then do the work yourself.',
     {
       goal: z.string().min(1).describe('What the child must achieve, standing on its own.'),
+      title: z.string().optional().describe('A short title for the child’s row, a few words saying what it does. Without one, it is cut from the goal.'),
       skill: z.string().optional().describe('A skill of the factory’s skill set to invoke on the goal.'),
       tier: z.enum(TIERS).optional().describe('The model tier: yours or a lower one. A higher one is lowered to yours.'),
       autonomy: z.enum(['L1', 'L2']).optional().describe('The autonomy level: yours or a lower one.'),

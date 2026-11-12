@@ -19,11 +19,25 @@ export class FakeConnection implements FactoryConnection {
   private readonly listeners = new Set<StateListener>();
   private readonly closeListeners = new Set<() => void>();
   private readonly replies = new Map<Command['type'], Reply>();
+  private readonly held = new Map<Command['type'], ((reply: Reply) => void)[]>();
   closed = false;
 
   send(command: Command): Promise<Reply> {
     this.sent.push(command);
+    const waiting = this.held.get(command.type);
+    if (waiting) return new Promise((answer) => waiting.push(answer));
     return Promise.resolve(this.replies.get(command.type) ?? { ok: true });
+  }
+
+  // Every later command of this type waits, as on a daemon still busy with
+  // it, until the returned function answers them all with its reply.
+  holdReplies(type: Command['type']): (reply: Reply) => void {
+    const waiting: ((reply: Reply) => void)[] = [];
+    this.held.set(type, waiting);
+    return (reply) => {
+      this.held.delete(type);
+      for (const answer of waiting.splice(0)) answer(reply);
+    };
   }
 
   // Every later command of this type gets `reply`.

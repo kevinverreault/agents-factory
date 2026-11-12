@@ -118,6 +118,10 @@ Starting AFK work from a single prompt after a short grilling of at most three q
 Where the operator starts a task: they pick its repository, workflow preset and start stage, give the prompt or issue refs the start stage needs, and tag it with groups and a model tier.
 _Avoid_: New task dialog, launcher
 
+**Launch summary**:
+A few sentences saying what a root task was launched to do, written with its title and branch name by the cheap run that names it at launch. Its PR body falls back to it when no stage wrote one and it has no handoff brief.
+_Avoid_: Task summary, prompt summary
+
 ### Control
 
 **Operator**:

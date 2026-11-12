@@ -92,6 +92,8 @@ export type Delegation =
       type: 'spawnChild';
       toolUseId: string;
       goal: string;
+      // A short title for the child's row, if the agent gave one.
+      title?: string;
       skill?: string;
       tier?: Tier;
       autonomy?: AutonomyLevel;
@@ -110,6 +112,11 @@ export type Verdict = { allow: true } | { allow: false; message: string };
 // `archive` is the directory the session was archived to, once its task
 // ended: it is read from there.
 export type Session = { sessionId: string; cwd: string; archive?: string | null };
+
+// A cheap run (ADR 0001): one turn of `model` on `prompt`, told `system`,
+// with no tools, settings, MCP servers or saved session, authenticated as
+// `credential` says. The daemon names tasks with it.
+export type Completion = { model: string; system: string; prompt: string; credential: CredentialProfile };
 
 // A session transcript couldn't be archived.
 export class ArchiveError extends Error {}
@@ -136,6 +143,9 @@ export interface Executor {
   // session still in place, or with no copy, is left as it is. Throws an
   // `ArchiveError` when it can't.
   restore(session: Session, dir: string): Promise<void>;
+  // The text a cheap run answers with. Rejects when its turn fails, or once
+  // `signal` aborts it.
+  complete(completion: Completion, signal: AbortSignal): Promise<string>;
   // Where the CLI keeps the session transcripts of runs whose cwd is `cwd`:
   // an L2 container mounts it, so its runs and the host's share sessions.
   sessionsDir(cwd: string): string;

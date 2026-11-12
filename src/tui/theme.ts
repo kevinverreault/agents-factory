@@ -7,7 +7,7 @@
 // terminal's background. Truecolour terminals (Windows Terminal among them)
 // get the hex, others the 16-colour name, and under NO_COLOR, or off a TTY,
 // it is monochrome: glyphs, › and bold still tell rows apart.
-import { createElement as h, type ReactNode } from 'react';
+import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text } from 'ink';
 import chalk from 'chalk';
 import type { AttentionKind } from '../lifecycle/lifecycle.ts';
@@ -120,6 +120,8 @@ export function kindRole(item: Item): Role {
 
 // The glyphs the screens share.
 export const GLYPH = {
+  // The frames a spinner turns through.
+  spinner: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
   selected: '›',
   current: '✓',
   live: '●',
@@ -191,6 +193,21 @@ export function spentRole(share: number): Role {
 // The cursor's column: › on the selected row, a space on the others.
 export function Cursor({ on }: { on: boolean }) {
   return h(Box, { flexShrink: 0 }, h(Text, tone('accent'), on ? GLYPH.selected : ' '));
+}
+
+// How long each spinner frame shows.
+const SPINNER_MS = 80;
+
+// Something under way the TUI waits on, such as a launch the daemon is
+// naming: a turning spinner in accent, then `label`, dim, so the screen
+// never looks frozen.
+export function Spinner({ label }: { label: string }) {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setFrame((frame) => (frame + 1) % GLYPH.spinner.length), SPINNER_MS);
+    return () => clearInterval(timer);
+  }, []);
+  return h(Text, null, h(Text, tone('accent'), GLYPH.spinner[frame]), h(Text, tone('dim'), ` ${label}`));
 }
 
 // A box on a sheet that takes several: ticked in ok, or not, dim.

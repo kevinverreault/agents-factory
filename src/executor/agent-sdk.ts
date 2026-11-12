@@ -6,7 +6,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -30,7 +30,7 @@ import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.t
 import type { ModelUsage, Usage, UsageWindowStatus } from '../usage/usage.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import type { Processes } from '../os/processes.ts';
-import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
+import { ArchiveError, type Completion, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
 import { afkFactoryTools, hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
 
@@ -105,6 +105,8 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
   }
 
   return {
+    complete: completeOnce,
+
     start(start, sink) {
       const unstartable = whyUnstartable(start);
       if (unstartable) {
@@ -565,6 +567,44 @@ function questionsIn(input: Record<string, unknown>): Question['questions'] {
 // The daemon's environment (keeping PATH, USERPROFILE, APPDATA), with the
 // credential profile applied: on `subscription-host` the CLI uses the
 // operator's login, so an API key in the daemon's environment must not win.
+// A cheap run (ADR 0001): one turn with no tools, no settings sources, no MCP
+// servers and no saved session, in the temp directory so no project's files
+// reach it. A turn that fails, or that `signal` aborts, takes its CLI with it.
+async function completeOnce({ model, system, prompt, credential }: Completion, signal: AbortSignal): Promise<string> {
+  const abortController = new AbortController();
+  const abort = () => abortController.abort();
+  if (signal.aborted) abort();
+  else signal.addEventListener('abort', abort, { once: true });
+  const replies = query({
+    prompt,
+    options: {
+      model,
+      systemPrompt: system,
+      tools: [],
+      maxTurns: 1,
+      settingSources: [],
+      strictMcpConfig: true,
+      persistSession: false,
+      cwd: tmpdir(),
+      env: { ...runEnv(credential), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+      abortController,
+    },
+  });
+  let answered = false;
+  try {
+    for await (const message of replies) {
+      if (message.type !== 'result') continue;
+      if (message.subtype !== 'success') throw new Error(`The cheap run ended with ${message.subtype}.`);
+      answered = true;
+      return message.result;
+    }
+    throw new Error('The cheap run ended without a result.');
+  } finally {
+    signal.removeEventListener('abort', abort);
+    if (!answered) abort();
+  }
+}
+
 function runEnv(credential: CredentialProfile): Record<string, string | undefined> {
   switch (credential) {
     case 'subscription-host': {
