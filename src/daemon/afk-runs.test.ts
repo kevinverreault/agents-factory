@@ -49,9 +49,9 @@ describe('the slot cap', () => {
   });
 
   test('changing the slot cap takes effect for the next admission, and outlasts a daemon restart', async () => {
-    await operator.send({ type: 'setSlotCap', cap: 2 });
     const { factory, operator, tui } = await attached();
     await operator.send({ type: 'setSlotCap', cap: 2 });
+    for (const title of ['Fix the login bug', 'Fix the flaky test', 'Add dark mode', 'Add SSO']) await operator.send(afk(title));
     await tui.until((state) => state.tasks.T4?.label === 'Queued');
 
     expect(await operator.send({ type: 'setSlotCap', cap: 3 })).toEqual({ ok: true });
