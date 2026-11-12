@@ -14,8 +14,8 @@ import { appBlock, lackingInputs, type PresetChoice, type StartStage } from '../
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
-import { edit } from './text-input.ts';
-import { choosable, Cursor, GLYPH, joined, Sheet, tone, type Role } from './theme.ts';
+import { edit, withCaret, type Caret } from './text-input.ts';
+import { choosable, Cursor, joined, Sheet, tone, type Role } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -30,9 +30,11 @@ type Props = {
 type Field = 'repo' | 'preset' | 'stage' | 'prompt' | 'issues' | 'groups' | 'autonomy' | 'tier' | 'maxTurns' | 'priority';
 // What the operator picked and typed. A null choice is the default: the
 // repository's preset, the preset's first start stage, the stage's tier,
-// L1, normal priority. Empty max turns are the stage's.
+// L1, normal priority. Empty max turns are the stage's. The caret is in the
+// field typed into, back at its end on another.
 type Draft = {
   field: Field;
+  caret: Caret;
   repo: string | null;
   preset: string | null;
   stage: string | null;
@@ -62,6 +64,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const repositories = Object.keys(state.repositories);
   const [draft, setDraft] = useState<Draft>(() => ({
     field: 'prompt',
+    caret: null,
     repo: defaultRepo(state, here),
     preset: null,
     stage: null,
@@ -127,7 +130,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
 
   const row = (field: Field, label: string, value: ReactNode, choice = true) => {
     const focused = draft.field === field;
-    const shown = typeof value === 'string' && focused ? (choice ? choosable(value) : `${value}${GLYPH.caret}`) : value;
+    const shown = typeof value === 'string' && focused ? (choice ? choosable(value) : withCaret(value, draft.caret)) : value;
     return h(
       Box,
       { key: field, gap: 1 },
@@ -212,7 +215,12 @@ function step(draft: Draft, card: Card, repositories: string[], input: string, k
   if (key.upArrow || key.downArrow) {
     const at = card.fields.indexOf(draft.field);
     const next = Math.min(Math.max(at + (key.upArrow ? -1 : 1), 0), card.fields.length - 1);
-    return { ...draft, field: card.fields[next]! };
+    return next === at ? draft : { ...draft, field: card.fields[next]!, caret: null };
+  }
+  if (draft.field === 'prompt' || draft.field === 'issues' || draft.field === 'groups' || draft.field === 'maxTurns') {
+    // Max turns are a whole number: other characters are dropped.
+    const typed = edit(draft[draft.field], draft.caret, draft.field === 'maxTurns' && !key.meta ? input.replace(/\D/g, '') : input, key);
+    return typed === null ? draft : { ...draft, [draft.field]: typed.text, caret: typed.caret };
   }
   if (key.leftArrow || key.rightArrow) {
     const by = key.leftArrow ? -1 : 1;
@@ -232,15 +240,6 @@ function step(draft: Draft, card: Card, repositories: string[], input: string, k
       default:
         return draft;
     }
-  }
-  if (draft.field === 'prompt' || draft.field === 'issues' || draft.field === 'groups') {
-    const edited = edit(draft[draft.field], input, key);
-    return edited === null ? draft : { ...draft, [draft.field]: edited };
-  }
-  if (draft.field === 'maxTurns') {
-    // A whole number: other characters are dropped.
-    const edited = edit(draft.maxTurns, input.replace(/\D/g, ''), key);
-    return edited === null ? draft : { ...draft, maxTurns: edited };
   }
   return draft;
 }

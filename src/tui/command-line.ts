@@ -6,6 +6,7 @@
 import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryState } from '../protocol/factory-state.ts';
+import { caretIn, type Typed } from './text-input.ts';
 import { Sheet, tone } from './theme.ts';
 
 // Where a line takes the operator, or why it can't.
@@ -27,11 +28,15 @@ export function runCommand(line: string, state: FactoryState): Jump {
   return { refused: `Unknown command :${line.trim()}. Try :task <id>, :group <name> or :gc.` };
 }
 
-// The line being typed, its cursor at the end, on a sheet naming what it runs.
-export function CommandLine({ draft }: { draft: string }) {
+// The line being typed, the character under its caret inverse (a space at
+// its end), on a sheet naming what it runs.
+export function CommandLine({ line }: { line: Typed }) {
+  const at = caretIn(line.text, line.caret);
+  const point = line.text.codePointAt(at);
+  const under = point === undefined ? '' : String.fromCodePoint(point);
   return h(
     Sheet,
     { title: 'Command', hint: 'task <id> · group <name> · group · gc · enter run · esc back' },
-    h(Box, null, h(Text, null, `:${draft}`), h(Text, { inverse: true }, ' ')),
+    h(Box, null, h(Text, null, `:${line.text.slice(0, at)}`), h(Text, { inverse: true }, under || ' '), h(Text, null, line.text.slice(at + under.length))),
   );
 }

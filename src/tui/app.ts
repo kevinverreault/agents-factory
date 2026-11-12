@@ -40,7 +40,7 @@ import { QuickLaunch } from './quick-launch.ts';
 import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useColumns, useRows } from './screen.ts';
 import { modeOf, TaskDetail } from './task-detail.ts';
-import { edit } from './text-input.ts';
+import { edit, type Typed } from './text-input.ts';
 import { Cursor, filled, GLYPH, joined, kindLook, Keys, Rule, stateLook, tone, type Hint } from './theme.ts';
 import { UsageStrip, UsageTab } from './usage.ts';
 
@@ -131,9 +131,9 @@ export function App({
   };
   // The `:` command line's draft while it is open. Keys typed in one burst
   // arrive before a re-render, so each goes on from the last in the ref.
-  const draft = useRef<string | null>(null);
-  const [command, setCommandState] = useState<string | null>(null);
-  const setCommand = (line: string | null) => {
+  const draft = useRef<Typed | null>(null);
+  const [command, setCommandState] = useState<Typed | null>(null);
+  const setCommand = (line: Typed | null) => {
     draft.current = line;
     setCommandState(line);
   };
@@ -382,8 +382,8 @@ export function App({
         if (key.escape) setCommand(null);
         else if (key.return) {
           setCommand(null);
-          if (state) jump(runCommand(line, state));
-        } else setCommand(edit(line, input, key) ?? line);
+          if (state) jump(runCommand(line.text, state));
+        } else setCommand(edit(line.text, line.caret, input, key) ?? line);
         return;
       }
       if (pickerAt.current !== null) {
@@ -411,7 +411,7 @@ export function App({
       if (input === 'a') return answer();
       if (input === '?') return setHelp(true);
       if (input === 'g') return setPickerCursor(groups.findIndex(([name]) => name === group) + 1);
-      if (input === ':') return setCommand('');
+      if (input === ':') return setCommand({ text: '', caret: null });
       if (input === 'v') return toggleCondensed();
       if (condensed && key.tab) return nextPane();
       if (condensed && input === 'f') return setZoom((zoom) => !zoom);
@@ -572,7 +572,7 @@ export function App({
         ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm, chosen: answers.chosen, position: { at: cursor + 1, of: queue.length } })
         : null,
       closed ? h(Text, { ...tone('bad') }, 'The daemon connection closed.') : null,
-      command === null ? null : h(CommandLine, { draft: command }),
+      command === null ? null : h(CommandLine, { line: command }),
       h(Rule, { key: 'strip-rule' }),
       state ? h(UsageStrip, { state }) : null,
       h(Rule, { key: 'footer-rule' }),
