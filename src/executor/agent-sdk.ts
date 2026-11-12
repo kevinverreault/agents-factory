@@ -18,6 +18,7 @@ import {
   type HookCallback,
   type Options,
   type Query,
+  type SDKControlGetUsageResponse,
   type SDKRateLimitInfo,
   type SDKResultMessage,
   type SessionKey,
@@ -27,7 +28,7 @@ import {
 import { HARD_DENY_RULES, refusal, runHistoryIn } from '../guards/hard-denies.ts';
 import { AFK_UNSET } from '../guards/run-git.ts';
 import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
-import type { ModelUsage, Usage, UsageWindowStatus } from '../usage/usage.ts';
+import type { ModelUsage, Usage, UsageWindowKind, UsageWindowStatus } from '../usage/usage.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import type { Processes } from '../os/processes.ts';
 import { ArchiveError, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
@@ -69,6 +70,12 @@ export const RETRY_WATCHDOG_ENV = {
 // not an ordinary backoff.
 const WINDOW_WAIT_MS = 60_000;
 
+// How often a run asks its CLI for the plan's usage windows (Claude Code's
+// `/usage`), across all runs: they share the account. A `rate_limit_event`
+// comes only when a window's status changes, and rarely says how much of it
+// is spent, so without asking the windows read unknown.
+const PLAN_USAGE_EVERY_MS = 5 * 60_000;
+
 // The `hook` CLI, which relays each PostToolUse hook event to the daemon for
 // artifact capture. Spawned directly by Claude Code, with no shell between.
 const RELAY_HOOK = { command: process.execPath, args: [fileURLToPath(new URL('../cli.ts', import.meta.url)), 'hook'] };
@@ -95,6 +102,8 @@ export type AgentSdkExecutorOptions = {
 
 export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkExecutorOptions = {}): Executor {
   const runs = new Map<string, LiveRun>();
+  // When a run last asked for the plan's usage windows, in ms.
+  let planAskedAt = -Infinity;
 
   function say(runId: string, text: string): void {
     const run = runs.get(runId);
@@ -249,9 +258,23 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
     // How to sign in again, once Claude Code couldn't sign in for the run.
     let signIn: string | null = null;
     const failed = (reason: string) => report({ type: 'runFailed', runId, reason: signIn ? `${reason}\n\n${signIn}` : reason });
+    // Reads the plan's usage windows, at most every `PLAN_USAGE_EVERY_MS`
+    // across runs. Display only (ADR 0008): a CLI that can't say says nothing.
+    const askPlanUsage = () => {
+      const now = Date.now();
+      if (now - planAskedAt < PLAN_USAGE_EVERY_MS) return;
+      planAskedAt = now;
+      run.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).then(
+        (usage) => {
+          for (const seen of snapshotsOfPlan(usage.rate_limits)) report({ type: 'usageSnapshotSeen', runId, ...seen });
+        },
+        () => {},
+      );
+    };
     try {
       for await (const message of run.query) {
         if (run.stopped) return;
+        askPlanUsage();
         if (message.type === 'system' && message.subtype === 'init' && !run.reportedStart && run.cli) {
           run.reportedStart = true;
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
@@ -638,6 +661,23 @@ function snapshotOf({ rateLimitType, status, utilization, resetsAt }: SDKRateLim
   if (!rateLimitType) return null;
   const spent = typeof utilization === 'number' ? Math.min(Math.max(utilization > 1 ? utilization / 100 : utilization, 0), 1) : null;
   return { window: rateLimitType, status, spent, resetsAt: typeof resetsAt === 'number' ? resetsAt * 1000 : null };
+}
+
+// The plan's usage windows the CLI's `/usage` reads, as snapshots: each
+// window it reads a share of, spent at 100%. Null when plan limits don't
+// apply, as with an API key.
+type PlanRateLimits = SDKControlGetUsageResponse['rate_limits'];
+const PLAN_WINDOWS = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet'] as const satisfies readonly UsageWindowKind[];
+
+export function snapshotsOfPlan(limits: PlanRateLimits) {
+  return PLAN_WINDOWS.flatMap((window) => {
+    const reading = limits?.[window];
+    if (typeof reading?.utilization !== 'number') return [];
+    const spent = Math.min(Math.max(reading.utilization / 100, 0), 1);
+    const resetsAt = reading.resets_at ? Date.parse(reading.resets_at) : NaN;
+    const status: UsageWindowStatus = spent >= 1 ? 'rejected' : 'allowed';
+    return [{ window, status, spent, resetsAt: Number.isNaN(resetsAt) ? null : resetsAt }];
+  });
 }
 
 // The session's usage so far, per model, with the client's API-equivalent cost.

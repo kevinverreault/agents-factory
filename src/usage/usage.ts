@@ -132,11 +132,17 @@ export function windowView(snapshot: UsageSnapshot | undefined, at: number): Win
   return { spent: snapshot.spent, resetsAt: snapshot.resetsAt };
 }
 
+// How far apart two readings' resets may be and still be the same window's:
+// the CLI's `/usage` names them to the millisecond, its `rate_limit_event`s
+// to the second.
+const SAME_RESET_MS = 60_000;
+
 // The window's reading `seen` brings: what it says, and what was spent as
 // the last reading had it when it says nothing of that for the same window.
 export function updatedSnapshot(last: UsageSnapshot | undefined, seen: UsageSnapshot): UsageSnapshot {
-  if (seen.spent !== null || !last || last.resetsAt !== seen.resetsAt) return seen;
-  return { ...seen, spent: last.spent };
+  if (seen.spent !== null || !last) return seen;
+  const sameReset = last.resetsAt === seen.resetsAt || (last.resetsAt !== null && seen.resetsAt !== null && Math.abs(last.resetsAt - seen.resetsAt) <= SAME_RESET_MS);
+  return sameReset ? { ...seen, spent: last.spent } : seen;
 }
 
 const HOUR_MS = 3_600_000;

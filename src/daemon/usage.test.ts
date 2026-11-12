@@ -112,6 +112,16 @@ describe('usage snapshots', () => {
     expect(tui.state().usage.window).toEqual({ spent: 0.4, resetsAt });
   });
 
+  test('a reading that says nothing of what is spent keeps the last one when it names the same reset to within a minute', async () => {
+    const { factory, operator, tui } = await conversing();
+    const resetsAt = factory.clock.now() + hours(3);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'allowed', spent: 0.4, resetsAt: resetsAt + 734 });
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'allowed', spent: null, resetsAt });
+    await settled(operator);
+
+    expect(tui.state().usage.weekly).toEqual({ spent: 0.4, resetsAt });
+  });
+
   test('a snapshot past its reset shows as unknown', async () => {
     const { factory, operator, tui } = await conversing();
     factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'allowed', spent: 0.5, resetsAt: factory.clock.now() + minutes(20) });
