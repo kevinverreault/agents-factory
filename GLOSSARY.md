@@ -174,7 +174,7 @@ Everything waiting on the operator: open attention requests, root tasks in revie
 _Avoid_: Inbox, notifications
 
 **Slot**:
-One of the fixed number of AFK runs the factory lets be active at once. HITL runs and suspended runs hold none.
+One of the fixed number of AFK runs (8 by default) the factory lets be active at once. HITL runs and suspended runs hold none.
 _Avoid_: Worker, lane
 
 ### Measurement

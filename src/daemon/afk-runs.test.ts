@@ -35,6 +35,7 @@ const startedTasks = (factory: TestFactory) => factory.executor.started.map((run
 describe('the slot cap', () => {
   test('with the cap at 2, a third AFK run waits as Queued until a slot frees', async () => {
     const { factory, operator, tui } = await attached();
+    await operator.send({ type: 'setSlotCap', cap: 2 });
     for (const title of ['Fix the login bug', 'Fix the flaky test', 'Add dark mode']) await operator.send(afk(title));
 
     let state = await tui.until((state) => state.tasks.T3 !== undefined);
@@ -49,6 +50,7 @@ describe('the slot cap', () => {
 
   test('changing the slot cap takes effect for the next admission, and outlasts a daemon restart', async () => {
     const { factory, operator, tui } = await attached();
+    await operator.send({ type: 'setSlotCap', cap: 2 });
     for (const title of ['Fix the login bug', 'Fix the flaky test', 'Add dark mode', 'Add SSO']) await operator.send(afk(title));
     await tui.until((state) => state.tasks.T4?.label === 'Queued');
 
