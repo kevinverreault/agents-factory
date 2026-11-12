@@ -39,6 +39,7 @@ type LiveRun = {
   query: Query;
   sink: RunSink;
   mode: Mode;
+  credential: CredentialProfile;
   maxTurns: number | null;
   // The CLI the run spawned, once known. Reported once: every turn starts with an init.
   cli: Promise<{ pid: number; createdAt: number }> | null;
@@ -115,6 +116,7 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
         input: streamedInput(),
         sink,
         mode: start.mode,
+        credential: start.credential,
         maxTurns: start.maxTurns,
         cli: null,
         reportedStart: false,
@@ -244,6 +246,9 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
     let result: string | undefined;
     // What the usage window the run last read said.
     let windowStatus: UsageWindowStatus | null = null;
+    // How to sign in again, once Claude Code couldn't sign in for the run.
+    let signIn: string | null = null;
+    const failed = (reason: string) => report({ type: 'runFailed', runId, reason: signIn ? `${reason}\n\n${signIn}` : reason });
     try {
       for await (const message of run.query) {
         if (run.stopped) return;
@@ -265,7 +270,13 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
           if (sampled) report({ type: 'usageSampled', runId, ...sampled });
           if (message.parent_tool_use_id) continue;
           latest = contextOf(message.message) ?? latest;
-          for (const event of eventsOf('assistant', message.uuid, message.message)) run.sink.converse(event);
+          // The CLI's own message names the failure, not the fix, and every
+          // message after it fails the same way until the operator signs in.
+          const refused = message.error === 'authentication_failed';
+          if (refused) signIn = signInAgain(run);
+          for (const event of eventsOf('assistant', message.uuid, message.message)) {
+            run.sink.converse(refused && event.type === 'message' ? { ...event, text: `${event.text}\n\n${signIn}` } : event);
+          }
         } else if (message.type === 'result' && run.mode === 'HITL') {
           // Every turn ends with a result, an interrupted one included.
           report(totalOf(runId, message));
@@ -281,7 +292,7 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
             run.input.close();
             continue;
           }
-          report({ type: 'runFailed', runId, reason: failure });
+          failed(failure);
           run.input.close();
           run.query.close();
           return;
@@ -290,7 +301,7 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
       report({ type: 'runCompleted', runId, ...(result !== undefined && { result }) });
     } catch (error) {
       // The SDK throws once the CLI returns an error result.
-      report({ type: 'runFailed', runId, reason: error instanceof Error ? error.message : String(error) });
+      failed(error instanceof Error ? error.message : String(error));
     } finally {
       runs.delete(runId);
     }
@@ -479,6 +490,17 @@ function whyUnstartable({ mode, autonomy, cwd, firstMessage, guards, container, 
   if (autonomy !== 'L2' && container !== null) return 'Only an L2 run starts in a container.';
   // An AFK run takes no chat, so with nothing to start on it would wait forever.
   return firstMessage === null ? 'The AFK run has no first message to work on.' : null;
+}
+
+// What the operator does when Claude Code can't sign in with the run's
+// credential: a host run's is their own login (ADR 0001), an L2 run's the
+// subscription token the factory stores.
+function signInAgain({ credential, mode }: Pick<LiveRun, 'credential' | 'mode'>): string {
+  if (credential === 'subscription-token') {
+    return 'The subscription token for L2 runs was refused: run `claude setup-token`, then `agents-factory setup token` to store what it prints, and retry the run.';
+  }
+  const then = mode === 'HITL' ? 'send your message again' : 'retry the run';
+  return `Claude Code couldn’t sign in with this machine’s login: run \`claude auth login\` in a terminal, then ${then}.`;
 }
 
 // Why an AFK run's result fails it, or null when it completed.
