@@ -17,6 +17,9 @@ Enter
 Sleep 3s
 Show
 Sleep 1500ms
+Type ":"
+Sleep 1200ms
+Type@90ms "task 1"
 Enter
 Sleep 300ms
 Enter

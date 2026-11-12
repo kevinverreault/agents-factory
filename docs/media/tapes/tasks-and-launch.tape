@@ -18,6 +18,14 @@ Sleep 3s
 Show
 Sleep 1500ms
 Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
 Sleep 2500ms
 Type "n"
 Sleep 1200ms

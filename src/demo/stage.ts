@@ -8,6 +8,7 @@
 import { createElement as h } from 'react';
 import { render } from 'ink-testing-library';
 import { App } from '../tui/app.ts';
+import { memoryPrefs } from '../tui/prefs.ts';
 import { DEMO_CWD, DemoConnection } from './demo-factory.ts';
 
 // A key that types no character: what the terminal sends for it, and its
@@ -67,7 +68,7 @@ async function settled(lastFrame: () => string | undefined): Promise<void> {
 export const sequenceOf = (key: Key): string => (typeof key === 'string' ? key : key.sequence);
 
 export async function play(scene: Scene): Promise<Played> {
-  const app = render(h(App, { connection: new DemoConnection(), cwd: DEMO_CWD }));
+  const app = render(h(App, { connection: new DemoConnection(), cwd: DEMO_CWD, prefs: memoryPrefs() }));
   const stdout = app.stdout as unknown as NodeJS.EventEmitter;
   Object.defineProperty(stdout, 'columns', { value: scene.columns, configurable: true });
   Object.defineProperty(stdout, 'rows', { value: scene.rows, configurable: true });
