@@ -29,6 +29,7 @@ import type { Command, DaemonStatus, LeftoversView, Reply } from './protocol/pro
 import { skillsCommand } from './skills/skills-command.ts';
 import { App } from './tui/app.ts';
 import { describeLeftover, GcSheet } from './tui/gc-sheet.ts';
+import { filePrefs } from './tui/prefs.ts';
 import { RestartPrompt } from './tui/restart-prompt.ts';
 
 const USAGE = [
@@ -54,7 +55,7 @@ async function main(args: string[]): Promise<number> {
     const connection = await attachTui(paths);
     if (!connection) return 0;
     // Closing the TUI closes only this connection; the daemon keeps running.
-    await render(h(App, { connection, cwd: process.cwd() })).waitUntilExit();
+    await render(h(App, { connection, cwd: process.cwd(), prefs: filePrefs(paths.tuiPrefsPath) })).waitUntilExit();
     connection.close();
     return 0;
   }

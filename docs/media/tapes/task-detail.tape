@@ -18,12 +18,24 @@ Sleep 3s
 Show
 Sleep 1500ms
 Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
 Sleep 1200ms
 Enter
 Sleep 3500ms
 Escape
 Sleep 1200ms
-Up
+Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
 Sleep 1200ms
 Enter
 Sleep 1200ms

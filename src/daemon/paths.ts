@@ -21,6 +21,8 @@ export type FactoryPaths = {
   modelsTable: string;
   // The operator's own allow rules for L1 runs (ADR 0007).
   permissionsPath: string;
+  // The TUI's own settings, such as whether it hides finished tasks.
+  tuiPrefsPath: string;
   // Each AFK run's own git config and hooks, while it runs (ADR 0007).
   runsRoot: string;
   // Each ended task's session transcripts, by task id (ADR 0011).
@@ -48,6 +50,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     presetsDir: join(shortHome, 'presets'),
     modelsTable: join(shortHome, 'models.yaml'),
     permissionsPath: join(shortHome, 'permissions.yaml'),
+    tuiPrefsPath: join(shortHome, 'tui.json'),
     runsRoot: join(shortHome, 'runs'),
     transcriptsRoot: join(shortHome, 'transcripts'),
     lspPlugin: join(shortHome, 'lsp'),

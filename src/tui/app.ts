@@ -1,8 +1,8 @@
 // The TUI: the screens view, its Tasks, Needs you, Runs and Usage screens
 // (`1`–`4`) fed by the factory-state subscription, with a task's detail
-// drilled into (`enter`) and popped back out of (`esc`); the task tree with
-// the selected task's output under it, and its Done and Cancelled tasks
-// dimmed or hidden (`H`); the launch card (`N`), quick launch (`n`), the conversation view
+// drilled into (`enter`) and popped back out of (`esc`); the task tree,
+// newest first, with the selected task's output under it, and its Done and
+// Cancelled tasks dimmed or hidden (`H`, remembered between sessions); the launch card (`N`), quick launch (`n`), the conversation view
 // (`enter` in a task's detail), re-tiering a task (`t`), conversing with or
 // taking over one (`c`), handing one off (`ctrl+h`), cancelling one with its
 // subtree (`x`, with the cancel sheet when work would be lost), finishing a
@@ -34,6 +34,7 @@ import { Conversation } from './conversation.ts';
 import { Help } from './help.ts';
 import { LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
+import { DEFAULT_PREFS, type PrefsStore, type TuiPrefs } from './prefs.ts';
 import { QuickLaunch } from './quick-launch.ts';
 import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useColumns, useRows } from './screen.ts';
@@ -70,16 +71,39 @@ function rowOf(item: AttentionQueueItem): string {
 // `cwd` is the directory the TUI started in: started inside a clone that
 // isn't registered, the TUI offers to register it (ADR 0010).
 // `openUrl` opens a fix in the operator's browser, such as the App's
-// installation settings.
-export function App({ connection, cwd, openUrl = openInBrowser }: { connection: FactoryConnection; cwd?: string; openUrl?: (url: string) => void }) {
+// installation settings. `prefs` keeps the TUI's own settings between
+// sessions; with none, they last as long as the TUI.
+export function App({
+  connection,
+  cwd,
+  openUrl = openInBrowser,
+  prefs = UNKEPT_PREFS,
+}: {
+  connection: FactoryConnection;
+  cwd?: string;
+  openUrl?: (url: string) => void;
+  prefs?: PrefsStore;
+}) {
   const [state, setState] = useState<FactoryState | null>(null);
   const [closed, setClosed] = useState(false);
   const [tab, setTab] = useState<Tab>('tasks');
   // The task whose detail `enter` drilled into over the screen, until `esc`
   // pops back to it.
   const [detail, setDetail] = useState<string | null>(null);
-  // Whether the task tree hides Done and Cancelled tasks.
-  const [hideFinished, setHideFinished] = useState(false);
+  // The TUI's settings as loaded once at start, and saved as they change.
+  const settings = useRef<TuiPrefs | null>(null);
+  settings.current ??= prefs.load();
+  // Whether the task tree hides Done and Cancelled tasks, as the last
+  // session left it, in a ref too for `H`s typed in one burst. Each `H`
+  // saves it for the next session.
+  const [hideFinished, setHideState] = useState(settings.current.hideFinished);
+  const hiding = useRef(hideFinished);
+  const toggleHideFinished = () => {
+    hiding.current = !hiding.current;
+    setHideState(hiding.current);
+    settings.current = { ...settings.current!, hideFinished: hiding.current };
+    prefs.save(settings.current);
+  };
   // Whether `?` help is open.
   const [help, setHelp] = useState(false);
   // Whether the condensed view (`v`) shows instead of the screens, and
@@ -134,10 +158,22 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
   }, [connection, cwd]);
   const unregistered = clone && state && !(clone.repo in state.repositories) ? clone : null;
   const missingSetup = state ? withoutSetup(state, clone?.repo ?? null) : null;
-  // The task tree: each root, then its descendants under it.
+  // The task tree: each root, newest first, then its descendants under it.
   const tree = state ? treeOrder(Object.values(state.tasks)) : [];
   const grouped = group === null ? tree : keepingAncestors(tree, (task) => task.groups.includes(group));
-  const tasks = hideFinished ? keepingAncestors(grouped, (task) => !finished(task)) : grouped;
+  const unfinished = (list: TaskView[]) => (hideFinished ? keepingAncestors(list, (task) => !finished(task)) : list);
+  const tasks = unfinished(grouped);
+  // The cursor holds on to the task it starts on: the newest task comes on
+  // top, and one launched meanwhile mustn't take the selection from under it.
+  const topTask = tasks[0]?.id;
+  useEffect(() => {
+    if (topTask === undefined || cursors.tasks.row !== null) return;
+    setCursors((cursors) => {
+      if (cursors.tasks.row !== null) return cursors;
+      const index = at(cursors.tasks, tasks.map(({ id }) => id));
+      return { ...cursors, tasks: { row: tasks[index]?.id ?? null, index } };
+    });
+  }, [topTask, cursors.tasks.row]);
   const groups = groupCounts(tree);
   const queue = state?.attentionQueue ?? [];
   const runs = state ? liveFirst(state) : [];
@@ -199,8 +235,11 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
     if (to.to === 'gc') return setView({ kind: 'gc' });
     const { taskId } = to;
     // A task the group filter hides shows again in the whole tree.
-    if (group !== null && !state?.tasks[taskId]?.groups.includes(group)) setGroup(null);
-    setCursors((cursors) => ({ ...cursors, tasks: { row: taskId, index: Math.max(tree.findIndex(({ id }) => id === taskId), 0) } }));
+    const ungrouped = group !== null && !state?.tasks[taskId]?.groups.includes(group);
+    if (ungrouped) setGroup(null);
+    // Its row in the tree as it will show; one H hides keeps the cursor where it was.
+    const index = unfinished(ungrouped ? tree : grouped).findIndex(({ id }) => id === taskId);
+    setCursors((cursors) => ({ ...cursors, tasks: { row: taskId, index: index >= 0 ? index : at(cursors.tasks, tasks.map(({ id }) => id)) } }));
     setTab('tasks');
     setDetail(taskId);
   };
@@ -367,7 +406,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
       if (key.escape && drilled) setDetail(null);
       if (input === 'N' && state) setView({ kind: 'launch' });
       if (input === 'n' && !key.ctrl && state) setView({ kind: 'quick' });
-      if (input === 'H' && tab === 'tasks' && !drilled) setHideFinished((hide) => !hide);
+      if (input === 'H' && tab === 'tasks' && !drilled) toggleHideFinished();
       if (key.upArrow && !drilled) move(-1);
       if (key.downArrow && !drilled) move(1);
       if (key.return && opens) openConversation(opens);
@@ -407,6 +446,7 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
         ...(finishable(tasks[cursor]) ? [['F', 'finish after this ticket'] as Hint] : []),
         ...(failedTask(state, tasks[cursor]) ? [['y', 'retry'] as Hint] : []),
         ['g', 'group'],
+        ['H', hideFinished ? 'show finished' : 'hide finished'],
         ['n', 'quick launch'],
         ['N', 'launch'],
         ['?', 'keys'],
@@ -492,13 +532,13 @@ export function App({ connection, cwd, openUrl = openInBrowser }: { connection: 
               zoom,
               group,
               sidebar: h(Sidebar, { state, cursor: at(cursors['needs-you'], queue.map(rowOf)), focused: focus === 'sidebar', groups, group }),
-              tree: h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
+              tree: h(TaskList, { connection, state, tasks, hidden: hideFinished ? grouped.length - tasks.length : null, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
               detail: followed ? h(TaskDetail, { connection, state, task: followed }) : h(Text, tone('dim'), 'Nothing selected.'),
             })
         : drilled
           ? h(TaskDetail, { connection, state, task: drilled })
         : tab === 'tasks'
-          ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? tree.length - tasks.length : null, cursor })
+          ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? grouped.length - tasks.length : null, cursor })
           : tab === 'needs-you'
             ? h(NeedsYouList, { state, cursor })
             : tab === 'runs'
@@ -603,21 +643,37 @@ function TaskList({
   ]);
 }
 
-// The tasks as a tree: each root in order, its descendants under it, depth first.
+// The tasks as a tree: each root newest first, its descendants under it,
+// depth first and newest first too.
 function treeOrder(tasks: TaskView[]): TaskView[] {
+  const newestFirst = [...tasks].sort(newerFirst);
   const ids = new Set(tasks.map(({ id }) => id));
   const ordered: TaskView[] = [];
   const place = (task: TaskView) => {
     ordered.push(task);
-    for (const child of tasks) if (child.parent === task.id) place(child);
+    for (const child of newestFirst) if (child.parent === task.id) place(child);
   };
-  for (const task of tasks) if (!task.parent || !ids.has(task.parent)) place(task);
+  for (const task of newestFirst) if (!task.parent || !ids.has(task.parent)) place(task);
   return ordered;
+}
+
+// Tasks have no creation time, but their ids count up as they are created:
+// T12 is newer than T3.
+function newerFirst(a: TaskView, b: TaskView): number {
+  return idNumber(b.id) - idNumber(a.id) || b.id.localeCompare(a.id);
+}
+
+function idNumber(id: string): number {
+  const number = /\d+/.exec(id);
+  return number ? Number(number[0]) : 0;
 }
 
 function finished(task: TaskView): boolean {
   return task.state === 'done' || task.state === 'cancelled';
 }
+
+// Settings that last as long as the TUI, when it is given no store.
+const UNKEPT_PREFS: PrefsStore = { load: () => ({ ...DEFAULT_PREFS }), save: () => {} };
 
 // The tree's tasks that `keep` keeps, and those above them, which keep the
 // tree whole: without its finished tasks, say, or only a group's.
