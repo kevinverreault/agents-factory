@@ -5,6 +5,7 @@
 import { createElement as h } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { Answers, Question } from '../lifecycle/lifecycle.ts';
+import { answerOf } from './answered.ts';
 import { GLYPH, Option, Sheet, Tick, tone } from './theme.ts';
 
 export type Card = {
@@ -43,18 +44,6 @@ export function cardKey(question: Question, card: Card, draft: string, input: st
   if (!asked.multiSelect) return answer(asked.options[option].label);
   const picked = card.picked.includes(option) ? card.picked.filter((i) => i !== option) : [...card.picked, option];
   return { kind: 'card', card: { ...card, picked }, clearDraft: false };
-}
-
-// A question with the operator's answer to it.
-function answerOf(question: string, answer: string): string {
-  return `${question} ${GLYPH.answers} ${answer}`;
-}
-
-// A card's answers on one line: each question, then its answer.
-export function answersText(answers: Answers): string {
-  return Object.entries(answers)
-    .map(([question, answer]) => answerOf(question, answer))
-    .join(` ${GLYPH.between} `);
 }
 
 // `ownWords` says whether typed text can answer too: not on an answer sheet.

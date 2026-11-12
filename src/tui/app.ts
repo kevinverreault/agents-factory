@@ -24,13 +24,14 @@ import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
-import { AnswerSheet, answerable, answeredLine, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
+import { AnswerSheet, answerable, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
+import { answeredLine, useAnswerLog } from './answered.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { CommandLine, runCommand, type Jump } from './command-line.ts';
 import { Condensed, groupCounts, PANES, Sidebar, type Pane } from './condensed.ts';
 import { GcSheet } from './gc-sheet.ts';
 import { GroupPicker, pickerKey } from './group-picker.ts';
-import { Conversation } from './conversation.ts';
+import { Conversation, conversationRunOf } from './conversation.ts';
 import { Help } from './help.ts';
 import { LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
@@ -86,7 +87,18 @@ export function App({
 }) {
   const [state, setState] = useState<FactoryState | null>(null);
   const [closed, setClosed] = useState(false);
-  const [tab, setTab] = useState<Tab>('tasks');
+  const [tab, setTabState] = useState<Tab>('tasks');
+  // What the operator last answered on Needs you, once the daemon took it,
+  // until they leave Needs you: every way to another screen comes through
+  // `setTab`, which forgets it.
+  const [needsYouAnswer, setNeedsYouAnswer] = useState<string | null>(null);
+  const setTab = (next: Tab) => {
+    if (next !== 'needs-you') setNeedsYouAnswer(null);
+    setTabState(next);
+  };
+  // The answers given this session, which each task's conversation shows
+  // where they were given, on Needs you or in the conversation itself.
+  const answerLog = useAnswerLog();
   // The task whose detail `enter` drilled into over the screen, until `esc`
   // pops back to it.
   const [detail, setDetail] = useState<string | null>(null);
@@ -127,12 +139,6 @@ export function App({
   };
   const [clone, setClone] = useState<CloneView | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
-  // What the operator last answered on Needs you, once the daemon took it,
-  // until they leave Needs you, however they do.
-  const [answered, setAnswered] = useState<string | null>(null);
-  useEffect(() => {
-    if (tab !== 'needs-you') setAnswered(null);
-  }, [tab]);
   const [view, setView] = useState<View>({ kind: 'tabs' });
   // Each pane's cursor. It stays on the row it was on while the rows move,
   // so leaving a conversation comes back to exactly where the operator was.
@@ -259,10 +265,15 @@ export function App({
   // request leaves Needs you the next item slides under it.
   const answers = useAnswering(connection, item, itemTask, {
     onSend: () => setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } })),
-    onReply: ({ reply, taskId, opens, title, answer }) => {
+    onReply: ({ reply, taskId, title, toolUseId, given }) => {
       setRefusal(reply.ok ? null : reply.reason);
-      setAnswered(reply.ok ? answeredLine(answer, title) : null);
-      if (reply.ok && opens && taskId) setView({ kind: 'conversation', taskId });
+      setNeedsYouAnswer(reply.ok ? answeredLine(given.answer, title) : null);
+      // The task's conversation says it too, after the run it was given on.
+      if (reply.ok && taskId) {
+        const runId = state ? conversationRunOf(state, taskId) : null;
+        answerLog.add({ taskId, runId, toolUseId, after: null, line: answeredLine(given.answer) });
+      }
+      if (reply.ok && given.opens && taskId) setView({ kind: 'conversation', taskId });
     },
   });
   // Answers the selected task's request: Needs you, its cursor and the
@@ -465,7 +476,7 @@ export function App({
     return [['1–4', 'screens'], ['?', 'keys']];
   };
   if (state && view.kind === 'conversation') {
-    return h(Conversation, { connection, state, taskId: view.taskId, onLeave: toTabs });
+    return h(Conversation, { connection, state, taskId: view.taskId, answerLog, onLeave: toTabs });
   }
 
   return h(
@@ -495,7 +506,7 @@ export function App({
         : null,
       refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
       // A refusal since says more about where things stand.
-      answered && tab === 'needs-you' && !refusal ? h(Text, { key: 'answered', ...tone('ok') }, answered) : null,
+      needsYouAnswer && !refusal ? h(Text, { key: 'answered', ...tone('ok') }, needsYouAnswer) : null,
       pickerCursor === null ? null : h(GroupPicker, { key: 'picker', groups, cursor: pickerCursor, current: group }),
       cancelSheet
         ? h(ChoosePrompt, { key: 'cancel', title: `Cancel ${cancelSheet.taskId}`, reason: cancelSheet.reason, options: cancelSheet.options.map(({ label }) => label) })

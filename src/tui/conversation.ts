@@ -12,11 +12,12 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
-import { AnswerSheet, answerable, answeredLine, cardItem, reopens, useAnswering } from './answer-sheet.ts';
+import { AnswerSheet, answerable, cardItem, reopens, useAnswering } from './answer-sheet.ts';
+import { answeredLine, answersText, placed, type AnswerLog } from './answered.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event, SystemLine } from './output.ts';
-import { answersText, cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
+import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { fixed, usePager, useRows } from './screen.ts';
 import { modeOf } from './task-detail.ts';
 import { GLYPH, joined, Keys, Rule, Section, stateLook, tone, type Hint } from './theme.ts';
@@ -27,30 +28,32 @@ type Props = {
   connection: FactoryConnection;
   state: FactoryState;
   taskId: string;
+  // The answers given this session, which the conversation shows where they were given.
+  answerLog: AnswerLog;
   onLeave(): void;
 };
 
-export function Conversation({ connection, state, taskId, onLeave }: Props) {
+// The run a task's conversation shows: the live one, or else the task's
+// last one, whose session holds it all.
+export function conversationRunOf(state: FactoryState, taskId: string): string | null {
+  return state.tasks[taskId]?.liveRunId ?? Object.values(state.runs).findLast((run) => run.taskId === taskId)?.id ?? null;
+}
+
+export function Conversation({ connection, state, taskId, answerLog, onLeave }: Props) {
   const task = state.tasks[taskId];
-  // The live run, or else the task's last one, whose session holds it all.
-  const runId = task?.liveRunId ?? Object.values(state.runs).findLast((run) => run.taskId === taskId)?.id ?? null;
+  const runId = conversationRunOf(state, taskId);
   const run = runId ? state.runs[runId] : undefined;
   const [events, setEvents] = useState<ConversationEvent[]>([]);
-  // The cards the operator answered here, each with how many events came
-  // before it, so its answer shows where it was given: the session file
-  // holds the agent's question, but not the operator's answer as a message.
-  const [answered, setAnswered] = useState<{ id: string; at: number; text: string }[]>([]);
-  // Numbers the answers from the answer sheet, which have no question of their own to name them.
-  const sheetAnswers = useRef(0);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [advancing, setAdvancing] = useState(false);
   // Keys typed in one burst arrive before a re-render, so what they edit is
-  // kept here: the draft, and the card for the question it answers.
-  const typing = useRef<{ draft: string; card: Card; cardFor: string | null; answered: string | null }>({
+  // kept here: the draft, the card for the question it answers, and the
+  // question last answered, whose card closes.
+  const typing = useRef<{ draft: string; card: Card; cardFor: string | null; answeredQuestion: string | null }>({
     draft: '',
     card: newCard(),
     cardFor: null,
-    answered: null,
+    answeredQuestion: null,
   });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const height = useRows();
@@ -59,7 +62,6 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   useEffect(() => {
     if (!runId) return;
     setEvents([]);
-    setAnswered([]);
     return connection.converse(runId, (event) => setEvents((events) => [...events, event]));
   }, [connection, runId]);
 
@@ -67,7 +69,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const live = takesChat && run?.status === 'active';
   const midTurn = live && run.turn === 'agent';
   // The open card, until the operator has answered it.
-  const question = live && run.question && run.question.id !== typing.current.answered ? run.question : null;
+  const question = live && run.question && run.question.id !== typing.current.answeredQuestion ? run.question : null;
   // A card answers its own question: a new question starts a new card.
   const card = question && typing.current.cardFor === question.id ? typing.current.card : newCard();
   const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
@@ -80,11 +82,15 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const request =
     state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId) ??
     (live && run.permission && task ? cardItem(task, run.permission) : undefined);
+  // Keeps an answer given here, after the call it answers or else the
+  // latest event the operator saw, and returns its id in the log.
+  const remember = (answer: string, toolUseId: string | null) =>
+    answerLog.add({ taskId, runId, toolUseId, after: events.at(-1)?.id ?? null, line: answeredLine(answer) });
   // An answer the daemon took shows in the conversation, as a card's does.
   const answers = useAnswering(connection, request, task, {
-    onReply: ({ reply, answer }) => {
+    onReply: ({ reply, toolUseId, given }) => {
       tell(reply);
-      if (reply.ok) setAnswered((lines) => [...lines, { id: `request-${(sheetAnswers.current += 1)}`, at: events.length, text: answeredLine(answer) }]);
+      if (reply.ok) remember(given.answer, toolUseId);
     },
   });
   const answering = answerable(request, task);
@@ -125,16 +131,16 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     const onCard = question ? cardKey(question, typed.card, typed.draft, input, key) : { kind: 'ignored' as const };
     if (onCard.kind === 'answered') {
       const questionId = question!.id;
-      const line = { id: questionId, at: events.length, text: answeredLine(answersText(onCard.answers)) };
-      setAnswered((lines) => [...lines.filter(({ id }) => id !== questionId), line]);
+      // Shown as it goes, as the card closes, and taken back if refused.
+      const given = remember(answersText(onCard.answers), questionId);
       void connection.send({ type: 'answerQuestion', taskId, questionId, answers: onCard.answers }).then((reply) => {
         tell(reply);
-        if (!reply.ok) setAnswered((lines) => lines.filter(({ id }) => id !== questionId));
+        if (!reply.ok) answerLog.remove(given);
         // A refused answer leaves the card up, so the operator sees what is still open.
-        if (!reply.ok && typed.answered === questionId) Object.assign(typed, { answered: null, card: newCard() });
+        if (!reply.ok && typed.answeredQuestion === questionId) Object.assign(typed, { answeredQuestion: null, card: newCard() });
         rerender();
       });
-      Object.assign(typed, { answered: questionId, draft: '' });
+      Object.assign(typed, { answeredQuestion: questionId, draft: '' });
     } else if (onCard.kind === 'card') {
       typed.card = onCard.card;
       if (onCard.clearDraft) typed.draft = '';
@@ -173,9 +179,6 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const scroll: Hint[] = pager.overflows ? [['pgup/pgdn', `scroll${pager.scrolledBack ? ' (newer below)' : ''}`]] : [];
   const hint: Hint[] = [...keys, ...(canAdvance(task) ? [['ctrl+n', 'advance'] as Hint] : []), ...(chat ? [['/handoff', 'hand off'] as Hint] : []), ['ctrl+b', 'back'], ...scroll];
   const label = task?.label ?? '';
-  // The answers given before event `at`, or after the last one.
-  const answeredAt = (at: number) =>
-    answered.flatMap((line) => (Math.min(line.at, events.length) === at ? [h(Text, { key: `answered-${line.id}`, ...tone('ok') }, line.text)] : []));
   const what = joined([task ? modeOf(task) : null, task?.stage, run?.model]);
 
   return h(
@@ -212,8 +215,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         Section,
         { title: 'Conversation', flexGrow: 1, flexShrink: 1, flexBasis: 0 },
         pager.view(
-          ...events.flatMap((event, i) => [...answeredAt(i), h(Event, { key: event.id, event })]),
-          ...answeredAt(events.length),
+          ...placed(events, answerLog.of(taskId), runId).map((at) =>
+            'event' in at ? h(Event, { key: at.event.id, event: at.event }) : h(Text, { key: at.answer.id, ...tone('ok') }, at.answer.line),
+          ),
           ...(run?.queued ?? []).map((text, i) => h(SystemLine, { key: `queued-${i}`, text: `queued ${text}` })),
         ),
       ),

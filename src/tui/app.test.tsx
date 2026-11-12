@@ -2,6 +2,7 @@
 import chalk from 'chalk';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
+import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { LeftoversView, PresetsView } from '../protocol/protocol.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
@@ -53,8 +54,16 @@ function widen(app: { stdout: NodeJS.EventEmitter }, columns: number) {
   app.stdout.emit('resize');
 }
 
+// A terminal of `rows` rows, which the TUI fits itself to.
+function resize(app: { stdout: NodeJS.EventEmitter }, rows: number) {
+  Object.defineProperty(app.stdout, 'rows', { value: rows, configurable: true });
+  app.stdout.emit('resize');
+}
+
+// The frame's lines.
+const lines = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.split('\n');
+
 describe('the frame', () => {
-  const lines = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.split('\n');
 
   test('the header names the factory and its tabs, and the breadcrumb says where you are', async () => {
     const { app } = await started(
@@ -104,8 +113,7 @@ describe('the frame', () => {
   test('the TUI takes the terminal’s full height at startup, its footer on the bottom line whatever the screen holds', async () => {
     const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running')]));
     // A tall terminal, far taller than what the screens hold.
-    Object.defineProperty(app.stdout, 'rows', { value: 40, configurable: true });
-    app.stdout.emit('resize');
+    resize(app, 40);
 
     for (const keys of [[], ['2'], ['3'], ['4'], ['1', '\r']]) {
       await press(app, ...keys);
@@ -714,11 +722,10 @@ describe('launching and conversing', () => {
 
   test('the conversation view takes the terminal’s full height, its keys on the bottom line', async () => {
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } });
-    Object.defineProperty(app.stdout, 'rows', { value: 40, configurable: true });
-    app.stdout.emit('resize');
+    resize(app, 40);
     await press(app, '\r', '\r');
     await eventually(() => {
-      const frame = app.lastFrame()!.split('\n');
+      const frame = lines(app);
       expect(frame).toHaveLength(40);
       expect(frame.at(-1)).toMatch(/ctrl\+b back/);
     });
@@ -2473,6 +2480,65 @@ describe('answering in the conversation', () => {
     });
   });
 
+  test('an answer given on Needs you shows in the conversation after the call it answers, and still does once the conversation is left and reopened', async () => {
+    const connection = new FakeConnection();
+    const question = {
+      id: 'toolu_02',
+      questions: [{ question: 'Which endpoint?', header: 'API', options: [{ label: 'v1', description: 'The old one' }, { label: 'v2', description: 'The new one' }], multiSelect: false }],
+    };
+    const asked = { ...permission, attention: 'question' as const, reason: 'Which endpoint?', question, permission: null };
+    const { app } = await started({ ...factoryState([waiting], [asked]), runs: { R1: suspended } }, { connection });
+    await press(app, '2', 'a', '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which endpoint?': 'v2' } }));
+    connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [] }]);
+
+    // The run's events: the answer goes after the call it answers, not after the latest.
+    const events: ConversationEvent[] = [
+      { type: 'message', id: 'E1', from: 'agent', text: 'Reading the issue.' },
+      { type: 'toolUse', id: 'E2', tool: 'AskUserQuestion', summary: 'Which endpoint?', toolUseId: 'toolu_02' },
+      { type: 'message', id: 'E3', from: 'agent', text: 'Going with v2.' },
+    ];
+    for (const time of [1, 2]) {
+      // Esc gives the digits back to the screens.
+      await press(app, ESC, '1', ENTER, ENTER);
+      await eventually(() => expect(connection.conversed).toHaveLength(time));
+      connection.serveConversation('R1', ...events);
+      await eventually(() => {
+        const frame = app.lastFrame()!;
+        const at = (text: string) => frame.indexOf(text);
+        expect(at('AskUserQuestion')).toBeGreaterThan(at('Reading the issue.'));
+        expect(at('✓ Answered Which endpoint? → v2')).toBeGreaterThan(at('AskUserQuestion'));
+        expect(at('Going with v2.')).toBeGreaterThan(at('✓ Answered Which endpoint? → v2'));
+      });
+      await press(app, '\x02');
+    }
+  });
+
+  test('an answer given in the conversation stays in it once the task’s next run starts, before that run’s events', async () => {
+    const connection = new FakeConnection();
+    const failure = { ...permission, attention: 'failure' as const, holdsRun: false, reason: 'The agent hit max turns.', permission: null };
+    const app = await opened(failure, connection);
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Out of turns.' });
+    await press(app, '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1' }));
+    await eventually(() => expect(app.lastFrame()).toContain('✓ Answered Retry'));
+
+    // Retried, the task's next run takes the conversation over.
+    const retried = { ...suspended, id: 'R2', status: 'active' as const, startedAt: 2 };
+    connection.servePatch([
+      { op: 'set', path: ['attentionQueue'], value: [] },
+      { op: 'set', path: ['runs', 'R2'], value: retried },
+      { op: 'set', path: ['tasks', 'T1', 'liveRunId'], value: 'R2' },
+    ]);
+    await eventually(() => expect(connection.conversed).toEqual(['R1', 'R2']));
+    connection.serveConversation('R2', { type: 'message', id: 'E9', from: 'agent', text: 'Trying again.' });
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.indexOf('Trying again.')).toBeGreaterThan(frame.indexOf('✓ Answered Retry'));
+      expect(frame).toContain('✓ Answered Retry');
+    });
+  });
+
   test('a refused answer shows its reason in the conversation and can be answered again', async () => {
     const connection = new FakeConnection();
     connection.replyTo('answer', { ok: false, reason: 'T1 has no open attention request.' });
@@ -2920,12 +2986,6 @@ describe('the screens view', () => {
       expect(frame.split('\n')).toHaveLength(before + 1);
     });
   });
-
-  // A terminal of `rows` rows, which the TUI fits itself to.
-  function resize(app: { stdout: NodeJS.EventEmitter }, rows: number) {
-    Object.defineProperty(app.stdout, 'rows', { value: rows, configurable: true });
-    app.stdout.emit('resize');
-  }
 
   test('on a short terminal the Tasks screen fits it: the tree scrolls with the cursor, under the tabs and over its keys and output', async () => {
     const tasks = Array.from({ length: 20 }, (_, i) => task(`T${i + 1}`, `Task number ${i + 1}`, 'queued', 'Ready for you', 'HITL'));
