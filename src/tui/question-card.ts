@@ -5,7 +5,8 @@
 import { createElement as h } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { Answers, Question } from '../lifecycle/lifecycle.ts';
-import { Option, Sheet, Tick, tone } from './theme.ts';
+import { answerOf } from './answered.ts';
+import { GLYPH, Option, Sheet, Tick, tone } from './theme.ts';
 
 export type Card = {
   // The question being answered.
@@ -52,7 +53,14 @@ export function QuestionCard({ question, card, ownWords = true, nested = false }
   const asked = question.questions[card.index]!;
   const count = question.questions.length;
   const hint = `${asked.multiSelect ? 'digits toggle · enter confirm' : 'digit picks'}${ownWords ? ' · or type your own answer' : ''}`;
+  // The card's questions already answered, each with its answer, over the one asked now.
+  const answered = question.questions.slice(0, card.index).map(({ question: text }) =>
+    h(Text, { key: `answered-${text}`, ...tone('ok') }, `${GLYPH.answered} ${answerOf(text, card.answers[text] ?? '')}`),
+  );
+  // An option the operator picked: toggled on, or the one the card was answered with.
+  const picked = (i: number) => card.picked.includes(i) || card.answers[asked.question] === asked.options[i]!.label;
   const body = [
+    ...answered,
     h(
       Box,
       { key: 'asked', gap: 1 },
@@ -63,12 +71,12 @@ export function QuestionCard({ question, card, ownWords = true, nested = false }
     ...asked.options.map((option, i) =>
       h(
         Option,
-        { key: option.label, digit: i + 1 },
+        { key: option.label, digit: i + 1, picked: picked(i) },
         h(
           Box,
           { gap: 1 },
           asked.multiSelect ? h(Tick, { on: card.picked.includes(i) }) : null,
-          h(Text, null, option.label),
+          h(Text, { bold: picked(i) }, option.label),
           h(Text, tone('dim'), option.description),
         ),
       ),

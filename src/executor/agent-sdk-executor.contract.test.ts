@@ -62,7 +62,7 @@ test('a HITL run streams text and tool use, takes the operator’s messages, rec
   expect(createdAt).toBeLessThanOrEqual(Date.now());
   expect(live.map(({ id, ...event }) => event)).toEqual([
     { type: 'message', from: 'operator', text: run.firstMessage },
-    { type: 'toolUse', tool: 'Read', summary: expect.stringContaining('secret.txt') },
+    { type: 'toolUse', tool: 'Read', summary: expect.stringContaining('secret.txt'), toolUseId: expect.any(String) },
     expect.objectContaining({ type: 'message', from: 'agent', text: expect.stringContaining('PERIWINKLE-42') }),
     { type: 'message', from: 'operator', text: 'Now reply with only the word PONG.' },
     expect.objectContaining({ type: 'message', from: 'agent', text: expect.stringContaining('PONG') }),

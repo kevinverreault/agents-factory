@@ -13,6 +13,7 @@ import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
 import { AnswerSheet, answerable, cardItem, reopens, useAnswering } from './answer-sheet.ts';
+import { answeredLine, answersText, placed, type AnswerLog } from './answered.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event, SystemLine } from './output.ts';
@@ -27,25 +28,33 @@ type Props = {
   connection: FactoryConnection;
   state: FactoryState;
   taskId: string;
+  // The answers given this session, which the conversation shows where they were given.
+  answerLog: AnswerLog;
   onLeave(): void;
 };
 
-export function Conversation({ connection, state, taskId, onLeave }: Props) {
+// The run a task's conversation shows: the live one, or else the task's
+// last one, whose session holds it all.
+export function conversationRunOf(state: FactoryState, taskId: string): string | null {
+  return state.tasks[taskId]?.liveRunId ?? Object.values(state.runs).findLast((run) => run.taskId === taskId)?.id ?? null;
+}
+
+export function Conversation({ connection, state, taskId, answerLog, onLeave }: Props) {
   const task = state.tasks[taskId];
-  // The live run, or else the task's last one, whose session holds it all.
-  const runId = task?.liveRunId ?? Object.values(state.runs).findLast((run) => run.taskId === taskId)?.id ?? null;
+  const runId = conversationRunOf(state, taskId);
   const run = runId ? state.runs[runId] : undefined;
   const [events, setEvents] = useState<ConversationEvent[]>([]);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [advancing, setAdvancing] = useState(false);
   // Keys typed in one burst arrive before a re-render, so what they edit is
-  // kept here: the draft, and the card for the question it answers.
-  const typing = useRef<{ draft: string; caret: Caret; card: Card; cardFor: string | null; answered: string | null }>({
+  // kept here: the draft, the card for the question it answers, and the
+  // question last answered, whose card closes.
+  const typing = useRef<{ draft: string; caret: Caret; card: Card; cardFor: string | null; answeredQuestion: string | null }>({
     draft: '',
     caret: null,
     card: newCard(),
     cardFor: null,
-    answered: null,
+    answeredQuestion: null,
   });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const height = useRows();
@@ -61,7 +70,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const live = takesChat && run?.status === 'active';
   const midTurn = live && run.turn === 'agent';
   // The open card, until the operator has answered it.
-  const question = live && run.question && run.question.id !== typing.current.answered ? run.question : null;
+  const question = live && run.question && run.question.id !== typing.current.answeredQuestion ? run.question : null;
   // A card answers its own question: a new question starts a new card.
   const card = question && typing.current.cardFor === question.id ? typing.current.card : newCard();
   const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
@@ -74,7 +83,17 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const request =
     state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId) ??
     (live && run.permission && task ? cardItem(task, run.permission) : undefined);
-  const answers = useAnswering(connection, request, task, { onReply: ({ reply }) => tell(reply) });
+  // Keeps an answer given here, after the call it answers or else the
+  // latest event the operator saw, and returns its id in the log.
+  const remember = (answer: string, toolUseId: string | null) =>
+    answerLog.add({ taskId, runId, toolUseId, after: events.at(-1)?.id ?? null, line: answeredLine(answer) });
+  // An answer the daemon took shows in the conversation, as a card's does.
+  const answers = useAnswering(connection, request, task, {
+    onReply: ({ reply, toolUseId, given }) => {
+      tell(reply);
+      if (reply.ok) remember(given.answer, toolUseId);
+    },
+  });
   const answering = answerable(request, task);
   // A live AFK task is talked to only once taken over, which `c` does from
   // here too, unless the answer sheet is taking what the operator types.
@@ -112,14 +131,17 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     if (question && typed.cardFor !== question.id) Object.assign(typed, { card: newCard(), cardFor: question.id });
     const onCard = question ? cardKey(question, typed.card, typed.draft, input, key) : { kind: 'ignored' as const };
     if (onCard.kind === 'answered') {
-      const answered = question!.id;
-      void connection.send({ type: 'answerQuestion', taskId, questionId: answered, answers: onCard.answers }).then((reply) => {
+      const questionId = question!.id;
+      // Shown as it goes, as the card closes, and taken back if refused.
+      const given = remember(answersText(onCard.answers), questionId);
+      void connection.send({ type: 'answerQuestion', taskId, questionId, answers: onCard.answers }).then((reply) => {
         tell(reply);
+        if (!reply.ok) answerLog.remove(given);
         // A refused answer leaves the card up, so the operator sees what is still open.
-        if (!reply.ok && typed.answered === answered) Object.assign(typed, { answered: null, card: newCard() });
+        if (!reply.ok && typed.answeredQuestion === questionId) Object.assign(typed, { answeredQuestion: null, card: newCard() });
         rerender();
       });
-      Object.assign(typed, { answered, draft: '' });
+      Object.assign(typed, { answeredQuestion: questionId, draft: '' });
     } else if (onCard.kind === 'card') {
       typed.card = onCard.card;
       if (onCard.clearDraft) typed.draft = '';
@@ -195,7 +217,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         Section,
         { title: 'Conversation', flexGrow: 1, flexShrink: 1, flexBasis: 0 },
         pager.view(
-          ...events.map((event) => h(Event, { key: event.id, event })),
+          ...placed(events, answerLog.of(taskId), runId).map((at) =>
+            'event' in at ? h(Event, { key: at.event.id, event: at.event }) : h(Text, { key: at.answer.id, ...tone('ok') }, at.answer.line),
+          ),
           ...(run?.queued ?? []).map((text, i) => h(SystemLine, { key: `queued-${i}`, text: `queued ${text}` })),
         ),
       ),
@@ -226,7 +250,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         advancing && canAdvance(task)
           ? h(AdvanceSheet, { key: 'advance', connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
           : null,
-        request ? h(AnswerSheet, { key: 'request', item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
+        request ? h(AnswerSheet, { key: 'request', item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, chosen: answers.chosen, escBack: false }) : null,
         live && (run.turn === 'operator' || question || run.permission) ? h(Text, { key: 'waiting', ...tone('warn') }, 'The agent is waiting on you.') : null,
         refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
         chat ? h(Text, { key: 'chat' }, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)) : null,
