@@ -683,9 +683,10 @@ export type RunEvent =
   // The run's session's usage so far, per model, as a result reports it: a
   // resumed session's counts the runs before.
   | { type: 'usageTotaled'; runId: string; models: ModelUsage }
-  // The run saw a usage window's reading (a `rate_limit_event`): the share
-  // of it spent (0 to 1) and when it resets, in ms, where it says.
-  | { type: 'usageSnapshotSeen'; runId: string; window: UsageWindowKind; status: UsageWindowStatus; spent: number | null; resetsAt: number | null }
+  // The run saw a usage window's reading (a `rate_limit_event`, or the
+  // CLI's `/usage`): its status, the share of it spent (0 to 1) and when it
+  // resets, in ms, where it says.
+  | { type: 'usageSnapshotSeen'; runId: string; window: UsageWindowKind; status: UsageWindowStatus | null; spent: number | null; resetsAt: number | null }
   // An AFK run's request hit a usage limit, and Claude Code's retry
   // watchdog waits `waitMs` for it to reset before retrying.
   | { type: 'windowWaited'; runId: string; waitMs: number };

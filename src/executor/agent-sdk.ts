@@ -33,6 +33,7 @@ import type { Processes } from '../os/processes.ts';
 import { ArchiveError, type Completion, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
 import { afkFactoryTools, hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
+import { READ_EVERY_MS, shareSpent, subscriptionWindowReader } from './subscription-windows.ts';
 
 type LiveRun = {
   input: StreamedInput;
@@ -95,6 +96,8 @@ export type AgentSdkExecutorOptions = {
 
 export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkExecutorOptions = {}): Executor {
   const runs = new Map<string, LiveRun>();
+  // Reads the usage windows through whichever run asks, as often as any run does.
+  const windows = subscriptionWindowReader();
 
   function say(runId: string, text: string): void {
     const run = runs.get(runId);
@@ -251,9 +254,24 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
     // How to sign in again, once Claude Code couldn't sign in for the run.
     let signIn: string | null = null;
     const failed = (reason: string) => report({ type: 'runFailed', runId, reason: signIn ? `${reason}\n\n${signIn}` : reason });
+    // Reads the usage windows through the run's CLI, as its `/usage` does:
+    // with each message, and on a timer while a conversation waits on the
+    // operator. Display only (ADR 0008): a CLI that can't say says nothing.
+    const readWindows = () =>
+      windows.read(
+        () => run.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).then((usage) => usage.rate_limits),
+        (readings) => {
+          if (run.stopped || ended) return false;
+          for (const reading of readings) report({ type: 'usageSnapshotSeen', runId, ...reading });
+          return true;
+        },
+      );
+    const windowTimer = setInterval(readWindows, READ_EVERY_MS);
+    windowTimer.unref();
     try {
       for await (const message of run.query) {
         if (run.stopped) return;
+        readWindows();
         if (message.type === 'system' && message.subtype === 'init' && !run.reportedStart && run.cli) {
           run.reportedStart = true;
           report({ type: 'runStarted', runId, ...(await run.cli), model: message.model });
@@ -305,6 +323,7 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
       // The SDK throws once the CLI returns an error result.
       failed(error instanceof Error ? error.message : String(error));
     } finally {
+      clearInterval(windowTimer);
       runs.delete(runId);
     }
   }
@@ -676,7 +695,7 @@ function sampleOf(message: unknown): { messageId: string; model: string; usage: 
 // window is no snapshot.
 function snapshotOf({ rateLimitType, status, utilization, resetsAt }: SDKRateLimitInfo) {
   if (!rateLimitType) return null;
-  const spent = typeof utilization === 'number' ? Math.min(Math.max(utilization > 1 ? utilization / 100 : utilization, 0), 1) : null;
+  const spent = typeof utilization === 'number' ? shareSpent(utilization > 1 ? utilization / 100 : utilization) : null;
   return { window: rateLimitType, status, spent, resetsAt: typeof resetsAt === 'number' ? resetsAt * 1000 : null };
 }
 

@@ -112,6 +112,16 @@ describe('usage snapshots', () => {
     expect(tui.state().usage.window).toEqual({ spent: 0.4, resetsAt });
   });
 
+  test('a reading that says nothing of what is spent keeps the last one when it names the same reset to within a minute', async () => {
+    const { factory, operator, tui } = await conversing();
+    const resetsAt = factory.clock.now() + hours(3);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'allowed', spent: 0.4, resetsAt: resetsAt + 734 });
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'allowed', spent: null, resetsAt });
+    await settled(operator);
+
+    expect(tui.state().usage.weekly).toEqual({ spent: 0.4, resetsAt });
+  });
+
   test('a snapshot past its reset shows as unknown', async () => {
     const { factory, operator, tui } = await conversing();
     factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'five_hour', status: 'allowed', spent: 0.5, resetsAt: factory.clock.now() + minutes(20) });
@@ -228,6 +238,34 @@ describe('usage limits on AFK runs', () => {
     expect(state.runs.R1).toMatchObject({ status: 'ended', outcome: 'failed' });
     expect(state.attentionQueue).toEqual([
       expect.objectContaining({ attention: 'failure', taskId: 'T1', reason: 'API Error: 429 usage limit. The weekly usage limit is spent: it resets Mon 2 Nov, 14:30.' }),
+    ]);
+  });
+
+  test('a reading that says nothing of the status keeps a weekly limit spent, so the run’s failure still names the reset time', async () => {
+    const { factory, operator, tui } = await running();
+    const resetsAt = Date.UTC(2026, 10, 2, 14, 30);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: 'rejected', spent: 1, resetsAt });
+    // The CLI's `/usage` reads the share, not the status, rounded below 100%.
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: null, spent: 0.996, resetsAt: resetsAt + 400 });
+    await settled(operator);
+    factory.executor.report('R1', { type: 'runFailed', reason: 'API Error: 429 usage limit' });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.attentionQueue).toEqual([
+      expect.objectContaining({ reason: 'API Error: 429 usage limit. The weekly usage limit is spent: it resets Mon 2 Nov, 14:30.' }),
+    ]);
+  });
+
+  test('a reading that says nothing of the status of a window seen spent at last reads it spent', async () => {
+    const { factory, operator, tui } = await running();
+    const resetsAt = Date.UTC(2026, 10, 2, 14, 30);
+    factory.executor.report('R1', { type: 'usageSnapshotSeen', window: 'seven_day', status: null, spent: 1, resetsAt });
+    await settled(operator);
+    factory.executor.report('R1', { type: 'runFailed', reason: 'API Error: 429 usage limit' });
+
+    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(state.attentionQueue).toEqual([
+      expect.objectContaining({ reason: 'API Error: 429 usage limit. The weekly usage limit is spent: it resets Mon 2 Nov, 14:30.' }),
     ]);
   });
 
