@@ -32,7 +32,12 @@ export function Condensed({
   tree: ReactNode;
   detail: ReactNode;
 }) {
-  const titles: Record<Pane, string | null> = { sidebar: null, tree: `Tasks · ${group ?? 'all'}`, detail: zoom ? 'Detail · zoomed' : 'Detail' };
+  // Each pane's title, and what it shows of it in its own case.
+  const titles: Record<Pane, { text: string; name?: string } | null> = {
+    sidebar: null,
+    tree: { text: 'Tasks', name: group ?? 'all' },
+    detail: { text: zoom ? 'Detail · zoomed' : 'Detail' },
+  };
   const pane = (id: Pane, content: ReactNode, size: { width?: number; flexGrow?: number; flexBasis?: number }, divided: boolean) =>
     h(
       Box,
@@ -45,7 +50,7 @@ export function Condensed({
         paddingX: 1,
         ...(divided ? { borderStyle: 'single', borderTop: false, borderBottom: false, borderRight: false, ...border('line') } : {}),
       },
-      titles[id] ? h(Heading, { text: titles[id], role: focus === id ? 'accent' : 'dim' }) : null,
+      titles[id] ? h(Heading, { ...titles[id], role: focus === id ? 'accent' : 'dim' }) : null,
       content,
     );
   return h(
