@@ -24,7 +24,7 @@ import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
-import { AnswerSheet, answerable, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
+import { AnswerSheet, answerable, answeredLine, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { CommandLine, runCommand, type Jump } from './command-line.ts';
 import { Condensed, groupCounts, PANES, Sidebar, type Pane } from './condensed.ts';
@@ -127,6 +127,9 @@ export function App({
   };
   const [clone, setClone] = useState<CloneView | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
+  // What the operator last answered on Needs you, once the daemon took it,
+  // until they leave Needs you.
+  const [answered, setAnswered] = useState<string | null>(null);
   const [view, setView] = useState<View>({ kind: 'tabs' });
   // Each pane's cursor. It stays on the row it was on while the rows move,
   // so leaving a conversation comes back to exactly where the operator was.
@@ -225,6 +228,7 @@ export function App({
   // A number key switches to its screen, leaving any detail behind.
   const show = (next: Tab) => {
     setTab(next);
+    if (next !== 'needs-you') setAnswered(null);
     setDetail(null);
   };
   // Where the command line jumps: a task's detail, the tree under the cursor
@@ -253,8 +257,9 @@ export function App({
   // request leaves Needs you the next item slides under it.
   const answers = useAnswering(connection, item, itemTask, {
     onSend: () => setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } })),
-    onReply: ({ reply, taskId, opens }) => {
+    onReply: ({ reply, taskId, opens, title, answer }) => {
       setRefusal(reply.ok ? null : reply.reason);
+      setAnswered(reply.ok ? answeredLine({ title, answer }) : null);
       if (reply.ok && opens && taskId) setView({ kind: 'conversation', taskId });
     },
   });
@@ -487,6 +492,7 @@ export function App({
             )
         : null,
       refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
+      answered && tab === 'needs-you' && !condensed ? h(Text, { key: 'answered', ...tone('ok') }, answered) : null,
       pickerCursor === null ? null : h(GroupPicker, { key: 'picker', groups, cursor: pickerCursor, current: group }),
       cancelSheet
         ? h(ChoosePrompt, { key: 'cancel', title: `Cancel ${cancelSheet.taskId}`, reason: cancelSheet.reason, options: cancelSheet.options.map(({ label }) => label) })
@@ -521,8 +527,9 @@ export function App({
     h(
       Box,
       // Boxes give way in proportion to their weight times their height:
-      // this one's outweighs the quick launch card's.
-      { flexDirection: 'column', flexShrink: PANE_GIVES_WAY_FIRST, overflow: 'hidden' },
+      // this one's outweighs the quick launch card's. On a tall screen it
+      // takes the rows left, so the footer is always the bottom line.
+      { flexDirection: 'column', flexGrow: 1, flexShrink: PANE_GIVES_WAY_FIRST, overflow: 'hidden' },
       state === null
         ? h(Text, tone('dim'), 'Attaching to the daemon…')
         : help

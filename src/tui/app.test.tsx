@@ -101,6 +101,24 @@ describe('the frame', () => {
     expect(app.lastFrame()).not.toContain('enter detail');
   });
 
+  test('the TUI takes the terminal’s full height at startup, its footer on the bottom line whatever the screen holds', async () => {
+    const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running')]));
+    // A tall terminal, far taller than what the screens hold.
+    Object.defineProperty(app.stdout, 'rows', { value: 40, configurable: true });
+    app.stdout.emit('resize');
+
+    for (const keys of [[], ['2'], ['3'], ['4'], ['1', '\r']]) {
+      await press(app, ...keys);
+      await eventually(() => {
+        const frame = lines(app);
+        expect(frame).toHaveLength(40);
+        // The footer: its keys under the last rule, ending on the last line.
+        expect(frame.at(-1)).toMatch(/\? keys$/);
+        expect(frame.findLastIndex((line) => /^─{20,}$/.test(line))).toBeGreaterThanOrEqual(frame.length - 3);
+      });
+    }
+  });
+
   test('under NO_COLOR nothing is coloured, on any screen, sheet or view', async () => {
     const level = chalk.level;
     chalk.level = 3;
@@ -694,6 +712,18 @@ describe('launching and conversing', () => {
     await settle();
   }
 
+  test('the conversation view takes the terminal’s full height, its keys on the bottom line', async () => {
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } });
+    Object.defineProperty(app.stdout, 'rows', { value: 40, configurable: true });
+    app.stdout.emit('resize');
+    await press(app, '\r', '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!.split('\n');
+      expect(frame).toHaveLength(40);
+      expect(frame.at(-1)).toMatch(/ctrl\+b back/);
+    });
+  });
+
   test('N opens the launch card on the repository holding the working directory, and enter launches the prompt into its conversation', async () => {
     const connection = inWidgets();
     connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
@@ -1162,7 +1192,8 @@ describe('launching and conversing', () => {
 
     app.stdin.write('1');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toContain('Which browsers fail?'));
+    // The card moves on to its next question, saying how the last was answered.
+    await eventually(() => expect(app.lastFrame()).toMatch(/✓ Which identity provider times out\? → Okta[\s\S]*Which browsers fail\?/));
     app.stdin.write('1');
     app.stdin.write('3');
     await settle();
@@ -1181,7 +1212,13 @@ describe('launching and conversing', () => {
         },
       ]),
     );
-    await eventually(() => expect(app.lastFrame()).not.toContain('Which browsers fail?'));
+    // The card closes, and the conversation says what the operator answered.
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).not.toContain('[1] [x] Safari');
+      // Wrapped beside the rail.
+      expect(frame).toMatch(/✓ Answered Which identity provider times out\? →[\s\S]*Okta · Which browsers fail\? → Safari, Chrome/);
+    });
   });
 
   test('typing on a question card answers it in the operator’s own words', async () => {
@@ -1788,6 +1825,29 @@ describe('answering from Needs you', () => {
     expect(app.lastFrame()).toContain('Fix the login bug');
   });
 
+  test('once an answer goes through, Needs you says what was answered and with which options, as the request leaves', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([asking, failing], [failure, asked]), { connection });
+    await press(app, '2', 'a', '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
+    connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [asked] }]);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('✓ Answered T2 Implement the store: Retry');
+      expect(frame).toMatch(/── 1\/1 ── T1 Fix the login bug/);
+    });
+
+    await press(app, '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which identity provider times out?': 'Auth0' } }));
+    connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [] }]);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('Nothing needs you.');
+      expect(frame).toContain('✓ Answered T1 Fix the login bug: Which identity provider times out? → Auth0');
+      expect(frame).not.toContain('T2 Implement the store: Retry');
+    });
+  });
+
   test('a digit can take a failed AFK task over, into its conversation; esc gives the digits back to the screens', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([asking, failing], [failure, asked]), { connection });
@@ -2171,7 +2231,11 @@ describe('answering from Needs you', () => {
     connection.replyTo('cancel', { ok: true });
     await press(app, '2');
     await eventually(() => expect(connection.sent.at(-1)).toEqual(discard));
-    await eventually(() => expect(app.lastFrame()).not.toContain('Discard work'));
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).not.toContain('[2] Discard work');
+      expect(frame).toContain('✓ Answered T3 Add a logout button: Cancel, Discard work');
+    });
   });
 
   test('a missing repository takes no digits, and its sheet says how to fix it', async () => {
@@ -2359,6 +2423,8 @@ describe('answering in the conversation', () => {
 
     await press(app, '2');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which endpoint?': 'v2' } }));
+    // Taken, the answer shows in the conversation.
+    await eventually(() => expect(app.lastFrame()).toContain('✓ Answered Which endpoint? → v2'));
   });
 
   test('a HITL run’s permission card shows in its conversation, answered as a request is, and chat waits until it is', async () => {
@@ -2388,7 +2454,9 @@ describe('answering in the conversation', () => {
     connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...asking, permission: null } }]);
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).not.toContain('Allow once');
+      // The card is gone, and the conversation says how it was answered.
+      expect(frame).not.toContain('[1] Allow once');
+      expect(frame).toContain('✓ Answered Allow once');
       expect(frame).toContain('enter queue · esc interrupt');
     });
   });

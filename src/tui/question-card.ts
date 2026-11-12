@@ -5,7 +5,7 @@
 import { createElement as h } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { Answers, Question } from '../lifecycle/lifecycle.ts';
-import { Option, Sheet, Tick, tone } from './theme.ts';
+import { GLYPH, Option, Sheet, Tick, tone } from './theme.ts';
 
 export type Card = {
   // The question being answered.
@@ -45,6 +45,13 @@ export function cardKey(question: Question, card: Card, draft: string, input: st
   return { kind: 'card', card: { ...card, picked }, clearDraft: false };
 }
 
+// A card's answers on one line: each question, then its answer.
+export function answersText(answers: Answers): string {
+  return Object.entries(answers)
+    .map(([question, answer]) => `${question} ${GLYPH.answers} ${answer}`)
+    .join(` ${GLYPH.between} `);
+}
+
 // `ownWords` says whether typed text can answer too: not on an answer sheet.
 // `nested` in a sheet of its own (an answer sheet, quick launch), the card
 // is that sheet's; alone, as in a conversation, it is a sheet itself.
@@ -52,7 +59,12 @@ export function QuestionCard({ question, card, ownWords = true, nested = false }
   const asked = question.questions[card.index]!;
   const count = question.questions.length;
   const hint = `${asked.multiSelect ? 'digits toggle · enter confirm' : 'digit picks'}${ownWords ? ' · or type your own answer' : ''}`;
+  // The card's questions already answered, each with its answer, over the one asked now.
+  const answered = question.questions.slice(0, card.index).map(({ question: text }) =>
+    h(Text, { key: `answered-${text}`, ...tone('ok') }, `${GLYPH.current} ${text} ${GLYPH.answers} ${card.answers[text] ?? ''}`),
+  );
   const body = [
+    ...answered,
     h(
       Box,
       { key: 'asked', gap: 1 },

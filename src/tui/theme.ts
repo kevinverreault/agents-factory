@@ -145,6 +145,8 @@ export const GLYPH = {
   caret: '▏',
   // The stage an advance lands on.
   advances: '←',
+  // Between a question and the operator's answer to it.
+  answers: '→',
   // Around a value ←→ changes.
   chooseBefore: '‹',
   chooseAfter: '›',

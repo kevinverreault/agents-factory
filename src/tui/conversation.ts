@@ -16,7 +16,7 @@ import { AnswerSheet, answerable, cardItem, reopens, useAnswering } from './answ
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
 import { Event, SystemLine } from './output.ts';
-import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
+import { answersText, cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { fixed, usePager, useRows } from './screen.ts';
 import { modeOf } from './task-detail.ts';
 import { GLYPH, joined, Keys, Rule, Section, stateLook, tone, type Hint } from './theme.ts';
@@ -36,6 +36,10 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const runId = task?.liveRunId ?? Object.values(state.runs).findLast((run) => run.taskId === taskId)?.id ?? null;
   const run = runId ? state.runs[runId] : undefined;
   const [events, setEvents] = useState<ConversationEvent[]>([]);
+  // The cards the operator answered here, each with how many events came
+  // before it, so its answer shows where it was given: the session file
+  // holds the agent's question, but not the operator's answer as a message.
+  const [answered, setAnswered] = useState<{ id: string; at: number; text: string }[]>([]);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [advancing, setAdvancing] = useState(false);
   // Keys typed in one burst arrive before a re-render, so what they edit is
@@ -53,6 +57,7 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   useEffect(() => {
     if (!runId) return;
     setEvents([]);
+    setAnswered([]);
     return connection.converse(runId, (event) => setEvents((events) => [...events, event]));
   }, [connection, runId]);
 
@@ -73,7 +78,13 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const request =
     state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId) ??
     (live && run.permission && task ? cardItem(task, run.permission) : undefined);
-  const answers = useAnswering(connection, request, task, { onReply: ({ reply }) => tell(reply) });
+  // An answer the daemon took shows in the conversation, as a card's does.
+  const answers = useAnswering(connection, request, task, {
+    onReply: ({ reply, answer }) => {
+      tell(reply);
+      if (reply.ok) setAnswered((lines) => [...lines, { id: `request-${lines.length}`, at: events.length, text: `${GLYPH.current} Answered ${answer}` }]);
+    },
+  });
   const answering = answerable(request, task);
   // A live AFK task is talked to only once taken over, which `c` does from
   // here too, unless the answer sheet is taking what the operator types.
@@ -112,8 +123,11 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     const onCard = question ? cardKey(question, typed.card, typed.draft, input, key) : { kind: 'ignored' as const };
     if (onCard.kind === 'answered') {
       const answered = question!.id;
+      const line = { id: answered, at: events.length, text: `${GLYPH.current} Answered ${answersText(onCard.answers)}` };
+      setAnswered((lines) => [...lines.filter(({ id }) => id !== answered), line]);
       void connection.send({ type: 'answerQuestion', taskId, questionId: answered, answers: onCard.answers }).then((reply) => {
         tell(reply);
+        if (!reply.ok) setAnswered((lines) => lines.filter(({ id }) => id !== answered));
         // A refused answer leaves the card up, so the operator sees what is still open.
         if (!reply.ok && typed.answered === answered) Object.assign(typed, { answered: null, card: newCard() });
         rerender();
@@ -157,6 +171,9 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
   const scroll: Hint[] = pager.overflows ? [['pgup/pgdn', `scroll${pager.scrolledBack ? ' (newer below)' : ''}`]] : [];
   const hint: Hint[] = [...keys, ...(canAdvance(task) ? [['ctrl+n', 'advance'] as Hint] : []), ...(chat ? [['/handoff', 'hand off'] as Hint] : []), ['ctrl+b', 'back'], ...scroll];
   const label = task?.label ?? '';
+  // The answers given before event `at`, or after the last one.
+  const answeredAt = (at: number) =>
+    answered.flatMap((line) => (Math.min(line.at, events.length) === at ? [h(Text, { key: `answered-${line.id}`, ...tone('ok') }, line.text)] : []));
   const what = joined([task ? modeOf(task) : null, task?.stage, run?.model]);
 
   return h(
@@ -193,7 +210,8 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
         Section,
         { title: 'Conversation', flexGrow: 1, flexShrink: 1, flexBasis: 0 },
         pager.view(
-          ...events.map((event) => h(Event, { key: event.id, event })),
+          ...events.flatMap((event, i) => [...answeredAt(i), h(Event, { key: event.id, event })]),
+          ...answeredAt(events.length),
           ...(run?.queued ?? []).map((text, i) => h(SystemLine, { key: `queued-${i}`, text: `queued ${text}` })),
         ),
       ),
