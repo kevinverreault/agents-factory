@@ -25,6 +25,7 @@ const KEYS: [string, string][] = [
   ['ctrl+h', 'hand a HITL task off'],
   ['ctrl+e', 'expand a quick launch into its full conversation'],
   ['ctrl+b', 'leave a conversation, back to where you were'],
+  ['home end', 'in a line being typed, the cursor to its start or end; ← → move it a character, and with ctrl or alt (or alt+b, alt+f) a word'],
   ['pgup pgdn', 'page back through a conversation taller than the screen, and down to its latest'],
   ['?', 'this help'],
 ];

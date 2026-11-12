@@ -675,6 +675,10 @@ const RIGHT = '\x1b[C';
 const LEFT = '\x1b[D';
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
+const HOME = '\x1b[H';
+const END = '\x1b[F';
+const DELETE = '\x1b[3~';
+const CTRL_LEFT = '\x1b[1;5D';
 
 // A frame's text with the card's border and wrapping taken out.
 const unwrapped = (frame: string) => frame.replace(/[│\s]+/g, ' ');
@@ -808,6 +812,43 @@ describe('launching and conversing', () => {
 
     expect(connection.conversed).toEqual([]);
     expect(app.lastFrame()).not.toMatch(/ctrl\+b back/);
+  });
+
+  test('in the launch card’s prompt, ←→, ctrl+←→, home and end move the cursor, and typing and delete happen at it', async () => {
+    const connection = inWidgets();
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/LAUNCH A TASK[\s\S]*Repository\s+acme\/widgets/));
+    await type(app, 'Grill me the login flow');
+    await press(app, CTRL_LEFT, CTRL_LEFT, CTRL_LEFT);
+    await type(app, 'about ');
+    await eventually(() => expect(app.lastFrame()).toContain('Grill me about ▏the login flow'));
+    await press(app, END, '.', HOME, DELETE, 'g', RIGHT, LEFT, LEFT, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toContain('g▏rill me about the login flow.'));
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', prompt: 'grill me about the login flow.' }));
+  });
+
+  test('on quick launch, ↑↓ pick another repository while ←→ move the cursor in the prompt', async () => {
+    const connection = inWidgets();
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('n');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/QUICK LAUNCH[\s\S]*Repository\s+‹ acme\/widgets ›[\s\S]*↑↓ repository/));
+    await type(app, 'Spke the cache');
+    await press(app, ...Array('ke the cache'.length).fill(LEFT), 'i', DOWN);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Repository\s+‹ acme\/gadgets ›[\s\S]*› Spi▏ke the cache/));
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/gadgets', preset: 'quick', prompt: 'Spike the cache', quick: true }));
   });
 
   test('on the launch card, ↑↓ move between fields, ←→ pick another repository, a refusal shows its reason, and esc backs out', async () => {
@@ -1695,7 +1736,7 @@ describe('launching and conversing', () => {
     expect(connection.sent).toEqual([]);
 
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...onLean, handoff: { ...sheet, brief } } }]);
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› Goal Failed webhook deliveries are retried\. Decided - Retry 5xx and timeouts only\. \+ Done when \+/));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/› Goal Failed webhook deliveries are retried\.▏ Decided - Retry 5xx and timeouts only\. \+ Done when \+/));
 
     await type(app, ' with backoff');
     // Down past the decided item, onto the line that adds one.
@@ -2107,7 +2148,7 @@ describe('answering from Needs you', () => {
     connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [{ ...permission, requestId: 'A4' }] }]);
     await settle();
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *) enter allows for this task · esc back'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *)▏ enter allows for this task · esc back'));
     expect(connection.sent).toHaveLength(1);
     await press(app, ENTER);
     await eventually(() =>
@@ -2138,7 +2179,7 @@ describe('answering from Needs you', () => {
     await press(app, 'a', '2');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        "› npm install zod: Bash(npm install *) sed -i 's/a/b/' src/a.ts: Bash(sed -i *) ↑↓ field · enter allows for this task · esc back",
+        "› npm install zod: Bash(npm install *)▏ sed -i 's/a/b/' src/a.ts: Bash(sed -i *) ↑↓ field · enter allows for this task · esc back",
       ),
     );
     await press(app, DOWN, ...Array(6).fill('\x7f'));
@@ -2167,7 +2208,7 @@ describe('answering from Needs you', () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([failing], [permission]), { connection });
     await press(app, '2', 'a', '3');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *) enter allows always · esc back'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('npm publish: Bash(npm publish *)▏ enter allows always · esc back'));
 
     await press(app, ...Array(' publish *)'.length).fill('\x7f'));
     app.stdin.write(' *)');
@@ -2182,7 +2223,7 @@ describe('answering from Needs you', () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([failing], [permission]), { connection });
     await press(app, '2', 'a', '4');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: ▏ enter denies · esc back'));
 
     await press(app, ESC);
     await eventually(() => expect(app.lastFrame()).toContain('[4] Deny with a note'));
@@ -2214,7 +2255,7 @@ describe('answering from Needs you', () => {
     );
 
     await press(app, 'a', '1');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Review comments: enter requests changes · esc back'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Review comments: ▏ enter requests changes · esc back'));
     app.stdin.write('Put it in the header');
     await eventually(() => expect(app.lastFrame()).toContain('Review comments: Put it in the header'));
     await press(app, ENTER);
@@ -2427,7 +2468,7 @@ describe('answering in the conversation', () => {
 
     // A request stored before rules were proposed per part proposes the call's own.
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('gh issue view 12: Bash(gh issue view 12) enter allows for this task · esc back'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('gh issue view 12: Bash(gh issue view 12)▏ enter allows for this task · esc back'));
     await press(app, ENTER);
     await eventually(() =>
       expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: ['Bash(gh issue view 12)'] } }),
@@ -2440,7 +2481,7 @@ describe('answering in the conversation', () => {
     const connection = new FakeConnection();
     const app = await opened(permission, connection);
     await press(app, '4');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: enter denies · esc back'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Note for the agent: ▏ enter denies · esc back'));
     await press(app, ESC);
     await eventually(() => expect(app.lastFrame()).not.toContain('Note for the agent'));
 
@@ -2511,7 +2552,7 @@ describe('answering in the conversation', () => {
 
     // Its field shows the rule as the label does, and allows it whole.
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('print(40) ↵ EOF) enter allows for this task · esc back'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('print(40) ↵ EOF)▏ enter allows for this task · esc back'));
     await press(app, ENTER);
     await eventually(() =>
       expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', permission: { allow: 'task', rules: [`Bash(${script})`] } }),
@@ -3974,6 +4015,15 @@ describe('the condensed view', () => {
     // The cursor stayed on the task :task jumped to.
     await press(app, 'x');
     await eventually(() => expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T1' }]));
+  });
+
+  test('on the command line, ←→, home and end move the cursor and typing goes in at it', async () => {
+    const { app } = await started(condensed());
+
+    await press(app, ':', 's', 'k', ' ', '1', LEFT, LEFT, LEFT, LEFT, 'a', HOME, 't', END);
+    await eventually(() => expect(app.lastFrame()).toMatch(/^│ :task 1/m));
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T1 Grill me about invoices'));
   });
 
   test('the command line says what it can’t do: an unknown command, a task or a group that isn’t there', async () => {

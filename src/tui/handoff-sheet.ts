@@ -10,7 +10,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
 import { autonomyText, cycle } from './launch-card.ts';
 import { CursorWindow, fixed } from './screen.ts';
-import { edit } from './text-input.ts';
+import { edit, withCaret, type Caret } from './text-input.ts';
 import { choosable, Cursor, GLYPH, Sheet, tone } from './theme.ts';
 
 type Props = {
@@ -32,13 +32,14 @@ const LISTS: [List, string][] = [
 type Line = { kind: 'goal' } | { kind: 'item'; list: List; index: number } | { kind: 'field'; field: 'continueAs' | 'autonomy' | 'tier' | 'maxTurns' };
 const LABEL_WIDTH = 14;
 
-// What the operator has made of the sheet so far.
-type Draft = { brief: Brief | null; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: string; line: number };
+// What the operator has made of the sheet so far, and the caret in the line
+// being typed into, back at its end on another line.
+type Draft = { brief: Brief | null; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: string; line: number; caret: Caret };
 
 export function HandoffSheet({ connection, task, run }: Props) {
   const { handoff } = task;
   // Keys typed in one burst arrive before a re-render, so the draft is kept here.
-  const draft = useRef<Draft>({ brief: null, continueAs: handoff.continueAs, autonomy: handoff.autonomy, tier: handoff.tier, maxTurns: String(handoff.maxTurns), line: 0 });
+  const draft = useRef<Draft>({ brief: null, continueAs: handoff.continueAs, autonomy: handoff.autonomy, tier: handoff.tier, maxTurns: String(handoff.maxTurns), line: 0, caret: null });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const [refusal, setRefusal] = useState<string | null>(null);
   // The brief is the operator's to edit once the agent has written it.
@@ -63,7 +64,8 @@ export function HandoffSheet({ connection, task, run }: Props) {
       return send({ type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, tier, maxTurns: Number(maxTurns) });
     }
     if (key.upArrow || key.downArrow) {
-      current.line = Math.min(Math.max(current.line + (key.upArrow ? -1 : 1), 0), lines.length - 1);
+      const line = Math.min(Math.max(current.line + (key.upArrow ? -1 : 1), 0), lines.length - 1);
+      if (line !== current.line) Object.assign(current, { line, caret: null });
     } else {
       step(current, lines[current.line]!, input, key);
     }
@@ -84,14 +86,14 @@ export function HandoffSheet({ connection, task, run }: Props) {
     brief
       ? h(CursorWindow, {
           cursor: Math.min(draft.current.line, briefLines.length - 1),
-          items: briefLines.map((line, i) => h(BriefLine, { key: i, line, brief, selected: i === draft.current.line, first: startsSection(lines, i) })),
+          items: briefLines.map((line, i) => h(BriefLine, { key: i, line, brief, caret: i === draft.current.line ? draft.current.caret : undefined, first: startsSection(lines, i) })),
         })
       : fixed(h(Text, tone('warn'), writing ? 'The agent is writing the brief…' : 'The agent ended its turn without writing the brief: enter asks again.')),
     fixed(
       h(Field, { key: 'continueAs', label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, choosable(draft.current.continueAs), share && h(Text, tone('dim'), ` ${share}`)),
       h(Field, { key: 'autonomy', label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, choosable(autonomyText(draft.current.autonomy))),
       h(Field, { key: 'tier', label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, choosable(draft.current.tier)),
-      h(Field, { key: 'maxTurns', label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, draft.current.maxTurns || ' '),
+      h(Field, { key: 'maxTurns', label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, at?.kind === 'field' && at.field === 'maxTurns' ? withCaret(draft.current.maxTurns, draft.current.caret) : draft.current.maxTurns || ' '),
       h(Text, { key: 'commit', ...tone('dim') }, toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
       ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
       refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
@@ -120,27 +122,35 @@ function startsSection(lines: Line[], i: number): boolean {
 
 // The draft after a key on `line` that isn't enter, esc or ↑↓.
 function step(draft: Draft, line: Line, input: string, key: Key): void {
+  // The line's text after the key, its caret moved with it, or null when the key doesn't type.
+  const type = (text: string, typed = input): string | null => {
+    const edited = edit(text, draft.caret, typed, key);
+    if (edited) draft.caret = edited.caret;
+    return edited?.text ?? null;
+  };
   if (line.kind === 'field') {
     const by = key.leftArrow ? -1 : key.rightArrow ? 1 : 0;
     if (line.field === 'continueAs' && by) draft.continueAs = cycle(CONTINUE_AS, draft.continueAs, by);
     if (line.field === 'autonomy' && by) draft.autonomy = cycle(AUTONOMY_LEVELS, draft.autonomy, by);
     if (line.field === 'tier' && by) draft.tier = cycle(TIERS, draft.tier, by);
     // A whole number: other characters are dropped.
-    if (line.field === 'maxTurns') draft.maxTurns = edit(draft.maxTurns, input.replace(/\D/g, ''), key) ?? draft.maxTurns;
+    if (line.field === 'maxTurns') draft.maxTurns = type(draft.maxTurns, key.meta ? input : input.replace(/\D/g, '')) ?? draft.maxTurns;
     return;
   }
   const brief = draft.brief!;
   if (line.kind === 'goal') {
-    brief.goal = edit(brief.goal, input, key) ?? brief.goal;
+    brief.goal = type(brief.goal) ?? brief.goal;
     return;
   }
   const items = brief[line.list];
-  const edited = edit(items[line.index] ?? '', input, key);
+  const edited = type(items[line.index] ?? '');
   // Typing on the line past the last item adds one.
   if (edited !== null && (line.index < items.length || edited)) items[line.index] = edited;
 }
 
-function BriefLine({ line, brief, selected, first }: { line: Line; brief: Brief; selected: boolean; first: boolean }) {
+// `caret` on the selected line, which shows it; undefined on the others.
+function BriefLine({ line, brief, caret, first }: { line: Line; brief: Brief; caret: Caret | undefined; first: boolean }) {
+  const selected = caret !== undefined;
   if (line.kind === 'field') return null;
   const label = line.kind === 'goal' ? 'Goal' : first ? LISTS.find(([list]) => list === line.list)![1] : '';
   const text = line.kind === 'goal' ? brief.goal : brief[line.list][line.index];
@@ -149,7 +159,7 @@ function BriefLine({ line, brief, selected, first }: { line: Line; brief: Brief;
     { gap: 1 },
     h(Cursor, { on: selected }),
     h(Box, { width: LABEL_WIDTH, flexShrink: 0 }, h(Text, tone('dim'), label)),
-    text === undefined ? h(Text, tone('dim'), selected ? '+ type to add' : '+') : h(Text, null, line.kind === 'goal' ? text : `- ${text}`),
+    text === undefined ? h(Text, tone('dim'), selected ? '+ type to add' : '+') : h(Text, null, `${line.kind === 'goal' ? '' : '- '}${selected ? withCaret(text, caret) : text}`),
   );
 }
 

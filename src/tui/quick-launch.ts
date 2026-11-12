@@ -6,7 +6,7 @@
 // the full conversation on the same session. Esc leaves the grill to carry
 // on as an ordinary conversation.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, type Key } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
@@ -14,7 +14,7 @@ import { HandoffSheet } from './handoff-sheet.ts';
 import { cycle, defaultRepo, NO_REPOSITORY } from './launch-card.ts';
 import { Output } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
-import { edit } from './text-input.ts';
+import { edit, withCaret, type Caret } from './text-input.ts';
 import { choosable, GLYPH, Sheet, tone } from './theme.ts';
 import { useLaunch } from './use-launch.ts';
 
@@ -43,7 +43,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
   const launching = useLaunch(connection);
   // Keys typed in one burst arrive before a re-render, so what they edit is
   // kept here: the prompt, then a typed answer, and the card it answers.
-  const typing = useRef<{ draft: string; card: Card; cardFor: string | null; answered: string | null }>({ draft: '', card: newCard(), cardFor: null, answered: null });
+  const typing = useRef<{ draft: string; caret: Caret; card: Card; cardFor: string | null; answered: string | null }>({ draft: '', caret: null, card: newCard(), cardFor: null, answered: null });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
 
@@ -96,8 +96,8 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
       // The launch under way takes no other key.
       if (taskId || launching.busy()) return;
       if (key.return) return launch();
-      if (key.leftArrow || key.rightArrow) return setRepo((repo) => cycle(repositories, repo, key.leftArrow ? -1 : 1));
-      typed.draft = edit(typed.draft, input, key) ?? typed.draft;
+      if (key.upArrow || key.downArrow) return setRepo((repo) => cycle(repositories, repo, key.upArrow ? -1 : 1));
+      typeKey(typed, input, key);
       return rerender();
     }
     if (key.ctrl && input === 'e') return expand(task.id);
@@ -108,7 +108,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
     }
     // With no card up, what is typed waits for the next one, or is `/handoff`.
     if (!question) {
-      typed.draft = edit(typed.draft, input, key) ?? typed.draft;
+      typeKey(typed, input, key);
       return rerender();
     }
     if (typed.cardFor !== question.id) Object.assign(typed, { card: newCard(), cardFor: question.id });
@@ -126,21 +126,21 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
       typed.card = onCard.card;
       if (onCard.clearDraft) typed.draft = '';
     } else {
-      typed.draft = edit(typed.draft, input, key) ?? typed.draft;
+      typeKey(typed, input, key);
     }
     rerender();
   });
 
-  const { draft } = typing.current;
+  const { draft, caret } = typing.current;
   if (task && sheet) return h(HandoffSheet, { connection, task: { ...task, handoff: sheet }, run });
   if (!task) {
     return h(
       Sheet,
-      { title: 'Quick launch', hint: `enter launch, at most three questions${repositories.length > 1 ? ' · ←→ repository' : ''} · esc back` },
+      { title: 'Quick launch', hint: `enter launch, at most three questions${repositories.length > 1 ? ' · ↑↓ repository' : ''} · esc back` },
       repo
         ? h(Box, { gap: 1 }, h(Text, tone('dim'), 'Repository'), h(Text, null, repositories.length > 1 ? choosable(repo) : repo))
         : h(Text, tone('warn'), NO_REPOSITORY),
-      h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`),
+      h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)),
       launching.indicator ?? (taskId ? h(Text, tone('dim'), 'Starting the grill…') : null),
       refusal ? h(Text, tone('bad'), refusal) : null,
     );
@@ -150,7 +150,13 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
     { title: `Quick launch ${task.id}`, hint: 'ctrl+h or /handoff hand off · ctrl+e full conversation · esc leave it as a conversation' },
     h(Text, { ...tone('fg'), bold: true, wrap: 'truncate' }, task.title),
     question ? h(QuestionCard, { question, card, nested: true }) : h(Output, { connection, state, taskId: task.id, lines: OUTPUT_LINES }),
-    h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`),
+    h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)),
     refusal ? h(Text, tone('bad'), refusal) : null,
   );
+}
+
+// The prompt or answer being typed after a key that edits it or moves its caret.
+function typeKey(typed: { draft: string; caret: Caret }, input: string, key: Key): void {
+  const edited = edit(typed.draft, typed.caret, input, key);
+  if (edited) Object.assign(typed, { draft: edited.text, caret: edited.caret });
 }
