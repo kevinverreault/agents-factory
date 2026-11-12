@@ -663,13 +663,15 @@ function snapshotOf({ rateLimitType, status, utilization, resetsAt }: SDKRateLim
   return { window: rateLimitType, status, spent, resetsAt: typeof resetsAt === 'number' ? resetsAt * 1000 : null };
 }
 
-// The plan's usage windows the CLI's `/usage` reads, as snapshots: each
-// window it reads a share of, spent at 100%. Null when plan limits don't
-// apply, as with an API key.
-type PlanRateLimits = SDKControlGetUsageResponse['rate_limits'];
+// The plan's usage windows as the CLI's `/usage` reads them: null when the
+// account has none, as with an API key.
+type PlanUsageWindows = SDKControlGetUsageResponse['rate_limits'];
+// The windows `/usage` reads that the factory keeps snapshots of.
 const PLAN_WINDOWS = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet'] as const satisfies readonly UsageWindowKind[];
 
-export function snapshotsOfPlan(limits: PlanRateLimits) {
+// The plan's usage windows as snapshots: each window `/usage` reads a share
+// of, spent at 100%.
+export function snapshotsOfPlan(limits: PlanUsageWindows) {
   return PLAN_WINDOWS.flatMap((window) => {
     const reading = limits?.[window];
     if (typeof reading?.utilization !== 'number') return [];

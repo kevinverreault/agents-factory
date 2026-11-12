@@ -89,7 +89,7 @@ export function usageViews({ runs, tasks }: { runs: Record<string, MeteredRun>; 
   return views;
 }
 
-// Usage windows (ADR 0008), as `rate_limit_event`s name them: the 5-hour
+// Usage windows (ADR 0008), as `rate_limit_event`s and the CLI's `/usage` name them: the 5-hour
 // one, the weekly one, and the weekly ones per model or with overage.
 export type UsageWindowKind = 'five_hour' | 'seven_day' | 'seven_day_opus' | 'seven_day_sonnet' | 'seven_day_overage_included' | 'overage';
 export type UsageWindowStatus = 'allowed' | 'allowed_warning' | 'rejected';

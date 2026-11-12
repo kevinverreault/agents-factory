@@ -15,7 +15,7 @@ describe('the plan’s usage windows, as the CLI’s /usage reads them', () => {
     ]);
   });
 
-  test('a window it doesn’t read, or reads without a share, gives nothing; nor do plan limits that don’t apply', () => {
+  test('a window it doesn’t read, or reads without a share, gives nothing; nor does an account without usage windows', () => {
     expect(snapshotsOfPlan({ five_hour: null, seven_day: { utilization: null, resets_at: null }, seven_day_sonnet: { utilization: 3, resets_at: null } })).toEqual([
       { window: 'seven_day_sonnet', status: 'allowed', spent: 0.03, resetsAt: null },
     ]);
