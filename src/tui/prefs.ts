@@ -13,7 +13,7 @@ export type PrefsStore = {
   save(prefs: TuiPrefs): void;
 };
 
-export const DEFAULT_PREFS: TuiPrefs = { hideFinished: false };
+const DEFAULT_PREFS: TuiPrefs = { hideFinished: false };
 
 // The settings in `path`. A missing, unreadable or malformed file loads as
 // the defaults, and a save that fails leaves the TUI as it is.

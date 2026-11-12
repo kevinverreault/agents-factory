@@ -34,7 +34,7 @@ import { Conversation } from './conversation.ts';
 import { Help } from './help.ts';
 import { LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
-import { DEFAULT_PREFS, type PrefsStore, type TuiPrefs } from './prefs.ts';
+import type { PrefsStore, TuiPrefs } from './prefs.ts';
 import { QuickLaunch } from './quick-launch.ts';
 import { liveFirst, RunsList } from './runs.ts';
 import { CursorWindow, fixed, useColumns, useRows } from './screen.ts';
@@ -72,17 +72,17 @@ function rowOf(item: AttentionQueueItem): string {
 // isn't registered, the TUI offers to register it (ADR 0010).
 // `openUrl` opens a fix in the operator's browser, such as the App's
 // installation settings. `prefs` keeps the TUI's own settings between
-// sessions; with none, they last as long as the TUI.
+// sessions.
 export function App({
   connection,
   cwd,
   openUrl = openInBrowser,
-  prefs = UNKEPT_PREFS,
+  prefs,
 }: {
   connection: FactoryConnection;
   cwd?: string;
   openUrl?: (url: string) => void;
-  prefs?: PrefsStore;
+  prefs: PrefsStore;
 }) {
   const [state, setState] = useState<FactoryState | null>(null);
   const [closed, setClosed] = useState(false);
@@ -90,20 +90,18 @@ export function App({
   // The task whose detail `enter` drilled into over the screen, until `esc`
   // pops back to it.
   const [detail, setDetail] = useState<string | null>(null);
-  // The TUI's settings as loaded once at start, and saved as they change.
-  const settings = useRef<TuiPrefs | null>(null);
-  settings.current ??= prefs.load();
-  // Whether the task tree hides Done and Cancelled tasks, as the last
-  // session left it, in a ref too for `H`s typed in one burst. Each `H`
-  // saves it for the next session.
-  const [hideFinished, setHideState] = useState(settings.current.hideFinished);
-  const hiding = useRef(hideFinished);
-  const toggleHideFinished = () => {
-    hiding.current = !hiding.current;
-    setHideState(hiding.current);
-    settings.current = { ...settings.current!, hideFinished: hiding.current };
-    prefs.save(settings.current);
+  // The TUI's settings, loaded once as the last session left them, in a ref
+  // too for keys typed in one burst. Each change is saved for the next session.
+  const [settings, setSettingsState] = useState<TuiPrefs>(() => prefs.load());
+  const latestSettings = useRef(settings);
+  const setSettings = (next: TuiPrefs) => {
+    latestSettings.current = next;
+    setSettingsState(next);
+    prefs.save(next);
   };
+  // Whether the task tree hides Done and Cancelled tasks (`H`).
+  const hideFinished = settings.hideFinished;
+  const toggleHideFinished = () => setSettings({ ...latestSettings.current, hideFinished: !latestSettings.current.hideFinished });
   // Whether `?` help is open.
   const [help, setHelp] = useState(false);
   // Whether the condensed view (`v`) shows instead of the screens, and
@@ -161,8 +159,11 @@ export function App({
   // The task tree: each root, newest first, then its descendants under it.
   const tree = state ? treeOrder(Object.values(state.tasks)) : [];
   const grouped = group === null ? tree : keepingAncestors(tree, (task) => task.groups.includes(group));
-  const unfinished = (list: TaskView[]) => (hideFinished ? keepingAncestors(list, (task) => !finished(task)) : list);
-  const tasks = unfinished(grouped);
+  // The tasks of `list` the tree shows: without the finished ones while H hides them.
+  const shownOf = (list: TaskView[]) => (hideFinished ? keepingAncestors(list, (task) => !finished(task)) : list);
+  const tasks = shownOf(grouped);
+  // How many finished tasks H hides, while it hides them.
+  const hidden = hideFinished ? grouped.length - tasks.length : null;
   // The cursor holds on to the task it starts on: the newest task comes on
   // top, and one launched meanwhile mustn't take the selection from under it.
   const topTask = tasks[0]?.id;
@@ -238,7 +239,7 @@ export function App({
     const ungrouped = group !== null && !state?.tasks[taskId]?.groups.includes(group);
     if (ungrouped) setGroup(null);
     // Its row in the tree as it will show; one H hides keeps the cursor where it was.
-    const index = unfinished(ungrouped ? tree : grouped).findIndex(({ id }) => id === taskId);
+    const index = shownOf(ungrouped ? tree : grouped).findIndex(({ id }) => id === taskId);
     setCursors((cursors) => ({ ...cursors, tasks: { row: taskId, index: index >= 0 ? index : at(cursors.tasks, tasks.map(({ id }) => id)) } }));
     setTab('tasks');
     setDetail(taskId);
@@ -532,13 +533,13 @@ export function App({
               zoom,
               group,
               sidebar: h(Sidebar, { state, cursor: at(cursors['needs-you'], queue.map(rowOf)), focused: focus === 'sidebar', groups, group }),
-              tree: h(TaskList, { connection, state, tasks, hidden: hideFinished ? grouped.length - tasks.length : null, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
+              tree: h(TaskList, { connection, state, tasks, hidden, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
               detail: followed ? h(TaskDetail, { connection, state, task: followed }) : h(Text, tone('dim'), 'Nothing selected.'),
             })
         : drilled
           ? h(TaskDetail, { connection, state, task: drilled })
         : tab === 'tasks'
-          ? h(TaskList, { connection, state, tasks, hidden: hideFinished ? grouped.length - tasks.length : null, cursor })
+          ? h(TaskList, { connection, state, tasks, hidden, cursor })
           : tab === 'needs-you'
             ? h(NeedsYouList, { state, cursor })
             : tab === 'runs'
@@ -671,9 +672,6 @@ function idNumber(id: string): number {
 function finished(task: TaskView): boolean {
   return task.state === 'done' || task.state === 'cancelled';
 }
-
-// Settings that last as long as the TUI, when it is given no store.
-const UNKEPT_PREFS: PrefsStore = { load: () => ({ ...DEFAULT_PREFS }), save: () => {} };
 
 // The tree's tasks that `keep` keeps, and those above them, which keep the
 // tree whole: without its finished tasks, say, or only a group's.

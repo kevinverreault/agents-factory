@@ -41,7 +41,7 @@ function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attention
 
 async function started(state?: FactoryState, { cwd, connection = new FakeConnection(), prefs }: { cwd?: string; connection?: FakeConnection; prefs?: PrefsStore } = {}) {
   if (state) connection.serveSnapshot(state);
-  const app = render(<App connection={connection} cwd={cwd} prefs={prefs} />);
+  const app = render(<App connection={connection} cwd={cwd} prefs={prefs ?? memoryPrefs()} />);
   apps.push(app);
   await settle();
   return { connection, app };
@@ -772,7 +772,7 @@ describe('launching and conversing', () => {
     };
     const opened: string[] = [];
     connection.serveSnapshot({ ...factoryState([]), repositories: { ...repositories, 'acme/widgets': uninstalled } });
-    const app = render(<App connection={connection} cwd="/clones/widgets/src" openUrl={(url) => opened.push(url)} />);
+    const app = render(<App connection={connection} cwd="/clones/widgets/src" openUrl={(url) => opened.push(url)} prefs={memoryPrefs()} />);
     apps.push(app);
     await settle();
 
@@ -3034,6 +3034,18 @@ describe('the screens view', () => {
     await eventually(() => expect(app.lastFrame()).toMatch(/›\s+\S\s+T5\s+Index the store/));
   });
 
+  test('with every task finished, H leaves a line that says so and how to show them again', async () => {
+    const { app } = await started(factoryState([task('T1', 'Implement the store', 'done', 'Done'), task('T2', 'Settle the glossary', 'cancelled', 'Cancelled')]));
+    await eventually(() => expect(app.lastFrame()).toContain('Settle the glossary'));
+
+    await press(app, 'H');
+    await eventually(() => expect(app.lastFrame()).toContain('Every task is finished. H shows the 2.'));
+    expect(app.lastFrame()).not.toContain('Implement the store');
+
+    await press(app, 'H');
+    await eventually(() => expect(app.lastFrame()).toContain('Implement the store'));
+  });
+
   test('the Tasks footer offers H, its label saying what the next press does', async () => {
     const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running'), task('T2', 'Settle the glossary', 'done', 'Done')]));
     const footer = () => app.lastFrame()!.split('\n').slice(-3).join(' ');
@@ -3655,13 +3667,14 @@ describe('the condensed view', () => {
     const { app, connection } = await started(condensed());
 
     // Typed on the command line, keys do nothing else: x cancels nothing.
-    await press(app, ':', 't', 'a', 's', 'x', '\x7f', 'k', ' ', '3');
-    await eventually(() => expect(app.lastFrame()).toMatch(/^│ :task 3/m));
+    // T1, the oldest, is the bottom row: the jump moves the cursor down to it.
+    await press(app, ':', 't', 'a', 's', 'x', '\x7f', 'k', ' ', '1');
+    await eventually(() => expect(app.lastFrame()).toMatch(/^│ :task 1/m));
     expect(connection.sent).toEqual([]);
     await press(app, '\r');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toContain('Tasks › T3 Write the docs');
+      expect(frame).toContain('Tasks › T1 Grill me about invoices');
       expect(frame).not.toContain('COMMAND');
     });
 
@@ -3686,7 +3699,7 @@ describe('the condensed view', () => {
     await eventually(() => expect(app.lastFrame()).not.toMatch(/^│ :q/m));
     // The cursor stayed on the task :task jumped to.
     await press(app, 'x');
-    await eventually(() => expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T3' }]));
+    await eventually(() => expect(connection.sent).toEqual([{ type: 'cancel', taskId: 'T1' }]));
   });
 
   test('the command line says what it can’t do: an unknown command, a task or a group that isn’t there', async () => {
