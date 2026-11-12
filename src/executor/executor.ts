@@ -67,7 +67,9 @@ export type CredentialProfile = 'subscription-host' | 'subscription-token';
 export type ConversationEvent =
   | { type: 'message'; id: string; from: 'operator' | 'agent'; text: string }
   // `summary` is what the tool was pointed at: a command, a path, a pattern.
-  | { type: 'toolUse'; id: string; tool: string; summary: string };
+  // `toolUseId` is the call's own, which a question or permission it raises
+  // is named by: what the operator answered shows after it.
+  | { type: 'toolUse'; id: string; tool: string; summary: string; toolUseId?: string };
 
 // Where a run sends what happens in it.
 export type RunSink = {

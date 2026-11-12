@@ -581,7 +581,7 @@ function spawnCli({ command, args, cwd, env, signal }: SpawnOptions) {
   return spawn(command, args, { cwd, env, signal, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
 }
 
-type Block = { type: string; text?: string; name?: string; input?: unknown };
+type Block = { type: string; id?: string; text?: string; name?: string; input?: unknown };
 
 // The conversation events in one message, live or from the session file.
 // Each content block is one event, named by the message's uuid and its index.
@@ -595,7 +595,9 @@ export function eventsOf(type: 'user' | 'assistant', uuid: string, message: unkn
   return (content as Block[]).flatMap((block, index): ConversationEvent[] => {
     const id = `${uuid}:${index}`;
     if (block.type === 'text' && block.text?.trim()) return [{ type: 'message', id, from: 'agent', text: block.text }];
-    if (block.type === 'tool_use' && block.name) return [{ type: 'toolUse', id, tool: block.name, summary: summarise(block.input) }];
+    if (block.type === 'tool_use' && block.name) {
+      return [{ type: 'toolUse', id, tool: block.name, summary: summarise(block.input), ...(block.id ? { toolUseId: block.id } : {}) }];
+    }
     return [];
   });
 }

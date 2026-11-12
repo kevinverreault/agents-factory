@@ -12,6 +12,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
 import type { Command, Option, Reply } from '../protocol/protocol.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
+import { answersText, toolUseOf, withOption } from './answered.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit } from './text-input.ts';
 import { GLYPH, kindLook, Option as Pick, Rule, Sheet, tone } from './theme.ts';
@@ -226,10 +227,14 @@ export function askedFor(item: AttentionQueueItem, task: TaskView | undefined): 
   return task?.label ?? '';
 }
 
+// An answer as it goes out: what the operator answered (the choice, or the
+// card's answers), and whether it opens the task's conversation.
+type Given = { answer: string; opens?: boolean };
+
 // What `onReply` hears of a sent answer: the daemon's reply, the task it
-// answered for (none for a request about the factory or a repository), and
-// whether its choice opens that task's conversation.
-export type Answered = { reply: Reply; taskId: string | null; opens: boolean };
+// answered for (none for a request about the factory or a repository), the
+// item's title, the agent's tool call it answers, if any, and the answer.
+export type Answered = { reply: Reply; taskId: string | null; title: string; toolUseId: string | null; given: Given };
 
 // What an item's row and sheet are titled by: its task, or else the
 // repository a request is about, or the factory itself.
@@ -265,9 +270,12 @@ export function useAnswering(
     cardFor: string | null;
     form: { for: string; choice: number; values: string[]; at: number } | null;
     // Options with `yesNo` ask whether to go ahead, with the one command that does.
-    confirm: { for: string; reason: string; options: Option[]; yesNo: boolean } | null;
+    // `given` is the refused answer, which going ahead still gives.
+    confirm: { for: string; reason: string; options: Option[]; yesNo: boolean; given: Given } | null;
     sent: Set<string>;
-  }>({ card: newCard(), cardFor: null, form: null, confirm: null, sent: new Set() });
+    // The choice the operator picked, by index, until the daemon has its answer.
+    chosen: { for: string; choice: number } | null;
+  }>({ card: newCard(), cardFor: null, form: null, confirm: null, sent: new Set(), chosen: null });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const itemKey = item ? keyOf(item) : null;
   const card = item?.kind === 'attention' && sheet.current.cardFor === itemKey ? sheet.current.card : newCard();
@@ -276,10 +284,13 @@ export function useAnswering(
   // The fields being filled in, with the choice they are for, while it still takes them.
   const filling = form && formChoice && 'fields' in formChoice ? { form, choice: formChoice } : null;
   const confirm = itemKey !== null && sheet.current.confirm?.for === itemKey ? sheet.current.confirm : null;
+  const chosen = itemKey !== null && sheet.current.chosen?.for === itemKey ? sheet.current.chosen.choice : null;
 
-  const send = (command: Command, opens = false) => {
+  const send = (command: Command, given: Given) => {
     if (!item || itemKey === null) return;
     const { taskId } = item;
+    const title = titleOf(item, task, { withId: true });
+    const toolUseId = toolUseOf(item);
     const sentFor = itemKey;
     // An answered request leaves the queue, so its digits stay spent. A root
     // in review stays there after its choice goes through (a push to its PR
@@ -290,11 +301,14 @@ export function useAnswering(
     void connection.send(command).then((reply) => {
       if (!reply.ok || stays) sheet.current.sent.delete(sentFor);
       if (!reply.ok && sheet.current.cardFor === sentFor) sheet.current.card = newCard();
+      // Answered, or refused, the choice is no longer picked; asked about, it still is.
+      const asks = !reply.ok && (!!reply.confirm || !!reply.choose?.length);
+      if (!asks && sheet.current.chosen?.for === sentFor) sheet.current.chosen = null;
       if (!reply.ok && reply.confirm) {
-        sheet.current.confirm = { for: sentFor, reason: reply.reason, options: [{ label: 'yes', command: reply.confirm }], yesNo: true };
+        sheet.current.confirm = { for: sentFor, reason: reply.reason, options: [{ label: 'yes', command: reply.confirm }], yesNo: true, given };
       } else if (!reply.ok && reply.choose?.length) {
-        sheet.current.confirm = { for: sentFor, reason: reply.reason, options: reply.choose, yesNo: false };
-      } else onReply({ reply, taskId, opens });
+        sheet.current.confirm = { for: sentFor, reason: reply.reason, options: reply.choose, yesNo: false, given };
+      } else onReply({ reply, taskId, title, toolUseId, given });
       rerender();
     });
   };
@@ -306,28 +320,31 @@ export function useAnswering(
       if (sheet.current.cardFor !== itemKey) Object.assign(sheet.current, { card: newCard(), cardFor: itemKey });
       const onCard = cardKey(item.question, sheet.current.card, '', input, key);
       if (onCard.kind === 'card') sheet.current.card = onCard.card;
-      if (onCard.kind === 'answered') send({ type: 'answer', taskId: item.taskId, answers: onCard.answers });
+      // Until the request leaves, its card shows what it was answered with.
+      if (onCard.kind === 'answered') sheet.current.card = { ...sheet.current.card, answers: onCard.answers };
+      if (onCard.kind === 'answered') send({ type: 'answer', taskId: item.taskId, answers: onCard.answers }, { answer: answersText(onCard.answers) });
       rerender();
       return;
     }
     const index = /^[1-9]$/.test(input) ? Number(input) - 1 : -1;
     const choice = choicesFor(item, task)[index];
+    if (choice) sheet.current.chosen = { for: itemKey, choice: index };
     if (choice && 'fields' in choice) {
       sheet.current.form = { for: itemKey, choice: index, values: choice.fields.map(({ value }) => value), at: 0 };
       rerender();
-    } else if (choice) send(choice.command, choice.opens);
+    } else if (choice) send(choice.command, { answer: choice.label, opens: choice.opens });
   };
   // A key while the operator fills in the fields a choice takes: up and down
   // (or tab) move between them, enter sends what they make, if anything,
   // and esc sets them aside.
   const fill = (input: string, key: Key) => {
-    if (key.escape || !filling) sheet.current.form = null;
+    if (key.escape || !filling) Object.assign(sheet.current, { form: null, chosen: null });
     else {
       const { form, choice } = filling;
       const command = key.return ? choice.send(form.values) : null;
       if (command) {
         sheet.current.form = null;
-        send(command);
+        send(command, { answer: choice.label });
       } else if (key.upArrow) form.at = Math.max(form.at - 1, 0);
       else if (key.downArrow || key.tab) form.at = Math.min(form.at + 1, form.values.length - 1);
       else form.values[form.at] = edit(form.values[form.at]!, input, key) ?? form.values[form.at]!;
@@ -337,15 +354,18 @@ export function useAnswering(
   // A key while the sheet asks whether to go ahead anyway (y does, n or esc
   // doesn't), or which way to (a digit or enter picks, esc backs out).
   const goAhead = (input: string, key: Key) => {
-    const { options, yesNo } = confirm!;
+    const { options, yesNo, given } = confirm!;
     const picked = yesNo ? (input === 'y' ? options[0]! : input === 'n' || key.escape ? 'back' : null) : chooseKey(options, input, key);
     if (picked) sheet.current.confirm = null;
-    if (picked && picked !== 'back') send(picked.command);
+    if (picked === 'back') sheet.current.chosen = null;
+    if (picked && picked !== 'back') send(picked.command, { answer: yesNo ? given.answer : withOption(given.answer, picked.label) });
     rerender();
   };
 
   return {
     card,
+    // The choice the operator picked, while its answer is under way.
+    chosen,
     // The fields being filled in, if any: while they are, every key is theirs.
     form: filling && {
       fields: filling.choice.fields.map(({ prompt }, i) => ({ prompt, value: filling.form.values[i]! })),
@@ -369,6 +389,8 @@ type Props = {
   form: Form | null;
   // What a refusal asks back, if anything.
   confirm?: Ask | null;
+  // The choice the operator picked, which the sheet lights.
+  chosen?: number | null;
   // Whether esc gives the digits back to the screens: on Needs you, not in a
   // conversation, whose own hint says what its keys do.
   escBack?: boolean;
@@ -378,7 +400,7 @@ type Props = {
 
 // The item's sheet, under an accent rule naming its task and, on Needs you,
 // where it is in the queue; the sheet's border in the item's kind's colour.
-export function AnswerSheet({ item, task, card, answering, form, confirm = null, escBack = true, position = null }: Props) {
+export function AnswerSheet({ item, task, card, answering, form, confirm = null, chosen = null, escBack = true, position = null }: Props) {
   const title = titleOf(item, task, { withId: true });
   const question = item.kind === 'attention' ? item.question : null;
   const hint = answerable(item, task)
@@ -403,7 +425,7 @@ export function AnswerSheet({ item, task, card, answering, form, confirm = null,
       Sheet,
       { title: look.kind, role: look.role, hint: hint ?? undefined },
       question ? h(QuestionCard, { question, card, ownWords: false, nested: true }) : h(Text, null, askedFor(item, task)),
-      ...choicesFor(item, task).map((choice, i) => h(Pick, { key: choice.label, digit: i + 1 }, choice.label)),
+      ...choicesFor(item, task).map((choice, i) => h(Pick, { key: choice.label, digit: i + 1, picked: i === chosen }, choice.label)),
       // With more than one field, › marks the one being typed into.
       ...(form?.fields ?? []).map(({ prompt, value }, i) =>
         h(Text, { key: `field-${i}` }, form!.fields.length > 1 ? (i === form!.at ? `${GLYPH.selected} ` : '  ') : '', h(Text, { bold: true }, `${prompt}: `), shownRule(value)),

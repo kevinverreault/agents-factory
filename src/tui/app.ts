@@ -25,12 +25,13 @@ import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
+import { answeredLine, useAnswerLog } from './answered.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { CommandLine, runCommand, type Jump } from './command-line.ts';
 import { Condensed, groupCounts, PANES, Sidebar, type Pane } from './condensed.ts';
 import { GcSheet } from './gc-sheet.ts';
 import { GroupPicker, pickerKey } from './group-picker.ts';
-import { Conversation } from './conversation.ts';
+import { Conversation, conversationRunOf } from './conversation.ts';
 import { Help } from './help.ts';
 import { LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
@@ -86,7 +87,18 @@ export function App({
 }) {
   const [state, setState] = useState<FactoryState | null>(null);
   const [closed, setClosed] = useState(false);
-  const [tab, setTab] = useState<Tab>('tasks');
+  const [tab, setTabState] = useState<Tab>('tasks');
+  // What the operator last answered on Needs you, once the daemon took it,
+  // until they leave Needs you: every way to another screen comes through
+  // `setTab`, which forgets it.
+  const [needsYouAnswer, setNeedsYouAnswer] = useState<string | null>(null);
+  const setTab = (next: Tab) => {
+    if (next !== 'needs-you') setNeedsYouAnswer(null);
+    setTabState(next);
+  };
+  // The answers given this session, which each task's conversation shows
+  // where they were given, on Needs you or in the conversation itself.
+  const answerLog = useAnswerLog();
   // The task whose detail `enter` drilled into over the screen, until `esc`
   // pops back to it.
   const [detail, setDetail] = useState<string | null>(null);
@@ -253,9 +265,15 @@ export function App({
   // request leaves Needs you the next item slides under it.
   const answers = useAnswering(connection, item, itemTask, {
     onSend: () => setCursors((cursors) => ({ ...cursors, 'needs-you': { row: null, index: at(cursors['needs-you'], rows) } })),
-    onReply: ({ reply, taskId, opens }) => {
+    onReply: ({ reply, taskId, title, toolUseId, given }) => {
       setRefusal(reply.ok ? null : reply.reason);
-      if (reply.ok && opens && taskId) setView({ kind: 'conversation', taskId });
+      setNeedsYouAnswer(reply.ok ? answeredLine(given.answer, title) : null);
+      // The task's conversation says it too, after the run it was given on.
+      if (reply.ok && taskId) {
+        const runId = state ? conversationRunOf(state, taskId) : null;
+        answerLog.add({ taskId, runId, toolUseId, after: null, line: answeredLine(given.answer) });
+      }
+      if (reply.ok && given.opens && taskId) setView({ kind: 'conversation', taskId });
     },
   });
   // Answers the selected task's request: Needs you, its cursor and the
@@ -458,7 +476,7 @@ export function App({
     return [['1–4', 'screens'], ['?', 'keys']];
   };
   if (state && view.kind === 'conversation') {
-    return h(Conversation, { connection, state, taskId: view.taskId, onLeave: toTabs });
+    return h(Conversation, { connection, state, taskId: view.taskId, answerLog, onLeave: toTabs });
   }
 
   return h(
@@ -487,6 +505,8 @@ export function App({
             )
         : null,
       refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
+      // A refusal since says more about where things stand.
+      needsYouAnswer && !refusal ? h(Text, { key: 'answered', ...tone('ok') }, needsYouAnswer) : null,
       pickerCursor === null ? null : h(GroupPicker, { key: 'picker', groups, cursor: pickerCursor, current: group }),
       cancelSheet
         ? h(ChoosePrompt, { key: 'cancel', title: `Cancel ${cancelSheet.taskId}`, reason: cancelSheet.reason, options: cancelSheet.options.map(({ label }) => label) })
@@ -521,8 +541,9 @@ export function App({
     h(
       Box,
       // Boxes give way in proportion to their weight times their height:
-      // this one's outweighs the quick launch card's.
-      { flexDirection: 'column', flexShrink: PANE_GIVES_WAY_FIRST, overflow: 'hidden' },
+      // this one's outweighs the quick launch card's. On a tall screen it
+      // takes the rows left, so the footer is always the bottom line.
+      { flexDirection: 'column', flexGrow: 1, flexShrink: PANE_GIVES_WAY_FIRST, overflow: 'hidden' },
       state === null
         ? h(Text, tone('dim'), 'Attaching to the daemon…')
         : help
@@ -548,7 +569,7 @@ export function App({
     ),
     fixed(
       state && item
-        ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm, position: { at: cursor + 1, of: queue.length } })
+        ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm, chosen: answers.chosen, position: { at: cursor + 1, of: queue.length } })
         : null,
       closed ? h(Text, { ...tone('bad') }, 'The daemon connection closed.') : null,
       command === null ? null : h(CommandLine, { draft: command }),

@@ -145,6 +145,10 @@ export const GLYPH = {
   caret: '▏',
   // The stage an advance lands on.
   advances: '←',
+  // Between a question and the operator's answer to it.
+  answers: '→',
+  // What leads a line saying the operator's answer went through.
+  answered: '✓',
   // Around a value ←→ changes.
   chooseBefore: '‹',
   chooseAfter: '›',
@@ -288,7 +292,14 @@ export function Section({
   );
 }
 
-// An option on a sheet: its digit in brackets, in the accent.
-export function Option({ digit, children }: { digit: number | string; children?: ReactNode }) {
-  return h(Box, { gap: 1 }, h(Text, { ...tone('accent'), bold: true }, `[${digit}]`), h(Box, { flexShrink: 1 }, typeof children === 'string' ? h(Text, null, children) : children));
+// An option on a sheet: its digit in brackets, in the accent, or in the
+// review colour once the operator `picked` it, its text bold then too, which
+// tells it apart without colour.
+export function Option({ digit, picked = false, children }: { digit: number | string; picked?: boolean; children?: ReactNode }) {
+  return h(
+    Box,
+    { gap: 1 },
+    h(Text, { ...tone(picked ? 'review' : 'accent'), bold: true }, `[${digit}]`),
+    h(Box, { flexShrink: 1 }, typeof children === 'string' ? h(Text, { bold: picked }, children) : children),
+  );
 }

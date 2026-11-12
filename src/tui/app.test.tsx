@@ -2,6 +2,7 @@
 import chalk from 'chalk';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
+import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { LeftoversView, PresetsView } from '../protocol/protocol.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
@@ -53,8 +54,16 @@ function widen(app: { stdout: NodeJS.EventEmitter }, columns: number) {
   app.stdout.emit('resize');
 }
 
+// A terminal of `rows` rows, which the TUI fits itself to.
+function resize(app: { stdout: NodeJS.EventEmitter }, rows: number) {
+  Object.defineProperty(app.stdout, 'rows', { value: rows, configurable: true });
+  app.stdout.emit('resize');
+}
+
+// The frame's lines.
+const lines = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.split('\n');
+
 describe('the frame', () => {
-  const lines = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.split('\n');
 
   test('the header names the factory and its tabs, and the breadcrumb says where you are', async () => {
     const { app } = await started(
@@ -99,6 +108,23 @@ describe('the frame', () => {
     await press(app, '\x1b', 'g');
     await eventually(() => expect(app.lastFrame()).toContain('enter filters the tasks · esc back'));
     expect(app.lastFrame()).not.toContain('enter detail');
+  });
+
+  test('the TUI takes the terminal’s full height at startup, its footer on the bottom line whatever the screen holds', async () => {
+    const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running')]));
+    // A tall terminal, far taller than what the screens hold.
+    resize(app, 40);
+
+    for (const keys of [[], ['2'], ['3'], ['4'], ['1', '\r']]) {
+      await press(app, ...keys);
+      await eventually(() => {
+        const frame = lines(app);
+        expect(frame).toHaveLength(40);
+        // The footer: its keys under the last rule, ending on the last line.
+        expect(frame.at(-1)).toMatch(/\? keys$/);
+        expect(frame.findLastIndex((line) => /^─{20,}$/.test(line))).toBeGreaterThanOrEqual(frame.length - 3);
+      });
+    }
   });
 
   test('under NO_COLOR nothing is coloured, on any screen, sheet or view', async () => {
@@ -694,6 +720,17 @@ describe('launching and conversing', () => {
     await settle();
   }
 
+  test('the conversation view takes the terminal’s full height, its keys on the bottom line', async () => {
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } });
+    resize(app, 40);
+    await press(app, '\r', '\r');
+    await eventually(() => {
+      const frame = lines(app);
+      expect(frame).toHaveLength(40);
+      expect(frame.at(-1)).toMatch(/ctrl\+b back/);
+    });
+  });
+
   test('N opens the launch card on the repository holding the working directory, and enter launches the prompt into its conversation', async () => {
     const connection = inWidgets();
     connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
@@ -1162,7 +1199,8 @@ describe('launching and conversing', () => {
 
     app.stdin.write('1');
     await settle();
-    await eventually(() => expect(app.lastFrame()).toContain('Which browsers fail?'));
+    // The card moves on to its next question, saying how the last was answered.
+    await eventually(() => expect(app.lastFrame()).toMatch(/✓ Which identity provider times out\? → Okta[\s\S]*Which browsers fail\?/));
     app.stdin.write('1');
     app.stdin.write('3');
     await settle();
@@ -1181,7 +1219,13 @@ describe('launching and conversing', () => {
         },
       ]),
     );
-    await eventually(() => expect(app.lastFrame()).not.toContain('Which browsers fail?'));
+    // The card closes, and the conversation says what the operator answered.
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).not.toContain('[1] [x] Safari');
+      // Wrapped beside the rail.
+      expect(frame).toMatch(/✓ Answered Which identity provider times out\? →[\s\S]*Okta · Which browsers fail\? → Safari, Chrome/);
+    });
   });
 
   test('typing on a question card answers it in the operator’s own words', async () => {
@@ -1788,6 +1832,41 @@ describe('answering from Needs you', () => {
     expect(app.lastFrame()).toContain('Fix the login bug');
   });
 
+  test('once an answer goes through, Needs you says what was answered and with which options, as the request leaves', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started(factoryState([asking, failing], [failure, asked]), { connection });
+    await press(app, '2', 'a', '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
+    connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [asked] }]);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('✓ Answered T2 Implement the store: Retry');
+      expect(frame).toMatch(/── 1\/1 ── T1 Fix the login bug/);
+    });
+
+    await press(app, '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which identity provider times out?': 'Auth0' } }));
+    connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [] }]);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('Nothing needs you.');
+      expect(frame).toContain('✓ Answered T1 Fix the login bug: Which identity provider times out? → Auth0');
+      expect(frame).not.toContain('T2 Implement the store: Retry');
+    });
+
+    // The condensed view's Needs you says it too.
+    await press(app, ESC, 'v');
+    await eventually(() => expect(app.lastFrame()).toContain('DETAIL'));
+    expect(app.lastFrame()).toContain('✓ Answered T1 Fix the login bug');
+
+    // Left, however it is left, Needs you no longer says it.
+    await press(app, ':', ...'task 1', ENTER, 'v');
+    await eventually(() => expect(app.lastFrame()).toContain('Tasks › T1'));
+    await press(app, '2');
+    await eventually(() => expect(app.lastFrame()).toContain('Nothing needs you.'));
+    expect(app.lastFrame()).not.toContain('Answered');
+  });
+
   test('a digit can take a failed AFK task over, into its conversation; esc gives the digits back to the screens', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([asking, failing], [failure, asked]), { connection });
@@ -2085,6 +2164,46 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'requestChanges', taskId: 'T3', comments: 'Put it in the header' }));
   });
 
+  test('the option the operator picks on the answer sheet is lit: its digit in the review colour, the others in the accent', async () => {
+    const level = chalk.level;
+    chalk.level = 3;
+    onTestFinished(() => void (chalk.level = level));
+    // A digit in brackets, in the review colour (terracotta) or the accent.
+    const lit = (digit: number) => new RegExp(`\\x1b\\[38;2;210;140;121m(?:\\x1b\\[1m)?\\[${digit}\\]`);
+    const plain = (digit: number) => new RegExp(`\\x1b\\[38;2;159;206;126m(?:\\x1b\\[1m)?\\[${digit}\\]`);
+    const { app } = await started(factoryState([reviewing], [review]));
+    await press(app, '2');
+    await eventually(() => expect(app.lastFrame()).toMatch(plain(1)));
+    expect(app.lastFrame()).not.toMatch(lit(1));
+
+    // Request changes, picked, stays lit while its comments are typed.
+    await press(app, 'a', '1');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(lit(1));
+      expect(frame).toMatch(plain(2));
+    });
+    await press(app, 'x');
+    expect(app.lastFrame()).toMatch(lit(1));
+
+    // Set aside, it is no longer picked.
+    await press(app, ESC);
+    await eventually(() => expect(app.lastFrame()).toMatch(plain(1)));
+    expect(app.lastFrame()).not.toMatch(lit(1));
+  });
+
+  test('on a question’s multi-select the options toggled on are lit too', async () => {
+    const level = chalk.level;
+    chalk.level = 3;
+    onTestFinished(() => void (chalk.level = level));
+    const lit = (digit: number) => new RegExp(`\\x1b\\[38;2;210;140;121m(?:\\x1b\\[1m)?\\[${digit}\\]`);
+    const multi = { ...question, questions: [{ ...question.questions[0]!, question: 'Which providers time out?', multiSelect: true }] };
+    const { app } = await started(factoryState([asking], [{ ...asked, question: multi }]));
+    await press(app, '2', 'a', '2');
+    await eventually(() => expect(app.lastFrame()).toMatch(lit(2)));
+    expect(app.lastFrame()).not.toMatch(lit(1));
+  });
+
   test('Push & open draft PR publishes the L1 root; once it has its PR the choice pushes to it, and none shows while it is under way', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([reviewing], [review]), { connection });
@@ -2171,7 +2290,11 @@ describe('answering from Needs you', () => {
     connection.replyTo('cancel', { ok: true });
     await press(app, '2');
     await eventually(() => expect(connection.sent.at(-1)).toEqual(discard));
-    await eventually(() => expect(app.lastFrame()).not.toContain('Discard work'));
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).not.toContain('[2] Discard work');
+      expect(frame).toContain('✓ Answered T3 Add a logout button: Cancel, Discard work');
+    });
   });
 
   test('a missing repository takes no digits, and its sheet says how to fix it', async () => {
@@ -2359,6 +2482,8 @@ describe('answering in the conversation', () => {
 
     await press(app, '2');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which endpoint?': 'v2' } }));
+    // Taken, the answer shows in the conversation.
+    await eventually(() => expect(app.lastFrame()).toContain('✓ Answered Which endpoint? → v2'));
   });
 
   test('a HITL run’s permission card shows in its conversation, answered as a request is, and chat waits until it is', async () => {
@@ -2388,8 +2513,69 @@ describe('answering in the conversation', () => {
     connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...asking, permission: null } }]);
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
-      expect(frame).not.toContain('Allow once');
+      // The card is gone, and the conversation says how it was answered.
+      expect(frame).not.toContain('[1] Allow once');
+      expect(frame).toContain('✓ Answered Allow once');
       expect(frame).toContain('enter queue · esc interrupt');
+    });
+  });
+
+  test('an answer given on Needs you shows in the conversation after the call it answers, and still does once the conversation is left and reopened', async () => {
+    const connection = new FakeConnection();
+    const question = {
+      id: 'toolu_02',
+      questions: [{ question: 'Which endpoint?', header: 'API', options: [{ label: 'v1', description: 'The old one' }, { label: 'v2', description: 'The new one' }], multiSelect: false }],
+    };
+    const asked = { ...permission, attention: 'question' as const, reason: 'Which endpoint?', question, permission: null };
+    const { app } = await started({ ...factoryState([waiting], [asked]), runs: { R1: suspended } }, { connection });
+    await press(app, '2', 'a', '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', answers: { 'Which endpoint?': 'v2' } }));
+    connection.servePatch([{ op: 'set', path: ['attentionQueue'], value: [] }]);
+
+    // The run's events: the answer goes after the call it answers, not after the latest.
+    const events: ConversationEvent[] = [
+      { type: 'message', id: 'E1', from: 'agent', text: 'Reading the issue.' },
+      { type: 'toolUse', id: 'E2', tool: 'AskUserQuestion', summary: 'Which endpoint?', toolUseId: 'toolu_02' },
+      { type: 'message', id: 'E3', from: 'agent', text: 'Going with v2.' },
+    ];
+    for (const time of [1, 2]) {
+      // Esc gives the digits back to the screens.
+      await press(app, ESC, '1', ENTER, ENTER);
+      await eventually(() => expect(connection.conversed).toHaveLength(time));
+      connection.serveConversation('R1', ...events);
+      await eventually(() => {
+        const frame = app.lastFrame()!;
+        const at = (text: string) => frame.indexOf(text);
+        expect(at('AskUserQuestion')).toBeGreaterThan(at('Reading the issue.'));
+        expect(at('✓ Answered Which endpoint? → v2')).toBeGreaterThan(at('AskUserQuestion'));
+        expect(at('Going with v2.')).toBeGreaterThan(at('✓ Answered Which endpoint? → v2'));
+      });
+      await press(app, '\x02');
+    }
+  });
+
+  test('an answer given in the conversation stays in it once the task’s next run starts, before that run’s events', async () => {
+    const connection = new FakeConnection();
+    const failure = { ...permission, attention: 'failure' as const, holdsRun: false, reason: 'The agent hit max turns.', permission: null };
+    const app = await opened(failure, connection);
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Out of turns.' });
+    await press(app, '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1' }));
+    await eventually(() => expect(app.lastFrame()).toContain('✓ Answered Retry'));
+
+    // Retried, the task's next run takes the conversation over.
+    const retried = { ...suspended, id: 'R2', status: 'active' as const, startedAt: 2 };
+    connection.servePatch([
+      { op: 'set', path: ['attentionQueue'], value: [] },
+      { op: 'set', path: ['runs', 'R2'], value: retried },
+      { op: 'set', path: ['tasks', 'T1', 'liveRunId'], value: 'R2' },
+    ]);
+    await eventually(() => expect(connection.conversed).toEqual(['R1', 'R2']));
+    connection.serveConversation('R2', { type: 'message', id: 'E9', from: 'agent', text: 'Trying again.' });
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame.indexOf('Trying again.')).toBeGreaterThan(frame.indexOf('✓ Answered Retry'));
+      expect(frame).toContain('✓ Answered Retry');
     });
   });
 
@@ -2840,12 +3026,6 @@ describe('the screens view', () => {
       expect(frame.split('\n')).toHaveLength(before + 1);
     });
   });
-
-  // A terminal of `rows` rows, which the TUI fits itself to.
-  function resize(app: { stdout: NodeJS.EventEmitter }, rows: number) {
-    Object.defineProperty(app.stdout, 'rows', { value: rows, configurable: true });
-    app.stdout.emit('resize');
-  }
 
   test('on a short terminal the Tasks screen fits it: the tree scrolls with the cursor, under the tabs and over its keys and output', async () => {
     const tasks = Array.from({ length: 20 }, (_, i) => task(`T${i + 1}`, `Task number ${i + 1}`, 'queued', 'Ready for you', 'HITL'));
