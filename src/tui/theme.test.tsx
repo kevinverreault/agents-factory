@@ -1,5 +1,8 @@
 // The theme module: the design system's colours as roles, the 16-colour
-// table, the state glyphs, and monochrome without colour.
+// table, the state glyphs, and monochrome without colour; and that the
+// screens take every colour and glyph from it.
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import chalk from 'chalk';
 import { Text } from 'ink';
 import { render } from 'ink-testing-library';
@@ -161,5 +164,28 @@ describe('sections', () => {
     expect(lines[2]).toMatch(/^╰─+╯$/);
     expect(lines).toHaveLength(3);
     unmount();
+  });
+});
+
+describe('the screens', () => {
+  // Every screen's source but the theme's own, its comments left out.
+  // key-probe.ts is no screen: it prints the keys a terminal sends.
+  const screens = () =>
+    readdirSync(import.meta.dirname)
+      .filter((file) => file.endsWith('.ts') && file !== 'theme.ts' && file !== 'key-probe.ts' && !file.includes('.test.'))
+      .map((file) => [file, readFileSync(join(import.meta.dirname, file), 'utf8').replace(/(^|\s)\/\/.*$/gm, '$1')] as const);
+
+  test('set no colour of their own: every colour comes from the theme', () => {
+    // A hex, a colour prop (written out or shorthand), a colour's name, or chalk.
+    const COLOUR = /#[0-9a-f]{3,8}\b|\b(?:color|borderColor|backgroundColor|dimColor|borderDimColor)\b(?=\s*[:,}])|'(?:black|red|green|yellow|blue|magenta|cyan|white|gray|grey)(?:Bright)?'|from 'chalk'/i;
+    expect(screens().filter(([, source]) => COLOUR.test(source)).map(([file]) => file)).toEqual([]);
+  });
+
+  test('draw no glyph of their own: rules, boxes, shapes, ticks and marks come from the theme', () => {
+    // Box drawing, blocks, shapes, symbols and dingbats, ↵, and tick boxes.
+    // Arrows stay: hints name the arrow keys by them. So does …: prose
+    // trails off with it ('Looking for leftovers…'); as a mark it is GLYPH.elided.
+    const GLYPHS = /[─-➿⬀-⯿↵]|\[[x ]\]/;
+    expect(screens().filter(([, source]) => GLYPHS.test(source)).map(([file, source]) => `${file}: ${source.match(GLYPHS)![0]}`)).toEqual([]);
   });
 });
