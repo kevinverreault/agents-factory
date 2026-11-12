@@ -2164,6 +2164,46 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'requestChanges', taskId: 'T3', comments: 'Put it in the header' }));
   });
 
+  test('the option the operator picks on the answer sheet is lit: its digit in the review colour, the others in the accent', async () => {
+    const level = chalk.level;
+    chalk.level = 3;
+    onTestFinished(() => void (chalk.level = level));
+    // A digit in brackets, in the review colour (terracotta) or the accent.
+    const lit = (digit: number) => new RegExp(`\\x1b\\[38;2;210;140;121m(?:\\x1b\\[1m)?\\[${digit}\\]`);
+    const plain = (digit: number) => new RegExp(`\\x1b\\[38;2;159;206;126m(?:\\x1b\\[1m)?\\[${digit}\\]`);
+    const { app } = await started(factoryState([reviewing], [review]));
+    await press(app, '2');
+    await eventually(() => expect(app.lastFrame()).toMatch(plain(1)));
+    expect(app.lastFrame()).not.toMatch(lit(1));
+
+    // Request changes, picked, stays lit while its comments are typed.
+    await press(app, 'a', '1');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(lit(1));
+      expect(frame).toMatch(plain(2));
+    });
+    await press(app, 'x');
+    expect(app.lastFrame()).toMatch(lit(1));
+
+    // Set aside, it is no longer picked.
+    await press(app, ESC);
+    await eventually(() => expect(app.lastFrame()).toMatch(plain(1)));
+    expect(app.lastFrame()).not.toMatch(lit(1));
+  });
+
+  test('on a question’s multi-select the options toggled on are lit too', async () => {
+    const level = chalk.level;
+    chalk.level = 3;
+    onTestFinished(() => void (chalk.level = level));
+    const lit = (digit: number) => new RegExp(`\\x1b\\[38;2;210;140;121m(?:\\x1b\\[1m)?\\[${digit}\\]`);
+    const multi = { ...question, questions: [{ ...question.questions[0]!, question: 'Which providers time out?', multiSelect: true }] };
+    const { app } = await started(factoryState([asking], [{ ...asked, question: multi }]));
+    await press(app, '2', 'a', '2');
+    await eventually(() => expect(app.lastFrame()).toMatch(lit(2)));
+    expect(app.lastFrame()).not.toMatch(lit(1));
+  });
+
   test('Push & open draft PR publishes the L1 root; once it has its PR the choice pushes to it, and none shows while it is under way', async () => {
     const connection = new FakeConnection();
     const { app } = await started(factoryState([reviewing], [review]), { connection });

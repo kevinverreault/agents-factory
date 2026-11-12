@@ -569,7 +569,7 @@ export function App({
     ),
     fixed(
       state && item
-        ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm, position: { at: cursor + 1, of: queue.length } })
+        ? h(AnswerSheet, { item, task: itemTask, card: answers.card, answering, form: answers.form, confirm: answers.confirm, chosen: answers.chosen, position: { at: cursor + 1, of: queue.length } })
         : null,
       closed ? h(Text, { ...tone('bad') }, 'The daemon connection closed.') : null,
       command === null ? null : h(CommandLine, { draft: command }),

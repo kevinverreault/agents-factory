@@ -248,7 +248,7 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
         advancing && canAdvance(task)
           ? h(AdvanceSheet, { key: 'advance', connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })
           : null,
-        request ? h(AnswerSheet, { key: 'request', item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, escBack: false }) : null,
+        request ? h(AnswerSheet, { key: 'request', item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, chosen: answers.chosen, escBack: false }) : null,
         live && (run.turn === 'operator' || question || run.permission) ? h(Text, { key: 'waiting', ...tone('warn') }, 'The agent is waiting on you.') : null,
         refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
         chat ? h(Text, { key: 'chat' }, h(Text, tone('ok'), `${GLYPH.operator} `), `${draft}${GLYPH.caret}`) : null,
