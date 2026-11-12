@@ -707,7 +707,7 @@ describe('launching and conversing', () => {
     ]);
     await settle();
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
-    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.\nHITL · claude-sonnet-5-5 · In conversation · factory\/T1-grill-me-about-the-login-flow/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/◇ T1 Grill me about the login flow\.\n[^\n]*In conversation/));
   });
 
   test('on the launch card, ↑↓ move between fields, ←→ pick another repository, a refusal shows its reason, and esc backs out', async () => {
@@ -1218,6 +1218,22 @@ describe('launching and conversing', () => {
     await settle();
 
     await eventually(() => expect(app.lastFrame()).toContain('claude --resume 5f0c2a8e-3b1d-4c6e-9a7f-2d8b4e1c0a93'));
+  });
+
+  test('the conversation opens under ◇ its task, then what it is (mode, model, state) and, mid-turn, that the agent is working; it shows no context share', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => {
+      const lines = app.lastFrame()!.split('\n');
+      expect(lines[0]).toMatch(/^◇ T1 Grill me about the login flow\./);
+      expect(lines[1]).toMatch(/^HITL · claude-sonnet-5-5 · In conversation · agent working… · factory\/T1-grill-me/);
+      expect(lines[2]).toMatch(/^claude --resume /);
+      expect(app.lastFrame()).not.toMatch(/ctx|\d+%\s+context/i);
+    });
+
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, turn: 'operator' } }]);
+    await eventually(() => expect(app.lastFrame()!.split('\n')[1]).not.toContain('agent working'));
   });
 
   const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
@@ -3423,6 +3439,29 @@ describe('the condensed view', () => {
       expect(frame).toMatch(/1 Tasks\s+2 Needs you \(2\)/);
       expect(frame).toMatch(/›\s+\S\s+T3\s+Write the docs/);
       expect(frame).not.toMatch(/^\s*GROUPS/m);
+    });
+  });
+
+  test('the condensed view’s panes sit under their titles, divided by │ rather than boxed, and its keys are the footer', async () => {
+    const { app } = await started(condensed());
+    await press(app, 'v');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      const lines = frame.split('\n');
+      // The titles share a row: the sidebar's, then the tree's and the detail's, each after a divider.
+      expect(frame).toMatch(/NEEDS YOU \(2\)\s+│\s+TASKS · all\s+│\s+DETAIL/);
+      expect(frame).toMatch(/^\s*GROUPS/m);
+      // The panes are divided, not boxed: no square corners. (The detail's
+      // own sections are rounded boxes, as task detail draws them.)
+      expect(frame).not.toMatch(/[┌┐└┘]/);
+      expect(lines.at(-1)).toMatch(/^tab focus · f zoom · g group · : command · v screens · \? keys/);
+    });
+
+    await press(app, 'f');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/^\s*DETAIL · zoomed/m);
+      expect(frame).not.toContain('TASKS · all');
     });
   });
 

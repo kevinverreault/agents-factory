@@ -167,14 +167,15 @@ export function Conversation({ connection, state, taskId, onLeave }: Props) {
     h(
       Box,
       { flexDirection: 'column', flexShrink: 0 },
-      h(Text, { ...tone('accent'), bold: true, wrap: 'truncate' }, `${GLYPH.conversation} ${taskId} ${task?.title ?? ''}`),
+      h(Text, { ...tone('accent'), wrap: 'truncate' }, `${GLYPH.conversation} ${taskId} ${task?.title ?? ''}`),
       h(
         Text,
         { ...tone('dim'), wrap: 'truncate' },
         what ? `${what} ${GLYPH.between} ` : '',
         h(Text, tone(stateLook(label).role), label),
-        task?.branch ? ` ${GLYPH.between} ${task.branch}` : '',
+        // Before the branch, which a narrow screen cuts first.
         midTurn ? h(Text, tone('ok'), ` ${GLYPH.between} agent working…`) : null,
+        task?.branch ? ` ${GLYPH.between} ${task.branch}` : '',
       ),
       // The escape hatch: the same session in the operator's own terminal.
       task?.sessionId
