@@ -707,7 +707,7 @@ describe('launching and conversing', () => {
     ]);
     await settle();
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
-    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Grill me about the login flow\.\nHITL · claude-sonnet-5-5 · In conversation · agent working… · factory\/T1-grill-me/));
+    await eventually(() => expect(app.lastFrame()).toMatch(/◇ T1 Grill me about the login flow\.\n[^\n]*In conversation/));
   });
 
   test('on the launch card, ↑↓ move between fields, ←→ pick another repository, a refusal shows its reason, and esc backs out', async () => {
@@ -3451,7 +3451,8 @@ describe('the condensed view', () => {
       // The titles share a row: the sidebar's, then the tree's and the detail's, each after a divider.
       expect(frame).toMatch(/NEEDS YOU \(2\)\s+│\s+TASKS · all\s+│\s+DETAIL/);
       expect(frame).toMatch(/^\s*GROUPS/m);
-      // No pane is boxed: no square corners, nor a row of rules closing a pane.
+      // The panes are divided, not boxed: no square corners. (The detail's
+      // own sections are rounded boxes, as task detail draws them.)
       expect(frame).not.toMatch(/[┌┐└┘]/);
       expect(lines.at(-1)).toMatch(/^tab focus · f zoom · g group · : command · v screens · \? keys/);
     });

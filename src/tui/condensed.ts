@@ -32,11 +32,11 @@ export function Condensed({
   tree: ReactNode;
   detail: ReactNode;
 }) {
-  // Each pane's title, and what it shows of it in its own case.
-  const titles: Record<Pane, { text: string; name?: string } | null> = {
+  // Each pane's title: the tree's names the group it is filtered by.
+  const titles: Record<Pane, { text: string; group?: string } | null> = {
     sidebar: null,
-    tree: { text: 'Tasks', name: group ?? 'all' },
-    detail: { text: zoom ? 'Detail · zoomed' : 'Detail' },
+    tree: { text: 'Tasks', group: group ?? 'all' },
+    detail: { text: zoom ? `Detail ${GLYPH.between} zoomed` : 'Detail' },
   };
   const pane = (id: Pane, content: ReactNode, size: { width?: number; flexGrow?: number; flexBasis?: number }, divided: boolean) =>
     h(
