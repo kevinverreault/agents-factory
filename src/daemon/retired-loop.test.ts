@@ -100,8 +100,8 @@ describe('a task frozen on the Ralph loop', () => {
     expect(factory.executor.started.map(({ runId }) => runId)).toEqual(['R1', 'R2']);
     expect(factory.github.writes).toEqual([]);
     // Only cancelling, or relaunching, carries it on.
-    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: false, reason: 'T1’s preset loop was retired: cancel T1, or relaunch it.' });
-    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: false, reason: 'T1’s preset loop was retired: cancel T1, or relaunch it.' });
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: false, reason: RETIRED });
+    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: false, reason: RETIRED });
     expect(await operator.send({ type: 'cancel', taskId: 'T1', branch: 'discard' })).toEqual({ ok: true });
     await tui.until((state) => state.tasks.T1?.label === 'Cancelled');
   });

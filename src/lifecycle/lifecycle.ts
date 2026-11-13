@@ -10,7 +10,7 @@ import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../m
 import { issueRef } from '../artifacts/capture.ts';
 import type { Issue, Mergeability, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
-import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, launchesTickets, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
+import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { cutToFit, oneLineOf } from '../text/lines.ts';
 import {
@@ -1396,11 +1396,6 @@ function retiredLoopReason(task: Task, stage: Stage): string {
   );
 }
 
-// Why the operator can't carry a task on at the retired Ralph loop's stage.
-function retiredLoopRefusal(task: Task): string {
-  return `${task.id}’s preset loop was retired: cancel ${task.id}, or relaunch it.`;
-}
-
 // Whether the task is at a stage of the retired Ralph loop.
 function atRetiredLoop(task: Task): boolean {
   return isRetiredLoop(stageOf(task, task.stage));
@@ -2107,7 +2102,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.quick ? null : `${task.id} is no quick launch, or is one no longer.`;
     case 'takeOver':
       if (!(task.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state))) return 'Only a live AFK task (queued, running or needing you) can be taken over.';
-      return atRetiredLoop(task) ? retiredLoopRefusal(task) : cantStartRuns(state, task);
+      return atRetiredLoop(task) ? retiredLoopReason(task, stageOf(task, task.stage)!) : cantStartRuns(state, task);
     case 'answer': {
       const request = showsRequest(task) ? openRequest(state, task) : undefined;
       // A HITL run's card takes only a permission answer.
@@ -2120,7 +2115,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
         return 'This request doesn’t name its call: allow it once or for this task.';
       }
       if (request.kind === 'pr-closed-unmerged') return `${task.id}’s PR was closed without merging: cancel the task, or reopen its PR.`;
-      if (request.kind === 'stage-blocked' && atRetiredLoop(task)) return retiredLoopRefusal(task);
+      // Only cancelling, to relaunch, carries a task on from the retired Ralph loop.
+      if (request.kind === 'stage-blocked' && atRetiredLoop(task)) return retiredLoopReason(task, stageOf(task, task.stage)!);
       const skippedRefusal = skippedAnswerRefusal(task, request, action);
       if (skippedRefusal !== undefined) return skippedRefusal;
       if (action.allowHosts !== undefined) {
@@ -3780,10 +3776,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         break;
       }
       const { to, jumped } = plan;
-      // Advanced to the retired Ralph loop's stage, it asks the operator instead.
+      // The retired Ralph loop's stage asks the operator, whatever its args.
       if (isRetiredLoop(to)) {
-        task.loop = null;
-        enterStage(task, to, action.sessionId);
+        enterStage(task, to, action.sessionId, jumped?.context === 'fresh');
         blockRetiredLoop(state, task, at);
         break;
       }
