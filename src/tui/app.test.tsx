@@ -2,6 +2,7 @@
 import chalk from 'chalk';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
+import type { Edited } from '../os/edit-externally.ts';
 import type { ConversationEvent } from '../executor/executor.ts';
 import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { LeftoversView, PresetsView } from '../protocol/protocol.ts';
@@ -54,9 +55,12 @@ function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attention
   };
 }
 
-async function started(state?: FactoryState, { cwd, connection = new FakeConnection(), prefs }: { cwd?: string; connection?: FakeConnection; prefs?: PrefsStore } = {}) {
+async function started(
+  state?: FactoryState,
+  { cwd, connection = new FakeConnection(), prefs, editText }: { cwd?: string; connection?: FakeConnection; prefs?: PrefsStore; editText?: (text: string) => Promise<Edited> } = {},
+) {
   if (state) connection.serveSnapshot(state);
-  const app = render(<App connection={connection} cwd={cwd} prefs={prefs ?? memoryPrefs()} />);
+  const app = render(<App connection={connection} cwd={cwd} prefs={prefs ?? memoryPrefs()} editText={editText} />);
   apps.push(app);
   await settle();
   return { connection, app };
@@ -1015,6 +1019,79 @@ describe('launching and conversing', () => {
     await press(app, UP, UP, LEFT);
     await eventually(() => expect(app.lastFrame()).toMatch(/Preset\s+‹ setup \(built-in\) ›/));
     expect(app.lastFrame()).not.toContain('works unattended');
+  });
+
+  test('the prompt takes several lines: ctrl+j breaks a line, a list continues, and ↑↓ move between lines before fields', async () => {
+    const connection = inWidgets();
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/ctrl\+j new line · ctrl\+e editor/));
+    await type(app, 'Steps:');
+    await press(app, '\n');
+    await type(app, '- one');
+    await press(app, '\n');
+    await type(app, 'two');
+    await press(app, '\n', '\n');
+    await type(app, 'Done.');
+    // The lines line up under the first, in the value column.
+    await eventually(() => {
+      const frame = app.lastFrame()!.split('\n');
+      const first = frame.findIndex((line) => /Prompt\s+Steps:/.test(line));
+      const column = frame[first]!.indexOf('Steps:');
+      expect(frame.slice(first, first + 4).map((line) => line.slice(column).replace(/\s*│$/, ''))).toEqual(['Steps:', '- one', '- two', `Done.${GLYPH.caret}`]);
+    });
+    // ↑ goes up the prompt's lines, at the same column, and on from its first to the field above.
+    await press(app, UP, UP, UP);
+    await eventually(() => expect(app.lastFrame()).toMatch(new RegExp(`Steps${GLYPH.caret}:`)));
+    await press(app, UP);
+    await eventually(() => expect(app.lastFrame()).not.toContain(GLYPH.caret));
+    await press(app, DOWN);
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Steps:\n- one\n- two\nDone.' }));
+  });
+
+  test('ctrl+e has the operator edit the prompt in their own editor, and the card takes what they saved', async () => {
+    const connection = inWidgets();
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const edited: string[] = [];
+    const editText = async (text: string): Promise<Edited> => {
+      edited.push(text);
+      return { ok: true, text: `${text}\n\n- with a list` };
+    };
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection, editText });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/LAUNCH A TASK/));
+    await type(app, 'Fix it');
+    await press(app, '\x05');
+    await eventually(() => expect(app.lastFrame()).toMatch(new RegExp(`- with a list${GLYPH.caret}`)));
+    expect(edited).toEqual(['Fix it']);
+    await type(app, '!');
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Fix it\n\n- with a list!' }));
+  });
+
+  test('an editor that fails leaves the prompt as it was, and the card says why', async () => {
+    const connection = inWidgets();
+    const editText = async (): Promise<Edited> => ({ ok: false, reason: 'vi exited with code 1: the prompt is unchanged.' });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection, editText });
+
+    app.stdin.write('N');
+    await settle();
+    await type(app, 'Fix it');
+    await press(app, '\x05');
+    await eventually(() => {
+      expect(app.lastFrame()).toContain('vi exited with code 1');
+      expect(app.lastFrame()).toMatch(new RegExp(`Fix it${GLYPH.caret}`));
+    });
   });
 
   test('a start stage that needs no launch input launches with an empty prompt', async () => {

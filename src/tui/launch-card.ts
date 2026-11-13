@@ -5,15 +5,18 @@
 // daemon resolves and freezes the preset; the card offers what it lists for
 // the repository. Where the factory's App isn't installed, a preset with
 // AFK stages shows why its launch is blocked, and `ctrl+o` opens the
-// App's installation settings.
-import { createElement as h, useEffect, useState, type ReactNode } from 'react';
-import { Box, Text, useInput, type Key } from 'ink';
+// App's installation settings. The prompt takes several lines (text-area.ts),
+// and `ctrl+e` opens it in the operator's own editor.
+import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Box, Text, useApp, useInput, type Key } from 'ink';
+import { editExternally, type Edited } from '../os/edit-externally.ts';
 import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, PRIORITIES, type AutonomyLevel, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
 import { appBlock, lackingInputs, type PresetChoice, type StartStage } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
+import { editArea, windowed } from './text-area.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
 import { choosable, Cursor, joined, Sheet, tone, type Role } from './theme.ts';
 import { useLaunch } from './use-launch.ts';
@@ -26,6 +29,8 @@ type Props = {
   onLaunched(taskId: string): void;
   onCancel(): void;
   openUrl(url: string): void;
+  // The prompt as the operator saved it in their own editor.
+  editText?: (text: string) => Promise<Edited>;
 };
 
 type Field = 'repo' | 'preset' | 'stage' | 'prompt' | 'issues' | 'groups' | 'autonomy' | 'tier' | 'maxTurns' | 'priority';
@@ -51,6 +56,8 @@ type Draft = {
 type Listing = PresetsView | { refusal: string };
 
 const LABEL = 12;
+// The most lines of the prompt on show at once, around its caret.
+const PROMPT_LINES = 8;
 // What a launch says while no repository is registered.
 export const NO_REPOSITORY = 'Register a repository first: run `agents-factory repo add` in a clone.';
 
@@ -61,7 +68,7 @@ export function defaultRepo(state: FactoryState, here: string | null): string | 
   return [here, state.lastUsedRepo].find((repo) => repo && repositories.includes(repo)) ?? repositories[0] ?? null;
 }
 
-export function LaunchCard({ connection, state, here, onLaunched, onCancel, openUrl }: Props) {
+export function LaunchCard({ connection, state, here, onLaunched, onCancel, openUrl, editText = editExternally }: Props) {
   const repositories = Object.keys(state.repositories);
   const [draft, setDraft] = useState<Draft>(() => ({
     field: 'prompt',
@@ -81,6 +88,24 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const [refusal, setRefusal] = useState<string | null>(null);
   // A launch the operator backed out of goes on, but takes them nowhere.
   const launching = useLaunch(connection);
+  const { suspendTerminal } = useApp();
+  // Set as the editor is asked for, before a re-render, so keys of the
+  // same burst can't open a second one.
+  const editing = useRef(false);
+
+  // The terminal goes to the operator's editor while it runs, and the prompt
+  // they saved comes back with the caret at its end.
+  const editPrompt = async (prompt: string) => {
+    setRefusal(null);
+    const edited = await new Promise<Edited>((resolve) => {
+      suspendTerminal(async () => resolve(await editText(prompt))).catch((error: unknown) =>
+        resolve({ ok: false, reason: `Couldn't open an editor: ${String(error)}` }),
+      );
+    });
+    editing.current = false;
+    if (edited.ok) setDraft((draft) => ({ ...draft, prompt: edited.text, caret: draft.field === 'prompt' ? null : draft.caret }));
+    else setRefusal(edited.reason);
+  };
 
   useEffect(() => {
     const { repo } = draft;
@@ -121,8 +146,18 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
       if (fixUrl) openUrl(fixUrl);
       return;
     }
-    // The launch under way takes no other key.
-    if (launching.busy()) return;
+    // The launch under way, or the editor, takes no other key.
+    if (launching.busy() || editing.current) return;
+    // On the prompt as the keys before it in the burst left the draft.
+    if (key.ctrl && input === 'e') {
+      return setDraft((draft) => {
+        if (draft.field === 'prompt' && !editing.current) {
+          editing.current = true;
+          queueMicrotask(() => void editPrompt(draft.prompt));
+        }
+        return draft;
+      });
+    }
     if (key.return) {
       const command = launchCommand(draft, card);
       if (!command) return;
@@ -157,7 +192,13 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const maxTurnsDefault = `stage default (${start?.maxTurns ?? DEFAULT_MAX_TURNS})`;
   return h(
     Sheet,
-    { title: 'Launch a task', hint: 'enter launch · ↑↓ field · ←→ choose · esc back' },
+    {
+      title: 'Launch a task',
+      hint:
+        draft.field === 'prompt'
+          ? 'enter launch · ctrl+j new line · ctrl+e editor · ↑↓ line/field · esc back'
+          : 'enter launch · ↑↓ field · ←→ choose · esc back',
+    },
     row('repo', 'Repository', draft.repo),
     row(
       'preset',
@@ -173,7 +214,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     choice && 'error' in choice ? note('error', choice.error, 'bad') : null,
     choice && 'description' in choice && choice.description ? note('description', choice.description) : null,
     row('stage', 'Start stage', start ? describeStage(start) : '—'),
-    row('prompt', 'Prompt', draft.prompt, false),
+    row('prompt', 'Prompt', promptText(draft.prompt, draft.field === 'prompt' ? draft.caret : undefined)),
     card.fields.includes('issues') ? row('issues', 'Issues', draft.issues, false) : null,
     row('groups', 'Groups', draft.groups, false),
     afk ? row('autonomy', 'Autonomy', autonomyText(draft.autonomy ?? 'L1')) : null,
@@ -221,14 +262,34 @@ function cardOf(draft: Draft, listing: Listing | undefined): Card {
   return { listing, choice, start, presets, starts, fields };
 }
 
+// The prompt over its lines, those around the caret while it is typed in,
+// under the value column, with how many more there are above and below.
+function promptText(prompt: string, caret: Caret | undefined): ReactNode {
+  const { shown, above, below } = windowed(prompt, caret, PROMPT_LINES);
+  const more = (key: string, lines: number, where: string) =>
+    lines > 0 ? h(Text, { key, ...tone('dim') }, `… ${lines} more line${lines === 1 ? '' : 's'} ${where}`) : null;
+  return h(
+    Box,
+    { flexDirection: 'column', flexShrink: 1 },
+    more('above', above, 'above'),
+    h(Text, { key: 'prompt' }, shown),
+    more('below', below, 'below'),
+  );
+}
+
 // The draft after a key that isn't enter or esc.
 function step(draft: Draft, card: Card, repositories: string[], input: string, key: Key): Draft {
+  // ↑ on the prompt's first line and ↓ on its last go on to the next field.
+  if (draft.field === 'prompt') {
+    const typed = editArea(draft.prompt, draft.caret, input, key);
+    if (typed) return { ...draft, prompt: typed.text, caret: typed.caret };
+  }
   if (key.upArrow || key.downArrow) {
     const at = card.fields.indexOf(draft.field);
     const next = Math.min(Math.max(at + (key.upArrow ? -1 : 1), 0), card.fields.length - 1);
     return next === at ? draft : { ...draft, field: card.fields[next]!, caret: null };
   }
-  if (draft.field === 'prompt' || draft.field === 'issues' || draft.field === 'groups' || draft.field === 'maxTurns') {
+  if (draft.field === 'issues' || draft.field === 'groups' || draft.field === 'maxTurns') {
     // Max turns are a whole number: other characters are dropped.
     const typed = edit(draft[draft.field], draft.caret, draft.field === 'maxTurns' && !key.meta ? input.replace(/\D/g, '') : input, key);
     return typed === null ? draft : { ...draft, [draft.field]: typed.text, caret: typed.caret };

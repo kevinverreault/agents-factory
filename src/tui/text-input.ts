@@ -61,5 +61,5 @@ function word(text: string, at: number, by: -1 | 1): number {
 }
 const WORD = /[\p{L}\p{N}_]/u;
 
-const isHigh = (text: string, i: number) => /[\uD800-\uDBFF]/.test(text[i] ?? '');
-const isLow = (text: string, i: number) => /[\uDC00-\uDFFF]/.test(text[i] ?? '');
+export const isHigh = (text: string, i: number) => /[\uD800-\uDBFF]/.test(text[i] ?? '');
+export const isLow = (text: string, i: number) => /[\uDC00-\uDFFF]/.test(text[i] ?? '');
