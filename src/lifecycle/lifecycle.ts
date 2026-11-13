@@ -1225,7 +1225,12 @@ function issuesFor(state: Lifecycle, task: Task, kind: string): string[] {
 // App (ADR 0013): those its chart stage made, or the launch refs standing
 // for them.
 export function mapsOf(state: Lifecycle, task: Task): string[] {
-  return issuesFor(state, task, 'map').filter((ref) => ref.toLowerCase().startsWith(`${task.repo.toLowerCase()}#`));
+  return issuesFor(state, task, 'map').filter((ref) => inRepo(task, ref));
+}
+
+// Whether the issue `ref` is in the task's own repository.
+export function inRepo(task: Task, ref: string): boolean {
+  return ref.toLowerCase().startsWith(`${task.repo.toLowerCase()}#`);
 }
 
 // The issues a Ralph loop reads its ticket set from (ADR 0006): the task's
@@ -1678,10 +1683,6 @@ function skipTicket(state: Lifecycle, task: Task): void {
   oweTicketSetRead(state, task);
 }
 
-// The spec task's spec is closed, or it has none (ADR 0013): spec-closed
-// holds, and it is Done. Its branch goes with its worktree once a ticket
-// task merged, carrying its docs to the base branch; else it is kept, as
-// the only copy of them.
 // The spec task's spec closed, or it has none: the wayfinder maps it was
 // written from close next (ADR 0013), unless one of them is the spec, as
 // when the spec stage was jumped over; then the spec task is Done.
@@ -1695,6 +1696,10 @@ function specResolved(state: Lifecycle, task: Task, request: AttentionRequest | 
   finishSpecTask(state, task, request);
 }
 
+// The spec task's spec is closed, or it has none (ADR 0013): spec-closed
+// holds, and it is Done. Its branch goes with its worktree once a ticket
+// task merged, carrying its docs to the base branch; else it is kept, as
+// the only copy of them.
 function finishSpecTask(state: Lifecycle, task: Task, request: AttentionRequest | undefined, { specOpen = false } = {}): void {
   if (!specOpen) task.ticketSet!.closed = true;
   finishRoot(task, request, { merged: true });
@@ -2394,6 +2399,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.ticketSet?.closing && !isTerminal(task) ? null : `${task.id} isn’t closing its spec.`;
     case 'mapClosed':
     case 'mapUnclosed':
+      // Owed even once the task ended: one ended at its cleared map is In
+      // review, and may be Done or cancelled before its map closes.
       return task.mapClosing ? null : `${task.id} isn’t closing its map.`;
     case 'ticketSetRead':
     case 'ticketSetUnread':

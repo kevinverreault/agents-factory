@@ -81,6 +81,7 @@ import {
   type ResolutionEvent,
   type SpecClosingEvent,
   mapsOf,
+  inRepo,
   type MapClosingEvent,
   type TicketSetEvent,
   type TicketTaskLaunched,
@@ -1112,8 +1113,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // linked to it only by text are no sub-issues, so it has none. Issues of
   // other repositories are left out.
   // A wayfinder map's tickets are its open sub-issues, those written from it
-  // once its spec was jumped over: its closed decision tickets are no
-  // tickets, and with none open it is no candidate.
+  // once its spec was jumped over: its closed decision tickets are left out
+  // of its ticket set, and with none open it is no candidate.
   async function specCandidates(task: Task): Promise<HandoffTicketSets> {
     try {
       const { token } = await appToken(task.repo, READ_ONLY);
@@ -1121,7 +1122,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const childless: string[] = [];
       const maps = mapsOf(lifecycle, task);
       // Its ticket tasks work in its repository alone.
-      const ours = recordedIssues(lifecycle, task).filter((ref) => ref.toLowerCase().startsWith(`${task.repo.toLowerCase()}#`));
+      const ours = recordedIssues(lifecycle, task).filter((ref) => inRepo(task, ref));
       for (const ref of ours) {
         const subIssues = await github.subIssues(token, ref);
         if (subIssues.length === 0) {

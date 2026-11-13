@@ -240,6 +240,22 @@ describe('the map clearing', () => {
     ]);
   });
 
+  test('a map the factory couldn’t close as the task ended is closed at the next poll', async () => {
+    const { factory, operator, tui } = await cleared();
+    factory.github.failIssueWrites('Service Unavailable.');
+
+    await operator.send({ type: 'advanceStage', taskId: 'T1', end: true });
+    await tui.until((state) => state.tasks.T1?.state === 'in-review');
+    expect(factory.github.issueState(MAP).open).toBe(true);
+    factory.github.failIssueWrites(null);
+
+    factory.clock.advance(15 * 60_000);
+    await operator.send({ type: 'daemon.status' });
+
+    await vi.waitFor(() => expect(factory.github.issueState(MAP).open).toBe(false));
+    expect(factory.github.writes.map(({ ref }) => ref)).toEqual([MAP]);
+  });
+
   test('ending, or jumping, is refused before the map cleared', async () => {
     const { operator, tui } = await working();
     await operator.send({ type: 'open', taskId: 'T1' });
