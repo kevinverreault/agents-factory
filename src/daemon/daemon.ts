@@ -72,6 +72,7 @@ import {
   type PrReadEvent,
   type PublishEvent,
   type ResearchEvent,
+  type ResolutionEvent,
   type ReopenEvent,
   type Repository,
   type RepoEvent,
@@ -123,6 +124,7 @@ import {
   REPO_PRESETS,
   resolvePreset,
   userPresets,
+  worksTickets,
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
@@ -280,6 +282,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // The In review roots whose PR this daemon is reading on GitHub, and when
   // it next reads them all.
   const prReadsInFlight = new Set<string>();
+  // The merged ticket tasks whose ticket this daemon has tried to resolve
+  // since the last PR poll, and those it is resolving now (ADR 0013).
+  const resolutionsTried = new Set<string>();
+  const resolutionsInFlight = new Set<string>();
   // The sweeps of ended runs' CLI trees under way (ADR 0003).
   const processSweeps = new Set<Promise<void>>();
   // Each task's last job on its transcripts under way (ADR 0011): archiving
@@ -760,6 +766,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const blocked = appBlock(resolved.preset.name, stages, check);
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
       }
+      // One issue ref with no sub-issues, at a stage working tickets, is a
+      // ticket task's ticket (ADR 0013).
+      if (worksTickets(start.stage) && action.issues.length === 1) {
+        const read = await loneTicket(repo, action.issues[0]!);
+        if ('error' in read) return { ok: false, reason: read.error };
+        action.ticket = read.ticket;
+      }
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       action.stage = start.stage.id;
       action.opening = start.opening;
@@ -778,6 +791,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pruneSkillSets();
       return { ok: true, value: { taskId } };
     });
+  }
+
+  // The issue `ref`, if it has no sub-issues, read as the App with a
+  // read-only token; null when it has some, so it is a spec.
+  async function loneTicket(repo: string, ref: string): Promise<{ ticket: string | null } | { error: string }> {
+    try {
+      const { token } = await appToken(repo, READ_ONLY);
+      return { ticket: (await github.subIssues(token, ref)).length ? null : ref };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { error: `Couldn’t read ${ref}’s sub-issues on GitHub as the factory’s App: ${error.message}` };
+    }
   }
 
   // Mark done (ADR 0011): a root without a PR finishes once its task branch
@@ -864,6 +889,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // the next poll, and never stops the daemon.
   function pollPrs(): void {
     nextPrPoll = clock.now() + PR_POLL_MS;
+    // A ticket the factory couldn't close is tried again at every poll.
+    resolutionsTried.clear();
+    driveResolutions();
     for (const task of Object.values(lifecycle.tasks)) {
       if (stopping || !waitsOnPr(task) || prReadsInFlight.has(task.id)) continue;
       prReadsInFlight.add(task.id);
@@ -1280,6 +1308,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveReopens();
     drivePublishes();
     driveResearch();
+    driveResolutions();
     driveNotes();
   });
 
@@ -1407,6 +1436,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveReopens();
     drivePublishes();
     driveResearch();
+    driveResolutions();
     driveBranchSweeps(before);
     driveProcessSweeps(before);
     driveTranscriptArchives(before);
@@ -1444,6 +1474,45 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           throw error;
         },
       );
+    }
+  }
+
+  // Resolves each merged ticket task's ticket (ADR 0013): once per daemon,
+  // and again at every PR poll while it fails. Its outcome goes through the
+  // Lifecycle like any other event.
+  function driveResolutions(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      if (stopping || !task.resolving || resolutionsTried.has(task.id) || resolutionsInFlight.has(task.id)) continue;
+      resolutionsTried.add(task.id);
+      resolutionsInFlight.add(task.id);
+      void resolveTicket(task).then(
+        (event) =>
+          serially(async () => {
+            resolutionsInFlight.delete(task.id);
+            if (!stopping) await settle(event, new Set());
+          }),
+        (error) => {
+          resolutionsInFlight.delete(task.id);
+          throw error;
+        },
+      );
+    }
+  }
+
+  // Closes the merged ticket task's ticket as completed if GitHub left it
+  // open, as the App: read with a read-only token, closed with a token
+  // minted for that write alone (ADR 0004), and a comment naming the PR.
+  async function resolveTicket(task: Task): Promise<ResolutionEvent> {
+    const ticket = task.ticket!;
+    try {
+      const { token: reading } = await appToken(task.repo, READ_ONLY);
+      if (!(await github.readIssue(reading, ticket)).open) return { type: 'ticketResolved', taskId: task.id };
+      const { token } = await appToken(task.repo, TICKET_WRITE);
+      await github.closeIssue(token, ticket, resolvingComment(task));
+      return { type: 'ticketResolved', taskId: task.id };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'ticketUnresolved', taskId: task.id, reason: error.message };
     }
   }
 
@@ -2660,6 +2729,12 @@ function closingComment(task: Task, commits: string[]): string {
     `Done on the task branch \`${task.worktree!.branch}\` by the agents factory’s task ${task.id} (${task.title}), ` +
     `in ${commits.map((commit) => commit.slice(0, 7)).join(', ')}.${where}`
   );
+}
+
+// What closing a merged ticket task's ticket says on it (ADR 0013): the PR
+// that did its work was merged.
+function resolvingComment(task: Task): string {
+  return `Done in ${task.pr!.url}, merged, by the agents factory’s task ${task.id} (${task.title}).`;
 }
 
 // What closing a research ticket says on it (ADR 0007): where the findings

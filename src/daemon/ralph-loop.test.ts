@@ -243,8 +243,9 @@ describe('an iteration that fails the judgement', () => {
 
   test('can’t be skipped when it isn’t an iteration’s', async () => {
     const { operator, tui } = await withSpec();
-    // An issue GitHub doesn't have: the factory can't read its tickets.
-    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#99'] });
+    // Issues GitHub doesn't have: the factory can't read their tickets. (One
+    // issue alone would be refused at launch, reading whether it is a ticket.)
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#98', '#99'] });
     await tui.until((state) => state.tasks.T1?.label === 'Needs you');
     expect(tui.state().attentionQueue).toMatchObject([{ attention: 'failure' }]);
 

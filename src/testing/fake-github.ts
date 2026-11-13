@@ -73,6 +73,7 @@ export class FakeGitHub implements GitHub {
   private readonly noDrafts = new Set<string>();
   private failure: string | null = null;
   private prFailure: string | null = null;
+  private issueWriteFailure: string | null = null;
   private hold: { arrived(): void; released: Promise<void> } | null = null;
 
   // `git` holds the clones pushes come from, whose origin is this GitHub.
@@ -113,6 +114,11 @@ export class FakeGitHub implements GitHub {
   // Opening PRs fails with `reason` from now on, or works again with null.
   failPullRequests(reason: string | null): void {
     this.prFailure = reason;
+  }
+
+  // Closing and reopening issues fails with `reason` from now on, or works again with null.
+  failIssueWrites(reason: string | null): void {
+    this.issueWriteFailure = reason;
   }
 
   // The writes from now on wait, unmade, until `release`: `held` settles
@@ -203,6 +209,7 @@ export class FakeGitHub implements GitHub {
 
   async closeIssue(token: string, ref: string, comment: string): Promise<void> {
     await this.held();
+    if (this.issueWriteFailure) throw new GitHubError(this.issueWriteFailure);
     const minted = this.scoped(token, ref, 'issues', 'write');
     const issue = this.found(ref);
     issue.comments.push(comment);
@@ -213,6 +220,7 @@ export class FakeGitHub implements GitHub {
 
   async reopenIssue(token: string, ref: string, comment: string): Promise<void> {
     await this.held();
+    if (this.issueWriteFailure) throw new GitHubError(this.issueWriteFailure);
     const minted = this.scoped(token, ref, 'issues', 'write');
     const issue = this.found(ref);
     issue.comments.push(comment);

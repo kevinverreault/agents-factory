@@ -187,6 +187,12 @@ export function isWorkLoop(stage: Stage | undefined): boolean {
   return stage?.kind === 'loop' && stage.mode === 'HITL' && stage.exit === 'map-cleared';
 }
 
+// Whether the stage works a spec's tickets: launched on one issue ref with
+// no sub-issues, it makes the task a ticket task for that issue (ADR 0013).
+export function worksTickets(stage: Stage): boolean {
+  return stage.kind === 'loop' && stage.exit === 'tickets-closed';
+}
+
 // The artifact kinds a stage's args name, such as `spec` for `{{artifacts.spec}}`.
 export function artifactKindsIn(stage: Stage): string[] {
   return variablesOf(stage).flatMap((variable) => (variable.startsWith('artifacts.') ? [variable.slice('artifacts.'.length)] : []));

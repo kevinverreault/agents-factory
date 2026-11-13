@@ -22,6 +22,7 @@ import {
   type FrozenPreset,
   type HandoffSheet,
   type Lifecycle,
+  type MergePolicy,
   type Mode,
   type Priority,
   type Publishing,
@@ -33,7 +34,9 @@ import {
   type Permission,
   type Run,
   type SkillsSetup,
+  type TaskKind,
   type TaskState,
+  type TicketResolution,
 } from '../lifecycle/lifecycle.ts';
 import type { PullRequest } from '../github/github.ts';
 import type { Tier } from '../models/routing.ts';
@@ -53,6 +56,14 @@ export type TaskView = {
   progress: string | null;
   // Its descendants' counts, and their failures waiting on the operator.
   rollup: Rollup | null;
+  // What kind of root it is (ADR 0013): for a ticket task, its ticket and
+  // the merge policy its merge gate goes by. A child is a plain root's kin.
+  kind: TaskKind;
+  ticket: string | null;
+  mergePolicy: MergePolicy | null;
+  // While the factory still owes a merged ticket task's ticket its closing,
+  // and why it last couldn't.
+  resolving: TicketResolution | null;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   priority: Priority;
@@ -171,6 +182,10 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       child: task.child ? { awaited: task.child.awaited, base: task.child.base, report: structuredClone(task.child.report) } : null,
       progress: task.progress ?? null,
       rollup: treeRollup(lifecycle, task),
+      kind: task.kind ?? 'root',
+      ticket: task.ticket ?? null,
+      mergePolicy: task.mergePolicy ?? null,
+      resolving: task.resolving ? { ...task.resolving } : null,
       mode: task.mode,
       autonomy: task.autonomy,
       priority: task.priority ?? 'normal',

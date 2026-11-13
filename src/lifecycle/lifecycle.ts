@@ -246,6 +246,19 @@ export type Publishing = { step: 'push' | 'open-pr'; problem: string | null };
 // reports what it left unfixed.
 export type Findings = { found: string[]; fixPass: boolean; leftOver: string[] };
 
+// What a root task is (ADR 0013): a plain root, a spec task that launches
+// ticket tasks over its spec's tickets, or a ticket task working one ticket
+// into its own PR. Tasks stored before kinds are plain roots.
+export type TaskKind = 'root' | 'spec' | 'ticket';
+// Who passes a ticket task's merge gate. v1 has one policy, the operator's:
+// the ticket task goes In review, and the operator merges its PR.
+export type MergePolicy = 'operator';
+
+// A ticket task's merged PR left its ticket open (ADR 0013): the factory
+// closes it as its App, and `problem` is why it last couldn't. It is tried
+// again at the next PR poll, or by the next daemon.
+export type TicketResolution = { problem: string | null };
+
 // The label of the tickets a Ralph loop works.
 export const READY_FOR_AGENT = 'ready-for-agent';
 
@@ -262,6 +275,15 @@ export type Task = {
   // The task that spawned it, for a child task: cancelling a task cancels
   // its whole subtree. Roots, and tasks stored before children, have none.
   parent?: string | null;
+  // What kind of root it is, its ticket for a ticket task, and the merge
+  // policy its merge gate goes by (ADR 0013). Children, and tasks stored
+  // before kinds, are plain.
+  kind?: TaskKind;
+  ticket?: string | null;
+  mergePolicy?: MergePolicy | null;
+  // While the factory still owes the ticket of a ticket task whose PR merged
+  // its closing, once GitHub left it open.
+  resolving?: TicketResolution | null;
   // Its place in its tree, for a child task.
   child?: Child | null;
   // The one-line progress its agent last set through `report_progress`,
@@ -767,6 +789,9 @@ export type TaskLaunched = {
   worktree: TaskWorktree;
   sessionId: string;
   skillSet: string;
+  // The one issue ref with no sub-issues it launched on, at a stage that
+  // works tickets: it is a ticket task for that issue (ADR 0013).
+  ticket?: string | null;
 };
 
 // The operator confirmed the advance sheet: the task leaves its stage for the
@@ -866,6 +891,10 @@ export type ResearchEvent =
   | { type: 'researchClosed'; taskId: string }
   | { type: 'researchFailed'; taskId: string; step: NonNullable<Research['step']>; reason: string };
 
+// What the daemon did about a merged ticket task's ticket (ADR 0013): it
+// found it closed, or closed it as its App, or couldn't, saying why.
+export type ResolutionEvent = { type: 'ticketResolved'; taskId: string } | { type: 'ticketUnresolved'; taskId: string; reason: string };
+
 // The daemon delivered the factory notes the HITL task held to its live
 // run, on the operator's turn.
 export type NoteEvent = { type: 'notesDelivered'; taskId: string };
@@ -892,6 +921,7 @@ export type LifecycleAction =
   | PrReadEvent
   | NoteEvent
   | ResearchEvent
+  | ResolutionEvent
   | CleanupEvent
   | ChildBranchDeleted
   | ArtifactsSeen;
@@ -1199,8 +1229,9 @@ function stageOf(task: Task, id: string | null | undefined): Stage | undefined {
 // `run-completed` holds.
 function unmetExit(state: Lifecycle, task: Task, stage: Stage): string | null {
   if (stage.exit === undefined || stage.exit === 'run-completed') return null;
-  // A loop with no ticket set runs once, and its run completing ends it.
-  if (stage.exit === 'tickets-closed' && !ticketSources(state, task)) return null;
+  // A loop with no ticket set runs once, and its run completing ends it,
+  // as does a ticket task's one run on its ticket.
+  if (stage.exit === 'tickets-closed' && (task.kind === 'ticket' || !ticketSources(state, task))) return null;
   // Read from GitHub between the work loop's tickets.
   if (stage.exit === 'map-cleared') {
     return task.loop?.cleared ? null : `${stage.id}’s exit, map-cleared, doesn’t hold: ${issuesFor(state, task, 'map').join(', ') || 'the map'} still has open tickets.`;
@@ -1244,6 +1275,8 @@ function enterStage(task: Task, stage: Stage, sessionId: string | undefined, fre
 // offers the operator its frontier in Ready for you.
 // Any other HITL loop stage is one conversation, as before.
 function enterLoop(state: Lifecycle, task: Task, stage: Stage): boolean {
+  // A ticket task's stage works its one ticket in a single run (ADR 0013).
+  if (task.kind === 'ticket') return false;
   if (stage.kind !== 'loop' || (task.mode === 'HITL' && !isWorkLoop(stage)) || !ticketSources(state, task)) return false;
   task.loop = picking();
   if (task.mode === 'HITL') task.state = 'queued';
@@ -1351,6 +1384,19 @@ function bulleted(items: string[]): string {
 // GitHub's closing keywords, before an issue ref.
 const CLOSING = String.raw`(?<![\w-])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+`;
 
+// The issue `ref` as a PR body of `repo` cites it: `#n` in its own repository.
+function citedIssue(repo: string, ref: string): string {
+  const [owner, number] = ref.split('#');
+  return owner!.toLowerCase() === repo.toLowerCase() ? `#${number}` : ref;
+}
+
+// Whether `text` has a closing keyword on the issue `ref`, in any form GitHub reads.
+function closesIssue(text: string, repo: string, ref: string): boolean {
+  const [owner, number] = ref.split('#');
+  const forms = [citedIssue(repo, ref), ref, `https://github.com/${owner}/issues/${number}`].map((form) => form.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'));
+  return new RegExp(`${CLOSING}(${forms.join('|')})(?!\\d)`, 'i').test(text);
+}
+
 // The PR body from the agent's `body`: its closing keywords on the tickets
 // the task closed turned to `Implements`, so merging doesn't close them
 // again (ADR 0006), then each closed ticket it doesn't say it implements,
@@ -1366,9 +1412,12 @@ function prBody(task: Task, body: string): string {
     text = text.replace(new RegExp(CLOSING + any, 'gi'), 'Implements $1');
     if (!new RegExp(String.raw`\bImplements\s+${any}`, 'i').test(text)) implemented.push(`Implements ${cited}`);
   }
+  // A ticket task's PR closes its ticket on merging (ADR 0013), whatever the agent wrote.
+  const closes = task.kind === 'ticket' && task.ticket && !closesIssue(text, task.repo, task.ticket) ? [`Closes ${citedIssue(task.repo, task.ticket)}`] : [];
   const leftOver = task.findings?.leftOver ?? [];
   return [
     text,
+    ...closes,
     ...(implemented.length ? [`## Tickets\n\n${implemented.join('\n')}`] : []),
     ...(leftOver.length ? [`## Review findings left over\n\n${bulleted(leftOver)}`] : []),
   ].join('\n\n');
@@ -1409,6 +1458,13 @@ export function pullRequestOf(state: Lifecycle, task: Task): { title: string; bo
   ];
   const body = task.prBody ?? prBody(task, task.brief?.trim() || task.launchSummary?.trim() || task.title);
   return { title: task.prTitle || task.title, body: `${body}\n\n${footer.join('\n')}` };
+}
+
+// What a ticket task's first run opens on (ADR 0013): its stage's skill on
+// its ticket, and the launch prompt, if any, as the operator's instructions.
+function ticketOpening(stage: Stage, ticket: string, prompt: string): string {
+  const opening = stage.skill ? `/factory:${stage.skill} ${ticket}` : ticket;
+  return prompt.trim() ? `${opening}\n\n## Operator instructions\n${prompt.trim()}` : opening;
 }
 
 // What a Ralph loop's iteration on `ticket` opens on (ADR 0006): its stage's
@@ -1944,6 +2000,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.child?.research?.step === 'close' ? null : `${task.id} isn’t closing its research ticket.`;
     case 'researchFailed':
       return task.child?.research?.step === action.step ? null : `${task.id} isn’t at ${action.step}.`;
+    case 'ticketResolved':
+    case 'ticketUnresolved':
+      return task.resolving ? null : `${task.id} owes no ticket its closing.`;
     case 'notesDelivered':
       if (!task.factoryNotes?.length) return `${task.id} holds no factory notes.`;
       const live = liveRun(state, task);
@@ -2838,10 +2897,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // The task takes its start stage's mode: a HITL stage opens its
       // conversation at once, and an AFK one queues for a slot with its
       // handoff fields.
-      const { mode } = action.preset.stages.find(({ id }) => id === action.stage)!;
+      const start = action.preset.stages.find(({ id }) => id === action.stage)!;
+      const { mode } = start;
+      const ticket = action.ticket ?? null;
       const launched: Task = {
         id: nextId(state, 'task'),
         title: action.title,
+        ...(ticket && { kind: 'ticket' as const, ticket, mergePolicy: 'operator' as const }),
         launchSummary: action.launchSummary?.trim() || null,
         repo: action.repo,
         mode,
@@ -2849,7 +2911,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         priority: action.priority,
         maxTurns: mode === 'AFK' ? action.maxTurns : null,
         groups: [...new Set(action.groups.map((group) => group.trim()).filter(Boolean))],
-        goal: action.opening,
+        goal: ticket ? ticketOpening(start, ticket, action.prompt) : action.opening,
         operatorTier: action.operatorTier,
         worktree: { ...action.worktree },
         skillSet: action.skillSet,
@@ -3094,7 +3156,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const asked = request?.kind === 'pr-closed-unmerged';
       if (action.state === 'merged') {
         // Merged, the root is Done (ADR 0011), whatever was left to ask.
+        // A ticket task's ticket closes with it: the factory closes it if
+        // GitHub left it open (ADR 0013).
         finishRoot(task, request, { merged: true });
+        if (task.kind === 'ticket' && task.ticket) task.resolving = { problem: null };
       } else if (action.state === 'closed' && !asked) {
         // A failed push to the closed PR has nothing left to update: the
         // closed PR asks instead. Never cancelled on the factory's own say.
@@ -3108,6 +3173,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     }
     case 'reopenPr':
       request!.status = 'answered';
+      break;
+    case 'ticketResolved':
+      task.resolving = null;
+      break;
+    case 'ticketUnresolved':
+      task.resolving = { problem: action.reason };
       break;
     case 'cleanedUp':
       // A child's branch went with its worktree, unless it was kept to merge.
