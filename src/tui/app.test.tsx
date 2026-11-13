@@ -3142,14 +3142,15 @@ describe('usage', () => {
   });
 });
 
+const SONNET = 'claude-sonnet-5-5';
+function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
+  return {
+    id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
+    ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, deniedHosts: [], waitingForWindow: null, ...fields,
+  };
+}
+
 describe('the screens view', () => {
-  const SONNET = 'claude-sonnet-5-5';
-  function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
-    return {
-      id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
-      ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, deniedHosts: [], waitingForWindow: null, ...fields,
-    };
-  }
   const grilling = task('T1', 'Grill me about the docs', 'queued', 'Ready for you', 'HITL');
   const implementing = { ...task('T2', 'Implement the store', 'running', 'Running'), liveRunId: 'R3', stage: 'implement' };
   const screens = () => factoryState([grilling, implementing]);
@@ -4070,6 +4071,56 @@ describe('the condensed view', () => {
       expect(frame).toMatch(/^\s*DETAIL · zoomed/m);
       expect(frame).not.toContain('TASKS · all');
     });
+  });
+
+  test('the condensed view’s detail leaves out the usage and artifacts, zoomed or not, the live output taking their rows', async () => {
+    const writing = { ...docs, liveRunId: 'R1' };
+    const runs = { R1: ran('R1', 'T3', 1, { status: 'active', outcome: null, endedAt: null }) };
+    const { app, connection } = await started({ ...factoryState([billing, failing, writing]), runs });
+    resize(app, 40);
+    // More events than any detail has rows for, so the output fills what it gets.
+    const steps = Array.from({ length: 60 }, (_, i) => ({ type: 'message' as const, id: `E${i + 1}`, from: 'agent' as const, text: `Step ${i + 1} done.` }));
+    const shown = () => lines(app).filter((line) => /Step \d+ done\./.test(line)).length;
+
+    await press(app, 'v');
+    await eventually(() => expect(connection.followed.at(-1)).toBe('R1'));
+    connection.serveConversation('R1', ...steps);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('LIVE OUTPUT · T3 · R1');
+      expect(frame).toContain('Step 60 done.');
+      expect(frame).toMatch(/─ RUNS ─/);
+      expect(frame).not.toMatch(/─ USAGE ─/);
+      expect(frame).not.toMatch(/─ ARTIFACTS ─/);
+    });
+
+    await press(app, 'f');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      // Zoomed, the detail alone: no tree beside it.
+      expect(frame).not.toContain('TASKS · all');
+      expect(frame).toMatch(/^\s*T3 Write the docs$/m);
+      expect(frame).toContain('Step 60 done.');
+      expect(frame).not.toMatch(/─ USAGE ─/);
+      expect(frame).not.toMatch(/─ ARTIFACTS ─/);
+    });
+    const zoomed = shown();
+
+    // Drilled into from the screens, T3's detail keeps them, and its output
+    // has their rows the fewer.
+    const follows = connection.followed.length;
+    await press(app, 'f', 'v', '\r');
+    await eventually(() => expect(connection.followed.length).toBeGreaterThan(follows));
+    connection.serveConversation('R1', ...steps);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('Tasks › T3 Write the docs');
+      expect(frame).toMatch(/^\s*T3 Write the docs$/m);
+      expect(frame).toMatch(/─ USAGE ─/);
+      expect(frame).toMatch(/─ ARTIFACTS ─/);
+      expect(frame).toContain('Step 60 done.');
+    });
+    expect(zoomed).toBeGreaterThanOrEqual(shown() + 4);
   });
 
   test('tab moves the focus from the tree to the detail, then the sidebar, the verbs acting on the focused pane’s task; f zooms the detail', async () => {
