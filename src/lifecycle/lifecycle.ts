@@ -303,14 +303,24 @@ export type TicketSet = {
   problem: string | null;
 };
 
-// The label of the tickets a Ralph loop works.
+// The label of the tickets a Ralph loop works, and of those a spec task
+// launches AFK ticket tasks on.
 export const READY_FOR_AGENT = 'ready-for-agent';
+// The label of the tickets a spec task launches HITL ticket tasks on.
+export const READY_FOR_HUMAN = 'ready-for-human';
 
-// Whether a spec task would launch an AFK ticket task on the ticket now,
-// had it not already (ADR 0013): open, with no open blockers, and labelled
-// ready-for-agent.
-export function readyNow({ open, openBlockers, labels }: Issue): boolean {
-  return open && openBlockers.length === 0 && labels.includes(READY_FOR_AGENT);
+// The mode of the ticket task a spec task launches on the ticket, by its
+// label (ADR 0013): AFK for ready-for-agent, HITL for ready-for-human, and
+// null for any other label, or none: the ticket is held back.
+export function ticketMode({ labels }: Pick<Issue, 'labels'>): Mode | null {
+  if (labels.includes(READY_FOR_AGENT)) return 'AFK';
+  return labels.includes(READY_FOR_HUMAN) ? 'HITL' : null;
+}
+
+// Whether a spec task would launch a ticket task on the ticket now, had it
+// not already (ADR 0013): open, with no open blockers, and not held back.
+export function readyNow(issue: Issue): boolean {
+  return issue.open && issue.openBlockers.length === 0 && ticketMode(issue) !== null;
 }
 
 // The workflow preset a task froze at launch, with the commit of
@@ -1611,6 +1621,10 @@ function launchedTicketTask(spec: Task, { ticket, title, worktree, sessionId }: 
   const preset = spec.preset!;
   const from = preset.stages.findIndex(({ id }) => id === spec.stage);
   const stages = preset.stages.slice(from);
+  // A ready-for-human ticket's is HITL: Ready for you, holding no slot. It
+  // takes the spec task's level when it is handed off.
+  const issue = spec.ticketSet!.issues.find(({ ref }) => ref === ticket);
+  const mode = (issue && ticketMode(issue)) ?? 'AFK';
   return {
     id: '',
     title,
@@ -1619,8 +1633,8 @@ function launchedTicketTask(spec: Task, { ticket, title, worktree, sessionId }: 
     specTask: spec.id,
     mergePolicy: spec.mergePolicy ?? 'operator',
     repo: spec.repo,
-    mode: 'AFK',
-    autonomy: spec.autonomy ?? 'L1',
+    mode,
+    autonomy: mode === 'AFK' ? (spec.autonomy ?? 'L1') : null,
     priority: spec.priority ?? 'normal',
     maxTurns: spec.maxTurns ?? null,
     groups: [...spec.groups],
@@ -1662,6 +1676,17 @@ function specTicketOpening(state: Lifecycle, spec: Task, ticketTask: Task): stri
   ];
   const prompt = spec.inputs?.prompt.trim();
   return [`/factory:${stage.skill} ${ticket}`, context.join('\n\n'), ...(prompt ? [`## Operator instructions\n${prompt}`] : [])].join('\n\n');
+}
+
+// Why a spec task waits on the operator once only held-back tickets are
+// left: each one with its labels, and what moves it on.
+function heldBackReason(task: Task, heldBack: Issue[]): string {
+  const tickets = heldBack.map(({ ref, labels }) => `${ref} (${labels.join(', ') || 'no label'})`);
+  const listed = tickets.length > 1 ? `${tickets.slice(0, -1).join(', ')} and ${tickets.at(-1)}` : tickets[0];
+  return (
+    `${task.stage} has only held-back tickets left: ${listed}. ` +
+    `Label one ${READY_FOR_AGENT} or ${READY_FOR_HUMAN} on GitHub, then answer to read the tickets again.`
+  );
 }
 
 // Where a sibling ticket stands for a ticket task's context: closed, in
@@ -2661,8 +2686,9 @@ function specsRefusal(sheet: HandoffSheet, specs: unknown): string | null {
 }
 
 // A new handoff sheet, pre-filled from the AFK stage it hands off to. It
-// hands off at L1 unless the operator raises it to L2 on the sheet.
-function newHandoffSheet(task: Task, readiness: Readiness): HandoffSheet {
+// hands off at L1 (a ticket task at its spec task's level) unless the
+// operator changes it on the sheet.
+function newHandoffSheet(state: Lifecycle, task: Task, readiness: Readiness): HandoffSheet {
   const stage = handoffStage(task);
   const share = task.context ? task.context.used / task.context.window : null;
   return {
@@ -2670,7 +2696,8 @@ function newHandoffSheet(task: Task, readiness: Readiness): HandoffSheet {
     asked: false,
     stage: stage?.id ?? null,
     continueAs: share !== null && share > FRESH_AT ? 'fresh' : 'resume',
-    autonomy: 'L1',
+    // A HITL ticket task's starts at the level set on its spec's handoff.
+    autonomy: (task.specTask && state.tasks[task.specTask]?.autonomy) || 'L1',
     tier: task.operatorTier ?? task.inputs?.tier ?? stage?.model ?? DEFAULT_TIER,
     maxTurns: task.maxTurns ?? stage?.max_turns ?? DEFAULT_MAX_TURNS,
     contextShare: share,
@@ -3364,6 +3391,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         if (task.publishing) task.publishing.problem = null;
         break;
       }
+      // A spec task reads its tickets again, launching those relabelled meanwhile.
+      if (task.kind === 'spec' && task.ticketSet) {
+        task.state = 'running';
+        task.ticketSet.reading = true;
+        task.ticketSet.reads = (task.ticketSet.reads ?? 0) + 1;
+        break;
+      }
       // And at its open-pr stage, which carries on.
       if (atActionStage(task) && task.publishing) {
         task.publishing.problem = null;
@@ -3464,16 +3498,25 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       set.issues = structuredClone(action.issues);
       // The frontier: the open tickets with no open blockers, in sub-issue
       // order, that were neither launched nor skipped. Those labelled
-      // ready-for-agent get AFK ticket tasks.
+      // ready-for-agent get AFK ticket tasks, ready-for-human HITL ones,
+      // and the others are held back.
       set.toLaunch = action.issues
         .filter((issue) => readyNow(issue) && !set.launched[issue.ref] && !set.skipped?.includes(issue.ref))
         .map(({ ref }) => ref);
       // Tickets, none open, and no ticket task still at work: the spec
       // closes, or with none (or one closed already) the spec task is Done.
       const resolved = action.issues.length > 0 && action.issues.every(({ open }) => !open);
-      if (resolved && Object.values(set.launched).every((id) => isTerminal(state.tasks[id]!))) {
+      const settled = Object.values(set.launched).every((id) => isTerminal(state.tasks[id]!));
+      if (resolved && settled) {
         if (set.spec && action.specOpen !== false) set.closing = { problem: null };
         else finishSpecTask(state, task, request);
+        break;
+      }
+      // Nothing to launch and nothing in flight, it never waits silently on
+      // the tickets held back by their label.
+      const heldBack = action.issues.filter((issue) => issue.open && !set.launched[issue.ref] && !set.skipped?.includes(issue.ref) && !ticketMode(issue));
+      if (settled && set.toLaunch.length === 0 && heldBack.length && !request) {
+        raise(state, task, lastRun(state, task), 'stage-blocked', false, heldBackReason(task, heldBack), at);
       }
       break;
     }
@@ -3605,7 +3648,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'handoffOpened': {
       // A sheet a stop found unconfirmed opens again as it was.
       if (!task.handoff) {
-        task.handoff = { ...newHandoffSheet(task, action.readiness), ...task.handoffDraft };
+        task.handoff = { ...newHandoffSheet(state, task, action.readiness), ...task.handoffDraft };
         task.handoffDraft = null;
       }
       const sheet = task.handoff;

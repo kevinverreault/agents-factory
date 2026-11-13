@@ -1954,6 +1954,19 @@ describe('launching and conversing', () => {
     await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', taskId: 'T1', specs: ['acme/widgets#132'] }]));
   });
 
+  test('the sheet lists each spec candidate’s tickets held back by their label, and counts a ready-for-human one as ready now', async () => {
+    const tickets = [ticket(133), ticket(134, { labels: ['ready-for-human'] }), ticket(137, { labels: [] }), ticket(138, { labels: ['needs-triage'], openBlockers: ['acme/widgets#133'] }), ticket(139, { labels: [], open: false })];
+    const sets = { ...ticketSets, candidates: [{ spec: 'acme/widgets#132', title: 'Webhook retries', tickets }], withoutTickets: [] };
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets: sets } }]), runs: { R1: { ...run, turn: 'operator' as const } } });
+    await press(app, '\r', '\r');
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('[x] Spec #132 Webhook retries → 5 tickets, 2 ready now');
+      expect(frame).toContain('Held back by their label: #137 (no label), #138 (needs-triage)');
+    });
+  });
+
   test('on the sheet, space toggles a spec candidate, selecting it alone; with none selected the handoff is one run on the brief', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });

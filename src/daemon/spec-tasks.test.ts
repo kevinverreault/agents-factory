@@ -1,8 +1,9 @@
 // Seam 1: spec tasks (ADR 0013), through the client protocol. Launching
 // `implement` at a `tickets` stage on a spec ref (an issue with sub-issues),
 // or on several refs, makes a spec task: it runs no agent and holds no slot,
-// reads its ticket set from GitHub and launches one AFK ticket task per
-// frontier ticket labelled `ready-for-agent`, in sub-issue order. Each
+// reads its ticket set from GitHub and launches one ticket task per
+// frontier ticket, in sub-issue order: AFK for `ready-for-agent`, HITL for
+// `ready-for-human`, any other label held back. Each
 // ticket task runs the spec task's frozen stages from the `tickets` stage
 // on, inherits its handoff fields, and is cut from its branch merged with
 // the latest `origin/<base>`.
@@ -111,6 +112,99 @@ describe('the spec task’s ticket set', () => {
 
     const state = await tui.until((state) => !!state.tasks.T3?.liveRunId && !!state.tasks.T2?.liveRunId);
     expect(state.tasks.T1?.ticketSet?.tickets.at(-1)).toEqual({ ref: 'acme/widgets#16', title: 'Audit log', state: 'held-back' });
+  });
+});
+
+describe('ticket labels', () => {
+  test('a frontier ready-for-human ticket gets a HITL ticket task, Ready for you and holding no slot, whose opening starts its first session on its skill with the same context', async () => {
+    const { factory, operator, tui } = await attached();
+    factory.github.addIssue('acme/widgets#16', { title: 'Brand the login', parent: SPEC, labels: ['ready-for-human'] });
+    await operator.send({ type: 'setSlotCap', cap: 2 });
+
+    await operator.send(onSpec());
+
+    let state = await tui.until((state) => Object.keys(ticketTasks(state)).length === 3 && !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+    expect(ticketTasks(state)).toEqual({ 'acme/widgets#11': 'T2', 'acme/widgets#15': 'T3', 'acme/widgets#16': 'T4' });
+    expect(state.tasks.T4).toMatchObject({ kind: 'ticket', ticket: 'acme/widgets#16', specTask: 'T1', mode: 'HITL', label: 'Ready for you', liveRunId: null });
+    expect(state.slots).toEqual({ active: 2, cap: 2 });
+    expect(state.tasks.T1?.ticketSet?.tickets.find(({ ref }) => ref === 'acme/widgets#16')).toEqual({ ref: 'acme/widgets#16', title: 'Brand the login', state: 'launched', taskId: 'T4' });
+
+    expect(await operator.send({ type: 'open', taskId: 'T4' })).toEqual({ ok: true });
+
+    state = await tui.until((state) => !!state.tasks.T4?.liveRunId);
+    const run = factory.executor.started.find(({ runId }) => runId === state.tasks.T4!.liveRunId)!;
+    expect(run.mode).toBe('HITL');
+    const [first, ...rest] = run.firstMessage!.split('\n');
+    expect(first).toBe('/factory:implement acme/widgets#16');
+    const afk = factory.executor.started[0]!.firstMessage!;
+    expect(rest.join('\n')).toContain('This task, T4, is a ticket task of the spec task T1');
+    expect(rest.join('\n')).toContain('- Spec: acme/widgets#10');
+    expect(afk).toContain('acme/widgets#16, Brand the login: in flight');
+  });
+
+  test('a HITL ticket task is handed off by the usual rules, at its spec task’s level, and ends in its own review and PR closing its ticket', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    factory.github.addIssue('acme/widgets#16', { title: 'Brand the login', parent: SPEC, labels: ['ready-for-human'] });
+    await operator.send(onSpec({ autonomy: 'L2' }));
+    await tui.until((state) => state.tasks.T4?.label === 'Ready for you');
+    await operator.send({ type: 'open', taskId: 'T4' });
+    const conversation = (await tui.until((state) => !!state.tasks.T4?.liveRunId)).tasks.T4!.liveRunId!;
+    factory.executor.report(conversation, { type: 'turnEnded' });
+
+    await operator.send({ type: 'openHandoff', taskId: 'T4' });
+    const brief = { goal: 'Brand the login form.', decided: ['Use the brand blue.'], doneWhen: [], outOfScope: [], links: [] };
+    factory.executor.report(conversation, { type: 'briefWritten', brief });
+    factory.executor.report(conversation, { type: 'turnEnded' });
+    const sheet = (await tui.until((state) => !!state.tasks.T4?.handoff?.brief && state.runs[conversation]?.turn === 'operator')).tasks.T4!.handoff!;
+    expect(sheet).toMatchObject({ stage: 'implement', autonomy: 'L2', ticketSets: null });
+    const { continueAs, autonomy, tier, maxTurns } = sheet;
+    expect(await operator.send({ type: 'handoff', taskId: 'T4', brief, continueAs, autonomy, tier, maxTurns })).toEqual({ ok: true });
+
+    const pr = await toReview(launched, 'T4');
+
+    const state = tui.state();
+    expect(state.tasks.T4).toMatchObject({ kind: 'ticket', mode: 'AFK', label: 'In review' });
+    expect(factory.github.pullRequests.find(({ number }) => number === pr)?.body).toMatch(/^Closes #16$/m);
+  });
+});
+
+// The attention requests open, but for the PRs in review.
+const requests = (state: FactoryState) => state.attentionQueue.filter(({ kind }) => kind === 'attention');
+
+describe('only held-back tickets left', () => {
+  test('once nothing is in flight, the spec task raises stage-blocked naming them; answering re-reads the set, launching a ticket relabelled ready-for-agent meanwhile', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    factory.github.close('acme/widgets#12');
+    factory.github.close('acme/widgets#15');
+    factory.github.addIssue('acme/widgets#16', { title: 'Audit log', parent: SPEC, labels: ['needs-info'] });
+    await operator.send(onSpec({ autonomy: 'L2' }));
+    await tui.until((state) => !!state.tasks.T2?.liveRunId);
+    const pr = await toReview(launched, 'T2');
+    expect(requests(tui.state())).toEqual([]);
+
+    await merge(launched, pr);
+
+    const blocked = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(requests(blocked)).toMatchObject([
+      {
+        taskId: 'T1',
+        attention: 'stage-blocked',
+        reason:
+          'implement has only held-back tickets left: acme/widgets#13 (no label) and acme/widgets#16 (needs-info). ' +
+          'Label one ready-for-agent or ready-for-human on GitHub, then answer to read the tickets again.',
+      },
+    ]);
+    expect(Object.keys(ticketTasks(blocked))).toEqual(['acme/widgets#11']);
+    factory.github.relabel('acme/widgets#13', READY);
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+
+    const state = await tui.until((state) => !!state.tasks.T3?.liveRunId);
+    expect(ticketTasks(state)).toEqual({ 'acme/widgets#11': 'T2', 'acme/widgets#13': 'T3' });
+    expect(state.tasks.T1?.label).not.toBe('Needs you');
+    expect(requests(state)).toEqual([]);
   });
 });
 

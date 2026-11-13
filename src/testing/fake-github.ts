@@ -156,6 +156,11 @@ export class FakeGitHub implements GitHub {
     this.issueAt(ref).blockedBy.push(blocker);
   }
 
+  // Someone relabels the issue on GitHub.
+  relabel(ref: string, labels: string[]): void {
+    this.issueAt(ref).labels = [...labels];
+  }
+
   // Someone closes the issue on GitHub.
   close(ref: string): void {
     this.issueAt(ref).open = false;

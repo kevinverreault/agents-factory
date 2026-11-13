@@ -1022,7 +1022,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
       action.readiness = await readiness(task);
-      action.ticketSets = launchesTickets(handoffStage(task) ?? undefined) ? await specCandidates(task) : null;
+      // A ticket task works its one ticket: it has no ticket set to launch.
+      action.ticketSets = task.kind !== 'ticket' && launchesTickets(handoffStage(task) ?? undefined) ? await specCandidates(task) : null;
       const refusal = await settle(action, new Set());
       return refusal ? { ok: false, reason: refusal } : { ok: true };
     });
