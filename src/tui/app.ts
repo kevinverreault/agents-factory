@@ -752,7 +752,12 @@ function rowLayout(tasks: TaskView[], columns: number, compact: boolean): RowLay
 // What a row says past its state: its loop's ticket or its ticket task's,
 // a spec task's tickets by state, its descendants' rollup and its progress.
 function extrasOf(task: TaskView): string {
-  return joined([loopDetail(task), task.kind === 'ticket' && task.ticket ? `on ${task.ticket}` : null, ticketSetDetail(task), rollupDetail(task), task.progress]);
+  return joined([loopDetail(task), ticketDetail(task), ticketSetDetail(task), rollupDetail(task), task.progress]);
+}
+
+// The ticket a ticket task works.
+function ticketDetail({ kind, ticket }: TaskView): string {
+  return kind === 'ticket' && ticket ? `on ${ticket}` : '';
 }
 
 // A spec task's tickets counted by where they stand, in flight being those

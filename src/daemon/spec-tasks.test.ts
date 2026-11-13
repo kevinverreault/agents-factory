@@ -118,6 +118,15 @@ describe('the spec task’s ticket set', () => {
       problem: null,
     });
   });
+  test('a ticket labelled for neither an agent nor the operator is held back, blocked or not', async () => {
+    const { factory, operator, tui } = await attached();
+    factory.github.addIssue('acme/widgets#16', { title: 'Audit log', parent: SPEC, blockedBy: ['acme/widgets#11'] });
+
+    await operator.send(onSpec());
+
+    const state = await tui.until((state) => !!state.tasks.T3?.liveRunId && !!state.tasks.T2?.liveRunId);
+    expect(state.tasks.T1?.ticketSet?.tickets.at(-1)).toEqual({ ref: 'acme/widgets#16', title: 'Audit log', state: 'held-back' });
+  });
 });
 
 describe('launching implement on several refs', () => {

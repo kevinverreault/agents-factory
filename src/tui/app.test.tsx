@@ -551,6 +551,16 @@ describe('spec tasks', () => {
     });
   });
 
+  test('H hides a Done ticket task, keeping its spec task and the rest under it', async () => {
+    const { app } = await started(specTree());
+    await press(app, 'H');
+
+    await eventually(() => {
+      const rows = lines(app).filter((line) => /^[›\s]+\S\s+T\d/.test(line));
+      expect(rows.map((row) => /T\d/.exec(row)![0])).toEqual(['T6', 'T1', 'T3', 'T5', 'T2']);
+    });
+  });
+
   test('the spec task’s detail lists its tickets, each with where it stands', async () => {
     const { app } = await started(specTree());
     widen(app, 140);

@@ -63,10 +63,13 @@ export function modeOf({ mode, autonomy }: Pick<TaskView, 'mode' | 'autonomy'>):
   return autonomy ? `${mode} ${autonomy}` : mode;
 }
 
+// The width of a ticket's title in a spec task's detail.
+const TICKET_TITLE_WIDTH = 30;
+
 // A spec task's tickets (ADR 0013), each a row: its ref, its title and where
 // it stands, and why the factory last couldn't read or launch them.
 function Tickets({ state, ticketSet }: { state: FactoryState; ticketSet: TicketSetView }) {
-  const ref = Math.max(0, ...ticketSet.tickets.map((ticket) => ticket.ref.length));
+  const refWidth = Math.max(0, ...ticketSet.tickets.map((ticket) => ticket.ref.length));
   return h(
     Section,
     { title: ticketSet.spec ? `Tickets of ${ticketSet.spec}` : 'Tickets' },
@@ -76,8 +79,8 @@ function Tickets({ state, ticketSet }: { state: FactoryState; ticketSet: TicketS
       h(
         Box,
         { key: ticket.ref, gap: 1 },
-        h(Box, { width: ref, flexShrink: 0 }, h(Text, tone('dim'), ticket.ref)),
-        h(Box, { width: 30, flexShrink: 0 }, h(Text, { ...tone('fg'), wrap: 'truncate' }, ticket.title ?? '')),
+        h(Box, { width: refWidth, flexShrink: 0 }, h(Text, tone('dim'), ticket.ref)),
+        h(Box, { width: TICKET_TITLE_WIDTH, flexShrink: 0 }, h(Text, { ...tone('fg'), wrap: 'truncate' }, ticket.title ?? '')),
         h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, h(Text, { ...tone(ticket.state === 'launched' ? 'fg' : 'dim'), wrap: 'truncate' }, standing(state, ticket))),
       ),
     ),

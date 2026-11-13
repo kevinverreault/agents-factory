@@ -10,6 +10,7 @@ import {
   liveRun,
   depthOf,
   nextTier,
+  READY_FOR_AGENT,
   readyForYou,
   treeRollup,
   type ChildReport,
@@ -358,6 +359,10 @@ export type TicketView = { ref: string; title: string | null } & (
   | { state: 'merged'; taskId: string | null }
 );
 
+// The labels a spec task launches ticket tasks for (ADR 0013): an AFK one
+// for ready-for-agent, a HITL one for ready-for-human.
+const LAUNCHED_LABELS = [READY_FOR_AGENT, 'ready-for-human'];
+
 // The ticket set's view, every ticket the set names, then any it launched
 // that its last read no longer has.
 function ticketSetView(lifecycle: Lifecycle, { spec, tickets, issues, toLaunch, launched, skipped, problem }: TicketSet): TicketSetView {
@@ -366,10 +371,14 @@ function ticketSetView(lifecycle: Lifecycle, { spec, tickets, issues, toLaunch, 
     const issue = issues.find((issue) => issue.ref === ref);
     const title = issue?.title ?? null;
     const taskId = launched[ref];
-    if (taskId) return lifecycle.tasks[taskId]?.state === 'done' ? { ref, title, state: 'merged', taskId } : { ref, title, state: 'launched', taskId };
-    if (issue && !issue.open) return { ref, title, state: 'merged', taskId: null };
+    if (taskId && lifecycle.tasks[taskId]?.state === 'done') return { ref, title, state: 'merged', taskId };
+    if (issue && !issue.open) return { ref, title, state: 'merged', taskId: taskId ?? null };
+    // A cancelled ticket task's ticket is skipped, though it was launched.
     if (skipped?.includes(ref)) return { ref, title, state: 'skipped' };
+    if (taskId) return { ref, title, state: 'launched', taskId };
     if (toLaunch.includes(ref)) return { ref, title, state: 'launching' };
+    // A ticket labelled for neither an agent nor the operator never launches, blocked or not.
+    if (issue && !issue.labels.some((label) => LAUNCHED_LABELS.includes(label))) return { ref, title, state: 'held-back' };
     if (!issue || issue.openBlockers.length) return { ref, title, state: 'waiting', blockers: [...(issue?.openBlockers ?? [])] };
     return { ref, title, state: 'held-back' };
   };
