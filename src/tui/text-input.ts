@@ -36,6 +36,12 @@ export function edit(text: string, caret: Caret, input: string, key: Key): Typed
   }
   if (key.delete) return { text: text.slice(0, at) + text.slice(character(text, at, 1)), caret: at };
   if (key.ctrl || key.meta || key.return || key.tab || key.escape || key.upArrow || key.downArrow || !input) return null;
+  return insert(text, caret, input);
+}
+
+// The text with `input` typed or pasted at its caret, the caret after it.
+export function insert(text: string, caret: Caret, input: string): Typed {
+  const at = caretIn(text, caret);
   return { text: text.slice(0, at) + input + text.slice(at), caret: at + input.length };
 }
 
@@ -61,5 +67,5 @@ function word(text: string, at: number, by: -1 | 1): number {
 }
 const WORD = /[\p{L}\p{N}_]/u;
 
-const isHigh = (text: string, i: number) => /[\uD800-\uDBFF]/.test(text[i] ?? '');
-const isLow = (text: string, i: number) => /[\uDC00-\uDFFF]/.test(text[i] ?? '');
+export const isHigh = (text: string, i: number) => /[\uD800-\uDBFF]/.test(text[i] ?? '');
+export const isLow = (text: string, i: number) => /[\uDC00-\uDFFF]/.test(text[i] ?? '');

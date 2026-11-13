@@ -19,9 +19,10 @@ import { createElement as h, useEffect, useRef, useState, type ReactNode } from 
 import { Box, Text, useInput, useStdin } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
+import { editExternally, type Edited } from '../os/edit-externally.ts';
+import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView, TicketView } from '../protocol/factory-state.ts';
-import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
@@ -72,17 +73,20 @@ function rowOf(item: AttentionQueueItem): string {
 // `cwd` is the directory the TUI started in: started inside a clone that
 // isn't registered, the TUI offers to register it (ADR 0010).
 // `openUrl` opens a fix in the operator's browser, such as the App's
-// installation settings. `prefs` keeps the TUI's own settings between
+// installation settings. `editText` has the operator edit a launch's
+// prompt in their own editor. `prefs` keeps the TUI's own settings between
 // sessions.
 export function App({
   connection,
   cwd,
   openUrl = openInBrowser,
+  editText = editExternally,
   prefs,
 }: {
   connection: FactoryConnection;
   cwd?: string;
   openUrl?: (url: string) => void;
+  editText?: (text: string) => Promise<Edited>;
   prefs: PrefsStore;
 }) {
   const [state, setState] = useState<FactoryState | null>(null);
@@ -510,6 +514,7 @@ export function App({
             onLaunched: (taskId: string) => setView({ kind: 'conversation', taskId }),
             onCancel: toTabs,
             openUrl,
+            editText,
           })
         : null,
       view.kind === 'gc' ? h(GcSheet, { key: 'gc', connection, onLeave: toTabs }) : null,
