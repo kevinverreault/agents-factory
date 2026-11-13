@@ -1934,11 +1934,12 @@ describe('launching and conversing', () => {
       { spec: 'acme/widgets#11', title: 'Webhooks', tickets: [ticket(12)] },
       { spec: 'acme/widgets#132', title: 'Webhook retries', tickets: [ticket(133), ticket(134, { openBlockers: ['acme/widgets#133'] }), ticket(135), ticket(136, { open: false }), ticket(137, { labels: [] })] },
     ],
+    selected: 'acme/widgets#132',
     withoutTickets: [{ ref: 'acme/widgets#140', title: 'Retries (Part of #132)' }],
     problem: null,
   };
 
-  test('the sheet shows each spec candidate with its tickets and how many are ready now, the last one selected, and issues with 0 tickets', async () => {
+  test('the sheet shows each spec candidate with its tickets and how many are ready now, the factory’s pick selected, and issues with 0 tickets', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
     await press(app, '\r', '\r');
@@ -1977,9 +1978,23 @@ describe('launching and conversing', () => {
     await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', taskId: 'T1', specs: [] }]));
   });
 
+  test('the sheet starts on the factory’s pick, and picks afresh when the factory reads other candidates', async () => {
+    const connection = new FakeConnection();
+    const onSpec11 = { ...ticketSets, selected: 'acme/widgets#11' };
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets: onSpec11 } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[x] Spec #11 Webhooks'));
+
+    const reread = { ...ticketSets, candidates: [{ spec: 'acme/widgets#150', title: 'Signing', tickets: [ticket(151)] }], selected: 'acme/widgets#150' };
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...onLean, handoff: { ...sheet, brief, ticketSets: reread } } }]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[x] Spec #150 Signing'));
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', specs: ['acme/widgets#150'] }]));
+  });
+
   test('a handoff with no spec candidate says it is one run on the brief, and why the factory couldn’t read them', async () => {
     const problem = 'The factory couldn’t read T1’s issues’ sub-issues from GitHub: GitHub refused the call (HTTP 404: Not Found).';
-    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets: { candidates: [], withoutTickets: [], problem } } }]), runs: { R1: run } });
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets: { candidates: [], selected: null, withoutTickets: [], problem } } }]), runs: { R1: run } });
     await press(app, '\r', '\r');
 
     await eventually(() => {

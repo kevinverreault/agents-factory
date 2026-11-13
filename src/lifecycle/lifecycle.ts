@@ -143,7 +143,9 @@ export type SpecCandidate = { spec: string; title: string; tickets: Issue[] };
 // `withoutTickets` are the issues the task recorded with no sub-issues that
 // are no candidate's ticket: tickets linked to one only by text ("Part of
 // #n") leave it here, with 0 tickets.
-export type HandoffTicketSets = { candidates: SpecCandidate[]; withoutTickets: { ref: string; title: string }[]; problem: string | null };
+// `selected` is the candidate the sheet starts selected: the issue recorded
+// at a stage whose exit is `artifact:spec`, else the one recorded last.
+export type HandoffTicketSets = { candidates: SpecCandidate[]; selected: string | null; withoutTickets: { ref: string; title: string }[]; problem: string | null };
 // A quick launch's grill, while it lasts (`n`): the questions the operator
 // has answered so far, of at most QUICK_QUESTIONS, and whether the grill is
 // `done`, so the factory opens its handoff sheet: once a turn of it ends on
@@ -303,6 +305,13 @@ export type TicketSet = {
 
 // The label of the tickets a Ralph loop works.
 export const READY_FOR_AGENT = 'ready-for-agent';
+
+// Whether a spec task would launch an AFK ticket task on the ticket now,
+// had it not already (ADR 0013): open, with no open blockers, and labelled
+// ready-for-agent.
+export function readyNow({ open, openBlockers, labels }: Issue): boolean {
+  return open && openBlockers.length === 0 && labels.includes(READY_FOR_AGENT);
+}
 
 // The workflow preset a task froze at launch, with the commit of
 // `origin/<base_branch>` its repo-scope presets were read from: editing a
@@ -2642,7 +2651,8 @@ function commitArtifacts(state: Lifecycle, task: Task, committed: string[]): voi
 
 // Why the handoff can't confirm the spec candidates `specs`, or null: each
 // must be one the sheet offers, and a spec task works one spec.
-function specsRefusal(sheet: HandoffSheet, specs: string[]): string | null {
+function specsRefusal(sheet: HandoffSheet, specs: unknown): string | null {
+  if (!Array.isArray(specs) || !specs.every((spec) => typeof spec === 'string')) return 'The specs confirmed are a list of issue refs.';
   const offered = sheet.ticketSets?.candidates.map(({ spec }) => spec) ?? [];
   const unknown = specs.find((spec) => !offered.includes(spec));
   if (unknown) return `${unknown} isn’t a spec candidate of this handoff${offered.length ? ` (${offered.join(', ')})` : ''}.`;
@@ -3456,7 +3466,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // order, that were neither launched nor skipped. Those labelled
       // ready-for-agent get AFK ticket tasks.
       set.toLaunch = action.issues
-        .filter(({ ref, open, openBlockers, labels }) => open && openBlockers.length === 0 && labels.includes(READY_FOR_AGENT) && !set.launched[ref] && !set.skipped?.includes(ref))
+        .filter((issue) => readyNow(issue) && !set.launched[issue.ref] && !set.skipped?.includes(issue.ref))
         .map(({ ref }) => ref);
       // Tickets, none open, and no ticket task still at work: the spec
       // closes, or with none (or one closed already) the spec task is Done.

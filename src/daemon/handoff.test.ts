@@ -436,6 +436,8 @@ describe('the ticket set at handoff', () => {
           ],
         },
       ],
+      // Recorded last, as the grill wrote it after reading #11.
+      selected: 'acme/widgets#132',
       withoutTickets: [],
       problem: null,
     });
@@ -468,6 +470,7 @@ describe('the ticket set at handoff', () => {
     const sheet = await tui.until((state) => state.tasks.T1?.handoff?.brief !== null);
     expect(sheet.tasks.T1?.handoff?.ticketSets).toEqual({
       candidates: [],
+      selected: null,
       withoutTickets: [
         { ref: 'acme/widgets#140', title: 'Webhook retries' },
         { ref: 'acme/widgets#141', title: 'Retry 5xx (Part of #140)' },
@@ -499,6 +502,7 @@ describe('the ticket set at handoff', () => {
       ok: false,
       reason: 'acme/widgets#99 isn’t a spec candidate of this handoff (acme/widgets#11, acme/widgets#132).',
     });
+    expect(await operator.send(confirm(sheet, { specs: 'acme/widgets#132' as never }))).toEqual({ ok: false, reason: 'The specs confirmed are a list of issue refs.' });
     expect(tui.state().tasks.T1).toMatchObject({ mode: 'HITL', liveRunId: 'R1', kind: 'plain' });
   });
 
@@ -511,6 +515,7 @@ describe('the ticket set at handoff', () => {
     const sheet = await tui.until((state) => state.tasks.T1?.handoff !== null);
     expect(sheet.tasks.T1?.handoff?.ticketSets).toEqual({
       candidates: [],
+      selected: null,
       withoutTickets: [],
       problem: 'The factory couldn’t read T1’s issues’ sub-issues from GitHub: GitHub refused the call (HTTP 404: Not Found).',
     });

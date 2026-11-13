@@ -32,6 +32,7 @@ import {
   artifactsOf,
   handoffStage,
   recordedIssues,
+  issuesOfKind,
   type HandoffTicketSets,
   type SpecCandidate,
   betweenIterations,
@@ -1042,7 +1043,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         autonomy,
         tier,
         maxTurns,
-        ...(specs && { specs: [...specs] }),
+        ...(specs !== undefined && { specs }),
         committed: [],
         sessionId: randomUUID(),
       };
@@ -1104,10 +1105,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (candidates.some(({ tickets }) => tickets.some((ticket) => ticket.ref === ref))) continue;
         withoutTickets.push({ ref, title: (await github.readIssue(token, ref)).title });
       }
-      return { candidates, withoutTickets, problem: null };
+      // The spec the spec stage wrote is the likeliest, else the issue recorded last.
+      const specs = issuesOfKind(lifecycle, task, 'spec');
+      const selected = candidates.find(({ spec }) => specs.includes(spec)) ?? candidates.at(-1);
+      return { candidates, selected: selected?.spec ?? null, withoutTickets, problem: null };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
-      return { candidates: [], withoutTickets: [], problem: `The factory couldn’t read ${task.id}’s issues’ sub-issues from GitHub: ${error.message}` };
+      return { candidates: [], selected: null, withoutTickets: [], problem: `The factory couldn’t read ${task.id}’s issues’ sub-issues from GitHub: ${error.message}` };
     }
   }
 

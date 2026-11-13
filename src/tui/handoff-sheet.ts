@@ -5,7 +5,7 @@
 // level, tier and max turns, and confirms. Esc backs out and the conversation carries on.
 import { createElement as h, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
-import { AUTONOMY_LEVELS, CONTINUE_AS, READY_FOR_AGENT, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, CONTINUE_AS, readyNow, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
@@ -50,9 +50,13 @@ export function HandoffSheet({ connection, task, run }: Props) {
   const [refusal, setRefusal] = useState<string | null>(null);
   // The brief is the operator's to edit once the agent has written it.
   if (handoff.brief && !draft.current.brief) draft.current.brief = structuredClone(handoff.brief);
-  // A spec task works one spec: the one recorded last is the likeliest.
+  // The factory's pick of the spec candidates, until the operator picks;
+  // read again with other candidates, it picks afresh.
   const candidates = handoff.ticketSets?.candidates ?? [];
-  if (handoff.ticketSets && !draft.current.specs) draft.current.specs = candidates.slice(-1).map(({ spec }) => spec);
+  const { specs } = draft.current;
+  if (handoff.ticketSets && (!specs || specs.some((spec) => !candidates.some((candidate) => candidate.spec === spec)))) {
+    draft.current.specs = handoff.ticketSets.selected ? [handoff.ticketSets.selected] : [];
+  }
   const { brief } = draft.current;
   const lines = linesOf(brief, candidates.length);
   const writing = !brief && run?.status === 'active' && run.turn === 'agent';
@@ -69,8 +73,9 @@ export function HandoffSheet({ connection, task, run }: Props) {
         if (!writing) send({ type: 'openHandoff', taskId: task.id });
         return;
       }
-      const { continueAs, autonomy, tier, maxTurns, specs } = current;
-      return send({ type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, tier, maxTurns: Number(maxTurns), ...(specs && { specs }) });
+      const { continueAs, autonomy, tier, maxTurns } = current;
+      const specs = current.specs && { specs: current.specs };
+      return send({ type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, tier, maxTurns: Number(maxTurns), ...specs });
     }
     if (key.upArrow || key.downArrow) {
       const line = Math.min(Math.max(current.line + (key.upArrow ? -1 : 1), 0), lines.length - 1);
@@ -173,19 +178,19 @@ function step(draft: Draft, line: Line, input: string, key: Key, candidates: Spe
 // tickets; what a handoff with none selected is; and why the factory
 // couldn't read them. `at` is the candidate the cursor is on.
 function ticketSetLines({ candidates, withoutTickets, problem }: HandoffTicketSets, specs: string[], repo: string, at: number | null): ReactNode[] {
-  const short = (ref: string) => (ref.startsWith(`${repo}#`) ? ref.slice(repo.length) : ref);
+  const short = (ref: string) => (ref.toLowerCase().startsWith(`${repo.toLowerCase()}#`) ? ref.slice(repo.length) : ref);
   const lines: ReactNode[] = candidates.map(({ spec, title, tickets }, i) => {
-    const ready = tickets.filter(({ open, openBlockers, labels }) => open && openBlockers.length === 0 && labels.includes(READY_FOR_AGENT)).length;
+    const ready = tickets.filter(readyNow).length;
     const count = `${tickets.length} ticket${tickets.length === 1 ? '' : 's'}, ${ready} ready now`;
     return h(
       Field,
       { key: `spec-${spec}`, label: i === 0 ? 'Ticket set' : '', selected: at === i },
       h(Tick, { on: specs.includes(spec) }),
-      ` Spec ${short(spec)} ${title} → ${count}`,
+      ` Spec ${short(spec)} ${title} ${GLYPH.launches} ${count}`,
     );
   });
   for (const { ref, title } of withoutTickets) {
-    lines.push(h(Text, { key: `none-${ref}`, ...tone('dim') }, `${short(ref)} ${title} → 0 tickets: none are its sub-issues`));
+    lines.push(h(Text, { key: `none-${ref}`, ...tone('dim') }, `${short(ref)} ${title} ${GLYPH.launches} 0 tickets: none are its sub-issues`));
   }
   if (!candidates.some(({ spec }) => specs.includes(spec))) lines.push(h(Text, { key: 'one-run', ...tone('warn') }, 'No ticket set: the handoff is one run on the brief.'));
   if (problem) lines.push(h(Text, { key: 'problem', ...tone('bad') }, `${GLYPH.failed} ${problem}`));

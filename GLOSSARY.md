@@ -95,6 +95,14 @@ _Avoid_: PRD, epic, plan
 A root task that works out a spec and its tickets with the operator, then launches a ticket task for each ticket as it becomes takeable. It has no PR of its own, and ends once its spec closes.
 _Avoid_: Parent task, coordinator, epic task
 
+**Ticket set**:
+The spec and the tickets a spec task launches ticket tasks for, which the operator confirms on the handoff sheet.
+_Avoid_: Ticket list, backlog
+
+**Spec candidate**:
+An issue a task recorded, at any stage, that has sub-issues: at its handoff, it could be the spec of its ticket set. Tickets linked to an issue only by text ("Part of #n") are no sub-issues, so they don't make it one.
+_Avoid_: Possible spec, spec guess
+
 **Ticket task**:
 A root task the factory launches for one ticket of a spec, once all of that ticket's blockers are merged. It has its own task branch and PR, and its ticket closes when that PR merges.
 _Avoid_: Ticket child, iteration, slice task
