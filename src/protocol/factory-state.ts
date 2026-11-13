@@ -18,7 +18,6 @@ import {
   type AppCheck,
   type AutonomyLevel,
   type Cleanup,
-  type ClosedTicket,
   type FrontierTicket,
   type FrozenPreset,
   type HandoffSheet,
@@ -31,7 +30,6 @@ import {
   type QuickLaunch,
   type AttentionQueueItem,
   type Artifact,
-  type Reopening,
   type Repository,
   type Permission,
   type Run,
@@ -102,17 +100,10 @@ export type TaskView = {
   handoff: HandoffView | null;
   // Its quick launch while its grill is one: the questions answered so far.
   quick: QuickLaunch | null;
-  // The tickets its Ralph loop closed, with their commits.
-  closedTickets: ClosedTicket[];
-  // The tickets the operator skipped, which its loop leaves open.
-  skippedTickets: string[];
-  // Its Ralph loop or work loop, while it is at a loop stage with a ticket
-  // set: the ticket its iteration works, and whether it ends after that one.
-  // A work loop over a map between its tickets offers the map's frontier, as last
-  // read, or has `cleared` once the map had no open ticket left.
-  loop: { ticket: string | null; finishing: boolean; frontier: FrontierTicket[] | null; cleared: boolean } | null;
-  // Once it is cancelled, while the tickets it closed aren't all reopened, and why it last failed to.
-  reopening: Reopening | null;
+  // Its work loop over a map, while it is at a HITL loop stage: the ticket
+  // the operator works. Between its tickets it offers the map's frontier, as
+  // last read, or has `cleared` once the map had no open ticket left.
+  loop: { ticket: string | null; frontier: FrontierTicket[] | null; cleared: boolean } | null;
   // Its launch summary, if the cheap run that named it wrote one.
   launchSummary: string | null;
   // Its PR body, once its PR body stage wrote it, and the PR title written with it, if any.
@@ -217,17 +208,13 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
       quick: task.quick ? { ...task.quick } : null,
-      closedTickets: structuredClone(task.closedTickets ?? []),
-      skippedTickets: [...(task.skippedTickets ?? [])],
       loop: task.loop
         ? {
             ticket: task.loop.ticket,
-            finishing: task.loop.finishing ?? false,
             frontier: task.loop.frontier ? structuredClone(task.loop.frontier) : null,
             cleared: task.loop.cleared ?? false,
           }
         : null,
-      reopening: task.reopening ? structuredClone(task.reopening) : null,
       launchSummary: task.launchSummary ?? null,
       prBody: task.prBody ?? null,
       prTitle: task.prTitle ?? null,
@@ -282,7 +269,6 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
     runs,
     artifacts: structuredClone(lifecycle.artifacts),
     attentionQueue: attentionQueue(lifecycle, watched),
-    // A loop between its iterations keeps its slot.
     slots: { active: heldSlots(lifecycle), cap: lifecycle.slotCap },
     keepAwake: keepsAwake(lifecycle),
     lastUsedRepo: lastUsedRepo(lifecycle),

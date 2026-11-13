@@ -5,8 +5,8 @@
 // Cancelled tasks dimmed or hidden (`H`, remembered between sessions); the launch card (`N`), quick launch (`n`), the conversation view
 // (`enter` in a task's detail), re-tiering a task (`t`), conversing with or
 // taking over one (`c`), handing one off (`ctrl+h`), cancelling one with its
-// subtree (`x`, with the cancel sheet when work would be lost), finishing a
-// loop after its ticket (`F`), retrying a failed task from the tree (`y`),
+// subtree (`x`, with the cancel sheet when work would be lost), retrying a
+// failed task from the tree (`y`),
 // answering its request on Needs you's answer sheet (`a`), `?` help, and Set
 // up now (`s`) or Re-check (`R`) for a repository without the skill set's
 // setup. Over the same state, the condensed view (`v`): Needs you and the
@@ -333,13 +333,6 @@ export function App({
       setCancelSheet(asks);
     });
   };
-  // Finish after this ticket: the selected task's loop ends once its live
-  // iteration is done.
-  const finishLoop = () => {
-    const task = selected;
-    if (!task || !finishable(task)) return;
-    void connection.send({ type: 'finishLoop', taskId: task.id }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
-  };
   // Retries the selected task's failed run, as Needs you's Retry does: a
   // child's included, from the tree.
   const retry = () => {
@@ -434,7 +427,6 @@ export function App({
       if (input === 'c') converse();
       const cancels = selected ?? itemTask;
       if (input === 'x' && cancels) cancel({ type: 'cancel', taskId: cancels.id });
-      if (input === 'F') finishLoop();
       if (input === 'y') retry();
       if (key.ctrl && input === 'h') handOff();
       if (input === 's') setUp();
@@ -462,7 +454,6 @@ export function App({
         ['c', 'converse or take over'],
         ['t', 're-tier'],
         ['x', 'cancel'],
-        ...(finishable(tasks[cursor]) ? [['F', 'finish after this ticket'] as Hint] : []),
         ...(failedTask(state, tasks[cursor]) ? [['y', 'retry'] as Hint] : []),
         ['g', 'group'],
         ['H', hideFinished ? 'show finished' : 'hide finished'],
@@ -749,7 +740,7 @@ function rowLayout(tasks: TaskView[], columns: number, compact: boolean): RowLay
   return { compact, glyph, id, title, extras: rest - 1 - title, groups };
 }
 
-// What a row says past its state: its loop's ticket or its ticket task's,
+// What a row says past its state: its work loop's ticket or its ticket task's,
 // a spec task's tickets by state, its descendants' rollup and its progress.
 function extrasOf(task: TaskView): string {
   return joined([loopDetail(task), ticketDetail(task), ticketSetDetail(task), rollupDetail(task), task.progress]);
@@ -838,16 +829,9 @@ function failedTask(state: FactoryState | null, task: TaskView | undefined): boo
   return !!task && !!state?.attentionQueue.some((item) => item.kind === 'attention' && item.taskId === task.id && item.attention === 'failure');
 }
 
-// Whether the task's Ralph loop can still be finished after its ticket.
-function finishable(task: TaskView | undefined): boolean {
-  return task?.mode === 'AFK' && !!task.loop && !task.loop.finishing;
-}
-
-// The ticket a task's loop works, and whether it ends after it.
+// The ticket of its map a task's work loop works.
 function loopDetail({ loop }: TaskView): string {
-  if (!loop) return '';
-  if (!loop.ticket) return loop.finishing ? 'finishing' : '';
-  return `on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
+  return loop?.ticket ? `on ${loop.ticket}` : '';
 }
 
 // The widest Needs you kind (`repo missing`) and the title's width on a Needs you row.

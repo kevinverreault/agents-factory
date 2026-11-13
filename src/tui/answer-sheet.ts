@@ -7,7 +7,7 @@
 import { createElement as h, useReducer, useRef } from 'react';
 import { Box, Text, type Key } from 'ink';
 import type { AttentionQueueItem, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
-import { isWorkLoop } from '../presets/presets.ts';
+import { isRetiredLoop, isWorkLoop } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
 import type { Command, Option, Reply } from '../protocol/protocol.ts';
@@ -94,11 +94,8 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
   const cancel: Choice = { label: 'Cancel', command: { type: 'cancel', taskId } };
   switch (item.attention) {
     case 'failure': {
-      // Only the operator decides what a failure means (ADR 0006): a failed
-      // AFK iteration's ticket can be skipped too.
-      const ticket = task?.mode === 'AFK' ? task.loop?.ticket : null;
-      const skip: Choice[] = ticket ? [{ label: `Skip ${ticket}`, command: { type: 'answer', taskId, skip: true } }] : [];
-      return [{ label: 'Retry', command: answer }, ...allowHosts(taskId, item.deniedHosts ?? []), ...skip, ...takeOver, cancel];
+      // Only the operator decides what a failure means.
+      return [{ label: 'Retry', command: answer }, ...allowHosts(taskId, item.deniedHosts ?? []), ...takeOver, cancel];
     }
     case 'permission': {
       // Requests stored before they named their call allow it for the task
@@ -133,8 +130,10 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
           cancel,
         ];
       }
-      // A stalled loop picks again once answered, and a work loop reads its map again.
-      if (task?.mode === 'AFK' && task.loop) return [{ label: 'Retry', command: answer }, ...takeOver, cancel];
+      // At the retired Ralph loop's stage (ADR 0013), the task can only be
+      // cancelled, to relaunch it.
+      if (task && isRetiredLoop(task.preset?.stages.find(({ id }) => id === task.stage))) return [cancel];
+      // A work loop reads its map again once answered.
       // Raised once the map cleared, it is the next stage that couldn't start: nothing is read again.
       return task?.loop && !task.loop.cleared && workLoopAt(task)
         ? [{ label: 'Read the map again', command: answer }, cancel]

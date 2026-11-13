@@ -32,7 +32,7 @@ const TOKEN_BAR_CELLS = 16;
 // The Usage tab, each part in its section: gauges of the usage windows, the
 // slots and the last hours' tokens; then each model's tokens by kind and
 // API-equivalent cost, then each task tree (by its root), group, stage and
-// Ralph loop ticket that used anything. Each model's and group's tokens are
+// ticket task's ticket that used anything. Each model's and group's tokens are
 // barred against the largest.
 export function UsageTab({ state }: { state: FactoryState }) {
   const views = usageViews(state);

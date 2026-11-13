@@ -44,7 +44,9 @@ export type Stage = z.infer<typeof stageSchema>;
 export const ARTIFACT_KINDS = ['map', 'spec', 'tickets', 'pr-body'] as const;
 // The artifact kinds that are GitHub issues, which issue refs can stand for.
 const ISSUE_KINDS = new Set(['map', 'spec', 'tickets']);
-const EXITS = ['run-completed', 'artifact:<kind>', 'tickets-closed', 'map-cleared', 'spec-closed'];
+const EXITS = ['run-completed', 'artifact:<kind>', 'map-cleared', 'spec-closed'];
+// The Ralph loop's exit (ADR 0006), retired with it (ADR 0013).
+const RETIRED_EXIT = 'tickets-closed';
 const FACTORY_ACTIONS = ['open-pr', 'close-ticket', 'push'];
 const TEMPLATE = /\{\{\s*([^{}]*?)\s*\}\}/g;
 
@@ -143,8 +145,7 @@ export function lackingInputs(start: Pick<StartStage, 'needs' | 'anyOf'>, { prom
 
 // The first message of a start stage's first run: its skill, from the
 // factory plugin (ADR 0005), invoked on its args filled from the launch
-// inputs. A run with no skill sends its args alone. A loop stage with a
-// ticket set opens each iteration on one ticket instead (ADR 0006).
+// inputs. A run with no skill sends its args alone.
 export function openingMessage(stage: Stage, { prompt, issues }: LaunchInputs): string {
   const filled = fillOpening(stage, (variable) => (variable === 'prompt' ? prompt.trim() : issues.join(' ')));
   return 'opening' in filled ? filled.opening : '';
@@ -187,11 +188,11 @@ export function isWorkLoop(stage: Stage | undefined): boolean {
   return stage?.kind === 'loop' && stage.mode === 'HITL' && stage.exit === 'map-cleared';
 }
 
-// Whether the stage works a spec's tickets: launched on one issue ref with
-// no sub-issues, it makes the task a ticket task for that issue (ADR 0013).
-// So does the retired Ralph loop's, until it goes.
-export function worksTickets(stage: Stage): boolean {
-  return launchesTickets(stage) || (stage.kind === 'loop' && stage.exit === 'tickets-closed');
+// Whether the stage is the retired Ralph loop's (ADR 0006): a loop whose
+// exit is `tickets-closed`. No preset may name it any more, but a task
+// launched before it was retired may still have it frozen (ADR 0013).
+export function isRetiredLoop(stage: Stage | undefined): boolean {
+  return stage?.kind === 'loop' && stage.exit === RETIRED_EXIT;
 }
 
 // Whether the stage launches ticket tasks (ADR 0013): a spec task at it
@@ -233,9 +234,8 @@ export function planStart(
 }
 
 // The stages of the preset that work as the factory's App (ADR 0004): its
-// AFK stages, whose runs read GitHub as it and whose factory actions and
-// loops (closing each ticket, ADR 0006) write as it. HITL stages act as the
-// operator.
+// AFK stages, whose runs read GitHub as it and whose factory actions write
+// as it. HITL stages act as the operator.
 export function appStages(preset: ResolvedPreset): string[] {
   return preset.stages.filter((stage) => stage.mode === 'AFK').map(({ id }) => id);
 }
@@ -311,6 +311,9 @@ function checkStages(drafts: StageDraft[]): { stages: Stage[] } | { error: strin
 
 // What the schema alone can't say is wrong with a stage, or null.
 function stageProblem(stage: Stage): string | null {
+  if (stage.exit === RETIRED_EXIT) {
+    return `exit ${RETIRED_EXIT} was the Ralph loop’s, which is retired: work a spec’s tickets with kind: tickets and exit spec-closed instead (ADR 0013).`;
+  }
   if (stage.exit !== undefined) {
     const kind = /^artifact:(.*)$/.exec(stage.exit)?.[1];
     if (kind !== undefined && !isArtifactKind(kind)) {
@@ -327,6 +330,8 @@ function stageProblem(stage: Stage): string | null {
     if (stage.skill !== undefined) return 'an action stage runs no skill.';
   }
   if (stage.kind === 'loop' && stage.skill === undefined) return 'a loop stage needs a skill.';
+  // The one loop left is the work loop over a map (ADR 0012).
+  if (stage.kind === 'loop' && !isWorkLoop(stage)) return 'a loop stage is a HITL work loop over a map, with exit map-cleared.';
   // Each ticket task's first run invokes it on its ticket (ADR 0013).
   if (stage.kind === 'tickets' && stage.skill === undefined) return 'a tickets stage needs a skill.';
   if (stage.kind === 'run' && stage.skill === undefined && stage.args === undefined) return 'a run stage needs a skill or args.';

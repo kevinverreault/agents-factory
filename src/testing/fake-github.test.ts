@@ -22,6 +22,7 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
     installedRepo: 'acme/widgets',
     uninstalledRepo: 'octocat/Hello-World',
     openIssue: 'acme/widgets#1',
+    reopenByHand: async (ref) => github.reopenIssue(ref),
     now: () => clock.now(),
     clone: {
       path,

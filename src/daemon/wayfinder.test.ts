@@ -287,21 +287,20 @@ describe('launching at the work loop', () => {
   });
 });
 
-describe('other HITL loops', () => {
-  test('a HITL loop stage that works no map starts its run at once, as before', async () => {
+describe('a work loop with no map', () => {
+  test('starts its run at once, one conversation as before', async () => {
     const factory = await startTestFactory();
     factories.push(factory);
     mkdirSync(factory.paths.presetsDir, { recursive: true });
     writeFileSync(
       join(factory.paths.presetsDir, 'triaging.preset.yaml'),
-      'stages:\n  - { id: triage, kind: loop, skill: triage, args: "{{artifacts.tickets}}", mode: HITL, exit: tickets-closed }\n',
+      'stages:\n  - { id: triage, kind: loop, skill: wayfinder, args: "{{prompt}}", mode: HITL, exit: map-cleared }\n',
     );
     await factory.registerRepo();
-    factory.github.addIssue('acme/widgets#11');
     const operator = await factory.attach();
     const tui = watch(operator);
 
-    const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'triaging', issues: ['#11'] });
+    const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'triaging', prompt: 'Triage the billing tickets.' });
     expect(launched.ok).toBe(true);
 
     const started = await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');

@@ -26,7 +26,7 @@ function task(id: string, title: string, state: TaskView['state'], label: string
   return {
     id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, resolving: null, specTask: null, ticketSet: null, mode, autonomy: mode === 'AFK' ? 'L1' : null,
     priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null,
-    tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null,
+    tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, loop: null,
     launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null,
     ...more,
   };
@@ -103,7 +103,7 @@ function demoState(): FactoryState {
       stage: 'implement',
       progress: 'Writing the JSON formatter.',
       rollup: { done: 1, running: 1, needsYou: 0, cancelled: 0, failed: [] },
-      loop: { ticket: 'acme/widgets#31', finishing: false, frontier: null, cleared: false },
+      kind: 'ticket', ticket: 'acme/widgets#31',
       groups: ['cli'],
     }),
     task('T3', 'Format the table as JSON', 'done', 'Done', { parent: 'T2', depth: 1, groups: ['cli'] }),

@@ -168,7 +168,7 @@ describe('the schema', () => {
 
   test('an unknown exit condition, or an artifact kind outside the vocabulary, is refused with the vocabulary', () => {
     expect(refusal(nightly('{ id: implement, kind: loop, skill: implement, mode: AFK, exit: tickets-done }'), 'nightly')).toBe(
-      `${at}: stage implement: exit tickets-done is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared, spec-closed).`,
+      `${at}: stage implement: exit tickets-done is not an exit condition (run-completed, artifact:<kind>, map-cleared, spec-closed).`,
     );
     expect(refusal(nightly('{ id: draw, kind: run, skill: draw, mode: HITL, exit: "artifact:diagram" }'), 'nightly')).toBe(
       `${at}: stage draw: exit artifact:diagram names no artifact kind (map, spec, tickets, pr-body).`,
@@ -205,9 +205,19 @@ describe('the schema', () => {
       `${at}: stage push: an action stage runs no skill.`,
     );
     expect(refusal(nightly('{ id: implement, kind: loop, mode: AFK }'), 'nightly')).toBe(`${at}: stage implement: a loop stage needs a skill.`);
+    expect(refusal(nightly('{ id: implement, kind: loop, skill: implement, mode: AFK, exit: run-completed }'), 'nightly')).toBe(
+      `${at}: stage implement: a loop stage is a HITL work loop over a map, with exit map-cleared.`,
+    );
     expect(refusal(nightly('{ id: grill, kind: run, skill: grill-me, mode: HITL, autonomy: L1 }'), 'nightly')).toBe(
       `${at}: stage grill: only an AFK stage has an autonomy ceiling.`,
     );
+  });
+
+  test('the Ralph loop’s exit, tickets-closed, is refused: the loop was retired', () => {
+    expect(refusal(nightly('{ id: implement, kind: loop, skill: implement, mode: AFK, exit: tickets-closed }'), 'nightly')).toBe(
+      `${at}: stage implement: exit tickets-closed was the Ralph loop’s, which is retired: work a spec’s tickets with kind: tickets and exit spec-closed instead (ADR 0013).`,
+    );
+    expect(refusal([user('nightly', 'extends: main-flow\nstages:\n  - { id: implement, kind: loop, exit: tickets-closed }')], 'nightly')).toMatch(/exit tickets-closed was the Ralph loop’s/);
   });
 
   test('a tickets stage launches ticket tasks on a skill until its spec closes: it needs the skill', () => {

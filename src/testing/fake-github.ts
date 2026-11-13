@@ -59,7 +59,7 @@ type FakeIssue = { title: string; open: boolean; stateReason: StateReason; label
 // can make it unreachable, or hold its writes mid-call.
 export class FakeGitHub implements GitHub {
   readonly minted: Minted[] = [];
-  readonly writes: { action: 'close' | 'reopen'; ref: string; comment: string; token: Minted }[] = [];
+  readonly writes: { action: 'close'; ref: string; comment: string; token: Minted }[] = [];
   // Each push that reached GitHub, with the tip it sent and its token.
   readonly pushes: { repo: string; branch: string; tip: string; token: Minted }[] = [];
   // Every PR opened, in order.
@@ -122,7 +122,7 @@ export class FakeGitHub implements GitHub {
     this.prFailure = reason;
   }
 
-  // Closing and reopening issues fails with `reason` from now on, or works again with null.
+  // Closing issues fails with `reason` from now on, or works again with null.
   failIssueWrites(reason: string | null): void {
     this.issueWriteFailure = reason;
   }
@@ -229,15 +229,11 @@ export class FakeGitHub implements GitHub {
     this.writes.push({ action: 'close', ref, comment, token: snapshot(minted) });
   }
 
-  async reopenIssue(token: string, ref: string, comment: string): Promise<void> {
-    await this.held();
-    if (this.issueWriteFailure) throw new GitHubError(this.issueWriteFailure);
-    const minted = this.scoped(token, ref, 'issues', 'write');
+  // Someone reopens the issue on GitHub.
+  reopenIssue(ref: string): void {
     const issue = this.found(ref);
-    issue.comments.push(comment);
     issue.open = true;
     issue.stateReason = 'reopened';
-    this.writes.push({ action: 'reopen', ref, comment, token: snapshot(minted) });
   }
 
   async push(token: string, { clonePath, repo, branch }: BranchPush): Promise<Pushed> {

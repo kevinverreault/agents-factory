@@ -12,6 +12,8 @@ export type GitHubFixture = {
   uninstalledRepo: string;
   // An open issue of the installed repository, as `owner/name#n`.
   openIssue: string;
+  // The operator reopens the issue by hand, as a test that closed it leaves it.
+  reopenByHand(ref: string): Promise<void>;
   // GitHub's time now.
   now(): number;
   // A clone of the installed repository on the operator's machine.
@@ -88,18 +90,17 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
 
       expect(await github.readIssue(token, openIssue)).toMatchObject({ ref: openIssue, open: true });
       await expect(github.closeIssue(token, openIssue, 'A read-only token can’t close this.')).rejects.toThrow(GitHubError);
-      await expect(github.reopenIssue(token, openIssue, 'A read-only token can’t reopen this.')).rejects.toThrow(GitHubError);
       expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
     });
 
-    test('a ticket-writing token closes an issue and reopens it, leaving it open', async () => {
-      const { github, app, installedRepo, openIssue } = await makeFixture();
+    test('a ticket-writing token closes an issue', async () => {
+      const { github, app, installedRepo, openIssue, reopenByHand } = await makeFixture();
       const { token } = await github.mintToken(app, installedRepo, TICKET_WRITE);
 
       await github.closeIssue(token, openIssue, 'Closed by the contract test.');
-      expect(await github.readIssue(token, openIssue)).toMatchObject({ open: false });
-      await github.reopenIssue(token, openIssue, 'Reopened by the contract test.');
 
+      expect(await github.readIssue(token, openIssue)).toMatchObject({ open: false });
+      await reopenByHand(openIssue);
       expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
     });
 

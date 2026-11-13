@@ -10,7 +10,6 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
 import { BUILT_IN_EGRESS } from '../sandbox/sandbox.ts';
-import { keepRalphLoop } from '../testing/ralph-loop-preset.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
@@ -179,30 +178,6 @@ describe('an L2 run’s egress', () => {
         deniedHosts: ['pypi.org', 'files.pythonhosted.org'],
       },
     ]);
-  });
-
-  test('denied to an iteration that completes with no new commit is listed on its failure request too, for the operator to allow', async () => {
-    const { factory, operator, tui } = await attached();
-    keepRalphLoop(factory);
-    factory.github.addIssue('acme/widgets#10');
-    factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
-    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'], autonomy: 'L2' });
-    await started(factory, 1);
-
-    factory.sandbox.request('T1', 'pypi.org');
-    factory.executor.report('R1', { type: 'runCompleted' });
-
-    const state = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
-    expect(state.attentionQueue).toMatchObject([
-      {
-        attention: 'failure',
-        reason: `The iteration on acme/widgets#11 made no new commit on ${state.tasks.T1!.branch}, so the ticket stays open. Its container’s egress proxy denied pypi.org.`,
-        deniedHosts: ['pypi.org'],
-      },
-    ]);
-    expect(await operator.send({ type: 'answer', taskId: 'T1', allowHosts: ['pypi.org'] })).toEqual({ ok: true });
-    await started(factory, 2);
-    expect(factory.sandbox.prepared.at(-1)!.egress).toContain('pypi.org');
   });
 
   test('a denied host the operator allows for the task joins its egress, and the run is retried, for that task only', async () => {

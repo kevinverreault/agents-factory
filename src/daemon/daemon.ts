@@ -35,7 +35,6 @@ import {
   issuesOfKind,
   type HandoffTicketSets,
   type SpecCandidate,
-  betweenIterations,
   readingMap,
   BRIEF_REQUEST,
   childrenOf,
@@ -61,7 +60,7 @@ import {
   subtree,
   childSpawnedBy,
   spawnsWithinDepth,
-  ticketSources,
+  workLoopMaps,
   unfinishedTasks,
   updatesOnConflict,
   waitsOnPr,
@@ -85,7 +84,6 @@ import {
   type MapClosingEvent,
   type TicketSetEvent,
   type TicketTaskLaunched,
-  type ReopenEvent,
   type Repository,
   type RepoEvent,
   type Run,
@@ -138,7 +136,6 @@ import {
   resolvePreset,
   userPresets,
   launchesTickets,
-  worksTickets,
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
@@ -271,17 +268,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Each guarded AFK run's read-only bot token (ADR 0004): its gh config
   // directory, and when it is next replaced.
   const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
-  // The tasks whose loop's step between iterations is under way on GitHub.
+  // The work loops whose read of their map is under way on GitHub.
   const stepsInFlight = new Set<string>();
   // The Done roots whose cleanup this daemon has started, and those of them
   // still under way. One that failed is tried again by the next daemon.
   const cleanupsStarted = new Set<string>();
   const cleanupsInFlight = new Set<string>();
-  // The cancelled tasks' tickets, as `<task> <ticket>`, whose reopening this
-  // daemon has started, and those of them still under way. One that failed
-  // is tried again once the operator answers, or by the next daemon.
-  const reopensStarted = new Set<string>();
-  const reopensInFlight = new Set<string>();
   // The roots' Push & open draft PR steps, as `<task> <step>`, this daemon
   // has started, and those of them still under way. One that failed is
   // tried again once the operator answers, or by the next daemon.
@@ -791,17 +783,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const blocked = appBlock(resolved.preset.name, stages, check);
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
       }
-      // One issue ref with no sub-issues, at an AFK stage working tickets,
-      // is a ticket task's ticket; at one launching ticket tasks, a spec ref
-      // or several refs make a spec task over their tickets (ADR 0013).
-      if (worksTickets(start.stage) && start.stage.mode === 'AFK' && action.issues.length) {
-        const spec = launchesTickets(start.stage);
+      // At an AFK stage launching ticket tasks, one issue ref with no
+      // sub-issues is a ticket task's ticket, and a spec ref or several refs
+      // make a spec task over their tickets (ADR 0013).
+      if (launchesTickets(start.stage) && start.stage.mode === 'AFK' && action.issues.length) {
         if (action.issues.length === 1) {
           const read = await subIssuesOf(repo, action.issues[0]!);
           if ('error' in read) return { ok: false, reason: read.error };
           if (read.subIssues.length === 0) action.ticket = action.issues[0]!;
-          else if (spec) action.specSet = { spec: action.issues[0]!, tickets: read.subIssues };
-        } else if (spec) action.specSet = { spec: null, tickets: [...new Set(action.issues)] };
+          else action.specSet = { spec: action.issues[0]!, tickets: read.subIssues };
+        } else action.specSet = { spec: null, tickets: [...new Set(action.issues)] };
       }
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       action.stage = start.stage.id;
@@ -1183,10 +1174,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // No run starts meanwhile; reconciling starts what they queued.
   async function replayIntents(): Promise<ReplayedIntent[]> {
     const replayed: ReplayedIntent[] = [];
-    // A cancelled task's reopening of its tickets and a cleanup are held on
-    // the task while under way (ADR 0011): this daemon carries them on.
+    // A cleanup is held on the task while under way (ADR 0011): this daemon
+    // carries it on.
     for (const task of Object.values(lifecycle.tasks)) {
-      if (task.reopening?.tickets.length) replayed.push({ taskId: task.id, verb: 'cancel', outcome: 'resumed' });
       if (task.cleanup) replayed.push({ taskId: task.id, verb: 'cleanup', outcome: 'resumed' });
     }
     replaying = true;
@@ -1340,15 +1330,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // An active or suspended run, a queued task (a HITL one Ready for you
   // included, as ADR 0002 says) or an attached TUI.
-  // A loop between its iterations does too, a root waiting on its PR, and a
-  // spec task at work on its tickets.
+  // A root waiting on its PR does too, and a spec task at work on its tickets.
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
     // A spec task that couldn't read or launch its tickets tries again at the next poll.
     // So does a ticket or a spec the factory couldn't close.
     const retrying = Object.values(lifecycle.tasks).filter((task) => (task.ticketSet?.problem && !isTerminal(task)) || task.resolving?.problem).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + retrying + resolutionsInFlight.size + ticketReadsInFlight.size + launchesInFlight.size + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + retrying + resolutionsInFlight.size + ticketReadsInFlight.size + launchesInFlight.size + stepsInFlight.size + cleanupsInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -1417,13 +1406,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // So is whether the App is installed on each, and the skill set set up.
     await checkEveryApp();
     await checkEverySetup();
-    // A loop the daemon stopped between iterations carries on, and so do a
-    // cleanup, a cancelled task's reopening and a Push & open draft PR it
-    // didn't finish, and a research child's publishing. Factory notes a
-    // conversation on the operator's turn holds are delivered.
+    // A work loop's read of its map the daemon stopped carries on, and so
+    // do a cleanup and a Push & open draft PR it didn't finish, and a
+    // research child's publishing. Factory notes a conversation on the
+    // operator's turn holds are delivered.
     driveLoops();
     driveCleanups();
-    driveReopens();
     drivePublishes();
     driveResearch();
     driveResolutions();
@@ -1552,7 +1540,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveTakeovers();
     driveLoops();
     driveCleanups();
-    driveReopens();
     drivePublishes();
     driveResearch();
     driveResolutions();
@@ -2078,45 +2065,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
   }
 
-  // Reopens each ticket a cancelled task closed (ADR 0006): once per daemon,
-  // and again once the operator answers the request a failure raised. Its
-  // outcome goes through the Lifecycle like any other event.
-  function driveReopens(): void {
-    for (const task of Object.values(lifecycle.tasks)) {
-      for (const ticket of task.reopening?.tickets ?? []) {
-        const key = `${task.id} ${ticket}`;
-        if (stopping || reopensInFlight.has(key) || (reopensStarted.has(key) && task.reopening!.problem)) continue;
-        reopensStarted.add(key);
-        reopensInFlight.add(key);
-        void reopenTicket(task, ticket).then(
-          (event) =>
-            serially(async () => {
-              reopensInFlight.delete(key);
-              if (!stopping) await settle(event, new Set());
-            }),
-          (error) => {
-            reopensInFlight.delete(key);
-            throw error;
-          },
-        );
-      }
-    }
-  }
-
-  // Reopens a ticket the cancelled task closed, as the App, with a token
-  // minted for this write alone (ADR 0004), and a comment saying its work
-  // wasn't merged.
-  async function reopenTicket(task: Task, ticket: string): Promise<ReopenEvent> {
-    try {
-      const { token } = await appToken(task.repo, TICKET_WRITE);
-      await github.reopenIssue(token, ticket, reopeningComment(task));
-      return { type: 'ticketReopened', taskId: task.id, ticket };
-    } catch (error) {
-      if (!isGitHubFailure(error)) throw error;
-      return { type: 'ticketUnreopened', taskId: task.id, ticket, reason: error.message };
-    }
-  }
-
   // Cleans up after each ended task whose cleanup is pending (ADR 0011), once
   // per daemon. Its outcome goes through the Lifecycle like any other event.
   function driveCleanups(): void {
@@ -2190,23 +2138,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return { type: 'cleanedUp', taskId: task.id, transcripts, childBranches: childBranches.map((child) => child.id) };
   }
 
-  // Starts the step on GitHub of each loop between its iterations (ADR 0006):
-  // picking the next ticket, pushing the task branch at L2 with what the last
-  // iteration did (ADR 0007), or closing that iteration's ticket; and
-  // of each work loop between its tickets (ADR 0012): reading its map. Its outcome goes
-  // through the Lifecycle like any other event.
+  // Reads the map of each work loop between its tickets (ADR 0012). Its
+  // outcome goes through the Lifecycle like any other event.
   function driveLoops(): void {
     for (const task of Object.values(lifecycle.tasks)) {
-      if (stopping || stepsInFlight.has(task.id)) continue;
-      // A pick starts the next iteration's run, which waits for the next
-      // daemon while this one starts none.
-      if (holdRuns && !readingMap(lifecycle, task) && task.loop?.step === 'pick') continue;
-      const step = readingMap(lifecycle, task)
-        ? readMap(task)
-        : betweenIterations(lifecycle, task)
-          ? task.loop!.step === 'pick' ? pickTicket(task) : task.loop!.step === 'push' ? pushIteration(task) : closeTicket(task)
-          : null;
-      if (!step) continue;
+      if (stopping || stepsInFlight.has(task.id) || !readingMap(lifecycle, task)) continue;
+      const step = readMap(task);
       stepsInFlight.add(task.id);
       void step.then(
         (event) =>
@@ -2223,19 +2160,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
   }
 
-  // Picks a Ralph loop's next ticket: reads its ticket set, with the task
-  // branch's tip the iteration starts from.
-  async function pickTicket(task: Task): Promise<LoopEvent> {
-    try {
-      const tickets = await readTicketSet(task);
-      const { head } = await git.snapshot(task.worktree!.path);
-      return { type: 'ticketsRead', taskId: task.id, tickets, base: head, sessionId: randomUUID() };
-    } catch (error) {
-      if (!isGitHubFailure(error) && !(error instanceof GitError)) throw error;
-      return { type: 'ticketsUnread', taskId: task.id, reason: error.message };
-    }
-  }
-
   // Reads a work loop's map: its tickets, for the frontier the operator picks from.
   async function readMap(task: Task): Promise<LoopEvent> {
     try {
@@ -2246,61 +2170,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
   }
 
-  // Reads the task's ticket set from GitHub with a read-only token, in
-  // order: each source's sub-issues, or a ticket source itself when it has
-  // none. A spec or a map is never a ticket itself.
+  // Reads a work loop's tickets from GitHub with a read-only token, in
+  // order: each of its maps' sub-issues. A map is never a ticket itself.
   async function readTicketSet(task: Task): Promise<Issue[]> {
     const { token } = await appToken(task.repo, READ_ONLY);
-    const { kind, refs: sources } = ticketSources(lifecycle, task)!;
     const refs: string[] = [];
-    for (const source of sources) {
-      const subIssues = await github.subIssues(token, source);
-      for (const ref of subIssues.length || kind !== 'tickets' ? subIssues : [source]) if (!refs.includes(ref)) refs.push(ref);
+    for (const map of workLoopMaps(lifecycle, task)) {
+      for (const ref of await github.subIssues(token, map)) if (!refs.includes(ref)) refs.push(ref);
     }
     const tickets: Issue[] = [];
     for (const ref of refs) tickets.push(await github.readIssue(token, ref));
     return tickets;
-  }
-
-  // Pushes the task branch with the last L2 iteration's commits as the App,
-  // with a token narrowed to Contents (ADR 0004), before its ticket closes
-  // (ADR 0006). Like Push & open draft PR's push, it fetches the base first.
-  async function pushIteration(task: Task): Promise<LoopEvent> {
-    const ticket = task.loop!.ticket!;
-    const { branch } = task.worktree!;
-    const failed = (reason: string): LoopEvent => ({ type: 'iterationUnpushed', taskId: task.id, ticket, reason });
-    const repository = lifecycle.repositories[task.repo];
-    if (!repository) return failed(`${task.repo} isn’t registered any more.`);
-    const unfetched = await fetchBase(git, repository);
-    if (unfetched) return failed(unfetched);
-    try {
-      const { token } = await appToken(task.repo, PUSH);
-      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch });
-      if ('workflowFiles' in pushed) {
-        return failed(`${branch} changes workflow files (${pushed.workflowFiles.join(', ')}), which the factory’s App may not push: push it by hand (\`git push origin ${branch}\`).`);
-      }
-      // A task branch is never a research branch.
-      if ('outsideResearch' in pushed) return failed(`${branch} isn’t a task branch.`);
-      return { type: 'iterationPushed', taskId: task.id, ticket };
-    } catch (error) {
-      if (!isGitHubFailure(error)) throw error;
-      return failed(error.message);
-    }
-  }
-
-  // Closes the ticket the last iteration did as completed, as the App, with
-  // a token minted for this write alone (ADR 0004), and a comment saying
-  // where its work is.
-  async function closeTicket(task: Task): Promise<LoopEvent> {
-    const { ticket, commits } = task.loop! as { ticket: string; commits: string[] };
-    try {
-      const { token } = await appToken(task.repo, TICKET_WRITE);
-      await github.closeIssue(token, ticket, closingComment(task, commits));
-      return { type: 'ticketClosed', taskId: task.id, ticket, commits };
-    } catch (error) {
-      if (!isGitHubFailure(error)) throw error;
-      return { type: 'ticketUnclosed', taskId: task.id, ticket, reason: error.message };
-    }
   }
 
   // A token of the App's installation on the repository, with `permissions` alone.
@@ -2725,19 +2605,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       : { ...event, reason: `${event.reason} It also ${breach}` };
   }
 
-  // A Ralph loop iteration's completion, with the commits on the task branch
-  // since its iteration began, by which the Lifecycle judges it (ADR 0006).
+  // A child's run completion, with the commits on its branch since it was
+  // cut, for its report (ADR 0009).
   async function withCommits(event: Extract<RunEvent, { type: 'runCompleted' }>, worktree: string): Promise<RunEvent> {
     const run = lifecycle.runs[event.runId];
     const task = run && lifecycle.tasks[run.taskId];
-    // A child's are those on its branch since it was cut, for its report.
-    const base = run?.ticket ? task!.loop?.base : task?.child?.base;
+    const base = task?.child?.base;
     if (!base) return event;
     try {
       return { ...event, commits: await git.commitsSince(worktree, base) };
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
-      return { type: 'runFailed', runId: event.runId, reason: `The factory couldn't read the iteration's commits: ${error.message}` };
+      return { type: 'runFailed', runId: event.runId, reason: `The factory couldn't read the child's commits: ${error.message}` };
     }
   }
 
@@ -3029,16 +2908,6 @@ function verdictOf(answer: PermissionAnswer): Verdict {
   return 'deny' in answer ? { allow: false, message: `The operator denied this: ${answer.deny.trim()}` } : { allow: true };
 }
 
-// What closing a ticket says on it (ADR 0006): its work is on the task
-// branch, not yet on the base branch, and at L1 only on the operator's machine.
-function closingComment(task: Task, commits: string[]): string {
-  const where = task.autonomy === 'L2' ? '' : ' Its commits are local to the operator’s machine until the task’s PR.';
-  return (
-    `Done on the task branch \`${task.worktree!.branch}\` by the agents factory’s task ${task.id} (${task.title}), ` +
-    `in ${commits.map((commit) => commit.slice(0, 7)).join(', ')}.${where}`
-  );
-}
-
 // The id of the intent launching the spec task's ticket task on `ticket`.
 function launchId(specTaskId: string, ticket: string): string {
   return `launch:${specTaskId}:${ticket}`;
@@ -3086,15 +2955,6 @@ function researchComment(task: Task): string {
     ? `The findings are on \`${report.branch}\`: https://github.com/${task.repo}/tree/${report.branch}. It is never merged.`
     : 'It committed no findings.';
   return [`Researched by the agents factory’s task ${task.id} (${task.title}). ${where}`, report.summary, ...(report.notes ? [report.notes] : [])].join('\n\n');
-}
-
-// What reopening a cancelled task's ticket says on it (ADR 0006): the work
-// that closed it never made it off the task branch.
-function reopeningComment(task: Task): string {
-  return (
-    `Reopened: the agents factory’s task ${task.id} (${task.title}) was cancelled, so its work on the task branch ` +
-    `\`${task.worktree!.branch}\` wasn’t merged.`
-  );
 }
 
 // The repository's PR `number`, as `owner/name#n`.

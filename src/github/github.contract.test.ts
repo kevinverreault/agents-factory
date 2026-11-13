@@ -125,6 +125,9 @@ if (!repo) {
       installedRepo: repo,
       uninstalledRepo: 'octocat/Hello-World',
       openIssue: `${repo}#${issue}`,
+      async reopenByHand(ref) {
+        await execFileAsync('gh', ['issue', 'reopen', ref.split('#')[1]!, '--repo', repo]);
+      },
       now: () => Date.now(),
       clone,
       baseBranch,

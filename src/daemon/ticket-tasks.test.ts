@@ -97,7 +97,7 @@ describe('launching implement on one issue ref with no sub-issues', () => {
     const [first] = factory.executor.started;
     expect(first).toMatchObject({ runId: 'R1', mode: 'AFK' });
     expect(first!.firstMessage).toBe(`/factory:implement ${TICKET}`);
-    expect(running.runs.R1).toMatchObject({ stage: 'implement', ticket: null });
+    expect(running.runs.R1).toMatchObject({ stage: 'implement', ticket: TICKET });
   });
 });
 
@@ -111,7 +111,7 @@ describe('the ticket task’s stages', () => {
     factory.executor.report('R1', { type: 'runCompleted' });
 
     const reviewing = await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
-    expect(reviewing.tasks.T1).toMatchObject({ stage: 'review', loop: null, closedTickets: [] });
+    expect(reviewing.tasks.T1).toMatchObject({ stage: 'review', loop: null });
     expect(factory.executor.started[1]!.firstMessage).toMatch(/^\/factory:code-review/);
     expect(reviewing.attentionQueue).toEqual([]);
     expect(factory.github.writes).toEqual([]);

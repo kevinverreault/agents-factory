@@ -4,13 +4,13 @@
 // ADR 0003 (`interrupted`) and ADR 0008 (no usage-window stop, no budget).
 // A launched task freezes its workflow preset, starts at one of its stages,
 // advances across HITL boundaries on the operator's confirm and across AFK
-// ones on its own, and works a loop stage's tickets one iteration at a time
-// (ADR 0006); child tasks arrive with their own slice.
+// ones on its own, and works a map's tickets with the operator at a work
+// loop (ADR 0012); child tasks arrive with their own slice.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
 import type { Issue, Mergeability, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
-import { artifactKindsIn, fillOpening, isWorkLoop, launchesTickets, namesPrompt, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
+import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, launchesTickets, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { cutToFit, oneLineOf } from '../text/lines.ts';
 import {
@@ -158,26 +158,17 @@ export type ContextUse = { used: number; window: number };
 // A root task's task branch and the worktree it is checked out in (ADR 0010).
 export type TaskWorktree = { branch: string; path: string };
 
-// A task's Ralph loop at its loop stage (ADR 0006).
+// A HITL task's work loop over a map at its loop stage (wayfinder, ADR 0012).
 export type Loop = {
-  // What the factory does before the next iteration: read the ticket set and
-  // pick a ticket, or close the ticket the last iteration did, at L2 once it
-  // pushed the task branch with that iteration's commits. Null while an
-  // iteration works on `ticket`.
-  step: 'pick' | 'push' | 'close' | null;
+  // `pick` while the factory reads the map, null otherwise.
+  step: 'pick' | null;
+  // The ticket of the map the operator works now, if any.
   ticket: string | null;
-  // The task branch's tip when the iteration on `ticket` began, and the
-  // commits it made since, once it succeeded.
-  base: string | null;
-  commits: string[];
-  // True once the operator chose to finish after this ticket: the loop ends
-  // at its next pick. Loops stored before it carry on.
-  finishing?: boolean;
-  // A HITL work loop over a map (wayfinder, ADR 0012) waits on the operator between
-  // its tickets: `frontier` is what the map offered when last read (its open
-  // tickets with no open blockers, in sub-issue order), for them to pick
-  // from, with the session the picked ticket starts; `cleared` is true once
-  // the map had no open tickets, for them to choose where the task goes.
+  // Between its tickets the loop waits on the operator: `frontier` is what
+  // the map offered when last read (its open tickets with no open blockers,
+  // in sub-issue order), for them to pick from, with the session the picked
+  // ticket starts; `cleared` is true once the map had no open tickets, for
+  // them to choose where the task goes.
   frontier?: FrontierTicket[] | null;
   session?: string | null;
   cleared?: boolean;
@@ -198,9 +189,6 @@ export type RemoteCleanup = { branch: string; prToClose: number | null };
 // else: Keep branch (the default) or Discard work.
 export type BranchChoice = 'keep' | 'discard';
 export const BRANCH_CHOICES: readonly BranchChoice[] = ['keep', 'discard'];
-
-// A ticket the task closed, with the commits that did its work.
-export type ClosedTicket = { ref: string; commits: string[] };
 
 // What a child task hands its parent when it ends (ADR 0009): the agent's
 // summary, status and notes through `report_result` (else its final result
@@ -245,12 +233,6 @@ export type Child = {
 // done. `problem` is why the step last failed, until the operator answers.
 // `refusalNoted` is true once its parent heard its push was refused.
 export type Research = { ticket: string; step: 'push' | 'close' | null; problem: string | null; refusalNoted?: boolean };
-
-// The tickets a cancelled task closed that the factory hasn't reopened yet
-// (ADR 0006), and why it last failed to, if it did. They are tried again
-// once the operator answers the request the failure raised, or the daemon
-// next starts.
-export type Reopening = { tickets: string[]; problem: string | null };
 
 // A root's Push & open draft PR while it hasn't finished (ADR 0007): the
 // step the factory is on, pushing the task branch or opening its draft PR
@@ -316,8 +298,7 @@ export type TicketSet = {
 export type SpecEnd = 'spec-open' | 'close-spec';
 export const SPEC_ENDS: readonly SpecEnd[] = ['spec-open', 'close-spec'];
 
-// The label of the tickets a Ralph loop works, and of those a spec task
-// launches AFK ticket tasks on.
+// The label of the tickets a spec task launches AFK ticket tasks on.
 export const READY_FOR_AGENT = 'ready-for-agent';
 // The label of the tickets a spec task launches HITL ticket tasks on.
 export const READY_FOR_HUMAN = 'ready-for-human';
@@ -449,20 +430,13 @@ export type Task = {
   context?: ContextUse | null;
   // The handoff brief it was handed off with, if any.
   brief?: string | null;
-  // Its Ralph loop while it is at a loop stage with a ticket set.
+  // Its work loop while it is at a HITL loop stage over a map.
   loop?: Loop | null;
-  // The tickets it closed: those ADR 0006's cancel cascade is to reopen.
-  closedTickets?: ClosedTicket[];
-  // The tickets the operator skipped on a failed iteration: its loop picks
-  // none of them again, and they stay open.
-  skippedTickets?: string[];
-  // Once it is cancelled, while the tickets it closed aren't all reopened.
-  reopening?: Reopening | null;
   // Its review's findings, once a `fix-once` review stage's run reported
   // some. They live on the task, so a run parked meanwhile loses none.
   findings?: Findings | null;
   // The PR body, once its `artifact:pr-body` stage wrote it: the agent's
-  // text with what the factory adds (ADR 0006).
+  // text with what the factory adds.
   prBody?: string | null;
   // The PR title its `artifact:pr-body` stage wrote with the body, if any:
   // without one, the PR takes the task's title.
@@ -484,8 +458,8 @@ export type Task = {
   // True once the factory pushed the task branch, until a run starts and may
   // commit to it again: the PR has all its work, so there is nothing to push.
   pushed?: boolean;
-  // True once the factory pushed the task branch to GitHub at all, as an L2
-  // loop does before it has a PR: its cleanup deletes the branch there.
+  // True once the factory pushed the task branch to GitHub at all: its
+  // cleanup deletes the branch there.
   branchOnGitHub?: boolean;
   // While its cleanup (ADR 0011), once it ended Done or Cancelled, hasn't
   // finished. It is tried again when the daemon next starts.
@@ -521,8 +495,8 @@ export type Run = {
   permission?: Permission | null;
   // The stage of its task's preset the run works on, if the task has one.
   stage: string | null;
-  // The ticket it works on, as a Ralph loop's iteration. Runs stored before
-  // loops have none.
+  // The ticket it works on, as a ticket task's run (ADR 0013). Runs stored
+  // before ticket tasks have none.
   ticket?: string | null;
   // The message the run starts with, or null to wait for the operator's.
   opening: string | null;
@@ -632,9 +606,8 @@ export type Intent =
   // launched (ADR 0013).
   | { id: string; verb: 'launch'; taskId: string; launch: Omit<TicketTaskLaunched, 'intent'> };
 // The verbs a recovery report says it replayed: the journaled ones, and a
-// cancelled task's reopening of its tickets and a cleanup, which the task
-// itself holds while they are under way (ADR 0011).
-export type IntentVerb = Intent['verb'] | 'cancel' | 'cleanup';
+// cleanup, which the task itself holds while it is under way (ADR 0011).
+export type IntentVerb = Intent['verb'] | 'cleanup';
 // What recovery did with an intent: finished it, rolled it back, or
 // resumed it, to finish once its steps on GitHub or Docker are through.
 export type ReplayedIntent = { taskId: string; verb: IntentVerb; outcome: 'finished' | 'rolled back' | 'resumed' };
@@ -726,18 +699,14 @@ export type OperatorCommand =
   // goes on as long as the operator likes, and opens no handoff sheet itself.
   | { type: 'expandQuickLaunch'; taskId: string }
   | { type: 'takeOver'; taskId: string }
-  // Finish after this ticket: the task's Ralph loop ends once its live
-  // iteration, if any, is judged and its ticket closed.
-  | { type: 'finishLoop'; taskId: string }
   // Answers the task's open attention request: a question's with `answers`,
-  // a permission request's with `permission`. A failed iteration's is
-  // retried, unless `skip` moves its loop on past its ticket. A failed L2
+  // a permission request's with `permission`. A failed L2
   // run's is retried with `allowHosts`, hosts it was denied, allowed for the
   // task from now on (ADR 0007). A spec task that can launch no more
   // tickets but its skipped ones (ADR 0013) takes `relaunch`, one of them to
   // launch a new ticket task on, or `end`: Done, leaving its spec open or
   // closing it anyway.
-  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; skip?: boolean; allowHosts?: string[]; relaunch?: string; end?: SpecEnd }
+  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; allowHosts?: string[]; relaunch?: string; end?: SpecEnd }
   // Resumes the root's session on the operator's review comments.
   | { type: 'requestChanges'; taskId: string; comments: string }
   // Publishes an L1 root in review as the factory's App, without raising its
@@ -770,8 +739,6 @@ export type OperatorCommand =
 // What the executor reports about a run.
 export type RunEvent =
   // The daemon names a session, for a next AFK stage whose context is fresh.
-  // A Ralph loop iteration's run carries the commits on the task branch
-  // since its iteration began.
   // A child task's run carries the commits on its branch since it was cut,
   // and the agent's final result text, its report's summary if it reported none.
   // An L2 run's end carries the hosts its container's egress proxy denied it.
@@ -989,30 +956,12 @@ export type ClockEvent = { type: 'deadlinesDue' };
 // `found` the leftovers an unclean start found.
 export type Reconciled = { type: 'runsReconciled'; interruption: Interruption; replayed?: ReplayedIntent[]; found?: Found };
 
-// What the daemon did on GitHub between a Ralph loop's iterations (ADR 0006),
-// and between a work loop's tickets (ADR 0012).
+// What the daemon read on GitHub between a work loop's tickets (ADR 0012):
+// its map's tickets, in sub-issue order, naming a session for the ticket
+// the operator picks next, or why it couldn't read them.
 export type LoopEvent =
-  // It read the ticket set, in order, with the task branch's tip, and names
-  // a session for the iteration it may start, or for a fresh next stage.
-  | { type: 'ticketsRead'; taskId: string; tickets: Issue[]; base: string; sessionId: string }
-  // It read a work loop's map: its tickets, in sub-issue order, and names
-  // a session for the ticket the operator picks next. A map it couldn't
-  // read is `ticketsUnread`, like a ticket set.
   | { type: 'mapRead'; taskId: string; tickets: Issue[]; sessionId: string }
-  | { type: 'ticketsUnread'; taskId: string; reason: string }
-  // At L2 it pushed the task branch with the commits the iteration on
-  // `ticket` made, or couldn't, saying why (ADR 0007).
-  | { type: 'iterationPushed'; taskId: string; ticket: string }
-  | { type: 'iterationUnpushed'; taskId: string; ticket: string; reason: string }
-  // It closed the ticket an iteration did with its commits, or couldn't.
-  | { type: 'ticketClosed'; taskId: string; ticket: string; commits: string[] }
-  | { type: 'ticketUnclosed'; taskId: string; ticket: string; reason: string };
-
-// What the daemon did on GitHub for a cancelled task's cancel cascade: it
-// reopened a ticket the task closed, or couldn't.
-export type ReopenEvent =
-  | { type: 'ticketReopened'; taskId: string; ticket: string }
-  | { type: 'ticketUnreopened'; taskId: string; ticket: string; reason: string };
+  | { type: 'ticketsUnread'; taskId: string; reason: string };
 
 // What the daemon did on GitHub for a root's Push & open draft PR: it pushed
 // the task branch's tip `commit`, found it changes workflow files it may
@@ -1069,7 +1018,6 @@ export type LifecycleAction =
   | ClockEvent
   | Reconciled
   | LoopEvent
-  | ReopenEvent
   | PublishEvent
   | PrReadEvent
   | NoteEvent
@@ -1180,7 +1128,7 @@ export function waitsOnPr(task: Task): boolean {
 }
 
 // The root's task branch, if the factory pushed it to GitHub: it has its
-// PR, its Push & open draft PR got past the push, or its L2 loop pushed it.
+// PR, or its Push & open draft PR got past the push.
 export function pushedBranch(task: Task): string | null {
   return task.worktree && (task.pr || task.publishing?.step === 'open-pr' || task.branchOnGitHub) ? task.worktree.branch : null;
 }
@@ -1233,23 +1181,11 @@ export function inRepo(task: Task, ref: string): boolean {
   return ref.toLowerCase().startsWith(`${task.repo.toLowerCase()}#`);
 }
 
-// The issues a Ralph loop reads its ticket set from (ADR 0006): the task's
-// specs, whose sub-issues are its tickets and which never are one, else its
-// tickets, each standing for its sub-issues if it has any. Null when the
-// task has no ticket set, as after an early handoff that skipped the stages
-// making them. At a work loop (exit `map-cleared`), its maps, whose
-// sub-issues are its tickets and which never are one.
-export type TicketSources = { kind: 'spec' | 'tickets' | 'map'; refs: string[] };
-
-export function ticketSources(state: Lifecycle, task: Task): TicketSources | null {
-  if (isWorkLoop(stageOf(task, task.stage))) {
-    const maps = issuesFor(state, task, 'map');
-    return maps.length ? { kind: 'map', refs: maps } : null;
-  }
-  const specs = issuesFor(state, task, 'spec');
-  if (specs.length) return { kind: 'spec', refs: specs };
-  const tickets = issuesFor(state, task, 'tickets');
-  return tickets.length ? { kind: 'tickets', refs: tickets } : null;
+// The maps a work loop (ADR 0012) reads its tickets from: their
+// sub-issues, a map never being a ticket itself. None when the task has no
+// map, and its loop stage is one conversation.
+export function workLoopMaps(state: Lifecycle, task: Task): string[] {
+  return issuesFor(state, task, 'map');
 }
 
 // Every session the task's runs worked in, in order.
@@ -1263,15 +1199,8 @@ function lastRun(state: Lifecycle, task: Task): Run | undefined {
   return state.runs[task.runIds.at(-1)!];
 }
 
-// An AFK task between its loop's iterations, holding its slot while the
-// factory reads or closes tickets.
-export function betweenIterations(state: Lifecycle, task: Task): boolean {
-  return task.mode === 'AFK' && task.state === 'running' && !!task.loop?.step && !liveRun(state, task);
-}
-
 // A HITL task at its work loop while the factory reads its map, before
 // the operator is offered the frontier: it holds no slot.
-// (A Ralph loop taken over keeps its loop while HITL, and reads nothing.)
 export function readingMap(state: Lifecycle, task: Task): boolean {
   return awaitsMapRead(task) && task.state === 'queued' && !liveRun(state, task);
 }
@@ -1294,10 +1223,9 @@ function picksFromFrontier(task: Task): boolean {
 
 // A work loop's states between the factory's reads of its map (`picking()`
 // is the read itself): offering the frontier, with the session the picked
-// ticket starts; cleared; or working one ticket. A work loop has no task
-// branch base or commits to judge.
+// ticket starts; cleared; or working one ticket.
 function workLoop(state: Pick<Loop, 'ticket' | 'frontier' | 'session' | 'cleared'>): Loop {
-  return { step: null, base: null, commits: [], ...state };
+  return { step: null, ...state };
 }
 
 // The tier the task's next run starts at: the operator's, then its stage's,
@@ -1405,9 +1333,6 @@ function stageOf(task: Task, id: string | null | undefined): Stage | undefined {
 // `run-completed` holds.
 function unmetExit(state: Lifecycle, task: Task, stage: Stage): string | null {
   if (stage.exit === undefined || stage.exit === 'run-completed') return null;
-  // A loop with no ticket set runs once, and its run completing ends it,
-  // as does a ticket task's one run on its ticket.
-  if (stage.exit === 'tickets-closed' && (task.kind === 'ticket' || !ticketSources(state, task))) return null;
   // A spec task's holds once its spec closes; any other task's one run on
   // the stage ends it, as a ticket task's on its ticket.
   if (stage.exit === 'spec-closed') return task.kind !== 'spec' || task.ticketSet?.closed ? null : `${stage.id}’s exit, spec-closed, doesn’t hold: ${task.ticketSet?.spec ?? 'its spec'} is still open.`;
@@ -1448,35 +1373,50 @@ function enterStage(task: Task, stage: Stage, sessionId: string | undefined, fre
   task.newSession = true;
 }
 
-// Starts the task's Ralph loop at a loop stage, if it has a ticket set: the
-// factory picks the first iteration's ticket once the task has a slot.
-// A HITL work loop starts no run either: the factory reads its map, then
-// offers the operator its frontier in Ready for you.
-// Any other HITL loop stage is one conversation, as before.
+// Starts the task's work loop at a HITL loop stage over a map: it starts
+// no run, the factory reads its map, then offers the operator its frontier
+// in Ready for you. A loop stage with no map is one conversation, as before.
 function enterLoop(state: Lifecycle, task: Task, stage: Stage): boolean {
-  // A ticket task's stage works its one ticket in a single run (ADR 0013).
-  if (task.kind === 'ticket') return false;
-  if (stage.kind !== 'loop' || (task.mode === 'HITL' && !isWorkLoop(stage)) || !ticketSources(state, task)) return false;
+  if (task.mode !== 'HITL' || !isWorkLoop(stage) || workLoopMaps(state, task).length === 0) return false;
   task.loop = picking();
-  if (task.mode === 'HITL') task.state = 'queued';
+  task.state = 'queued';
   return true;
 }
 
-// What a loop does once an iteration succeeded: at L2 it pushes the task
-// branch first, then closes the ticket (ADR 0006, ADR 0007).
-function stepAfterIteration(autonomy: AutonomyLevel | null | undefined): 'push' | 'close' {
-  return autonomy === 'L2' ? 'push' : 'close';
+// A work loop about to read its map.
+function picking(): Loop {
+  return { step: 'pick', ticket: null };
 }
 
-// Whether the loop still owes the ticket its last iteration did: pushing
-// the task branch with its commits, or closing it.
-function owesTicket(loop: Loop): boolean {
-  return loop.step === 'push' || loop.step === 'close';
+// What a task frozen on the retired Ralph loop's stage (ADR 0013) is told.
+function retiredLoopReason(task: Task, stage: Stage): string {
+  return (
+    `This preset’s loop was retired: ${stage.id} works tickets through the Ralph loop (exit tickets-closed), which the factory no longer runs. ` +
+    `Cancel ${task.id}, or relaunch it.`
+  );
 }
 
-// A loop about to pick its next ticket, unless it is `finishing`.
-function picking(finishing = false): Loop {
-  return { step: 'pick', ticket: null, base: null, commits: [], finishing };
+// Why the operator can't carry a task on at the retired Ralph loop's stage.
+function retiredLoopRefusal(task: Task): string {
+  return `${task.id}’s preset loop was retired: cancel ${task.id}, or relaunch it.`;
+}
+
+// Whether the task is at a stage of the retired Ralph loop.
+function atRetiredLoop(task: Task): boolean {
+  return isRetiredLoop(stageOf(task, task.stage));
+}
+
+// The task reached, or a daemon start found it at, the retired Ralph
+// loop's stage: nothing runs there, and the operator is asked to cancel or
+// relaunch it. One already asked is left as it is.
+function blockRetiredLoop(state: Lifecycle, task: Task, at: number): void {
+  task.loop = null;
+  task.resumeWith = null;
+  const reason = retiredLoopReason(task, stageOf(task, task.stage)!);
+  const open = openRequest(state, task);
+  if (open?.kind === 'stage-blocked' && open.reason === reason) return;
+  if (open) open.status = 'superseded';
+  raise(state, task, lastRun(state, task), 'stage-blocked', false, reason, at);
 }
 
 // Moves the task on from the AFK stage whose exit holds: to the next AFK
@@ -1506,11 +1446,15 @@ function advanceFrom(state: Lifecycle, task: Task, from: Stage, run: Run | undef
     task.state = 'running';
     return;
   }
+  if (isRetiredLoop(to)) {
+    enterStage(task, to, sessionId);
+    return blockRetiredLoop(state, task, at);
+  }
   const filled = fillOpening(to, (variable) => argValue(state, task, variable));
   if ('missing' in filled) return blocked(cantFill(task, to, filled.missing));
   // Queued as work continuing something in flight, for the scheduler.
   enterStage(task, to, sessionId);
-  if (!enterLoop(state, task, to)) task.resumeWith = stageOpening(task, to, filled.opening);
+  task.resumeWith = stageOpening(task, to, filled.opening);
   task.state = 'queued';
 }
 
@@ -1540,7 +1484,7 @@ function stageOpening(task: Task, stage: Stage, opening: string): string {
         'with none, don’t call it. Don’t fix them yourself: the factory runs one fix pass on what you report.'
     : reports.includes('pr-body')
       ? 'Write the PR body through the factory’s write_pr_body tool before you end: the factory opens the PR with it. ' +
-        'Leave out the tickets this task closed and the review findings left over: the factory adds those itself.'
+        'Leave out the review findings left over: the factory adds those itself.'
       : null;
   return context ? `${opening}\n\n## Factory context\n${context}` : opening;
 }
@@ -1582,25 +1526,16 @@ function issuePattern(repo: string, ref: string): string {
   return `(${forms.join('|')})(?!\\d)`;
 }
 
-// The PR body from the agent's `body`: its closing keywords on the tickets
-// the task closed turned to `Implements`, so merging doesn't close them
-// again (ADR 0006), then each closed ticket it doesn't say it implements,
-// and the review findings the fix pass left over.
+// The PR body from the agent's `body`: a ticket task's closing keyword on
+// its ticket, unless it has one, and the review findings the fix pass left over.
 function prBody(task: Task, body: string): string {
-  let text = body.trim();
-  const implemented: string[] = [];
-  for (const { ref } of task.closedTickets ?? []) {
-    const any = issuePattern(task.repo, ref);
-    text = text.replace(new RegExp(CLOSING + any, 'gi'), 'Implements $1');
-    if (!new RegExp(String.raw`\bImplements\s+${any}`, 'i').test(text)) implemented.push(`Implements ${citedIssue(task.repo, ref)}`);
-  }
+  const text = body.trim();
   // A ticket task's PR closes its ticket on merging (ADR 0013), whatever the agent wrote.
   const closes = task.kind === 'ticket' && task.ticket && !closesIssue(text, task.repo, task.ticket) ? [`Closes ${citedIssue(task.repo, task.ticket)}`] : [];
   const leftOver = task.findings?.leftOver ?? [];
   return [
     text,
     ...closes,
-    ...(implemented.length ? [`## Tickets\n\n${implemented.join('\n')}`] : []),
     ...(leftOver.length ? [`## Review findings left over\n\n${bulleted(leftOver)}`] : []),
   ].join('\n\n');
 }
@@ -1616,7 +1551,7 @@ function prTitleOf(title: string | undefined): string | null {
 
 // The draft PR the root opens (ADR 0004): its PR title (or its task's
 // title), and its PR body (or, without one, its brief, launch summary or
-// title, with the tickets it closed) above the
+// title) above the
 // factory's footer, which names the task, each stage's models in preset
 // order, and the tokens its whole tree took.
 export function pullRequestOf(state: Lifecycle, task: Task): { title: string; body: string } {
@@ -1853,32 +1788,6 @@ function siblingState(state: Lifecycle, set: TicketSet, issue: Issue): string {
   return issue.openBlockers.length ? `waiting on ${issue.openBlockers.join(', ')}` : 'waiting';
 }
 
-// What a Ralph loop's iteration on `ticket` opens on (ADR 0006): its stage's
-// skill on the ticket alone, and the factory context its fresh session
-// starts from, with the launch prompt as guidance if the stage's args take it.
-// `tickets` is the ticket set as just read.
-function iterationOpening(state: Lifecycle, task: Task, stage: Stage, ticket: string, tickets: Issue[]): string {
-  const specs = issuesFor(state, task, 'spec');
-  const done = task.closedTickets ?? [];
-  // The launch prompt rides along as guidance when the stage's args take it (implement).
-  const guidance = namesPrompt(stage) ? task.inputs?.prompt.trim() : null;
-  const facts = [
-    ...(specs.length ? [`- Spec: ${specs.join(', ')}`] : []),
-    `- Progress: ${tickets.filter(({ open }) => !open).length} of ${tickets.length} tickets closed.`,
-    ...(done.length ? ['- Done by this task:', ...done.map(({ ref, commits }) => `  - ${ref}: ${commits.map(short).join(', ')}`)] : []),
-  ];
-  const context = [
-    '## Factory context',
-    `This run is one iteration of the factory’s Ralph loop on ${task.id}, ${task.title}. Work on ${ticket} alone, commit its work ` +
-      `onto the task branch ${task.worktree?.branch} and leave the tree clean. The factory closes the ticket once it judges ` +
-      'the iteration: don’t close it yourself, and don’t start another ticket.',
-    facts.join('\n'),
-    ...(guidance ? [`## Operator instructions\n${guidance}`] : []),
-    ...(task.brief ? [task.brief] : []),
-  ];
-  return `/factory:${stage.skill} ${ticket}\n\n${context.join('\n\n')}`;
-}
-
 // What the factory read of a work loop's map: with no open ticket left the
 // map has cleared, and the operator chooses where the task goes next;
 // otherwise they are offered its frontier, the open tickets with no open
@@ -1926,7 +1835,7 @@ function nextAfkStage(task: Task, from: Stage): Stage | null {
 // Where the advance sheet's confirm takes the task: past its stage and the
 // optional ones it skips, to the next HITL stage, or past the last stage
 // (null). An AFK stage next is the handoff's to start.
-// At a work loop, confirming finishes the ticket its live iteration works,
+// At a work loop, confirming finishes the ticket its live run works,
 // and the factory reads the map again. Once the map cleared, it leaves the
 // loop: on to the next stage, jumping over it (`skip` names it, optional or
 // not: the stage `jumped`), or, with `end`, to the end.
@@ -2197,12 +2106,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'expandQuickLaunch':
       return task.quick ? null : `${task.id} is no quick launch, or is one no longer.`;
     case 'takeOver':
-      return task.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state)
-        ? cantStartRuns(state, task)
-        : 'Only a live AFK task (queued, running or needing you) can be taken over.';
-    case 'finishLoop':
-      if (isTerminal(task) || task.mode !== 'AFK' || !task.loop) return `${task.id} isn’t working through a Ralph loop.`;
-      return task.loop.finishing ? `${task.id} already finishes after this ticket.` : null;
+      if (!(task.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state))) return 'Only a live AFK task (queued, running or needing you) can be taken over.';
+      return atRetiredLoop(task) ? retiredLoopRefusal(task) : cantStartRuns(state, task);
     case 'answer': {
       const request = showsRequest(task) ? openRequest(state, task) : undefined;
       // A HITL run's card takes only a permission answer.
@@ -2215,7 +2120,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
         return 'This request doesn’t name its call: allow it once or for this task.';
       }
       if (request.kind === 'pr-closed-unmerged') return `${task.id}’s PR was closed without merging: cancel the task, or reopen its PR.`;
-      if (action.skip && !(request.kind === 'failure' && failedIteration(task))) return 'Only a failed iteration’s ticket can be skipped.';
+      if (request.kind === 'stage-blocked' && atRetiredLoop(task)) return retiredLoopRefusal(task);
       const skippedRefusal = skippedAnswerRefusal(task, request, action);
       if (skippedRefusal !== undefined) return skippedRefusal;
       if (action.allowHosts !== undefined) {
@@ -2352,27 +2257,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return state.intents[action.intentId] ? null : `There is no intent ${action.intentId}.`;
     case 'mapRead':
       return readingMap(state, task) ? null : `${task.id} isn’t reading a map.`;
-    case 'ticketsRead':
-      if (!betweenIterations(state, task) || task.loop!.step !== 'pick') return `${task.id} isn’t picking a ticket.`;
-      // Refused while the clone is missing: the pick runs again once it is found.
-      return cantStartRuns(state, task);
     case 'ticketsUnread':
-      return readingMap(state, task) || (betweenIterations(state, task) && task.loop!.step === 'pick') ? null : `${task.id} isn’t picking a ticket.`;
-    case 'iterationPushed':
-    case 'iterationUnpushed':
-      return betweenIterations(state, task) && task.loop!.step === 'push' && task.loop!.ticket === action.ticket
-        ? null
-        : `${task.id} isn’t pushing the iteration on ${action.ticket}.`;
-    case 'ticketUnclosed':
-      return betweenIterations(state, task) && task.loop!.step === 'close' && task.loop!.ticket === action.ticket
-        ? null
-        : `${task.id} isn’t closing ${action.ticket}.`;
-    case 'ticketClosed':
-      // A ticket closed is the task's however it stands now, even cancelled.
-      return null;
-    case 'ticketReopened':
-    case 'ticketUnreopened':
-      return task.reopening?.tickets.includes(action.ticket) ? null : `${task.id} isn’t reopening ${action.ticket}.`;
+      return readingMap(state, task) ? null : `${task.id} isn’t reading a map.`;
     case 'branchPushed':
     case 'pushRefused':
       return task.publishing?.step === 'push' ? null : `${task.id} isn’t pushing its task branch.`;
@@ -2732,19 +2618,10 @@ function cancelSubtree(state: Lifecycle, task: Task, keepBranch: boolean, at: nu
       closeReport(cancelled, { summary: 'Cancelled before it finished.', status: 'cancelled', commits: [], outcome: 'cancelled' }, { forced: true });
       noteParent(state, cancelled);
     }
-    // The daemon reopens the tickets it closed: their work wasn't merged (ADR 0006).
-    const closed = cancelled.closedTickets ?? [];
-    if (closed.length) cancelled.reopening = { tickets: closed.map(({ ref }) => ref), problem: null };
     // The daemon archives its transcripts, then removes its worktree and
     // branch, unless the operator kept it.
     if (cancelled.worktree) cancelled.cleanup = { problem: null, keepBranch: cancelled === task && keepBranch, remote };
   }
-}
-
-// Whether the task's loop stopped on an iteration: its ticket is the one a
-// failure request is about.
-function failedIteration(task: Task): boolean {
-  return !!task.loop?.ticket && task.loop.step === null;
 }
 
 // Allow once, for the task or always, or deny with a note that isn't blank.
@@ -2959,7 +2836,7 @@ function startRun(
     queued: [],
     question: null,
     stage: task.stage ?? null,
-    ticket: task.mode === 'AFK' ? (task.loop?.ticket ?? null) : null,
+    ticket: task.kind === 'ticket' ? (task.ticket ?? null) : null,
     opening,
     reports: reported.map((child) => child.id),
     proposal: null,
@@ -3067,6 +2944,11 @@ function reconcile(state: Lifecycle, interruption: Interruption, replayed: Repla
       park(state, task, run, at);
       recovery.parked.push(ref);
     }
+  }
+  // A task the daemon before left on the retired Ralph loop's stage asks
+  // the operator to cancel or relaunch it (ADR 0013): nothing is migrated.
+  for (const task of Object.values(state.tasks)) {
+    if (!isTerminal(task) && task.state !== 'draft' && task.state !== 'in-review' && atRetiredLoop(task)) blockRetiredLoop(state, task, at);
   }
   const { found: anyFound, ...runsAndIntents } = recovery;
   if (interruption === 'unclean' && (anyFound || Object.values(runsAndIntents).some((listed) => listed.length))) reportRecovery(state, recovery, at);
@@ -3301,15 +3183,13 @@ function schedule(state: Lifecycle, at: number): void {
   for (const task of queued) {
     if (!admits(state)) return;
     if (cantStartRuns(state, task)) continue;
-    // A loop takes its slot for the factory's step before its next iteration.
-    if (task.loop?.step) task.state = 'running';
-    else startRun(state, task, at);
+    startRun(state, task, at);
   }
 }
 
-// The slots taken: by active AFK runs, and by loops between iterations.
+// The slots taken: by active AFK runs.
 export function heldSlots(state: Lifecycle): number {
-  return activeAfkRuns(state) + Object.values(state.tasks).filter((task) => betweenIterations(state, task)).length;
+  return activeAfkRuns(state);
 }
 
 // The one admission check: whether another AFK run may start now. v1 checks
@@ -3389,7 +3269,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         quick: action.quick ? { questions: 0, done: false } : null,
       };
       state.tasks[launched.id] = launched;
-      // A loop starts from its tickets (a HITL one from its map's frontier).
+      // A work loop starts from its map's frontier.
       if (!enterLoop(state, launched, stageOf(launched, action.stage)!) && mode === 'HITL') startRun(state, launched, at);
       break;
     }
@@ -3496,19 +3376,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         task.state = 'running';
         break;
       }
-      // A loop taken over before it closed its last ticket closes it first,
-      // pushing the task branch before at L2, and one finishing ends at its next pick.
-      const kept = to?.id === task.stage ? task.loop : null;
-      const owed = kept && owesTicket(kept) ? { ...kept, step: stepAfterIteration(action.autonomy) } : null;
       if (to) task.stage = to.id;
-      // A loop with a ticket set starts from its tickets; one without runs
-      // once from the brief.
       task.loop = null;
-      const loops = !!to && enterLoop(state, task, to);
-      if (loops && owed) task.loop = owed;
-      else if (loops && kept?.finishing) task.loop = picking(true);
       const opening = to && fillOpening(to, (variable) => argValue(state, task, variable) ?? '');
-      if (!loops) task.resumeWith = opening && 'opening' in opening && opening.opening ? `${stageOpening(task, to, opening.opening)}\n\n${task.goal}` : task.goal;
+      task.resumeWith = opening && 'opening' in opening && opening.opening ? `${stageOpening(task, to, opening.opening)}\n\n${task.goal}` : task.goal;
       if (action.continueAs === 'fresh') {
         task.sessionId = action.sessionId;
         task.newSession = true;
@@ -3517,6 +3388,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       commitArtifacts(state, task, action.committed);
       // Queued as work continuing something in flight, for the scheduler.
       task.state = 'queued';
+      // Handed off to the retired Ralph loop's stage, it asks the operator instead.
+      if (atRetiredLoop(task)) blockRetiredLoop(state, task, at);
       break;
     }
     case 'closeHandoff':
@@ -3538,10 +3411,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (atActionStage(task)) task.publishing = null;
       task.mode = 'HITL';
       task.autonomy = null;
-      // The operator works the ticket now: handing back off picks afresh. A
-      // ticket the loop did but hasn't pushed or closed yet still closes on
-      // hand-back, and a finishing loop still ends there.
-      if (!(task.loop && owesTicket(task.loop))) task.loop = task.loop?.finishing ? picking(true) : null;
+      task.loop = null;
       // What an AFK run was to open on is the operator's to say now.
       task.resumeWith = null;
       // A fresh session no run has started yet gives way to the one the
@@ -3553,17 +3423,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       }
       startRun(state, task, at);
       break;
-    case 'finishLoop':
-      task.loop!.finishing = true;
-      break;
     case 'answer':
       if (answerCard(state, task, action.permission)) break;
       request!.status = 'answered';
-      // The daemon tries the tickets left to reopen again; the task stays Cancelled.
-      if (task.state === 'cancelled') {
-        if (task.reopening) task.reopening.problem = null;
-        break;
-      }
+      if (task.state === 'cancelled') break;
       // The daemon tries the failed step of a research child's publishing again; the child stays Done.
       if (task.state === 'done') {
         if (task.child?.research) task.child.research.problem = null;
@@ -3612,15 +3475,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         }
         // An AFK stage that couldn't move on carries on, told why and how
         // its stage reports through the factory's tools.
-        if (request!.kind === 'stage-blocked' && task.mode === 'AFK' && !task.loop?.step) {
+        if (request!.kind === 'stage-blocked' && task.mode === 'AFK') {
           const opening = `The factory couldn’t move this task on: ${request!.reason}\n\n${AFK_RESUME}`;
           const stage = stageOf(task, task.stage);
           task.resumeWith = stage ? stageOpening(task, stage, opening) : opening;
-        }
-        // Skipped, the ticket stays open and the loop picks past it.
-        if (action.skip) {
-          (task.skippedTickets ??= []).push(task.loop!.ticket!);
-          task.loop = picking(task.loop!.finishing);
         }
         // A retried run waits for the awaited children still open, as
         // the run that failed would have, and opens on their reports.
@@ -3932,7 +3790,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.loop = null;
       // A stage jumped to starts fresh when the one jumped over would have.
       enterStage(task, to, action.sessionId, jumped?.context === 'fresh');
-      if (!enterLoop(state, task, to)) startRun(state, task, at, { opening: filled.opening });
+      if (isRetiredLoop(to)) blockRetiredLoop(state, task, at);
+      else if (!enterLoop(state, task, to)) startRun(state, task, at, { opening: filled.opening });
       break;
     }
     case 'turnEnded':
@@ -3952,7 +3811,6 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       logDenials(run!, action.deniedHosts);
       // Whatever the agent said, a run that ends with awaited children it
       // hasn't had the reports of waits on them, holding no slot (ADR 0009).
-      // A loop's iteration keeps its ticket, which its next run resumes.
       handReports(state, run!);
       if (awaitedChildren(state, task).length) {
         endRun(run!, 'waiting on children', at);
@@ -3970,18 +3828,6 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const from = stageOf(task, run!.stage);
       if (from?.mode !== 'AFK' || task.changesRequested || task.conflicted) {
         reachReview(task);
-        break;
-      }
-      if (run!.ticket) {
-        // The factory judges the iteration (ADR 0006): its run completed and
-        // committed, on a tree its git guards found clean. Its ticket closes
-        // next, the task holding its slot: at L2 once the factory pushed the
-        // task branch with its commits (ADR 0007).
-        if (action.commits?.length) task.loop = { ...task.loop!, step: stepAfterIteration(task.autonomy), commits: [...action.commits] };
-        else {
-          const why = `The iteration on ${run!.ticket} made no new commit on ${task.worktree?.branch}, so the ticket stays open.`;
-          raise(state, task, run, 'failure', false, withDenials(why, run!.deniedHosts), at, { deniedHosts: run!.deniedHosts });
-        }
         break;
       }
       if (task.findings?.found.length && !task.findings.fixPass && stageReports(from).includes('findings')) {
@@ -4167,80 +4013,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'dismiss':
       state.requests[action.requestId]!.status = 'closed';
       break;
-    case 'ticketsRead': {
-      const stage = stageOf(task, task.stage)!;
-      const last = lastRun(state, task);
-      // Finishing after its last ticket, the loop ends early: the stage moves on.
-      if (task.loop!.finishing) {
-        advanceFrom(state, task, stage, last, action.sessionId, at);
-        break;
-      }
-      const tickets = action.tickets.filter(({ labels }) => labels.includes(READY_FOR_AGENT));
-      const open = tickets.filter((ticket) => ticket.open && !task.skippedTickets?.includes(ticket.ref));
-      if (open.length === 0) {
-        // Every ticket is closed, or skipped: tickets-closed holds.
-        if (tickets.length || task.closedTickets?.length) advanceFrom(state, task, stage, last, action.sessionId, at);
-        else raise(state, task, last, 'stage-blocked', false, `${stage.id} has no tickets: ${ticketSources(state, task)!.refs.join(', ')} hold no open issue labelled ${READY_FOR_AGENT}.`, at);
-        break;
-      }
-      // The frontier: the open tickets with no open blockers, first in sub-issue order.
-      const next = open.find((ticket) => ticket.openBlockers.length === 0);
-      if (!next) {
-        const blocked = open.map(({ ref, openBlockers }) => `${ref} by ${openBlockers.join(', ')}`).join('; ');
-        raise(state, task, last, 'stage-blocked', false, `${stage.id}’s loop stalled: every open ticket is blocked (${blocked}).`, at);
-        break;
-      }
-      // Each iteration is a fresh session.
-      task.loop = { step: null, ticket: next.ref, base: action.base, commits: [] };
-      task.sessionId = action.sessionId;
-      task.newSession = true;
-      task.context = null;
-      startRun(state, task, at, { opening: iterationOpening(state, task, stage, next.ref, tickets) });
-      break;
-    }
     case 'mapRead':
       readMap(state, task, action, at);
       break;
     case 'ticketsUnread':
       raise(state, task, lastRun(state, task), 'failure', false, `The factory couldn’t read ${task.id}’s tickets from GitHub: ${action.reason}`, at);
       break;
-    case 'iterationPushed':
-      task.loop!.step = 'close';
-      task.branchOnGitHub = true;
-      break;
-    case 'iterationUnpushed':
-      // Retried once the operator answers, and never as the operator (ADR 0004).
-      raise(
-        state,
-        task,
-        lastRun(state, task),
-        'github-write',
-        false,
-        `The factory couldn’t push ${task.worktree!.branch} for ${action.ticket} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`,
-        at,
-      );
-      break;
-    case 'ticketClosed':
-      (task.closedTickets ??= []).push({ ref: action.ticket, commits: [...action.commits] });
-      if (task.loop?.step === 'close' && task.loop.ticket === action.ticket) task.loop = picking(task.loop.finishing);
-      // Closed after its task was cancelled, it is reopened like the others.
-      if (task.state === 'cancelled') (task.reopening ??= { tickets: [], problem: null }).tickets.push(action.ticket);
-      break;
-    case 'ticketReopened': {
-      const tickets = task.reopening!.tickets.filter((ticket) => ticket !== action.ticket);
-      task.reopening = tickets.length ? { ...task.reopening!, tickets } : null;
-      // Every ticket reopened, nothing is left for the operator to answer.
-      if (!task.reopening && request) request.status = 'closed';
-      break;
-    }
-    case 'ticketUnreopened': {
-      // Tried again once the operator answers, or the daemon next starts,
-      // and never as the operator (ADR 0004). The task stays Cancelled.
-      const problem = `The factory couldn’t reopen ${action.ticket} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`;
-      task.reopening!.problem = problem;
-      if (!request) addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
-      break;
-    }
     case 'pushAndOpenPr':
       task.publishing = { step: 'push', problem: null };
       break;
@@ -4271,18 +4049,6 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       failPublishing(state, task, request, `The factory couldn’t ${what} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`, at);
       break;
     }
-    case 'ticketUnclosed':
-      // Retried once the operator answers, and never as the operator (ADR 0004).
-      raise(
-        state,
-        task,
-        lastRun(state, task),
-        'github-write',
-        false,
-        `The factory couldn’t close ${action.ticket} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`,
-        at,
-      );
-      break;
   }
 }
 
