@@ -10,7 +10,7 @@ import {
   liveRun,
   depthOf,
   nextTier,
-  ticketMode,
+  heldBack,
   readyForYou,
   treeRollup,
   type ChildReport,
@@ -375,7 +375,7 @@ function ticketSetView(lifecycle: Lifecycle, { spec, tickets, issues, toLaunch, 
     if (taskId) return { ref, title, state: 'launched', taskId };
     if (toLaunch.includes(ref)) return { ref, title, state: 'launching' };
     // A ticket labelled for neither an agent nor the operator never launches, blocked or not.
-    if (issue && !ticketMode(issue)) return { ref, title, state: 'held-back' };
+    if (issue && heldBack(issue)) return { ref, title, state: 'held-back' };
     if (!issue || issue.openBlockers.length) return { ref, title, state: 'waiting', blockers: [...(issue?.openBlockers ?? [])] };
     return { ref, title, state: 'held-back' };
   };

@@ -317,6 +317,18 @@ export function ticketMode({ labels }: Pick<Issue, 'labels'>): Mode | null {
   return labels.includes(READY_FOR_HUMAN) ? 'HITL' : null;
 }
 
+// Whether the ticket is open and held back by its label: its spec task
+// never launches it until it is relabelled.
+export function heldBack(issue: Pick<Issue, 'open' | 'labels'>): boolean {
+  return issue.open && ticketMode(issue) === null;
+}
+
+// A held-back ticket as the operator is told of it: its ref (as `refOf`
+// shortens it) with its labels, or that it has none.
+export function heldBackLabel({ ref, labels }: Pick<Issue, 'ref' | 'labels'>, refOf = (ref: string) => ref): string {
+  return `${refOf(ref)} (${labels.join(', ') || 'no label'})`;
+}
+
 // Whether a spec task would launch a ticket task on the ticket now, had it
 // not already (ADR 0013): open, with no open blockers, and not held back.
 export function readyNow(issue: Issue): boolean {
@@ -1621,10 +1633,11 @@ function launchedTicketTask(spec: Task, { ticket, title, worktree, sessionId }: 
   const preset = spec.preset!;
   const from = preset.stages.findIndex(({ id }) => id === spec.stage);
   const stages = preset.stages.slice(from);
-  // A ready-for-human ticket's is HITL: Ready for you, holding no slot. It
-  // takes the spec task's level when it is handed off.
+  // On a ready-for-human ticket, the ticket task is HITL: Ready for you,
+  // holding no slot, and handed off at the spec task's level. Only frontier
+  // tickets of the last read, none held back, are launched.
   const issue = spec.ticketSet!.issues.find(({ ref }) => ref === ticket);
-  const mode = (issue && ticketMode(issue)) ?? 'AFK';
+  const mode = issue && ticketMode(issue) === 'HITL' ? 'HITL' : 'AFK';
   return {
     id: '',
     title,
@@ -1680,8 +1693,8 @@ function specTicketOpening(state: Lifecycle, spec: Task, ticketTask: Task): stri
 
 // Why a spec task waits on the operator once only held-back tickets are
 // left: each one with its labels, and what moves it on.
-function heldBackReason(task: Task, heldBack: Issue[]): string {
-  const tickets = heldBack.map(({ ref, labels }) => `${ref} (${labels.join(', ') || 'no label'})`);
+function heldBackReason(task: Task, held: Issue[]): string {
+  const tickets = held.map((issue) => heldBackLabel(issue));
   const listed = tickets.length > 1 ? `${tickets.slice(0, -1).join(', ')} and ${tickets.at(-1)}` : tickets[0];
   return (
     `${task.stage} has only held-back tickets left: ${listed}. ` +
@@ -2696,8 +2709,8 @@ function newHandoffSheet(state: Lifecycle, task: Task, readiness: Readiness): Ha
     asked: false,
     stage: stage?.id ?? null,
     continueAs: share !== null && share > FRESH_AT ? 'fresh' : 'resume',
-    // A HITL ticket task's starts at the level set on its spec's handoff.
-    autonomy: (task.specTask && state.tasks[task.specTask]?.autonomy) || 'L1',
+    // A ticket task's handoff starts at the level its spec task was handed off at.
+    autonomy: (task.kind === 'ticket' && task.specTask && state.tasks[task.specTask]?.autonomy) || 'L1',
     tier: task.operatorTier ?? task.inputs?.tier ?? stage?.model ?? DEFAULT_TIER,
     maxTurns: task.maxTurns ?? stage?.max_turns ?? DEFAULT_MAX_TURNS,
     contextShare: share,
@@ -3391,8 +3404,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         if (task.publishing) task.publishing.problem = null;
         break;
       }
-      // A spec task reads its tickets again, launching those relabelled meanwhile.
-      if (task.kind === 'spec' && task.ticketSet) {
+      // A spec task stalled on its held-back tickets reads them again,
+      // launching those relabelled meanwhile.
+      if (request!.kind === 'stage-blocked' && task.kind === 'spec' && task.ticketSet) {
         task.state = 'running';
         task.ticketSet.reading = true;
         task.ticketSet.reads = (task.ticketSet.reads ?? 0) + 1;
@@ -3512,11 +3526,11 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         else finishSpecTask(state, task, request);
         break;
       }
-      // Nothing to launch and nothing in flight, it never waits silently on
-      // the tickets held back by their label.
-      const heldBack = action.issues.filter((issue) => issue.open && !set.launched[issue.ref] && !set.skipped?.includes(issue.ref) && !ticketMode(issue));
-      if (settled && set.toLaunch.length === 0 && heldBack.length && !request) {
-        raise(state, task, lastRun(state, task), 'stage-blocked', false, heldBackReason(task, heldBack), at);
+      // With nothing to launch and nothing in flight, the spec task asks the
+      // operator about its held-back tickets rather than wait silently.
+      const held = action.issues.filter((issue) => heldBack(issue) && !set.launched[issue.ref] && !set.skipped?.includes(issue.ref));
+      if (settled && set.toLaunch.length === 0 && held.length && !request) {
+        raise(state, task, lastRun(state, task), 'stage-blocked', false, heldBackReason(task, held), at);
       }
       break;
     }

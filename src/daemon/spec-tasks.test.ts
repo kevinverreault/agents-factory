@@ -169,7 +169,7 @@ describe('ticket labels', () => {
   });
 });
 
-// The attention requests open, but for the PRs in review.
+// The open attention requests, leaving out the PRs in review.
 const requests = (state: FactoryState) => state.attentionQueue.filter(({ kind }) => kind === 'attention');
 
 describe('only held-back tickets left', () => {
@@ -205,6 +205,18 @@ describe('only held-back tickets left', () => {
     expect(ticketTasks(state)).toEqual({ 'acme/widgets#11': 'T2', 'acme/widgets#13': 'T3' });
     expect(state.tasks.T1?.label).not.toBe('Needs you');
     expect(requests(state)).toEqual([]);
+  });
+
+  test('a spec task whose every open ticket is held back at its first read raises stage-blocked at once, launching nothing', async () => {
+    const { factory, operator, tui } = await attached();
+
+    await operator.send(onSpec({ issues: ['#13', '#14'] }));
+
+    const blocked = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(requests(blocked)).toMatchObject([{ taskId: 'T1', attention: 'stage-blocked' }]);
+    expect(requests(blocked)[0]).toMatchObject({ reason: expect.stringContaining('only held-back tickets left: acme/widgets#13 (no label).') });
+    expect(Object.keys(blocked.tasks)).toEqual(['T1']);
+    expect(factory.executor.started).toEqual([]);
   });
 });
 

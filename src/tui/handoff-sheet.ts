@@ -5,7 +5,7 @@
 // level, tier and max turns, and confirms. Esc backs out and the conversation carries on.
 import { createElement as h, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
-import { AUTONOMY_LEVELS, CONTINUE_AS, readyNow, ticketMode, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, readyNow, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
@@ -174,16 +174,16 @@ function step(draft: Draft, line: Line, input: string, key: Key, candidates: Spe
 }
 
 // The ticket set's lines: each spec candidate, selected or not, with its
-// tickets, how many are ready now and those held back by their label; the issues the task recorded with 0
-// tickets; what a handoff with none selected is; and why the factory
-// couldn't read them. `at` is the candidate the cursor is on.
+// tickets, how many are ready now and those held back by their label; the
+// issues the task recorded with 0 tickets; what a handoff with none
+// selected is; and why the factory couldn't read them. `at` is the candidate the cursor is on.
 function ticketSetLines({ candidates, withoutTickets, problem }: HandoffTicketSets, specs: string[], repo: string, at: number | null): ReactNode[] {
   const short = (ref: string) => (ref.toLowerCase().startsWith(`${repo.toLowerCase()}#`) ? ref.slice(repo.length) : ref);
   const lines: ReactNode[] = candidates.flatMap(({ spec, title, tickets }, i) => {
     const ready = tickets.filter(readyNow).length;
     const count = `${tickets.length} ticket${tickets.length === 1 ? '' : 's'}, ${ready} ready now`;
     // The open tickets its spec task would never launch, by their label.
-    const heldBack = tickets.filter((ticket) => ticket.open && !ticketMode(ticket)).map(({ ref, labels }) => `${short(ref)} (${labels.join(', ') || 'no label'})`);
+    const held = tickets.filter(heldBack).map((ticket) => heldBackLabel(ticket, short));
     return [
       h(
         Field,
@@ -191,7 +191,7 @@ function ticketSetLines({ candidates, withoutTickets, problem }: HandoffTicketSe
         h(Tick, { on: specs.includes(spec) }),
         ` Spec ${short(spec)} ${title} ${GLYPH.launches} ${count}`,
       ),
-      ...(heldBack.length ? [h(Field, { key: `held-${spec}`, label: '', selected: false }, h(Text, tone('dim'), `    Held back by their label: ${heldBack.join(', ')}`))] : []),
+      ...(held.length ? [h(Field, { key: `held-${spec}`, label: '', selected: false }, h(Text, tone('dim'), `    Held back by their label: ${held.join(', ')}`))] : []),
     ];
   });
   for (const { ref, title } of withoutTickets) {

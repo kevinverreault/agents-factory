@@ -107,6 +107,10 @@ _Avoid_: Possible spec, spec guess
 A root task the factory launches for one ticket of a spec, once all of that ticket's blockers are merged. It has its own task branch and PR, and its ticket closes when that PR merges.
 _Avoid_: Ticket child, iteration, slice task
 
+**Held back**:
+A spec's ticket labelled neither `ready-for-agent` (an AFK ticket task) nor `ready-for-human` (a HITL one): its spec task never launches it until it is relabelled.
+_Avoid_: Skipped, untriaged
+
 **Map**:
 The GitHub issue a wayfinder task charts, whose sub-issues are the decision tickets that clear the way to its destination. It is never a ticket itself.
 _Avoid_: Plan, epic
