@@ -7,7 +7,8 @@
 // the skill set pin; `models update` moves each model tier to the model this
 // factory ships; `setup github` creates the factory's GitHub App, and
 // `setup token` stores the subscription token L2 runs use; `keep-awake`
-// turns off or on keeping the machine awake while AFK runs are active; `gc`
+// turns off or on keeping the machine awake while AFK runs are active;
+// `slots` sets the slot cap, how many AFK runs may be active at once; `gc`
 // lists the leftovers that belong to no live task and deletes only those
 // the operator ticks (ADR 0011). `hook`
 // is run by Claude Code, not the operator: it relays a run's hook events
@@ -43,6 +44,7 @@ const USAGE = [
   '       agents-factory setup github [--name <app-name>]',
   '       agents-factory setup token',
   '       agents-factory keep-awake on | keep-awake off',
+  '       agents-factory slots <n>',
   '       agents-factory gc',
 ].join('\n');
 
@@ -121,6 +123,22 @@ async function main(args: string[]): Promise<number> {
         return 1;
       }
       console.log(args[1] === 'on' ? 'The machine is kept awake while AFK runs are active.' : 'The machine may sleep while AFK runs are active.');
+      return 0;
+    } finally {
+      connection.close();
+    }
+  }
+  if (args[0] === 'slots' && args.length === 2) {
+    const cap = Number(args[1]);
+    const connection = await connectOrStart(paths);
+    try {
+      // The daemon refuses anything but a whole number of at least 1.
+      const reply = await connection.send({ type: 'setSlotCap', cap });
+      if (!reply.ok) {
+        console.error(reply.reason);
+        return 1;
+      }
+      console.log(`The slot cap is now ${cap}: up to ${cap} AFK ${cap === 1 ? 'run' : 'runs'} at once.`);
       return 0;
     } finally {
       connection.close();

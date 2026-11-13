@@ -97,6 +97,7 @@ The stills below show Needs you with its answer sheet. **Runs** (`3`) lists ever
 | `agents-factory setup github [--name <app-name>]` | Create the factory's GitHub App |
 | `agents-factory setup token` | Store the subscription token L2 runs use |
 | `agents-factory keep-awake on \| keep-awake off` | Keep the machine awake, or not, while AFK runs are active |
+| `agents-factory slots <n>` | Set how many AFK runs may be active at once (8 by default) |
 | `agents-factory gc` | List the leftovers that belong to no live task, and delete only those you tick |
 
 ## Learn more
