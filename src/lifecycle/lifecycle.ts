@@ -2981,8 +2981,9 @@ function foundText({ containers, worktrees }: Found): string {
 }
 
 // Whether a conflicting PR queues an update run on the root: an AFK ticket
-// task's, unless one was queued since its PR was last found mergeable.
-function updatesOnConflict(task: Task): boolean {
+// task's, unless one was queued since its PR was last found mergeable. A
+// HITL one's work stays the operator's (ADR 0004).
+export function updatesOnConflict(task: Task): boolean {
   return task.kind === 'ticket' && task.mode === 'AFK' && !task.conflicted;
 }
 
@@ -3502,18 +3503,18 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         // closed PR asks instead. Never cancelled on the factory's own say.
         stopPublishing(task, request);
         addRequest(state, task, lastRun(state, task), 'pr-closed-unmerged', false, prClosedReason(task), at);
-      } else if (action.state === 'open' && asked) {
+      } else if (action.state === 'open') {
         // Reopened on GitHub: nothing is left to ask.
-        request!.status = 'closed';
-      } else if (action.state === 'open' && action.mergeable === 'mergeable') {
-        task.conflicted = false;
-      } else if (action.state === 'open' && action.mergeable === 'conflicting' && updatesOnConflict(task) && !request) {
-        // A ticket task's PR its base moved on under (ADR 0013): one update
-        // run, resuming its session, merges the base in. At L2 the factory
-        // pushes what it did once it is back In review.
-        task.conflicted = true;
-        task.resumeWith = updateOpening(state, task);
-        task.state = 'queued';
+        if (asked) request!.status = 'closed';
+        else if (action.mergeable === 'mergeable') task.conflicted = false;
+        else if (action.mergeable === 'conflicting' && updatesOnConflict(task) && !request) {
+          // A ticket task's PR its base moved on under (ADR 0013): one update
+          // run, resuming its session, merges the base in. At L2 the factory
+          // pushes what it did once it is back In review.
+          task.conflicted = true;
+          task.resumeWith = updateOpening(state, task);
+          task.state = 'queued';
+        }
       }
       break;
     }

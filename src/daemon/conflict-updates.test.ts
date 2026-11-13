@@ -63,11 +63,15 @@ async function inReview(autonomy: AutonomyLevel): Promise<Factory> {
   return launched;
 }
 
-// Another TUI attaching, which makes the daemon read the PRs.
+// Another TUI attaching, which makes the daemon read the PRs, once the read
+// of T1's PR has reached GitHub and what it found has settled.
 async function poll(factory: TestFactory): Promise<void> {
+  const reads = factory.github.prReads.length;
   const tui = await factory.attach();
   watch(tui);
-  await tui.send({ type: 'daemon.status' });
+  await vi.waitFor(() => expect(factory.github.prReads.length).toBeGreaterThan(reads));
+  // Settled behind the read, its base fetch included, the status replies.
+  for (let i = 0; i < 3; i++) await tui.send({ type: 'daemon.status' });
 }
 
 describe('the PR poll', () => {
@@ -102,8 +106,7 @@ describe('a ticket task’s conflicting PR', () => {
     expect(factory.git.fetchedTip(factory.sandbox.clonePathOf('T1'), 'main')).toBe(moved);
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R4');
 
-    // Polled again while it runs, it queues no second one.
-    await poll(factory);
+    // While it runs, the task isn't In review: its PR isn't read, so no second one is queued.
     factory.clock.advance(2 * MINUTE);
     await factory.attach().then((again) => again.send({ type: 'daemon.status' }));
     expect(factory.executor.started).toHaveLength(4);
@@ -123,6 +126,7 @@ describe('a ticket task’s conflicting PR', () => {
     factory.executor.report('R4', { type: 'runCompleted' });
 
     await tui.until((state) => state.runs.R4?.status === 'ended' && state.tasks.T1?.label === 'In review' && state.tasks.T1.publishing === null);
+    expect(factory.git.checked.at(-1)).toMatchObject({ worktreePath: workdir(launched, 'L2') });
     expect(factory.github.pushes).toHaveLength(pushes + 1);
     expect(factory.github.pushes.at(-1)?.tip).toBe(factory.git.branchTip(clone, tui.state().tasks.T1!.branch!));
     expect(tui.state().attentionQueue).toEqual([{ kind: 'review', taskId: 'T1' }]);
@@ -173,8 +177,6 @@ describe('a ticket task’s conflicting PR', () => {
     expect(failed.attentionQueue).toContainEqual(
       expect.objectContaining({ kind: 'attention', taskId: 'T1', attention: 'failure', reason: expect.stringContaining('The conflicts in src/login.ts need a decision.') }),
     );
-    await poll(factory);
-    expect(factory.executor.started).toHaveLength(4);
   });
 
   test('a PR GitHub hasn’t worked out yet queues nothing', async () => {

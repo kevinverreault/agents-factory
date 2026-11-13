@@ -65,6 +65,8 @@ export class FakeGitHub implements GitHub {
   // Every PR opened, in order.
   readonly pullRequests: FakePullRequest[] = [];
   // Each PR closed or reopened through the port, with its token.
+  // Each PR read that reached GitHub, by its ref.
+  readonly prReads: string[] = [];
   readonly prWrites: { action: 'close' | 'reopen'; repo: string; number: number; token: Minted }[] = [];
   // Each branch deleted through the port, with its token.
   readonly branchDeletes: { repo: string; branch: string; token: Minted }[] = [];
@@ -294,6 +296,7 @@ export class FakeGitHub implements GitHub {
   async readPr(token: string, ref: string): Promise<PrStatus> {
     this.scoped(token, ref, 'pull_requests', 'read');
     const pr = this.foundPr(ref);
+    this.prReads.push(ref);
     return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown' };
   }
 

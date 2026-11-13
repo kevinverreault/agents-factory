@@ -52,7 +52,8 @@ export const PR_WRITE: Permissions = { pull_requests: 'write', metadata: 'read' 
 // Where a PR stands on GitHub: open, merged, or closed without merging.
 export type PrState = 'open' | 'merged' | 'closed';
 // Whether GitHub finds the PR mergeable into its base, or conflicting with
-// it, or unknown while it is still working that out after a push (ADR 0013).
+// it, or unknown while it is still working that out after a push (ADR 0013),
+// as it may stay for a PR that isn't open.
 export type Mergeability = 'mergeable' | 'conflicting' | 'unknown';
 // What a read of a PR says of it.
 export type PrStatus = { state: PrState; mergeable: Mergeability };
@@ -396,7 +397,8 @@ function stateOf(pr: { merged: boolean; state: string }): PrState {
   return pr.merged ? 'merged' : pr.state === 'open' ? 'open' : 'closed';
 }
 
-// Whether the PR is mergeable, as GitHub last worked it out: null until it has.
+// Whether the PR is mergeable, as GitHub last worked it out: GitHub says
+// null until it has.
 function mergeabilityOf(pr: { mergeable?: boolean | null }): Mergeability {
   return pr.mergeable === true ? 'mergeable' : pr.mergeable === false ? 'conflicting' : 'unknown';
 }

@@ -63,6 +63,7 @@ import {
   spawnsWithinDepth,
   ticketSources,
   unfinishedTasks,
+  updatesOnConflict,
   waitsOnPr,
   type AppCheck,
   type ChildSpawned,
@@ -207,6 +208,7 @@ const AWAKE_RETRY_MS = 60_000;
 // whenever a TUI attaches: the factory's only poll. It reads them more often
 // while any ticket task is In review (ADR 0013), whose PR may conflict.
 export const PR_POLL_MS = 15 * 60_000;
+// How often it reads them while a ticket task is In review.
 export const TICKET_PR_POLL_MS = 2 * 60_000;
 
 export interface Daemon {
@@ -290,8 +292,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const notesInFlight = new Set<string>();
   // The tasks whose quick launch is opening its handoff sheet.
   const quickInFlight = new Set<string>();
-  // The In review roots whose PR this daemon is reading on GitHub, and when
-  // it last read them all.
+  // The In review roots whose PR this daemon is reading on GitHub.
   const prReadsInFlight = new Set<string>();
   // The merged ticket tasks whose ticket this daemon has tried to resolve
   // since the last PR poll, and those it is resolving now (ADR 0013).
@@ -310,6 +311,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Each task's last job on its transcripts under way (ADR 0011): archiving
   // an ended run's, or putting one back. They go one at a time per task.
   const transcriptJobs = new Map<string, Promise<void>>();
+  // When the daemon last read the PRs of the roots In review.
   let lastPrPoll = clock.now();
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
@@ -946,8 +948,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // Where the root's PR stands, read as the App with a read-only token, or
   // null when GitHub couldn't say: the next poll asks again. A PR found
-  // conflicting has its base fetched first, for the update run it may
-  // queue to merge in; one that can't be fetched leaves the run to try.
+  // conflicting that queues an update run has its base fetched first, for
+  // the run to merge in; one that can't be fetched leaves the run to try.
   async function readPr(task: Task): Promise<PrReadEvent | null> {
     let event: PrReadEvent;
     try {
@@ -958,7 +960,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return null;
     }
     const repository = lifecycle.repositories[task.repo];
-    if (event.mergeable === 'conflicting' && repository) await fetchBase(git, repository);
+    if (event.mergeable === 'conflicting' && updatesOnConflict(task) && repository) await fetchBase(git, repository);
     return event;
   }
 
