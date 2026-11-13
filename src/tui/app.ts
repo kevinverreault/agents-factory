@@ -546,7 +546,7 @@ export function App({
               group,
               sidebar: h(Sidebar, { state, cursor: at(cursors['needs-you'], queue.map(rowOf)), focused: focus === 'sidebar', groups, group }),
               tree: h(TaskList, { connection, state, tasks, hidden, cursor: at(cursors.tasks, tasks.map(({ id }) => id)), focused: focus === 'tree', compact: true }),
-              detail: followed ? h(TaskDetail, { connection, state, task: followed, condensed: true }) : h(Text, tone('dim'), 'Nothing selected.'),
+              detail: followed ? h(TaskDetail, { connection, state, task: followed, compact: true }) : h(Text, tone('dim'), 'Nothing selected.'),
             })
         : drilled
           ? h(TaskDetail, { connection, state, task: drilled })
