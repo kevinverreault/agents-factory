@@ -288,13 +288,14 @@ export type TicketResolution = { problem: string | null };
 // it doesn't launch again. `reads` counts the reads owed so far: a read the
 // daemon started before the last one was owed leaves the next still owed.
 // Once no ticket is open, `closing` holds while the factory owes the spec
-// its closing, and `closed` once it is closed (or the set has no spec).
+// its closing (`anyway` once the operator closes it with tickets left
+// open), and `closed` once it is closed (or the set has no spec).
 export type TicketSet = {
   spec: string | null;
   tickets: string[];
   reading: boolean;
   reads?: number;
-  closing?: TicketResolution | null;
+  closing?: (TicketResolution & { anyway?: boolean }) | null;
   closed?: boolean;
   issues: Issue[];
   toLaunch: string[];
@@ -302,6 +303,11 @@ export type TicketSet = {
   skipped?: string[];
   problem: string | null;
 };
+
+// How the operator ends a spec task left with skipped tickets: leaving its
+// spec open, or closing it anyway.
+export type SpecEnd = 'spec-open' | 'close-spec';
+export const SPEC_ENDS: readonly SpecEnd[] = ['spec-open', 'close-spec'];
 
 // The label of the tickets a Ralph loop works, and of those a spec task
 // launches AFK ticket tasks on.
@@ -576,6 +582,9 @@ export type AttentionRequest = {
   // The hosts a failed L2 run was denied egress to (ADR 0007), which the
   // operator can allow for the task and retry. Requests stored before them have none.
   deniedHosts?: string[] | null;
+  // The skipped tickets a spec task's request offers to relaunch, once it
+  // can launch no more tickets (ADR 0013). Other requests have none.
+  skipped?: string[] | null;
   raisedAt: number;
 };
 
@@ -713,8 +722,11 @@ export type OperatorCommand =
   // a permission request's with `permission`. A failed iteration's is
   // retried, unless `skip` moves its loop on past its ticket. A failed L2
   // run's is retried with `allowHosts`, hosts it was denied, allowed for the
-  // task from now on (ADR 0007).
-  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; skip?: boolean; allowHosts?: string[] }
+  // task from now on (ADR 0007). A spec task that can launch no more
+  // tickets but its skipped ones (ADR 0013) takes `relaunch`, one of them to
+  // launch a new ticket task on, or `end`: Done, leaving its spec open or
+  // closing it anyway.
+  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; skip?: boolean; allowHosts?: string[]; relaunch?: string; end?: SpecEnd }
   // Resumes the root's session on the operator's review comments.
   | { type: 'requestChanges'; taskId: string; comments: string }
   // Publishes an L1 root in review as the factory's App, without raising its
@@ -1619,12 +1631,30 @@ function oweTicketSetRead(state: Lifecycle, task: Task): void {
   set.reads = (set.reads ?? 0) + 1;
 }
 
+// The spec task's ticket tasks still unfinished: those its cancel cascades to.
+export function unmergedTicketTasks(state: Lifecycle, spec: Task): Task[] {
+  return Object.values(spec.ticketSet?.launched ?? {}).flatMap((id) => {
+    const ticketTask = state.tasks[id];
+    return ticketTask && !isTerminal(ticketTask) ? [ticketTask] : [];
+  });
+}
+
+// The ticket task was cancelled (ADR 0013): its spec task marks its ticket
+// skipped, never launching it again, and owes a read of its ticket set, so
+// that it asks the operator once nothing more can be launched.
+function skipTicket(state: Lifecycle, task: Task): void {
+  const set = task.specTask ? state.tasks[task.specTask]?.ticketSet : undefined;
+  if (!set || !task.ticket || set.launched[task.ticket] !== task.id) return;
+  if (!(set.skipped ??= []).includes(task.ticket)) set.skipped.push(task.ticket);
+  oweTicketSetRead(state, task);
+}
+
 // The spec task's spec is closed, or it has none (ADR 0013): spec-closed
 // holds, and it is Done. Its branch goes with its worktree once a ticket
 // task merged, carrying its docs to the base branch; else it is kept, as
 // the only copy of them.
-function finishSpecTask(state: Lifecycle, task: Task, request: AttentionRequest | undefined): void {
-  task.ticketSet!.closed = true;
+function finishSpecTask(state: Lifecycle, task: Task, request: AttentionRequest | undefined, { specOpen = false } = {}): void {
+  if (!specOpen) task.ticketSet!.closed = true;
   finishRoot(task, request, { merged: true });
   const merged = Object.values(task.ticketSet!.launched).some((id) => state.tasks[id]?.state === 'done');
   if (task.cleanup && !merged) task.cleanup.keepBranch = true;
@@ -1700,12 +1730,71 @@ function specTicketOpening(state: Lifecycle, spec: Task, ticketTask: Task): stri
 // Why a spec task waits on the operator once only held-back tickets are
 // left: each one with its labels, and what moves it on.
 function heldBackReason(task: Task, held: Issue[]): string {
-  const tickets = held.map((issue) => heldBackLabel(issue));
-  const listed = tickets.length > 1 ? `${tickets.slice(0, -1).join(', ')} and ${tickets.at(-1)}` : tickets[0];
   return (
-    `${task.stage} has only held-back tickets left: ${listed}. ` +
+    `${task.stage} has only held-back tickets left: ${listed(held.map((issue) => heldBackLabel(issue)))}. ` +
     `Label one ${READY_FOR_AGENT} or ${READY_FOR_HUMAN} on GitHub, then answer to read the tickets again.`
   );
+}
+
+// Why a spec task waits on the operator once it can launch no more tickets
+// but its skipped ones: each skipped ticket, the open tickets they leave
+// waiting, any held back, and what the operator can do.
+function skippedReason(task: Task, skipped: Issue[], held: Issue[]): string {
+  const refs = skipped.map(({ ref }) => ref);
+  const waiting = task.ticketSet!.issues.filter((issue) => issue.open && !refs.includes(issue.ref) && issue.openBlockers.some((ref) => refs.includes(ref)));
+  const one = refs.length === 1;
+  const waits = waiting.length
+    ? `, and ${listed(waiting.map(({ ref }) => ref))} ${waiting.length === 1 ? 'waits' : 'wait'} on ${one ? 'it' : 'them'}`
+    : '';
+  const heldBack = held.length ? ` ${listed(held.map((issue) => heldBackLabel(issue)))} ${held.length === 1 ? 'is' : 'are'} held back.` : '';
+  const spec = task.ticketSet!.spec;
+  const choices = spec ? `Relaunch a skipped ticket, end leaving ${spec} open, or close it anyway.` : 'Relaunch a skipped ticket, or end.';
+  return (
+    `${task.stage} can launch no more tickets: ${listed(refs)} ${one ? 'was' : 'were'} skipped when ${one ? 'its ticket task was' : 'their ticket tasks were'} cancelled${waits}.` +
+    `${heldBack} ${choices}`
+  );
+}
+
+// The items, joined as a sentence lists them.
+function listed(items: string[]): string {
+  return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : (items[0] ?? '');
+}
+
+// Why the answer can't stand on a spec task's request about its skipped
+// tickets, null when it can, or undefined when neither is about them.
+function skippedAnswerRefusal(task: Task, request: AttentionRequest, action: Extract<OperatorCommand, { type: 'answer' }>): string | null | undefined {
+  const chose = action.relaunch !== undefined || action.end !== undefined;
+  if (!request.skipped) return chose ? `${task.id} isn’t asking about skipped tickets: there is nothing to relaunch or end.` : undefined;
+  if (action.relaunch !== undefined && action.end !== undefined) return 'Relaunch a skipped ticket, or end: not both.';
+  if (action.relaunch !== undefined) {
+    return request.skipped.includes(action.relaunch) && task.ticketSet?.skipped?.includes(action.relaunch) ? null : `${String(action.relaunch)} isn’t a skipped ticket of ${task.id}.`;
+  }
+  if (action.end !== undefined) {
+    if (!SPEC_ENDS.includes(action.end)) return 'End leaving the spec open, or closing it anyway.';
+    return action.end === 'close-spec' && !task.ticketSet?.spec ? `${task.id} has no spec to close: end it.` : null;
+  }
+  return `${task.id} can launch no more tickets: relaunch a skipped ticket, end leaving its spec open, or close it anyway.`;
+}
+
+// The operator answered a spec task's request about its skipped tickets:
+// a relaunched ticket is skipped no more, and the spec task reads its
+// tickets again to launch it; an ended spec task is Done, closing its spec
+// first if the operator closes it anyway.
+function answerSkipped(state: Lifecycle, task: Task, request: AttentionRequest, action: Extract<OperatorCommand, { type: 'answer' }>): void {
+  const set = task.ticketSet!;
+  if (action.relaunch) {
+    const ticket = action.relaunch;
+    set.skipped = (set.skipped ?? []).filter((ref) => ref !== ticket);
+    delete set.launched[ticket];
+    set.reading = true;
+    set.reads = (set.reads ?? 0) + 1;
+    task.state = 'running';
+  } else if (action.end === 'close-spec') {
+    set.closing = { problem: null, anyway: true };
+    task.state = 'running';
+  } else {
+    finishSpecTask(state, task, request, { specOpen: true });
+  }
 }
 
 // Where a sibling ticket stands for a ticket task's context: closed, in
@@ -1911,11 +2000,12 @@ export type AttentionQueueItem =
       permission: Permission | null;
       recovery: Recovery | null;
       deniedHosts: string[] | null;
+      skipped: string[] | null;
     }
   | { kind: 'ready'; taskId: string }
   | { kind: 'review'; taskId: string };
 
-const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null, recovery = null, deniedHosts = null }: AttentionRequest): AttentionQueueItem => ({
+const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null, recovery = null, deniedHosts = null, skipped = null }: AttentionRequest): AttentionQueueItem => ({
   kind: 'attention',
   taskId,
   repo,
@@ -1927,6 +2017,7 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = nu
   permission,
   recovery: structuredClone(recovery),
   deniedHosts: deniedHosts && [...deniedHosts],
+  skipped: skipped && [...skipped],
 });
 
 // Whether the task's open request, if any, waits on the operator: a task
@@ -2079,6 +2170,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       }
       if (request.kind === 'pr-closed-unmerged') return `${task.id}’s PR was closed without merging: cancel the task, or reopen its PR.`;
       if (action.skip && !(request.kind === 'failure' && failedIteration(task))) return 'Only a failed iteration’s ticket can be skipped.';
+      const skippedRefusal = skippedAnswerRefusal(task, request, action);
+      if (skippedRefusal !== undefined) return skippedRefusal;
       if (action.allowHosts !== undefined) {
         const hosts = request.kind === 'failure' ? (request.deniedHosts ?? []) : [];
         if (hosts.length === 0) return `${task.id}’s run was denied no egress: there is no host to allow.`;
@@ -3111,7 +3204,7 @@ function addRequest(
   holdsRun: boolean,
   reason: string | null,
   at: number,
-  { question = null, permission = null, deniedHosts = null }: RequestExtra = {},
+  { question = null, permission = null, deniedHosts = null, skipped = null }: RequestExtra = {},
 ): void {
   const request: AttentionRequest = {
     id: nextId(state, 'request'),
@@ -3125,13 +3218,14 @@ function addRequest(
     question,
     permission,
     ...(deniedHosts?.length ? { deniedHosts: [...deniedHosts] } : {}),
+    ...(skipped?.length ? { skipped: [...skipped] } : {}),
     raisedAt: at,
   };
   state.requests[request.id] = request;
 }
 
 // What a request holds besides its kind and reason.
-type RequestExtra = { question?: Question | null; permission?: Permission | null; deniedHosts?: string[] | null };
+type RequestExtra = { question?: Question | null; permission?: Permission | null; deniedHosts?: string[] | null; skipped?: string[] | null };
 
 function addArtifact(state: Lifecycle, artifact: DistributiveOmit<Artifact, 'id'>): void {
   const id = nextId(state, 'artifact');
@@ -3429,6 +3523,11 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         if (task.publishing) task.publishing.problem = null;
         break;
       }
+      // A spec task left with skipped tickets goes as the operator chose.
+      if (request!.skipped && task.ticketSet) {
+        answerSkipped(state, task, request!, action);
+        break;
+      }
       // A spec task stalled on its held-back tickets reads them again,
       // launching those relabelled meanwhile.
       if (request!.kind === 'stage-blocked' && task.kind === 'spec' && task.ticketSet) {
@@ -3532,7 +3631,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       finishSpecTask(state, task, request);
       break;
     case 'specUnclosed':
-      task.ticketSet!.closing = { problem: action.reason };
+      task.ticketSet!.closing = { ...task.ticketSet!.closing, problem: action.reason };
       task.ticketSet!.problem = `The factory couldn’t close ${task.ticketSet!.spec} on GitHub: ${action.reason}`;
       break;
     case 'ticketSetRead': {
@@ -3561,10 +3660,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         break;
       }
       // With nothing to launch and nothing in flight, the spec task asks the
-      // operator about its held-back tickets rather than wait silently.
+      // operator about its skipped tickets, or else its held-back ones,
+      // rather than wait silently.
       const held = action.issues.filter((issue) => heldBack(issue) && !set.launched[issue.ref] && !set.skipped?.includes(issue.ref));
-      if (settled && set.toLaunch.length === 0 && held.length && !request) {
-        raise(state, task, lastRun(state, task), 'stage-blocked', false, heldBackReason(task, held), at);
+      const skipped = action.issues.filter((issue) => issue.open && set.skipped?.includes(issue.ref));
+      if (settled && set.toLaunch.length === 0 && !request) {
+        if (skipped.length) raise(state, task, lastRun(state, task), 'stage-blocked', false, skippedReason(task, skipped, held), at, { skipped: skipped.map(({ ref }) => ref) });
+        else if (held.length) raise(state, task, lastRun(state, task), 'stage-blocked', false, heldBackReason(task, held), at);
       }
       break;
     }
@@ -3605,6 +3707,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'cancel':
       cancelSubtree(state, task, action.branch !== 'discard', at);
+      // A spec task's cancel cascades to each of its ticket tasks not yet
+      // merged, under the operator's one branch choice (ADR 0013).
+      if (task.kind === 'spec') for (const ticketTask of unmergedTicketTasks(state, task)) cancelSubtree(state, ticketTask, action.branch !== 'discard', at);
+      // A cancelled ticket task's ticket stays open, and its spec task
+      // launches it no more: it is skipped, and reads its tickets again.
+      if (task.kind === 'ticket') skipTicket(state, task);
       break;
     case 'childCancelled':
       // An agent's own child: nothing of it is the operator's to keep.

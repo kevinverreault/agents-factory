@@ -122,6 +122,16 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
         { label: 'Reopen PR', command: { type: 'reopenPr', taskId } },
       ];
     case 'stage-blocked':
+      // A spec task that can launch no more tickets but its skipped ones
+      // (ADR 0013): relaunch one, or end, leaving its spec open or closing it.
+      if (item.skipped?.length) {
+        const spec = !!task?.ticketSet?.spec;
+        return [
+          ...item.skipped.map((ref): Choice => ({ label: `Relaunch ${ref}`, command: { type: 'answer', taskId, relaunch: ref } })),
+          { label: spec ? 'End, leaving the spec open' : 'End', command: { type: 'answer', taskId, end: 'spec-open' } },
+          ...(spec ? [{ label: 'Close the spec anyway', command: { type: 'answer', taskId, end: 'close-spec' } } satisfies Choice] : []),
+        ];
+      }
       // A stalled loop picks again once answered, and a work loop reads its map again.
       if (task?.mode === 'AFK' && task.loop) return [{ label: 'Retry', command: answer }, ...takeOver, cancel];
       // Raised once the map cleared, it is the next stage that couldn't start: nothing is read again.
@@ -185,7 +195,7 @@ export function cardItem(task: TaskView, permission: Permission): AttentionQueue
     question: null,
     permission,
     recovery: null,
-    deniedHosts: null,
+    deniedHosts: null, skipped: null,
   };
 }
 

@@ -111,6 +111,10 @@ _Avoid_: Ticket child, iteration, slice task
 A spec's ticket labelled neither `ready-for-agent` (an AFK ticket task) nor `ready-for-human` (a HITL one): its spec task never launches it until it is relabelled.
 _Avoid_: Skipped, untriaged
 
+**Skipped ticket**:
+A spec's ticket whose ticket task the operator cancelled: it stays open, its spec task never launches it again unless the operator relaunches it, and the tickets it blocks stay blocked. Once nothing more can be launched, the spec task asks the operator to relaunch it, end leaving the spec open, or close the spec anyway.
+_Avoid_: Dropped ticket, abandoned ticket
+
 **Map**:
 The GitHub issue a wayfinder task charts, whose sub-issues are the decision tickets that clear the way to its destination. It is never a ticket itself.
 _Avoid_: Plan, epic

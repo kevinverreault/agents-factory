@@ -92,6 +92,7 @@ import {
   type SkillsSetup,
   type Task,
   type TaskLaunched,
+  unmergedTicketTasks,
 } from '../lifecycle/lifecycle.ts';
 import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
 import {
@@ -862,7 +863,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
       if (!branch) {
-        const unique = (await bringOutForCancel(lifecycle.tasks[taskId]!)) ?? (await workAtStake(lifecycle.tasks[taskId]!));
+        // A spec task's cancel weighs the work of each ticket task it
+        // cascades to as well, and asks once for the lot (ADR 0013).
+        const task = lifecycle.tasks[taskId]!;
+        const cascade = [task, ...(task.kind === 'spec' ? unmergedTicketTasks(lifecycle, task) : [])];
+        const stakes: string[] = [];
+        for (const cancelled of cascade) {
+          const stake = (await bringOutForCancel(cancelled)) ?? (await workAtStake(cancelled));
+          if (stake) stakes.push(stake);
+        }
+        const unique = stakes.join(' ');
         if (unique) {
           const choose: Option[] = [
             { label: 'Keep branch', command: { type: 'cancel', taskId, branch: 'keep' } },
@@ -1631,9 +1641,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         continue;
       }
       if (launchesInFlight.has(task.id)) continue;
-      const ticket = set.toLaunch.find((ref) => !launchesTried.has(launchId(task.id, ref)));
+      // Each launch is tried once per read until the next poll: a ticket
+      // relaunched after its ticket task was cancelled is read again first.
+      const tried = (ref: string) => `${launchId(task.id, ref)}:${set.reads ?? 0}`;
+      const ticket = set.toLaunch.find((ref) => !launchesTried.has(tried(ref)));
       if (!ticket) continue;
-      launchesTried.add(launchId(task.id, ticket));
+      launchesTried.add(tried(ticket));
       launchesInFlight.add(task.id);
       void serially(() => launchTicketTask(task.id, ticket)).finally(() => {
         launchesInFlight.delete(task.id);
@@ -2994,17 +3007,20 @@ function launchId(specTaskId: string, ticket: string): string {
 
 // What closing a spec says on it (ADR 0013): each of its tickets, then any
 // it launched that GitHub no longer has among its sub-issues, with the PR
-// that did its work, merged, or closed with none.
+// that did its work, merged, or closed with none. Closed anyway by the
+// operator, its tickets still open are left so, skipped or not.
 function specComment(state: Lifecycle, task: Task): string {
   const set = task.ticketSet!;
   const refs = [...new Set([...set.issues.map(({ ref }) => ref), ...Object.keys(set.launched)])];
   const lines = refs.map((ref) => {
-    const title = set.issues.find((issue) => issue.ref === ref)?.title;
+    const issue = set.issues.find((issue) => issue.ref === ref);
     const ticketTask = state.tasks[set.launched[ref] ?? ''];
     const pr = ticketTask?.state === 'done' ? ticketTask.pr : null;
-    return `- ${ref}${title ? `, ${title}` : ''}: ${pr ? `merged in ${pr.url}` : 'closed'}`;
+    const stands = pr ? `merged in ${pr.url}` : !issue?.open ? 'closed' : set.skipped?.includes(ref) ? 'skipped, left open' : 'left open';
+    return `- ${ref}${issue?.title ? `, ${issue.title}` : ''}: ${stands}`;
   });
-  return [`Every ticket of this spec is closed, so the agents factory’s task ${task.id} (${task.title}) closes it:`, '', ...lines].join('\n');
+  const why = set.closing?.anyway ? 'The operator closed this spec with tickets left open' : 'Every ticket of this spec is closed';
+  return [`${why}, so the agents factory’s task ${task.id} (${task.title}) closes it:`, '', ...lines].join('\n');
 }
 
 // What closing a merged ticket task's ticket says on it (ADR 0013): the PR

@@ -585,6 +585,7 @@ describe('a tool call no rule covers', () => {
         },
         recovery: null,
         deniedHosts: null,
+        skipped: null,
       },
     ]);
     expect(factory.executor.verdicts('R1')).toEqual({});

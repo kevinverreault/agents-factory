@@ -270,6 +270,7 @@ describe('the Factory recovered report', () => {
         question: null,
         permission: null,
         deniedHosts: null,
+        skipped: null,
         recovery: {
           requeued: [{ taskId: 'T1', runId: 'R1' }],
           parked: [

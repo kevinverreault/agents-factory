@@ -134,7 +134,7 @@ function demoState(): FactoryState {
     attentionQueue: [
       {
         kind: 'attention', taskId: 'T5', repo: 'acme/widgets', requestId: 'A1', attention: 'question', holdsRun: true,
-        reason: 'Which identity provider times out on Safari?', question: QUESTION, permission: null, recovery: null, deniedHosts: null,
+        reason: 'Which identity provider times out on Safari?', question: QUESTION, permission: null, recovery: null, deniedHosts: null, skipped: null,
       },
       { kind: 'review', taskId: 'T6' },
       { kind: 'ready', taskId: 'T7' },
