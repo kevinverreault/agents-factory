@@ -2374,7 +2374,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       sessionId: task.sessionId!,
       resumesSession: run.resumesSession,
       cwd,
-      firstMessage: withInstallNote(run.opening, uninstalled),
+      firstMessage: withFactoryNotes(run.opening, [
+        uninstalled === null ? null : installNote(uninstalled),
+        container === null ? null : scratchNote(container.scratch),
+      ]),
       model: run.model,
       maxTurns: run.maxTurns ?? null,
       // The scheduler's choice (ADR 0001): an L2 run's token goes into its container alone.
@@ -2907,14 +2910,26 @@ type Guarded = {
 };
 
 // What the executor hands a call the operator answered.
-// A run's opening, with a factory note after it when its worktree's
-// dependencies didn't install: after, so a skill it invokes stays first. A
-// run with no opening resumes a conversation and hears nothing; its agent
+// A run's opening, with the factory's notes after it: after, so a skill it
+// invokes stays first. A run with no opening resumes a conversation and
+// hears nothing.
+function withFactoryNotes(opening: string | null, notes: (string | null)[]): string | null {
+  const said = notes.filter((note) => note !== null);
+  if (opening === null || said.length === 0) return opening;
+  return `${opening}\n\n## Factory note\n\n${said.join('\n\n')}`;
+}
+
+// The note for a run whose worktree's dependencies didn't install. Its agent
 // may install them itself, as the allow list lets it.
-function withInstallNote(opening: string | null, uninstalled: string | null): string | null {
-  if (opening === null || uninstalled === null) return opening;
-  const note = `The factory couldn’t install this worktree’s dependencies before the run started: ${uninstalled} Install them in the worktree from its lockfile before you need them, rather than reading or running another clone’s.`;
-  return `${opening}\n\n## Factory note\n\n${note}`;
+function installNote(uninstalled: string): string {
+  return `The factory couldn’t install this worktree’s dependencies before the run started: ${uninstalled} Install them in the worktree from its lockfile before you need them, rather than reading or running another clone’s.`;
+}
+
+// The note for an L2 run (ADR 0007): the guards fail a run that leaves its
+// worktree unclean, so what isn't its work, files it asks the operator for
+// included, goes in its container's scratch folder.
+function scratchNote(scratch: string): string {
+  return `Leave the worktree clean: the factory fails a run that leaves uncommitted changes or untracked files in it, and holds its commits in this container. Keep files that aren’t part of the work, such as notes, downloads and files you ask the operator for, in ${scratch}, outside the clone, where they stay for this task’s later runs. When you ask the operator for files, ask them to copy them there, never into the worktree.`;
 }
 
 function verdictOf(answer: PermissionAnswer): Verdict {

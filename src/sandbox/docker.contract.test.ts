@@ -217,6 +217,20 @@ describe('the Docker sandbox: containment', () => {
       expect(existsSync(join(f.root, 'T1-sessions', 'S1.jsonl'))).toBe(true);
     }));
 
+  test('the scratch folder is outside the clone, the run’s to write, kept across a stop, and the guards leave it alone while a file left in the clone breaks them', () =>
+    withTask(async (_f, sandbox, container) => {
+      const before = await container.checks.snapshot(container.workdir);
+      expect((await sh(container, `echo {} > ${container.scratch}/T29.jsonl`)).code).toBe(0);
+      expect(await container.checks.violations(container.workdir, before, [], FACTORY_IDENTITY.email)).toEqual([]);
+
+      await sandbox.stop('T1');
+      await sandbox.start('T1');
+      expect((await sh(container, `cat ${container.scratch}/T29.jsonl`)).stdout.trim()).toBe('{}');
+
+      expect((await sh(container, 'echo {} > T29.jsonl')).code).toBe(0);
+      expect(await container.checks.violations(container.workdir, before, [], FACTORY_IDENTITY.email)).toEqual(['The run left uncommitted changes: T29.jsonl.']);
+    }));
+
   test('the container’s CLI is the Linux build of the one the pinned SDK bundles', () =>
     withTask(async (_f, _sandbox, container) => {
       const entry = createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk');

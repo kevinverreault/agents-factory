@@ -24,6 +24,8 @@ import { SECURITY_PLUGIN, securityPluginDigest } from '../security-guidance/secu
 import { RUN_DIR, SandboxError, type Container, type ContainerListing, type ContainerSpec, type GitResult, type ImageListing, type Sandbox } from './sandbox.ts';
 
 const WORKDIR = '/work';
+// The run's scratch folder, outside the clone, which the guards never read.
+const SCRATCH_DIR = '/scratch';
 const PLUGIN_DIR = '/opt/factory/plugin';
 // The code intelligence plugin the image holds, for the language server it
 // installs globally.
@@ -266,6 +268,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     return {
       taskId: spec.taskId,
       workdir: WORKDIR,
+      scratch: SCRATCH_DIR,
       plugin: spec.plugin === null ? null : PLUGIN_DIR,
       lspPlugin: LSP_PLUGIN_DIR,
       securityPlugin: SECURITY_PLUGIN_DIR,
@@ -344,6 +347,8 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       const running = await stateOf(spec.taskId);
       if (running === null) await create(spec);
       else if (!running) await docker(['start', nameOf(spec.taskId)]);
+      // Made here rather than in the image, so containers made before it get one too.
+      await docker(['exec', '--user', 'root', nameOf(spec.taskId), 'install', '-d', '-o', USER, '-g', USER, SCRATCH_DIR]);
       await bringIn(spec);
       return handle(spec);
     },

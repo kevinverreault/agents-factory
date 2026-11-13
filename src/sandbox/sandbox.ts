@@ -77,6 +77,11 @@ export type Container = {
   taskId: string;
   // The clone's working tree, in the container: the run's cwd.
   workdir: string;
+  // A directory in the container, outside the clone, that the run may write
+  // and that stays as long as the container does: where the run keeps files
+  // that aren't its work, and where the operator puts files it asks for.
+  // The git guards never look there (ADR 0007).
+  scratch: string;
   // The skill set plugin's directory, in the container, or null.
   plugin: string | null;
   // The code intelligence plugin's directory, in the container: the image's

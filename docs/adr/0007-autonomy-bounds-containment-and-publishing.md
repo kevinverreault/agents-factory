@@ -52,6 +52,8 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
   - no refs or remotes were added;
   - `.git/config` and `.git/hooks/` match their snapshot from before the run.
 
+  "Clean" means no uncommitted changes and no untracked files, with no exceptions. Since the T32 run, an L2 run has a **scratch folder** for what isn't its work: `/scratch` in its container, outside the clone. The run may write there, it lasts as long as the container (ADR 0011), and the check never looks at it. Each L2 run's opening ends with a factory note telling it to leave the worktree clean and keep notes, downloads and files it asks the **operator** for in the scratch folder, and to ask the operator to copy those files there, not into the worktree. The T32 run asked the operator to copy session transcripts into `/work`, promising never to commit them. It committed its work, but the check failed it on those untracked files and held its commits in the container. An L1 run already has the temp folder as its scratch space.
+
   A violation is a run or iteration failure. The clone is the operator's too (ADR 0010), and their own sessions and editors change it while a run works, so the check counts only what the run could have done. A run logs every ref it updates under the bot's identity, so an added ref whose reflog names someone else is not the run's. A ref with no reflog still counts, unless the factory cut it for another task, or another worktree has it checked out: a run can't add worktrees, and tools such as Claude Desktop make their worktrees' branches without a reflog. In the config, other branches' `branch.*` settings don't count, and neither do the task branch's settings other than `remote`, `pushRemote` and `merge`. Tools such as `git push -u` and VS Code write those settings for the operator.
 
 - **A cleaned environment makes pushes fail in git itself.** Each AFK run gets:
@@ -83,6 +85,8 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
   - the same call can get a different answer from one run to the next.
 - **Silent denial at L1.** Rejected: the agent would work around refusals the operator might have allowed. A permission request suspends the run at no slot cost, and `canUseTool` has no deadline.
 - **Research children at L2, or findings only in a comment.** Rejected. L2's egress allowlist would block WebFetch. A comment loses the research branch that the map's context pointers link to.
+- **Exempting a scratch path inside the worktree from the clean-tree check.** Rejected. That path would be the one place where untracked files could pile up unnoticed, and a run could still `git add` them by accident. A folder outside the clone needs no exception, so the check stays strict for the whole work tree.
+- **Only telling runs to delete their scratch files before they end.** Rejected on its own. A run that forgets still fails, and files the operator handed over would be gone before the task's next run. The opening note asks for that discipline, but the scratch folder is what makes it cheap to follow.
 
 ## Consequences
 

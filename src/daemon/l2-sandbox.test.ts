@@ -76,6 +76,20 @@ describe('an L2 AFK run', () => {
     expect(readFileSync(join(spec!.runDir, 'gitconfig'), 'utf8')).toMatch(/pushInsteadOf =\s*$/m);
   });
 
+  test('is told to keep what isn’t its work, files it asks the operator for included, in its container’s scratch folder, outside the clone the guards check', async () => {
+    const { factory, operator } = await attached();
+    await operator.send(implementAtL2('#39'));
+
+    const run = await started(factory, 1);
+
+    expect(run.container!.scratch).toBe('/scratch');
+    expect(run.container!.scratch.startsWith(`${run.container!.workdir}/`)).toBe(false);
+    // After the opening, so the skill it invokes stays first.
+    expect(run.firstMessage).toMatch(/^\/factory:implement [^\n]*#39\n\n## Factory note\n\nLeave the worktree clean: /);
+    expect(run.firstMessage).toContain('files you ask the operator for, in /scratch, outside the clone');
+    expect(run.firstMessage).toContain('ask them to copy them there, never into the worktree.');
+  });
+
   test('checked in the container, hands its commits to the host task branch, which its task moves on from', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(implementAtL2('#39'));
@@ -448,7 +462,7 @@ describe('an L2 task’s container', () => {
 });
 
 describe('without Docker', () => {
-  test('L1 runs start as ever', async () => {
+  test('L1 runs start as ever, with no scratch folder to be told of', async () => {
     const factory = await startTestFactory();
     factories.push(factory);
     factory.sandbox.failList('Cannot connect to the Docker daemon.');
@@ -458,7 +472,9 @@ describe('without Docker', () => {
 
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', prompt: '#39' });
 
-    expect(await started(factory, 1)).toMatchObject({ autonomy: 'L1', container: null, credential: 'subscription-host' });
+    const run = await started(factory, 1);
+    expect(run).toMatchObject({ autonomy: 'L1', container: null, credential: 'subscription-host' });
+    expect(run.firstMessage).not.toContain('scratch');
     expect(factory.sandbox.calls).toEqual([]);
   });
 });
