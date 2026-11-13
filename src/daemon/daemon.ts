@@ -1255,8 +1255,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
     // A spec task that couldn't read or launch its tickets tries again at the next poll.
     // So does a ticket or a spec the factory couldn't close.
-    const specsRetrying = Object.values(lifecycle.tasks).filter((task) => (task.ticketSet?.problem && !isTerminal(task)) || task.resolving?.problem).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + specsRetrying + resolutionsInFlight.size + ticketReadsInFlight.size + launchesInFlight.size + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
+    const retrying = Object.values(lifecycle.tasks).filter((task) => (task.ticketSet?.problem && !isTerminal(task)) || task.resolving?.problem).length;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + retrying + resolutionsInFlight.size + ticketReadsInFlight.size + launchesInFlight.size + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -2916,13 +2916,17 @@ function launchId(specTaskId: string, ticket: string): string {
   return `launch:${specTaskId}:${ticket}`;
 }
 
-// What closing a spec says on it (ADR 0013): each of its tickets, with the
-// PR that did its work, merged, or closed with none.
+// What closing a spec says on it (ADR 0013): each of its tickets, then any
+// it launched that GitHub no longer has among its sub-issues, with the PR
+// that did its work, merged, or closed with none.
 function specComment(state: Lifecycle, task: Task): string {
   const set = task.ticketSet!;
-  const lines = set.issues.map((issue) => {
-    const pr = state.tasks[set.launched[issue.ref] ?? '']?.pr;
-    return `- ${issue.ref}, ${issue.title}: ${pr ? `merged in ${pr.url}` : 'closed'}`;
+  const refs = [...new Set([...set.issues.map(({ ref }) => ref), ...Object.keys(set.launched)])];
+  const lines = refs.map((ref) => {
+    const title = set.issues.find((issue) => issue.ref === ref)?.title;
+    const ticketTask = state.tasks[set.launched[ref] ?? ''];
+    const pr = ticketTask?.state === 'done' ? ticketTask.pr : null;
+    return `- ${ref}${title ? `, ${title}` : ''}: ${pr ? `merged in ${pr.url}` : 'closed'}`;
   });
   return [`Every ticket of this spec is closed, so the agents factory’s task ${task.id} (${task.title}) closes it:`, '', ...lines].join('\n');
 }

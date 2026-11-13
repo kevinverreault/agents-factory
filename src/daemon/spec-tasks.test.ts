@@ -449,6 +449,19 @@ describe('the spec resolving', () => {
     expect(factory.git.branchTip(clone, branch)).toBeNull();
   });
 
+  test('a spec task with no spec whose tickets were all closed with no ticket task merged is Done, keeping its branch as the only copy of its docs', async () => {
+    const { factory, operator, tui } = await attached();
+    factory.github.close('acme/widgets#12');
+
+    await operator.send(onSpec({ issues: ['#12', '#14'] }));
+
+    const done = await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.cleanup === null);
+    expect(Object.keys(done.tasks)).toEqual(['T1']);
+    expect(factory.github.writes).toEqual([]);
+    expect(factory.git.branchTip(clone, done.tasks.T1!.branch!)).not.toBeNull();
+    expect((await factory.git.worktrees(clone)).map(({ path }) => path)).not.toContain(done.tasks.T1!.worktree);
+  });
+
   test('a spec the factory couldn’t close is closed at the next poll', async () => {
     const launched = await twoOpen();
     const { factory, operator, tui } = launched;
