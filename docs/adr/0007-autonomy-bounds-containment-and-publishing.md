@@ -68,7 +68,7 @@ The glossary first defined an **autonomy level** by what the agent may do on Git
 
 - **Research children push at L1, narrowly.** A wayfinder research child runs at L1, because it needs open web access, which L2's egress allowlist would block. Its `research/<name>` branch is the one exception to "no code leaves this machine". The `push` action pushes it only when its commits touch nothing but `docs/research/**`, and never the task branch. Anything else raises an attention request. The GitHub port enforces the path rule itself, next to its refspec guard. Once the branch is pushed, the factory closes the research ticket with a comment pointing at the branch. A child that committed nothing only has its ticket closed.
 
-- **L1 tasks reach a PR through the operator.** An L1 root task in review offers **Push & open draft PR**. The operator's click authorizes the `push` and `open-pr` actions as the bot, without raising the level or starting a run.
+- **L1 tasks reach a PR through the operator.** An L1 root task in review offers **Push & open draft PR**. The operator's click authorizes the `push` and `open-pr` actions as the bot, without raising the level or starting a run. A setup task is the exception (ADR 0010). The factory publishes it unasked once it reaches review, whether HITL, L1 or L2. Its only code is the skill set's setup files, and launching it from "Set up now" is the operator's request to publish them.
 
 - **The level changes only between runs.** Raising to L2 clones the task branch, local commits included, into the next run's container. Lowering to L1 fetches the last bundle and fast-forwards the host worktree. In a loop the change applies from the next iteration. Each stage's ceiling from the frozen preset still clamps it.
 

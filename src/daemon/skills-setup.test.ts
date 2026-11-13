@@ -11,6 +11,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import { handOff } from '../testing/handoff.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
+import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
 
 const factories: TestFactory[] = [];
 
@@ -226,6 +227,44 @@ describe('reaching review', () => {
     expect(published.tasks.T1).toMatchObject({ label: 'In review', publishing: null });
     expect(factory.git.originTip(widgets, branch!)).toBe(factory.git.branchTip(widgets, branch!));
     expect(factory.github.pullRequests).toEqual([expect.objectContaining({ head: branch, title: 'Set up the skill set' })]);
+  });
+
+  // T1 handed off at L2, its AFK run R2 started in its container.
+  async function handedOffAtL2(factory: TestFactory, operator: FactoryConnection, tui: Watched): Promise<void> {
+    await factory.secrets.write(SUBSCRIPTION_TOKEN_SECRET, 'sk-ant-oat01-token');
+    expect(await operator.send({ type: 'openHandoff', taskId: 'T1' })).toMatchObject({ ok: true });
+    await tui.until((state) => state.tasks.T1?.handoff != null);
+    factory.executor.report('R1', { type: 'briefWritten', brief: { goal: 'Set the repo up.', decided: [], doneWhen: [], outOfScope: [], links: [] } });
+    const { brief, continueAs, tier, maxTurns } = (await tui.until((state) => !!state.tasks.T1?.handoff?.brief)).tasks.T1!.handoff!;
+    expect(await operator.send({ type: 'handoff', taskId: 'T1', brief: brief!, continueAs, autonomy: 'L2', tier, maxTurns })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+  }
+
+  test('handed off at L2, publishes what its run committed in its container', async () => {
+    const { factory, operator, tui } = await settingUp();
+    await handedOffAtL2(factory, operator, tui);
+    const workdir = factory.sandbox.workdirOf('T1');
+    for (const [path, content] of Object.entries(SETUP)) factory.git.editFile(workdir, path, content);
+    factory.git.commitAll(workdir);
+
+    factory.executor.report('R2', { type: 'runCompleted' });
+
+    const published = await tui.until((state) => state.tasks.T1?.pr != null);
+    const { branch } = published.tasks.T1!;
+    expect(factory.git.originTip(widgets, branch!)).toBe(factory.git.branchTip(widgets, branch!));
+    expect(factory.github.pullRequests).toEqual([expect.objectContaining({ head: branch, title: 'Set up the skill set' })]);
+  });
+
+  test('handed off at L2 with nothing committed, has nothing to push and opens no PR', async () => {
+    const { factory, operator, tui } = await settingUp();
+    await handedOffAtL2(factory, operator, tui);
+
+    factory.executor.report('R2', { type: 'runCompleted' });
+
+    const reviewed = await tui.until((state) => state.tasks.T1?.label === 'In review' && state.tasks.T1.publishing === null);
+    expect(reviewed.tasks.T1!.pr).toBeNull();
+    expect(factory.github.pushes).toEqual([]);
+    expect(reviewed.attentionQueue).toEqual([{ kind: 'review', taskId: 'T1' }]);
   });
 
   test('with no setup written, has nothing to push and opens no PR', async () => {

@@ -2159,7 +2159,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
       if (task.autonomy === 'L2') return `${task.id} is at L2, where the factory opens its draft PR itself.`;
       // HITL work acts as the operator (ADR 0004): the App publishes only L1
-      // work, and a setup task's, which it publishes unasked (ADR 0010).
+      // work here. A setup task is published unasked when it reaches review
+      // (ADR 0010), never through this button.
       if (task.autonomy !== 'L1') return `${task.id} is HITL work, which stays yours: push its branch and open its PR yourself.`;
       return task.publishing ? `${task.id} is already pushing and opening its draft PR.` : null;
     case 'reopenPr':
@@ -2357,18 +2358,20 @@ function failPublishing(state: Lifecycle, task: Task, request: AttentionRequest 
 // the run did unattended (ADR 0007): it pushes the task branch to the root's
 // PR, or, with no PR yet, pushes and opens one if the preset has an open-pr
 // stage, as when the operator took the root over before it opened. A setup
-// task handed off publishes at any level (ADR 0010), on the host first
-// committing what setup files its runs left.
+// task publishes at any level, HITL included (ADR 0010): it first commits
+// the setup files its runs left, and opens no PR when its branch then has
+// nothing the base branch lacks.
 function reachReview(task: Task): void {
   task.state = 'in-review';
-  if (task.autonomy === 'L2' && !task.child && task.worktree && (task.pr || opensPr(task) || isSetupTask(task))) task.publishing = { step: 'push', problem: null };
-  else if (isSetupTask(task)) task.publishing = { step: 'commit', problem: null };
+  if (task.child || !task.worktree) return;
+  if (isSetupTask(task)) task.publishing = { step: 'commit', problem: null };
+  else if (task.autonomy === 'L2' && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
 }
 
-// Whether the root runs the skill set's per-repo setup: its preset is the
+// Whether the task runs the skill set's per-repo setup: its preset is the
 // one "Set up now" launches (ADR 0010).
 function isSetupTask(task: Task): boolean {
-  return !task.parent && !!task.worktree && task.preset?.name === SETUP_PRESET;
+  return task.preset?.name === SETUP_PRESET;
 }
 
 // Whether the task's frozen preset has an open-pr stage.

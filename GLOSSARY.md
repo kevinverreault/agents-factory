@@ -199,7 +199,7 @@ Who passes a spec's merge gates, fixed when the spec task is handed off. Under t
 _Avoid_: Auto-merge setting, review mode
 
 **Factory identity**:
-The GitHub identity the factory acts under for AFK work, distinct from the operator's own. HITL work stays under the operator's identity.
+The GitHub identity the factory acts under for AFK work, distinct from the operator's own. HITL work stays under the operator's identity. One exception: once a setup task reaches review, the factory pushes its branch and opens its draft PR under this identity, HITL or not (ADR 0010).
 _Avoid_: Bot account, service account
 
 **Attention request**:
