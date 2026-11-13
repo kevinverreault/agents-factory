@@ -107,6 +107,43 @@ describe('an L2 AFK run', () => {
     expect(factory.git.branchTip(clone, worktree!.branch)).toBe(worktree!.head);
   });
 
+  test('that broke a guard hands its commits to the host when the operator takes its task over, before the HITL run starts', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementAtL2('#39'));
+    await started(factory, 1);
+    const [worktree] = await factory.git.worktrees(clone);
+    const tip = commitInContainer(factory, 'T1');
+    factory.git.breakInvariant(factory.sandbox.workdirOf('T1'), 'The run left uncommitted changes: notes.jsonl.');
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    await vi.waitFor(() => expect(factory.sandbox.state('T1')).toBe('stopped'));
+
+    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: true });
+
+    expect(await started(factory, 2)).toMatchObject({ mode: 'HITL', container: null });
+    expect(factory.git.branchTip(clone, worktree!.branch)).toBe(tip);
+    expect(factory.sandbox.calls).toEqual(['prepare T1', 'stop T1', 'start T1', 'bringOut T1', 'stop T1']);
+  });
+
+  test('that broke a guard and whose commits still can’t come out leaves them there, and the operator’s HITL run starts anyway', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(implementAtL2('#39'));
+    await started(factory, 1);
+    const [worktree] = await factory.git.worktrees(clone);
+    commitInContainer(factory, 'T1');
+    factory.git.breakInvariant(factory.sandbox.workdirOf('T1'), 'The run added remotes: fork.');
+    factory.executor.report('R1', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    await vi.waitFor(() => expect(factory.sandbox.state('T1')).toBe('stopped'));
+
+    factory.sandbox.fail('bringOut', 'Cannot connect to the Docker daemon.');
+    expect(await operator.send({ type: 'takeOver', taskId: 'T1' })).toEqual({ ok: true });
+
+    expect(await started(factory, 2)).toMatchObject({ mode: 'HITL', container: null });
+    expect(factory.git.branchTip(clone, worktree!.branch)).toBe(worktree!.head);
+    await vi.waitFor(() => expect(factory.sandbox.state('T1')).toBe('stopped'));
+  });
+
   test('whose commits can’t come out fails, saying why', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(implementAtL2('#39'));
@@ -371,7 +408,8 @@ describe('an L2 task’s container', () => {
 
     const hitl = await started(factory, 2);
     expect(hitl).toMatchObject({ mode: 'HITL', container: null });
-    expect(factory.sandbox.calls).toEqual(['prepare T1', 'restart T1', 'bringOut T1', 'stop T1']);
+    // The HITL run's own start brings out whatever is left, which is nothing here.
+    await vi.waitFor(() => expect(factory.sandbox.calls).toEqual(['prepare T1', 'restart T1', 'bringOut T1', 'stop T1', 'start T1', 'bringOut T1', 'stop T1']));
     expect(factory.git.branchTip(clone, worktree!.branch)).toBe(tip);
     expect(factory.sandbox.state('T1')).toBe('stopped');
     void tui;
