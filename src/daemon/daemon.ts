@@ -993,20 +993,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // why it couldn't, which is work at stake. The container is settled after.
   async function bringOutForCancel(task: Task): Promise<string | null> {
     if (task.parent || !task.worktree || !containers.has(task.id)) return null;
-    const { path, branch } = task.worktree;
-    try {
-      await onContainer(task.id, async () => {
-        await sandbox.start(task.id);
-        containers.set(task.id, true);
-        await sandbox.bringOut(task.id, path, branch);
-      });
-      return null;
-    } catch (error) {
-      if (!(error instanceof SandboxError)) throw error;
-      return `Couldn’t bring ${task.id}’s commits out of its container, where they may be the only copy: ${error.message}`;
-    } finally {
-      settleContainer(task.id);
-    }
+    const unbrought = await bringOutOfContainer(task);
+    return unbrought && `Couldn’t bring ${task.id}’s commits out of its container, where they may be the only copy: ${unbrought}`;
   }
 
   // Why the task's branch isn't known to be merged into its base branch on
@@ -2300,7 +2288,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // An L2 run starts in its task's container (ADR 0007), prepared with the
   // host task branch's commits, and its checks are made there. Any run of a
   // task with a container waits for what the container is doing first, such
-  // as bringing out the commits of a run cut short.
+  // as bringing out the commits of a run cut short. A HITL run on the host
+  // then gets the commits the container still holds, such as those of an L2
+  // run whose guards broke: the operator is there to weigh them, and a run
+  // without them would redo their work beside them.
   async function startRun(run: Run): Promise<void> {
     const task = lifecycle.tasks[run.taskId]!;
     const cwd = task.worktree?.path ?? null;
@@ -2308,6 +2299,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     let container: Container | null = null;
     let token: string | null = null;
     if (containers.has(task.id)) await onContainer(task.id, async () => {});
+    // Commits that can't come out stay there: the next run's prepare, or the task's cleanup, says why.
+    if (run.mode === 'HITL' && cwd && containers.has(task.id)) await bringOutOfContainer(task);
     // The CLI resumes a session only from its file (ADR 0011).
     if (run.resumesSession && cwd && task.sessionId) {
       await restoreTranscript(task, task.sessionId);
@@ -2770,6 +2763,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await sandbox.bringOut(taskId, worktree.path, worktree.branch).catch((error) => {
       if (!(error instanceof SandboxError)) throw error;
     });
+  }
+
+  // Brings the commits the task's container holds out to its host task
+  // branch, starting the container if it is stopped, then settles it: null
+  // once done, else why they couldn't come out.
+  async function bringOutOfContainer(task: Task): Promise<string | null> {
+    const { path, branch } = task.worktree!;
+    try {
+      await onContainer(task.id, async () => {
+        await sandbox.start(task.id);
+        containers.set(task.id, true);
+        await sandbox.bringOut(task.id, path, branch);
+      });
+      return null;
+    } catch (error) {
+      if (!(error instanceof SandboxError)) throw error;
+      return error.message;
+    } finally {
+      settleContainer(task.id);
+    }
   }
 
   // At the task's end (ADR 0011): its container's commits come out to the

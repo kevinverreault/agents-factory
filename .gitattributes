@@ -1,3 +1,7 @@
 # The vendored security guidance plugin, byte for byte as upstream ships it:
 # no line-ending conversion, so bash can run its scripts on Windows too.
 src/security-guidance/plugin/** -text
+
+# The vhs tapes `npm run tapes` writes, which a test compares byte for byte
+# with what it would write now: LF on every checkout.
+docs/media/tapes/*.tape text eol=lf

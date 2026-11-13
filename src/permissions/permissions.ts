@@ -32,33 +32,13 @@ export const INTERPRETERS: Readonly<Record<string, Interpreter>> = {
 // Whether the word gives the interpreter inline code, as the next word.
 export const givesCode = ({ inline, clustered }: Interpreter, word: string) => inline.includes(word) || (clustered?.test(word) ?? false);
 
-// The factory's allow list: what it lets every L1 run do without asking,
-// each entry with why that is safe enough for L1, which guards against
-// accidents, not malice (ADR 0007). It is these rules, which Claude Code
-// matches itself, and the factory's commands below, which no rule's glob
-// can say. Edits in the worktree are accepted by the run's permission mode,
-// edits in the temp folder by the factory's matcher (see `uncovered`), and
-// Claude Code runs what it considers read-only without asking.
-export const FACTORY_ALLOW_LIST: readonly string[] = [
-  // Read-only tools, and the agent's own bookkeeping.
-  'Read',
-  'Glob',
-  'Grep',
-  'LS',
-  // Code intelligence's symbol lookups. Claude Code already counts them as
-  // reads, but a later CLI needn't.
-  'LSP',
-  'NotebookRead',
-  'TodoWrite',
-  'Task',
-  'Agent',
-  'Skill',
-  'WebFetch',
-  'WebSearch',
-  // The factory's own MCP tools, which only report to the daemon. An L1 run
-  // has no MCP server but the factory's, so none other answers to the name.
-  'mcp__factory',
-  // Read-only and local-commit git.
+// The rules of the factory's allow list that hold wherever a command runs:
+// they read, or run inline code no more able out of the worktree than in it.
+// A command after a `cd` out of the worktree is covered by these, the
+// factory's commands and the operator's and task's own rules, but not by the
+// rest of the allow list, which commits or runs the project where it is.
+export const ANYWHERE_RULES: readonly string[] = [
+  // Read-only git.
   ...[
     'status',
     'diff',
@@ -68,8 +48,6 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
     'ls-files',
     'rev-parse',
     'grep',
-    'add',
-    'commit',
     'merge-base',
     'rev-list',
     'cat-file',
@@ -88,27 +66,9 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
   // alone is a read too, which the factory's matcher tells from a write.
   ...[...CONFIG_READS, 'get', 'list'].map((read) => `Bash(git config ${read} *)`),
   // Reading issues and PRs, which an AFK run does as the App's bot with its
-  // read-only token (ADR 0004).
+  // read-only token (ADR 0004), and which `gh` it has.
   ...['issue view', 'issue list', 'pr view', 'pr list', 'pr diff'].map((verb) => `Bash(gh ${verb} *)`),
-  // Package-manager scripts and test runners.
-  ...['npm', 'pnpm', 'yarn'].flatMap((manager) => [`Bash(${manager} test *)`, `Bash(${manager} run *)`]),
-  ...['vitest', 'jest', 'tsc', 'eslint'].map((runner) => `Bash(npx ${runner} *)`),
-  'Bash(pytest *)',
-  'Bash(python -m pytest *)',
-  'Bash(cargo test *)',
-  'Bash(cargo build *)',
-  'Bash(go test *)',
-  'Bash(go build *)',
-  'Bash(dotnet test *)',
-  'Bash(dotnet build *)',
-  // Installs from the lockfile only, which fetch what the project pinned and
-  // never change what it depends on. An install that names a package, or
-  // one that may move the lockfile, still asks.
-  'Bash(npm ci *)',
-  'Bash(pnpm install --frozen-lockfile *)',
-  'Bash(pnpm i --frozen-lockfile *)',
-  'Bash(yarn install --immutable *)',
-  'Bash(yarn install --frozen-lockfile *)',
+  'Bash(gh --version)',
   // Python and Node on inline code or on stdin, a heredoc's included: no more
   // than a test script could run, or the run's Edit tool could write as a
   // script. The hard denies read the code, inline or in a heredoc, for a push.
@@ -117,7 +77,9 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
   ...Object.entries(INTERPRETERS).flatMap(([name, { inline, inPlace }]) =>
     inPlace ? [] : [...inline, '-'].map((option) => `Bash(${name} ${option} *)`),
   ),
-  // Common read-only shell commands, none with an option that writes.
+  // Common read-only shell commands, none with an option that writes, and
+  // Git Bash's `cygpath`, which only prints a path as Windows names it, as
+  // T29's grill needed to hand its Write tool a temp file.
   ...[
     'ls',
     'cat',
@@ -146,9 +108,62 @@ export const FACTORY_ALLOW_LIST: readonly string[] = [
     'basename',
     'dirname',
     'realpath',
+    'cygpath',
     'test',
     'true',
   ].map((command) => `Bash(${command} *)`),
+];
+
+// The factory's allow list: what it lets every L1 run do without asking,
+// each entry with why that is safe enough for L1, which guards against
+// accidents, not malice (ADR 0007). It is these rules, which Claude Code
+// matches itself, and the factory's commands below, which no rule's glob
+// can say. Edits in the worktree are accepted by the run's permission mode,
+// edits in the temp folder by the factory's matcher (see `uncovered`), and
+// Claude Code runs what it considers read-only without asking.
+export const FACTORY_ALLOW_LIST: readonly string[] = [
+  // Read-only tools, and the agent's own bookkeeping.
+  'Read',
+  'Glob',
+  'Grep',
+  'LS',
+  // Code intelligence's symbol lookups. Claude Code already counts them as
+  // reads, but a later CLI needn't.
+  'LSP',
+  'NotebookRead',
+  'TodoWrite',
+  'Task',
+  'Agent',
+  'Skill',
+  'WebFetch',
+  'WebSearch',
+  // The factory's own MCP tools, which only report to the daemon. An L1 run
+  // has no MCP server but the factory's, so none other answers to the name.
+  'mcp__factory',
+  // What reads anywhere, above.
+  ...ANYWHERE_RULES,
+  // Local commits in the worktree.
+  'Bash(git add *)',
+  'Bash(git commit *)',
+  // Package-manager scripts and test runners.
+  ...['npm', 'pnpm', 'yarn'].flatMap((manager) => [`Bash(${manager} test *)`, `Bash(${manager} run *)`]),
+  ...['vitest', 'jest', 'tsc', 'eslint'].map((runner) => `Bash(npx ${runner} *)`),
+  'Bash(pytest *)',
+  'Bash(python -m pytest *)',
+  'Bash(cargo test *)',
+  'Bash(cargo build *)',
+  'Bash(go test *)',
+  'Bash(go build *)',
+  'Bash(dotnet test *)',
+  'Bash(dotnet build *)',
+  // Installs from the lockfile only, which fetch what the project pinned and
+  // never change what it depends on. An install that names a package, or
+  // one that may move the lockfile, still asks.
+  'Bash(npm ci *)',
+  'Bash(pnpm install --frozen-lockfile *)',
+  'Bash(pnpm i --frozen-lockfile *)',
+  'Bash(yarn install --immutable *)',
+  'Bash(yarn install --frozen-lockfile *)',
 ];
 
 // The factory's commands: the rest of its allow list, which its own matcher
@@ -165,6 +180,7 @@ function factoryCommand(command: SimpleCommand, at: Place, covered: (other: Simp
   if (program === 'export') return args.length > 0 && args.every(plainAssignment);
   if (program === 'cp') return copiesWithin(args, at, false);
   if (program === 'mv') return copiesWithin(args, at, true);
+  if (program === 'mkdir') return makesWithin(args, at);
   if (program === 'git' && args[0] === '-c') return withPlainConfig(command, covered);
   if (program === 'git' && args[0] === 'config') return readsGitConfig(args.slice(1));
   if (program === 'git' && args[0] === 'branch') return listsBranches(args.slice(1));
@@ -229,6 +245,15 @@ function copyOf(args: string[]): { sources: string[]; destination: string | null
   const target = options.filter(({ name }) => name === '-t' || name === '--target-directory').at(-1);
   if (target) return { sources: operands, destination: target.value };
   return { sources: operands.slice(0, -1), destination: operands.at(-1) ?? null };
+}
+
+// `mkdir` of folders in the worktree, outside `.git`, or in the temp folder,
+// where the run's file tools make them too, as T29's spec and tickets did
+// for the issue bodies they wrote. `-m` and `-Z` set more than the folder.
+function makesWithin(args: string[], at: Place): boolean {
+  const { options, operands } = optionsOf(args, 'mZ', ['--mode', '--context']);
+  const plain = options.every(({ name }) => ['-p', '-v', '--parents', '--verbose'].includes(name));
+  return plain && operands.length > 0 && operands.every((path) => at.inside(path) !== null || inTemp(path) !== null);
 }
 
 // The files in the temp folder the command writes, but by the heredoc `cat`
@@ -524,24 +549,27 @@ const mustHoldRules = (path: string) => `${path} must hold \`allow:\`, a list of
 // The parts of the call no rule covers, each a call of its own, made in the
 // run's `worktree` when known: the commands of a Bash chain (`&&`, `||`, `;`,
 // `&` or `|`), less their redirections, which a rule or the factory's
-// commands may cover, or else the call itself. A Bash command that can't be
-// read, writes outside the worktree and the temp folder or `cd`s out of the
-// worktree is one part, which only its exact rule covers. None when the
-// rules cover the call. `scripts` are those the run wrote to the temp folder
-// in its earlier calls, as `trackScripts` keeps them, which it may run as it
-// would its line's own. The temp folder is the run's scratch space too: its
+// commands may cover, or else the call itself. Those after a `cd` that may
+// leave the worktree run away from it, where the factory's own rules cover
+// only `ANYWHERE_RULES`. A Bash command that can't be read or writes outside
+// the worktree and the temp folder is one part, which only its exact rule
+// covers. None when the rules cover the call. `scripts` are those the run
+// wrote to the temp folder in its earlier calls, as `trackScripts` keeps
+// them, which it may run as it would its line's own. The temp folder is the run's scratch space too: its
 // file tools, redirections, `cp` and `mv` may write there, as in the worktree.
 export function uncovered(rules: readonly string[], call: ToolCall, worktree: string | null = null, scripts: ReadonlySet<string> = new Set()): ToolCall[] {
   const parsed = rules.flatMap((rule) => parseRule(rule) ?? []).filter((rule) => toolMatches(rule.tool, call.tool));
   if (parsed.some((rule) => rule.specifier === null)) return [];
   if (call.tool === 'Bash') {
     const command = String(call.input.command ?? '');
+    if (parsed.some((rule) => rule.specifier === command.trim())) return [];
     const commands = readCommandLine(command);
     const parts = partsWithin(commands, worktree, scripts);
-    if (parts === null) return parsed.some((rule) => rule.specifier === command.trim()) ? [] : [call];
-    const covered = (simple: SimpleCommand, at: Place): boolean =>
-      parsed.some((rule) => bashMatches(rule.specifier!, simple.text)) || factoryCommand(simple, at, (other) => covered(other, at));
-    const left = parts.filter((part) => !covered(part.command, part.at));
+    if (parts === null) return [call];
+    const anywhere = awayRules(rules).flatMap((rule) => parseRule(rule) ?? []).filter((rule) => toolMatches(rule.tool, call.tool));
+    const covered = (simple: SimpleCommand, at: Place, by: Rule[]): boolean =>
+      by.some((rule) => bashMatches(rule.specifier!, simple.text)) || factoryCommand(simple, at, (other) => covered(other, at, by));
+    const left = parts.filter((part) => !covered(part.command, part.at, part.away ? anywhere : parsed));
     // A loop's command, run once for each of its words, is one part.
     const texts = [...new Set(left.map(({ command: { text } }) => text))];
     return texts.map((text) => (commands!.length === 1 ? call : { ...call, input: { ...call.input, command: text }, summary: text }));
@@ -553,6 +581,21 @@ export function uncovered(rules: readonly string[], call: ToolCall, worktree: st
   const target = targetOf(call.input);
   if (target !== null && FILE_TOOLS.has(call.tool) && fileInTemp(target) !== null) return [];
   return target !== null && parsed.some((rule) => glob(slashed(rule.specifier!)).test(posix.normalize(slashed(target)))) ? [] : [call];
+}
+
+// The rules that hold away from the worktree: all but the factory's own
+// entries that hold only in it, which the rules hold once, ahead of the
+// operator's and the task's, as `readAllowRules` gives them. The same rule
+// again is the operator's or the task's own, which named the command
+// wherever it runs: as Allow always adds `Bash(npm test *)` for a test run
+// after a `cd` out.
+function awayRules(rules: readonly string[]): string[] {
+  const factory = FACTORY_ALLOW_LIST.filter((rule) => !ANYWHERE_RULES.includes(rule));
+  return rules.filter((rule) => {
+    const at = factory.indexOf(rule.trim());
+    if (at >= 0) factory.splice(at, 1);
+    return at < 0;
+  });
 }
 
 // The tools that write files.
@@ -579,26 +622,33 @@ export function trackScripts(call: Pick<ToolCall, 'tool' | 'input'>, scripts: Se
 }
 
 // The simple commands of a line, but its `cd`s and bare redirections, each
-// with where it runs, or null when the line can't be read, writes outside
-// the worktree and the temp folder, or a `cd` may leave the worktree. A `cd`
-// in a loop, a condition or a group may run more than once or not at all,
-// so no reading says where it leaves. A heredoc `cat` writes to the temp
-// folder is a script the commands after it may run, as an interpreter would
-// run the heredoc itself, and so are the run's earlier `written` scripts,
-// until the line overwrites them otherwise.
-function partsWithin(commands: SimpleCommand[] | null, worktree: string | null, written: ReadonlySet<string>): { command: SimpleCommand; at: Place }[] | null {
+// with where it runs, or null when the line can't be read or writes outside
+// the worktree and the temp folder. After a `cd` that may leave the
+// worktree, every command runs `away`, where no path but the temp folder's
+// is known. A `cd` in a loop, a condition or a group may run more than once
+// or not at all, so no reading says where it leaves. A heredoc `cat` writes
+// to the temp folder is a script the commands after it may run, as an
+// interpreter would run the heredoc itself, and so are the run's earlier
+// `written` scripts, until the line overwrites them otherwise.
+function partsWithin(
+  commands: SimpleCommand[] | null,
+  worktree: string | null,
+  written: ReadonlySet<string>,
+): { command: SimpleCommand; at: Place; away: boolean }[] | null {
   if (commands === null || commands.length === 0) return null;
   // Where each command runs, as far as the `cd`s before it in the line say.
   let dir = worktree === null ? null : slashed(worktree);
+  let away = false;
   const scripts = new Set(written);
-  const parts: { command: SimpleCommand; at: Place }[] = [];
+  const parts: { command: SimpleCommand; at: Place; away: boolean }[] = [];
   for (const command of commands) {
     const at = place(worktree, dir, new Set(scripts));
     if (!command.writes.every((path) => at.inside(path) !== null || inTemp(path) !== null)) return null;
     scriptsAfter(command, scripts);
     if (command.words[0] === 'cd') {
-      if (command.compound || (dir = movesTo(command, at)) === null) return null;
-    } else if (command.words.length) parts.push({ command, at });
+      dir = command.compound || away ? null : movesTo(command, at);
+      away = dir === null;
+    } else if (command.words.length) parts.push({ command, at, away });
   }
   return parts;
 }
@@ -735,9 +785,12 @@ const TEMP_FOLDERS = ['/tmp', OS_TEMP];
 
 // The path, resolved, when it is absolute and lies in the temp folder. On
 // Windows, by the OS's name for it, which Node reads `/tmp` paths by too.
+// A path may start with the variable that names it, as the run's
+// environment, the daemon's own, sets it (`$TEMP/spec`).
 export function inTemp(path: string): string | null {
-  if (/[$~]/.test(path)) return null;
-  const written = posix.normalize(fromBash(path));
+  const named = path.replace(/^\$(?:(TEMP|TMP|TMPDIR)\b|\{(TEMP|TMP|TMPDIR)\})/, (written, plain?: string, braced?: string) => process.env[(plain ?? braced)!] || written);
+  if (/[$~]/.test(named)) return null;
+  const written = posix.normalize(fromBash(named));
   const resolved = process.platform === 'win32' ? written.replace(/^\/tmp(?=\/|$)/, OS_TEMP) : written;
   return TEMP_FOLDERS.some((folder) => comparable(resolved).startsWith(`${comparable(folder)}/`)) ? resolved : null;
 }
