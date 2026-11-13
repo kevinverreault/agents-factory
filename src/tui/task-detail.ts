@@ -1,10 +1,10 @@
 // A task's detail, drilled into from a screen with `enter`: its title, what
-// it is on one line, its open request, its runs, its usage and artifacts,
-// and its output whole.
+// it is on one line, its open request, a spec task's tickets, its runs, its
+// usage and artifacts, and its output whole.
 import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
-import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
+import type { FactoryState, RunView, TaskView, TicketSetView, TicketView } from '../protocol/factory-state.ts';
 import { overall, tokensOf } from '../usage/usage.ts';
 import { answerable, askedFor } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
@@ -44,6 +44,7 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
       request?.kind === 'attention'
         ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: answerable(request, task) ? 'a answer' : undefined }, h(Text, null, askedFor(request, task)))
         : null,
+      task.ticketSet ? h(Tickets, { state, ticketSet: task.ticketSet }) : null,
       h(
         Section,
         { title: 'Runs' },
@@ -60,6 +61,46 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
 // A task's mode, with its autonomy when it has one: `AFK L2`, `HITL`.
 export function modeOf({ mode, autonomy }: Pick<TaskView, 'mode' | 'autonomy'>): string {
   return autonomy ? `${mode} ${autonomy}` : mode;
+}
+
+// A spec task's tickets (ADR 0013), each a row: its ref, its title and where
+// it stands, and why the factory last couldn't read or launch them.
+function Tickets({ state, ticketSet }: { state: FactoryState; ticketSet: TicketSetView }) {
+  const ref = Math.max(0, ...ticketSet.tickets.map((ticket) => ticket.ref.length));
+  return h(
+    Section,
+    { title: ticketSet.spec ? `Tickets of ${ticketSet.spec}` : 'Tickets' },
+    ticketSet.problem ? h(Text, { ...tone('warn'), wrap: 'truncate' }, ticketSet.problem) : null,
+    ticketSet.tickets.length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
+    ...ticketSet.tickets.map((ticket) =>
+      h(
+        Box,
+        { key: ticket.ref, gap: 1 },
+        h(Box, { width: ref, flexShrink: 0 }, h(Text, tone('dim'), ticket.ref)),
+        h(Box, { width: 30, flexShrink: 0 }, h(Text, { ...tone('fg'), wrap: 'truncate' }, ticket.title ?? '')),
+        h(Box, { flexGrow: 1, flexShrink: 1, flexBasis: 0 }, h(Text, { ...tone(ticket.state === 'launched' ? 'fg' : 'dim'), wrap: 'truncate' }, standing(state, ticket))),
+      ),
+    ),
+  );
+}
+
+// Where a ticket stands: its ticket task and that task's state while
+// launched, or what it waits on, or why it won't be launched.
+function standing(state: FactoryState, ticket: TicketView): string {
+  switch (ticket.state) {
+    case 'launched':
+      return `${ticket.taskId} ${state.tasks[ticket.taskId]?.label ?? ''}`.trim();
+    case 'launching':
+      return 'launching';
+    case 'waiting':
+      return ticket.blockers.length ? `waiting on ${ticket.blockers.join(', ')}` : 'waiting';
+    case 'held-back':
+      return 'held back';
+    case 'skipped':
+      return 'skipped';
+    case 'merged':
+      return ticket.taskId ? `merged (${ticket.taskId})` : 'merged';
+  }
 }
 
 // A run: bright while live, its outcome lit, and dim once it ended.

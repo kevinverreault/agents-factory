@@ -493,6 +493,93 @@ describe('the task tree', () => {
   });
 });
 
+describe('spec tasks', () => {
+  // T1, a spec task over #10, with ticket tasks T2 on #11 (In review), T3
+  // on #15 (Running) with a child T5, and T4 on #16 (Done); #12 waits on
+  // #11, #13 is held back, #14 was skipped and #17 is about to launch. T6
+  // is a root launched after.
+  const specTree = () =>
+    factoryState([
+      {
+        ...task('T1', 'Sign-in', 'running', 'Running'),
+        kind: 'spec',
+        mergePolicy: 'operator',
+        ticketSet: {
+          spec: 'acme/widgets#10',
+          tickets: [
+            { ref: 'acme/widgets#11', title: 'A login form', state: 'launched', taskId: 'T2' },
+            { ref: 'acme/widgets#12', title: 'Remember me', state: 'waiting', blockers: ['acme/widgets#11'] },
+            { ref: 'acme/widgets#13', title: 'SSO', state: 'held-back' },
+            { ref: 'acme/widgets#14', title: 'The sign-in route', state: 'skipped' },
+            { ref: 'acme/widgets#15', title: 'Sign out', state: 'launched', taskId: 'T3' },
+            { ref: 'acme/widgets#16', title: 'Lock out', state: 'merged', taskId: 'T4' },
+            { ref: 'acme/widgets#17', title: 'Audit log', state: 'launching' },
+          ],
+          problem: null,
+        },
+      },
+      { ...ticketTask('T2', 'A login form', 'acme/widgets#11'), state: 'in-review', label: 'In review' },
+      { ...ticketTask('T3', 'Sign out', 'acme/widgets#15'), rollup: { done: 0, running: 1, needsYou: 0, cancelled: 0, failed: [] } },
+      { ...ticketTask('T4', 'Lock out', 'acme/widgets#16'), state: 'done', label: 'Done' },
+      { ...task('T5', 'Check the links', 'running', 'Running'), parent: 'T3', depth: 1 },
+      task('T6', 'Another root', 'queued', 'Queued'),
+    ]);
+
+  function ticketTask(id: string, title: string, ticket: string): TaskView {
+    return { ...task(id, title, 'running', 'Running'), kind: 'ticket', ticket, specTask: 'T1', mergePolicy: 'operator' };
+  }
+
+  test('ticket tasks show under their spec task, which counts its tickets by state, each ticket task naming its ticket', async () => {
+    const { app } = await started(specTree());
+    widen(app, 140);
+
+    await eventually(() => {
+      const rows = lines(app).filter((line) => /^[›\s]+\S\s+T\d/.test(line));
+      // Newest first: the roots, and each spec task's ticket tasks under it, as children are.
+      expect(rows.map((row) => /T\d/.exec(row)![0])).toEqual(['T6', 'T1', 'T4', 'T3', 'T5', 'T2']);
+      const glyphAt = rows.map((row) => row.search(/[^›\s]/));
+      expect(glyphAt[1]).toBe(glyphAt[0]);
+      expect(glyphAt[2]).toBeGreaterThan(glyphAt[1]!);
+      expect(glyphAt[3]).toBe(glyphAt[2]);
+      // A ticket task's child sits past its ticket task.
+      expect(glyphAt[4]).toBeGreaterThan(glyphAt[3]!);
+      expect(glyphAt[5]).toBe(glyphAt[2]);
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toMatch(/T1 +Sign-in +AFK L1 +Running +\[1 merged, 3 in flight, 1 waiting, 1 held back, 1 skipped\]/);
+      expect(frame).toMatch(/T2 +A login form +AFK L1 +In review +on acme\/widgets#11/);
+      expect(frame).toMatch(/T3 +Sign out +AFK L1 +Running +on acme\/widgets#15 · \[1 running\]/);
+    });
+  });
+
+  test('the spec task’s detail lists its tickets, each with where it stands', async () => {
+    const { app } = await started(specTree());
+    widen(app, 140);
+    // T1 is the second row: T6, T1.
+    await press(app, '\x1b[B', '\r');
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('TICKETS OF ACME/WIDGETS#10');
+      expect(frame).toMatch(/acme\/widgets#11 A login form T2 In review/);
+      expect(frame).toMatch(/acme\/widgets#12 Remember me waiting on acme\/widgets#11/);
+      expect(frame).toMatch(/acme\/widgets#13 SSO held back/);
+      expect(frame).toMatch(/acme\/widgets#14 The sign-in route skipped/);
+      expect(frame).toMatch(/acme\/widgets#15 Sign out T3 Running/);
+      expect(frame).toMatch(/acme\/widgets#16 Lock out merged \(T4\)/);
+      expect(frame).toMatch(/acme\/widgets#17 Audit log launching/);
+    });
+  });
+
+  test('a spec task’s detail says why the factory couldn’t read or launch its tickets', async () => {
+    const state = specTree();
+    state.tasks.T1!.ticketSet!.problem = 'The factory couldn’t read T1’s tickets from GitHub: Bad gateway.';
+    const { app } = await started(state);
+    await press(app, '\x1b[B', '\r');
+
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('The factory couldn’t read T1’s tickets from GitHub: Bad gateway.'));
+  });
+});
+
 describe('repositories', () => {
   const widgets = { id: 'acme/widgets', path: '/clones/widgets', baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: null, skills: null };
 

@@ -20,7 +20,7 @@ import { Box, Text, useInput, useStdin } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
-import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
+import type { FactoryState, TaskView, TicketView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
@@ -666,17 +666,27 @@ function TaskList({
 }
 
 // The tasks as a tree: each root newest first, its descendants under it,
-// depth first and newest first too.
+// depth first and newest first too. A spec task's ticket tasks show under
+// it as its children do, each indented by its depth in the tree as shown.
 function treeOrder(tasks: TaskView[]): TaskView[] {
   const newestFirst = [...tasks].sort(newerFirst);
   const ids = new Set(tasks.map(({ id }) => id));
   const ordered: TaskView[] = [];
-  const place = (task: TaskView) => {
-    ordered.push(task);
-    for (const child of newestFirst) if (child.parent === task.id) place(child);
+  const place = (task: TaskView, depth: number) => {
+    ordered.push(task.depth === depth ? task : { ...task, depth });
+    for (const child of newestFirst) if (shownUnder(child) === task.id) place(child, depth + 1);
   };
-  for (const task of newestFirst) if (!task.parent || !ids.has(task.parent)) place(task);
+  for (const task of newestFirst) {
+    const above = shownUnder(task);
+    if (!above || !ids.has(above)) place(task, 0);
+  }
   return ordered;
+}
+
+// The task a task shows under in the tree: its parent, or for a ticket
+// task its spec task.
+function shownUnder(task: TaskView): string | null {
+  return task.parent ?? task.specTask;
 }
 
 // Tasks have no creation time, but their ids count up as they are created:
@@ -701,7 +711,7 @@ function keepingAncestors(tree: TaskView[], keep: (task: TaskView) => boolean): 
   const kept = new Set<string>();
   for (const task of tree) {
     if (!keep(task)) continue;
-    for (let at: TaskView | undefined = task; at && !kept.has(at.id); at = at.parent ? byId.get(at.parent) : undefined) kept.add(at.id);
+    for (let at: TaskView | undefined = task; at && !kept.has(at.id); at = byId.get(shownUnder(at) ?? '')) kept.add(at.id);
   }
   return tree.filter((task) => kept.has(task.id));
 }
@@ -739,10 +749,27 @@ function rowLayout(tasks: TaskView[], columns: number, compact: boolean): RowLay
   return { compact, glyph, id, title, extras: rest - 1 - title, groups };
 }
 
-// What a row says past its state: its loop's ticket, its descendants'
-// rollup and its progress.
+// What a row says past its state: its loop's ticket or its ticket task's,
+// a spec task's tickets by state, its descendants' rollup and its progress.
 function extrasOf(task: TaskView): string {
-  return joined([loopDetail(task), rollupDetail(task), task.progress]);
+  return joined([loopDetail(task), task.kind === 'ticket' && task.ticket ? `on ${task.ticket}` : null, ticketSetDetail(task), rollupDetail(task), task.progress]);
+}
+
+// A spec task's tickets counted by where they stand, in flight being those
+// launched or launching (ADR 0013).
+function ticketSetDetail({ ticketSet }: TaskView): string {
+  if (!ticketSet) return '';
+  const count = (states: TicketView['state'][]) => ticketSet.tickets.filter(({ state }) => states.includes(state)).length;
+  const counts = (
+    [
+      [count(['merged']), 'merged'],
+      [count(['launched', 'launching']), 'in flight'],
+      [count(['waiting']), 'waiting'],
+      [count(['held-back']), 'held back'],
+      [count(['skipped']), 'skipped'],
+    ] as const
+  ).flatMap(([n, what]) => (n ? [`${n} ${what}`] : []));
+  return counts.length ? `[${counts.join(', ')}]` : '';
 }
 
 // A task in the tree: its state's glyph, indented by its depth; its id and

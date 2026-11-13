@@ -85,7 +85,7 @@ describe('launching implement on a spec ref', () => {
 
     const state = await tui.until((state) => !!state.tasks.T3?.liveRunId && !!state.tasks.T2?.liveRunId);
     expect(state.tasks.T1).toMatchObject({ kind: 'spec', ticket: null, specTask: null, mergePolicy: 'operator', mode: 'AFK', liveRunId: null, stage: 'implement' });
-    expect(state.tasks.T1?.ticketSet).toMatchObject({ spec: SPEC, tickets: ['acme/widgets#11', 'acme/widgets#12', 'acme/widgets#13', 'acme/widgets#14', 'acme/widgets#15'], problem: null });
+    expect(state.tasks.T1?.ticketSet?.tickets.map(({ ref }) => ref)).toEqual(['acme/widgets#11', 'acme/widgets#12', 'acme/widgets#13', 'acme/widgets#14', 'acme/widgets#15']);
     expect(ticketTasks(state)).toEqual({ 'acme/widgets#11': 'T2', 'acme/widgets#15': 'T3' });
     expect(state.tasks.T2).toMatchObject({ kind: 'ticket', ticket: 'acme/widgets#11', specTask: 'T1', mergePolicy: 'operator', mode: 'AFK', stage: 'implement', title: 'A login form' });
     expect(state.tasks.T3).toMatchObject({ kind: 'ticket', ticket: 'acme/widgets#15', specTask: 'T1', title: 'Sign out' });
@@ -99,6 +99,27 @@ describe('launching implement on a spec ref', () => {
   });
 });
 
+describe('the spec task’s ticket set', () => {
+  test('shows each ticket with its state: launched with its ticket task, waiting on its blockers, held back by its label, or merged', async () => {
+    const { operator, tui } = await attached();
+
+    await operator.send(onSpec());
+
+    const state = await tui.until((state) => !!state.tasks.T3?.liveRunId && !!state.tasks.T2?.liveRunId);
+    expect(state.tasks.T1?.ticketSet).toEqual({
+      spec: SPEC,
+      tickets: [
+        { ref: 'acme/widgets#11', title: 'A login form', state: 'launched', taskId: 'T2' },
+        { ref: 'acme/widgets#12', title: 'Remember me', state: 'waiting', blockers: ['acme/widgets#11'] },
+        { ref: 'acme/widgets#13', title: 'SSO', state: 'held-back' },
+        { ref: 'acme/widgets#14', title: 'The sign-in route', state: 'merged', taskId: null },
+        { ref: 'acme/widgets#15', title: 'Sign out', state: 'launched', taskId: 'T3' },
+      ],
+      problem: null,
+    });
+  });
+});
+
 describe('launching implement on several refs', () => {
   test('makes a spec task with no spec, each ref one of its tickets, in launch order', async () => {
     const { factory, operator, tui } = await attached();
@@ -107,7 +128,8 @@ describe('launching implement on several refs', () => {
 
     const state = await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
     expect(state.tasks.T1).toMatchObject({ kind: 'spec', liveRunId: null });
-    expect(state.tasks.T1?.ticketSet).toMatchObject({ spec: null, tickets: ['acme/widgets#15', 'acme/widgets#11', 'acme/widgets#13'] });
+    expect(state.tasks.T1?.ticketSet?.spec).toBeNull();
+    expect(state.tasks.T1?.ticketSet?.tickets.map(({ ref }) => ref)).toEqual(['acme/widgets#15', 'acme/widgets#11', 'acme/widgets#13']);
     expect(ticketTasks(state)).toEqual({ 'acme/widgets#15': 'T2', 'acme/widgets#11': 'T3' });
     expect(factory.executor.started[0]!.firstMessage).not.toContain('- Spec:');
   });
@@ -232,7 +254,7 @@ describe('a ticket task', () => {
     expect(conflicted.tasks.T1?.ticketSet?.problem).toMatch(/^The factory couldn’t launch a ticket task on acme\/widgets#11: The factory couldn’t cut factory\/T2-a-login-form from /);
     expect(Object.keys(conflicted.tasks)).toEqual(['T1']);
     expect(factory.git.branchTip(clone, 'factory/T2-a-login-form')).toBeNull();
-    expect(conflicted.tasks.T1?.ticketSet?.launched).toEqual({});
+    expect(conflicted.tasks.T1?.ticketSet?.tickets.filter(({ state }) => state === 'launched')).toEqual([]);
 
     // The operator resolves it on the spec task's branch.
     factory.git.editFile(specWorktree, 'README.md', 'Theirs.\n');
@@ -294,6 +316,6 @@ describe('a crash while launching a ticket task', () => {
     expect(recoveryReport(state)?.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'launch', outcome: 'rolled back' }]);
     expect(Object.keys(state.tasks)).toEqual(['T1']);
     expect((await factory.git.worktrees(clone)).filter(({ branch }) => branch === 'factory/T2-a-login-form')).toMatchObject([{ path: elsewhere }]);
-    expect(state.tasks.T1?.ticketSet?.launched).toEqual({});
+    expect(state.tasks.T1?.ticketSet?.tickets.filter(({ state }) => state === 'launched')).toEqual([]);
   });
 });

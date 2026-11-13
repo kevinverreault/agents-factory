@@ -267,6 +267,8 @@ export type TicketResolution = { problem: string | null };
 // ticket task for yet, in frontier order. `launched` maps each launched
 // ticket to its ticket task. `problem` is why the factory last couldn't
 // read the tickets or launch one: it tries again at the next PR poll.
+// `skipped` are the tickets whose ticket task the operator cancelled, which
+// it doesn't launch again.
 export type TicketSet = {
   spec: string | null;
   tickets: string[];
@@ -274,6 +276,7 @@ export type TicketSet = {
   issues: Issue[];
   toLaunch: string[];
   launched: Record<string, string>;
+  skipped?: string[];
   problem: string | null;
 };
 

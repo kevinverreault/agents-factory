@@ -195,7 +195,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       mergePolicy: task.mergePolicy ?? null,
       resolving: task.resolving ? { ...task.resolving } : null,
       specTask: task.specTask ?? null,
-      ticketSet: task.ticketSet ? ticketSetView(task.ticketSet) : null,
+      ticketSet: task.ticketSet ? ticketSetView(lifecycle, task.ticketSet) : null,
       mode: task.mode,
       autonomy: task.autonomy,
       priority: task.priority ?? 'normal',
@@ -339,10 +339,39 @@ export function applyPatch(state: FactoryState, ops: PatchOp[]): FactoryState {
   return next as unknown as FactoryState;
 }
 
-// A spec task's ticket set as the TUI sees it (ADR 0013).
-export type TicketSetView = { spec: string | null; tickets: string[]; launched: Record<string, string>; problem: string | null };
+// A spec task's ticket set as the TUI sees it (ADR 0013): its spec, each of
+// its tickets in order with where it stands, and why the factory last
+// couldn't read the tickets or launch one.
+export type TicketSetView = { spec: string | null; tickets: TicketView[]; problem: string | null };
 
-// The ticket set's view, copied so the store's never leaks out.
-function ticketSetView({ spec, tickets, launched, problem }: TicketSet): TicketSetView {
-  return { spec, tickets: [...tickets], launched: { ...launched }, problem };
+// A ticket of a spec task, its title once read, and where it stands:
+// launched on its ticket task, launching (on the frontier, its ticket task
+// not made yet), waiting on its open blockers (none until the tickets are
+// first read), held back by its label, skipped once its ticket task was
+// cancelled, or merged: closed, its ticket task (if it had one) Done.
+export type TicketView = { ref: string; title: string | null } & (
+  | { state: 'launched'; taskId: string }
+  | { state: 'launching' }
+  | { state: 'waiting'; blockers: string[] }
+  | { state: 'held-back' }
+  | { state: 'skipped' }
+  | { state: 'merged'; taskId: string | null }
+);
+
+// The ticket set's view, every ticket the set names, then any it launched
+// that its last read no longer has.
+function ticketSetView(lifecycle: Lifecycle, { spec, tickets, issues, toLaunch, launched, skipped, problem }: TicketSet): TicketSetView {
+  const refs = [...new Set([...(issues.length ? issues.map(({ ref }) => ref) : tickets), ...Object.keys(launched)])];
+  const view = (ref: string): TicketView => {
+    const issue = issues.find((issue) => issue.ref === ref);
+    const title = issue?.title ?? null;
+    const taskId = launched[ref];
+    if (taskId) return lifecycle.tasks[taskId]?.state === 'done' ? { ref, title, state: 'merged', taskId } : { ref, title, state: 'launched', taskId };
+    if (issue && !issue.open) return { ref, title, state: 'merged', taskId: null };
+    if (skipped?.includes(ref)) return { ref, title, state: 'skipped' };
+    if (toLaunch.includes(ref)) return { ref, title, state: 'launching' };
+    if (!issue || issue.openBlockers.length) return { ref, title, state: 'waiting', blockers: [...(issue?.openBlockers ?? [])] };
+    return { ref, title, state: 'held-back' };
+  };
+  return { spec, tickets: refs.map(view), problem };
 }
