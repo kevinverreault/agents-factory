@@ -177,6 +177,7 @@ export class FakeSandbox implements Sandbox {
     return {
       taskId: spec.taskId,
       workdir: this.workdirOf(spec.taskId),
+      scratch: '/scratch',
       plugin: spec.plugin === null ? null : '/opt/factory/plugin',
       lspPlugin: '/opt/factory/lsp',
       securityPlugin: '/opt/factory/security',

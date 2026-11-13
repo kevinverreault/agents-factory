@@ -182,6 +182,10 @@ _Avoid_: Reverse handoff, hijack
 The ceiling on what an AFK task may do unattended: at L1 the task's code stays on the operator's machine, and at L2 it runs in a sandbox and the factory may push it and open a draft PR. HITL tasks have none.
 _Avoid_: Permission level, trust level
 
+**Scratch folder**:
+The folder in an L2 task's container, outside its clone, where its runs keep files that aren't the work and where the operator puts files a run asks for. It lasts as long as the container, and the git guards never look at it.
+_Avoid_: Hand-over folder, temp dir (an L1 run's scratch space is the temp folder)
+
 **Merge gate**:
 Where a ticket task's PR waits until it is merged into the base branch. Its spec's merge policy decides who lets it through.
 _Avoid_: Approval, review step
