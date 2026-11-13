@@ -240,7 +240,7 @@ export type Research = { ticket: string; step: 'push' | 'close' | null; problem:
 // (skipped once it has one), and why that step last failed, if it did. A
 // failed step is tried again once the operator answers the request it raised.
 // A setup task's publishing (ADR 0010) starts by committing the setup
-// files its HITL run left in the worktree.
+// files its runs left uncommitted in the worktree.
 export type Publishing = { step: 'commit' | 'push' | 'open-pr'; problem: string | null };
 
 // What a `fix-once` review stage's runs found, whether its one fix pass
@@ -2158,7 +2158,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'pushAndOpenPr':
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
       if (task.autonomy === 'L2') return `${task.id} is at L2, where the factory opens its draft PR itself.`;
-      // HITL work acts as the operator (ADR 0004): the App publishes only L1 work.
+      // HITL work acts as the operator (ADR 0004): the App publishes only L1
+      // work, and a setup task's, which it publishes unasked (ADR 0010).
       if (task.autonomy !== 'L1') return `${task.id} is HITL work, which stays yours: push its branch and open its PR yourself.`;
       return task.publishing ? `${task.id} is already pushing and opening its draft PR.` : null;
     case 'reopenPr':
@@ -2355,10 +2356,13 @@ function failPublishing(state: Lifecycle, task: Task, request: AttentionRequest 
 // A root reaching In review after a run. At L2 the factory publishes what
 // the run did unattended (ADR 0007): it pushes the task branch to the root's
 // PR, or, with no PR yet, pushes and opens one if the preset has an open-pr
-// stage, as when the operator took the root over before it opened.
+// stage, as when the operator took the root over before it opened. A setup
+// task handed off publishes at any level (ADR 0010), on the host first
+// committing what setup files its runs left.
 function reachReview(task: Task): void {
   task.state = 'in-review';
-  if (task.autonomy === 'L2' && !task.child && task.worktree && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
+  if (task.autonomy === 'L2' && !task.child && task.worktree && (task.pr || opensPr(task) || isSetupTask(task))) task.publishing = { step: 'push', problem: null };
+  else if (isSetupTask(task)) task.publishing = { step: 'commit', problem: null };
 }
 
 // Whether the root runs the skill set's per-repo setup: its preset is the
@@ -3798,9 +3802,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         const maps = plan.kind === 'end' ? mapsOf(state, task) : [];
         if (maps.length) task.mapClosing = { maps, spec: null, problem: null };
         task.loop = null;
-        task.state = 'in-review';
         // A setup task's work reaches its PR without the operator (ADR 0010).
-        if (isSetupTask(task)) task.publishing = { step: 'commit', problem: null };
+        reachReview(task);
         break;
       }
       const { to, jumped } = plan;

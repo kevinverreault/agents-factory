@@ -8,6 +8,7 @@
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
+import { handOff } from '../testing/handoff.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -210,6 +211,21 @@ describe('reaching review', () => {
     expect(factory.git.branchTip(widgets, branch!)).toBe(tip);
     expect(factory.git.originTip(widgets, branch!)).toBe(tip);
     expect((await factory.git.worktreeState(worktree)).uncommitted).toEqual(['notes.txt']);
+  });
+
+  test('handed off, publishes what its AFK run committed once that run completes', async () => {
+    const { factory, operator, tui } = await settingUp();
+    await handOff(operator, tui, factory.executor, 'T1');
+    const { worktree, branch } = (await tui.until((state) => state.tasks.T1?.liveRunId === 'R2')).tasks.T1!;
+    for (const [path, content] of Object.entries(SETUP)) factory.git.editFile(worktree!, path, content);
+    factory.git.commitAll(worktree!);
+
+    factory.executor.report('R2', { type: 'runCompleted' });
+
+    const published = await tui.until((state) => state.tasks.T1?.pr != null);
+    expect(published.tasks.T1).toMatchObject({ label: 'In review', publishing: null });
+    expect(factory.git.originTip(widgets, branch!)).toBe(factory.git.branchTip(widgets, branch!));
+    expect(factory.github.pullRequests).toEqual([expect.objectContaining({ head: branch, title: 'Set up the skill set' })]);
   });
 
   test('with no setup written, has nothing to push and opens no PR', async () => {
