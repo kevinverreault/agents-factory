@@ -106,14 +106,6 @@ The stills below show Needs you with its answer sheet. **Runs** (`3`) lists ever
 - [docs/adr/](docs/adr/): the architecture decisions.
 - [docs/windows-terminal-scheme.md](docs/windows-terminal-scheme.md): the TUI's colours in Windows Terminal.
 
-## Contributing
-
-```bash
-npm run typecheck
-npm test                 # the default suite
-npm run test:contract    # contract tests against the real platform; see docs/walking-skeleton.md
-```
-
 ### Re-recording the media
 
 The GIFs and screenshots in `docs/media/` come from scripted scenes in `src/demo/scenes.ts`, played on the real TUI over a made-up factory (`src/demo/demo-factory.ts`). The demo's connection answers the TUI's commands as the daemon would, so a scene is only keys and text, and recording needs no daemon, GitHub or Claude credentials. Two recorders play the same scenes:
