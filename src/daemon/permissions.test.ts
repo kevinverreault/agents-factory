@@ -102,6 +102,21 @@ describe('a tool call the rules cover', () => {
     expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_2: { allow: true } });
     expect(tui.state().attentionQueue).toEqual([]);
   });
+
+  test('in the operator’s permissions file, it runs without asking out of the worktree too, where the factory’s own builds still ask', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(afk('Fix the login bug'));
+    await tui.until((state) => state.tasks.T1?.label === 'Running');
+
+    // `Bash(npm test *)` is the factory's too, as Allow always would add it for this call.
+    operatorRules(factory, 'allow:\n  - Bash(make *)\n  - Bash(npm test *)\n');
+    factory.executor.askPermission('R1', bash('toolu_1', 'cd ../elsewhere && make lint'));
+    factory.executor.askPermission('R1', bash('toolu_2', 'cd ../elsewhere && cargo build'));
+    factory.executor.askPermission('R1', bash('toolu_3', 'cd ../elsewhere && npm test'));
+    await settled(operator);
+
+    expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_3: { allow: true } });
+  });
 });
 
 // What AFK runs reach for (#89): the calls Claude Code still asks about, which
@@ -173,10 +188,6 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
     'git config core.autocrlf > $HOME/autocrlf.txt',
     'git config core.autocrlf > .git/hooks/pre-commit',
     'cd src && git config core.autocrlf > ../../autocrlf.txt',
-    'cd .. && git config core.autocrlf',
-    'cd && git status',
-    'cd /tmp; ls',
-    'cd - && ls',
     "cd nowhere; sed -i 's/owl/heron/' ../notes.txt",
     'cd src & git config core.autocrlf > ../autocrlf.txt',
     'cd src || git config core.autocrlf > ../autocrlf.txt',
@@ -184,6 +195,82 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
   ])('redirected or moved out of the worktree, it still asks: `%s`', async (command) => {
     expect(await gated([command])).toEqual([false]);
   });
+
+  // As T29's grill reached for them: reading the skill set, and inline code
+  // run from the temp folder. Out of the worktree, only what reads anywhere runs.
+  test('moved out of the worktree, a read or inline code runs without asking', async () => {
+    const commands = [
+      'cd .. && git config core.autocrlf',
+      'cd && git status',
+      'cd /tmp; ls',
+      'cd - && ls',
+      'cd ~/.agent-factory/skills/4a39e27d6f9e2bd4 && ls skills; cat ~/.agent-factory/skills.lock 2>/dev/null; echo; ls skills/implement 2>&1',
+      'cd ~/.agent-factory/skills/4a39e27d6f9e2bd4/skills && cat grilling/SKILL.md | head -60; echo ====; grep -rn -i "to-spec" grilling | head -20',
+      "cd /tmp 2>/dev/null; node -e '\nconst db = 1;\nconsole.log(db);\n'",
+      'cd .. && git config core.autocrlf > /tmp/autocrlf.txt',
+    ];
+    expect(await gated(commands)).toEqual(commands.map(() => true));
+  });
+
+  test.each([
+    'cd .. && git commit -m "an owl"',
+    'cd ../elsewhere && git add .',
+    'cd ../elsewhere && npm test',
+    'cd ../elsewhere && npx vitest run',
+    "cd ../elsewhere && sed -i 's/owl/heron/' notes.txt",
+    'cd ../elsewhere && cp notes.txt notes.bak',
+    'cd ../elsewhere && mkdir build',
+    'cd ../elsewhere && node scripts/seed.js',
+    'cd ../elsewhere && git config core.autocrlf > autocrlf.txt',
+  ])('moved out of the worktree, a command that writes or runs the project there still asks: `%s`', async (command) => {
+    expect(await gated([command])).toEqual([false]);
+  });
+
+  // As T29's spec and tickets made them, for the issue bodies they wrote.
+  test('mkdir in the worktree or the temp folder runs without asking', async () => {
+    const commands = [
+      'mkdir -p /tmp/spec-t29 && mkdir /tmp/spec-t29/tickets',
+      `mkdir --parents ${slashed(join(tmpdir(), 'spec', 'tickets'))}`,
+      'mkdir -pv docs/research src/new',
+      'cd src && mkdir -p ../docs/adr',
+    ];
+    const folders = (worktree: string) => mkdirSync(join(worktree, 'src'), { recursive: true });
+    expect(await gated(commands, folders)).toEqual([true, true, true, true]);
+  });
+
+  // As T29's spec named it, in Git Bash, to hand its Write tool the Windows path.
+  test('the temp folder named by `$TEMP`, `$TMP` or `$TMPDIR`, as the run’s environment sets it, is the temp folder', async () => {
+    const before = process.env.TEMP;
+    process.env.TEMP = tmpdir();
+    try {
+      const commands = [
+        'mkdir -p "$TEMP/spec-t29" && cygpath -w "$TEMP/spec-t29"',
+        'gh --version | head -1; mkdir -p "${TEMP}/spec-t29/tickets"',
+        'git log -1 > $TEMP/log.txt',
+        'mkdir -p "$TEMPEST/spec-t29"',
+        'mkdir -p "$HOME/spec-t29"',
+        'mkdir -p "$TEMP/../spec-t29"',
+      ];
+      expect(await gated(commands)).toEqual([true, true, true, false, false, false]);
+    } finally {
+      if (before === undefined) delete process.env.TEMP;
+      else process.env.TEMP = before;
+    }
+  });
+
+  test.each(['gh --version; gh issue create --title "An owl"', 'gh --version --repo acme/widgets', 'cygpath -w src > ../paths.txt'])(
+    'gh or cygpath doing more than printing still asks: `%s`',
+    async (command) => {
+      expect(await gated([command])).toEqual([false]);
+    },
+  );
+
+  test.each(['mkdir ../elsewhere', 'mkdir -p ~/build', 'mkdir .git/hooks', 'mkdir -m 777 build', 'mkdir', 'mkdir -p /tmp/..'])(
+    'mkdir elsewhere, or with an option that sets more than the folder, still asks: `%s`',
+    async (command) => {
+      expect(await gated([command])).toEqual([false]);
+    },
+  );
 
   // As run T12 reached for it: the temp folder is scratch space, as for the file tools.
   test('redirected into the temp folder, it runs without asking', async () => {
@@ -527,15 +614,16 @@ describe('a call AFK runs reach for, which Claude Code still asks about', () => 
       'if git diff --quiet; then echo clean; else git status --short; fi',
       'while git diff --quiet; do git log -1; done',
       '{ git status; git log -1; } | head',
+      'for d in src lib; do cd $d && ls; done',
     ];
-    expect(await gated(commands)).toEqual([true, true, true, true, true, true, true]);
+    expect(await gated(commands)).toEqual([true, true, true, true, true, true, true, true]);
   });
 
   test.each([
     "for f in src/a.ts ../elsewhere/b.ts; do sed -i 's/owl/heron/' $f; done",
     "for f in $(git ls-files); do sed -i 's/owl/heron/' $f; done",
     "while read -r f; do sed -i 's/owl/heron/' \"$f\"; done < files.txt",
-    'for d in src lib; do cd $d && ls; done',
+    'for d in src lib; do cd $d && npm test; done',
     'if true; then cd src; fi; sed -i "s/owl/heron/" ../notes.txt',
     'for f in a.ts; do npm publish; done',
     'for f in a.ts; do ls $f; done > ../counts.txt',

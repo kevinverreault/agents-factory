@@ -59,9 +59,11 @@ describe('a HITL run’s tool call', () => {
 
     factory.executor.askPermission('R1', bash('toolu_1', 'npm test'));
     factory.executor.askPermission('R1', bash('toolu_2', 'make lint'));
+    // As T29's grill read the skill set, out of the worktree.
+    factory.executor.askPermission('R1', bash('toolu_3', 'cd ~/.agent-factory/skills/4a39e27d6f9e2bd4/skills && cat grilling/SKILL.md | head -60'));
     await settled(operator);
 
-    expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_2: { allow: true } });
+    expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true }, toolu_2: { allow: true }, toolu_3: { allow: true } });
     expect(tui.state().runs.R1?.permission).toBeNull();
   });
 

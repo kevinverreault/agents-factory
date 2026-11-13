@@ -5,6 +5,7 @@
 // session, which merges `origin/<base>` into the task branch and resolves
 // the conflicts. At L2 the factory pushes what it did; at L1 nothing is
 // pushed. One that fails asks the operator as any failed run does.
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { AutonomyLevel } from '../lifecycle/lifecycle.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -18,7 +19,7 @@ afterEach(async () => {
   for (const factory of factories.splice(0)) await factory.dispose();
 });
 
-const clone = '/clones/widgets';
+const clone = resolve('/clones/widgets');
 const TICKET = 'acme/widgets#39';
 const MINUTE = 60_000;
 

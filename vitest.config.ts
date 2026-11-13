@@ -8,6 +8,8 @@ export default defineConfig({
     include: ['src/**/*.test.{ts,tsx}'],
     exclude: ['src/**/*.contract.test.{ts,tsx}'],
     // Times show in the machine's own zone: tests pin it, so they can name them.
-    env: { TZ: 'UTC' },
+    // NO_COLOR, which an agent's shell may set, is cleared: the tests that
+    // want it stub it themselves.
+    env: { TZ: 'UTC', NO_COLOR: '' },
   },
 });
