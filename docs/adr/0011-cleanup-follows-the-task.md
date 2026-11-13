@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (PR poll and Done for spec tasks amended by ADR 0013)
 ---
 
 # Cleanup follows the task, and only Cancel asks before discarding work

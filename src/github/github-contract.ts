@@ -1,7 +1,7 @@
 // The GitHub port's contract, shared by the fake and the REST adapter so the
 // two can't drift apart.
 import { describe, expect, test } from 'vitest';
-import { GitHubError, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub } from './github.ts';
+import { GitHubError, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub, type PrStatus } from './github.ts';
 
 export type GitHubFixture = {
   github: GitHub;
@@ -12,6 +12,8 @@ export type GitHubFixture = {
   uninstalledRepo: string;
   // An open issue of the installed repository, as `owner/name#n`.
   openIssue: string;
+  // The operator reopens the issue by hand, as a test that closed it leaves it.
+  reopenByHand(ref: string): Promise<void>;
   // GitHub's time now.
   now(): number;
   // A clone of the installed repository on the operator's machine.
@@ -47,6 +49,16 @@ const WORKFLOW = 'on: workflow_dispatch\njobs:\n  noop:\n    runs-on: ubuntu-lat
 // A branch name of its own for each test, so runs against a real repository never meet.
 const unique = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+// The PR as read once GitHub has worked out whether it is mergeable, which
+// it does in the background after a push: until then it says unknown.
+async function workedOut(read: () => Promise<PrStatus>): Promise<PrStatus> {
+  for (let tries = 1; ; tries++) {
+    const status = await read();
+    if (status.mergeable !== 'unknown' || tries === 30) return status;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+}
+
 export function describeGitHubContract(name: string, makeFixture: () => Promise<GitHubFixture>): void {
   describe(`${name}: the GitHub contract`, () => {
     test('says whether the App is installed on a repository', async () => {
@@ -78,18 +90,17 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
 
       expect(await github.readIssue(token, openIssue)).toMatchObject({ ref: openIssue, open: true });
       await expect(github.closeIssue(token, openIssue, 'A read-only token can’t close this.')).rejects.toThrow(GitHubError);
-      await expect(github.reopenIssue(token, openIssue, 'A read-only token can’t reopen this.')).rejects.toThrow(GitHubError);
       expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
     });
 
-    test('a ticket-writing token closes an issue and reopens it, leaving it open', async () => {
-      const { github, app, installedRepo, openIssue } = await makeFixture();
+    test('a ticket-writing token closes an issue', async () => {
+      const { github, app, installedRepo, openIssue, reopenByHand } = await makeFixture();
       const { token } = await github.mintToken(app, installedRepo, TICKET_WRITE);
 
       await github.closeIssue(token, openIssue, 'Closed by the contract test.');
-      expect(await github.readIssue(token, openIssue)).toMatchObject({ open: false });
-      await github.reopenIssue(token, openIssue, 'Reopened by the contract test.');
 
+      expect(await github.readIssue(token, openIssue)).toMatchObject({ open: false });
+      await reopenByHand(openIssue);
       expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
     });
 
@@ -239,17 +250,39 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const read = (await github.mintToken(app, installedRepo, READ_ONLY)).token;
       const write = (await github.mintToken(app, installedRepo, PR_WRITE)).token;
 
-      expect(await github.readPr(read, ref)).toBe('open');
+      expect((await github.readPr(read, ref)).state).toBe('open');
       await expect(github.closePr(read, ref, 'A read-only token can’t close this.')).rejects.toThrow(GitHubError);
 
       await github.closePr(write, ref, 'Closed by the contract test.');
-      expect(await github.readPr(read, ref)).toBe('closed');
+      expect((await github.readPr(read, ref)).state).toBe('closed');
       await github.closePr(write, ref, 'Closed again by the contract test.');
-      expect(await github.readPr(read, ref)).toBe('closed');
+      expect((await github.readPr(read, ref)).state).toBe('closed');
 
       await github.reopenPr(write, ref);
-      expect(await github.readPr(read, ref)).toBe('open');
+      expect((await github.readPr(read, ref)).state).toBe('open');
       await github.closePr(write, ref, 'Closed by the contract test.');
+    });
+
+    test('reads whether GitHub finds an open PR mergeable, once it has worked it out, or conflicting with its base', async () => {
+      const { github, app, installedRepo, clone, operator, baseBranch } = await makeFixture();
+      const path = `contract/${unique()}.txt`;
+      // Two task branches change the same file differently: one PR merges
+      // cleanly into the base branch, the other conflicts with the first.
+      const [first, second] = [`factory/contract-${unique()}`, `factory/contract-${unique()}`];
+      await clone.commitOn(first, { [path]: 'One side.\n' });
+      await clone.commitOn(second, { [path]: 'The other side.\n' });
+      const push = (await github.mintToken(app, installedRepo, PUSH)).token;
+      for (const branch of [first, second]) await github.push(push, { clonePath: clone.path, repo: installedRepo, branch });
+      const open = (await github.mintToken(app, installedRepo, OPEN_PR)).token;
+      const pr = (head: string, base: string) => ({ repo: installedRepo, head, base, title: 'Contract test PR', body: '', assignee: operator });
+      const clean = await github.openDraftPr(open, pr(first, baseBranch));
+      const conflicting = await github.openDraftPr(open, pr(second, first));
+      const read = (await github.mintToken(app, installedRepo, READ_ONLY)).token;
+
+      expect(await workedOut(() => github.readPr(read, `${installedRepo}#${clean.number}`))).toEqual({ state: 'open', mergeable: 'mergeable' });
+      expect(await workedOut(() => github.readPr(read, `${installedRepo}#${conflicting.number}`))).toEqual({ state: 'open', mergeable: 'conflicting' });
+      const write = (await github.mintToken(app, installedRepo, PR_WRITE)).token;
+      for (const { number } of [conflicting, clean]) await github.closePr(write, `${installedRepo}#${number}`, 'Closed by the contract test.');
     });
 
     test('a PR whose head branch GitHub no longer has can’t be reopened, and says why', async () => {
@@ -266,7 +299,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       await github.deleteBranch(push, installedRepo, branch);
 
       await expect(github.reopenPr(write, ref)).rejects.toThrow(`${branch} is gone from GitHub, so #${number} can’t be reopened.`);
-      expect(await github.readPr(write, ref)).toBe('closed');
+      expect((await github.readPr(write, ref)).state).toBe('closed');
     });
 
     test('a push token deletes a pushed task branch, and deleting it again is no error, while a read-only token can’t', async () => {

@@ -10,6 +10,7 @@ import {
   liveRun,
   depthOf,
   nextTier,
+  heldBack,
   readyForYou,
   treeRollup,
   type ChildReport,
@@ -17,23 +18,26 @@ import {
   type AppCheck,
   type AutonomyLevel,
   type Cleanup,
-  type ClosedTicket,
   type FrontierTicket,
   type FrozenPreset,
   type HandoffSheet,
+  type HandoffTicketSets,
   type Lifecycle,
+  type MergePolicy,
   type Mode,
   type Priority,
   type Publishing,
   type QuickLaunch,
   type AttentionQueueItem,
   type Artifact,
-  type Reopening,
   type Repository,
   type Permission,
   type Run,
   type SkillsSetup,
+  type TaskKind,
   type TaskState,
+  type TicketResolution,
+  type TicketSet,
 } from '../lifecycle/lifecycle.ts';
 import type { PullRequest } from '../github/github.ts';
 import type { Tier } from '../models/routing.ts';
@@ -53,6 +57,21 @@ export type TaskView = {
   progress: string | null;
   // Its descendants' counts, and their failures waiting on the operator.
   rollup: Rollup | null;
+  // What kind of task it is (ADR 0013), plain for children and roots that
+  // are neither a spec task nor a ticket task: for a ticket task, its
+  // ticket and the merge policy its merge gate goes by.
+  kind: TaskKind;
+  ticket: string | null;
+  mergePolicy: MergePolicy | null;
+  // While the factory still owes a merged ticket task's ticket its closing,
+  // and why it last couldn't.
+  resolving: TicketResolution | null;
+  // A ticket task's spec task, if one launched it (ADR 0013).
+  specTask: string | null;
+  // A spec task's ticket set: its spec, its tickets in order, the ticket
+  // task launched on each so far, and why the factory last couldn't read or
+  // launch them.
+  ticketSet: TicketSetView | null;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   priority: Priority;
@@ -81,17 +100,10 @@ export type TaskView = {
   handoff: HandoffView | null;
   // Its quick launch while its grill is one: the questions answered so far.
   quick: QuickLaunch | null;
-  // The tickets its Ralph loop closed, with their commits.
-  closedTickets: ClosedTicket[];
-  // The tickets the operator skipped, which its loop leaves open.
-  skippedTickets: string[];
-  // Its Ralph loop or work loop, while it is at a loop stage with a ticket
-  // set: the ticket its iteration works, and whether it ends after that one.
-  // A work loop over a map between its tickets offers the map's frontier, as last
-  // read, or has `cleared` once the map had no open ticket left.
-  loop: { ticket: string | null; finishing: boolean; frontier: FrontierTicket[] | null; cleared: boolean } | null;
-  // Once it is cancelled, while the tickets it closed aren't all reopened, and why it last failed to.
-  reopening: Reopening | null;
+  // Its work loop over a map, while it is at a HITL loop stage: the ticket
+  // the operator works. Between its tickets it offers the map's frontier, as
+  // last read, or has `cleared` once the map had no open ticket left.
+  loop: { ticket: string | null; frontier: FrontierTicket[] | null; cleared: boolean } | null;
   // Its launch summary, if the cheap run that named it wrote one.
   launchSummary: string | null;
   // Its PR body, once its PR body stage wrote it, and the PR title written with it, if any.
@@ -109,7 +121,7 @@ export type TaskView = {
   transcripts: string | null;
 };
 
-export type HandoffView = Omit<HandoffSheet, 'asked'>;
+export type HandoffView = Omit<HandoffSheet, 'asked' | 'ticketSets'> & { ticketSets: HandoffTicketSets | null };
 
 export type RunView = Pick<
   Run,
@@ -171,6 +183,12 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       child: task.child ? { awaited: task.child.awaited, base: task.child.base, report: structuredClone(task.child.report) } : null,
       progress: task.progress ?? null,
       rollup: treeRollup(lifecycle, task),
+      kind: task.kind ?? 'plain',
+      ticket: task.ticket ?? null,
+      mergePolicy: task.mergePolicy ?? null,
+      resolving: task.resolving ? { ...task.resolving } : null,
+      specTask: task.specTask ?? null,
+      ticketSet: task.ticketSet ? ticketSetView(lifecycle, task.ticketSet) : null,
       mode: task.mode,
       autonomy: task.autonomy,
       priority: task.priority ?? 'normal',
@@ -190,17 +208,13 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
       quick: task.quick ? { ...task.quick } : null,
-      closedTickets: structuredClone(task.closedTickets ?? []),
-      skippedTickets: [...(task.skippedTickets ?? [])],
       loop: task.loop
         ? {
             ticket: task.loop.ticket,
-            finishing: task.loop.finishing ?? false,
             frontier: task.loop.frontier ? structuredClone(task.loop.frontier) : null,
             cleared: task.loop.cleared ?? false,
           }
         : null,
-      reopening: task.reopening ? structuredClone(task.reopening) : null,
       launchSummary: task.launchSummary ?? null,
       prBody: task.prBody ?? null,
       prTitle: task.prTitle ?? null,
@@ -255,7 +269,6 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
     runs,
     artifacts: structuredClone(lifecycle.artifacts),
     attentionQueue: attentionQueue(lifecycle, watched),
-    // A loop between its iterations keeps its slot.
     slots: { active: heldSlots(lifecycle), cap: lifecycle.slotCap },
     keepAwake: keepsAwake(lifecycle),
     lastUsedRepo: lastUsedRepo(lifecycle),
@@ -271,7 +284,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
 function handoffView(sheet: HandoffSheet | null): HandoffView | null {
   if (!sheet) return null;
   const { asked, ...view } = structuredClone(sheet);
-  return view;
+  return { ...view, ticketSets: view.ticketSets ?? null };
 }
 
 export function repositoryView({ id, path, baseBranch, defaultPreset, missing, app, skills }: Repository): RepositoryView {
@@ -312,4 +325,45 @@ export function applyPatch(state: FactoryState, ops: PatchOp[]): FactoryState {
     else delete parent[key];
   }
   return next as unknown as FactoryState;
+}
+
+// A spec task's ticket set as the TUI sees it (ADR 0013): its spec, each of
+// its tickets in order with where it stands, and why the factory last
+// couldn't read the tickets or launch one.
+export type TicketSetView = { spec: string | null; tickets: TicketView[]; problem: string | null };
+
+// A ticket of a spec task, its title once read, and where it stands:
+// launched on its ticket task, launching (on the frontier, its ticket task
+// not made yet), waiting on its open blockers (none until the tickets are
+// first read), held back by its label, skipped once its ticket task was
+// cancelled, or merged: closed, its ticket task (if it had one) Done.
+export type TicketView = { ref: string; title: string | null } & (
+  | { state: 'launched'; taskId: string }
+  | { state: 'launching' }
+  | { state: 'waiting'; blockers: string[] }
+  | { state: 'held-back' }
+  | { state: 'skipped' }
+  | { state: 'merged'; taskId: string | null }
+);
+
+// The ticket set's view, every ticket the set names, then any it launched
+// that its last read no longer has.
+function ticketSetView(lifecycle: Lifecycle, { spec, tickets, issues, toLaunch, launched, skipped, problem }: TicketSet): TicketSetView {
+  const refs = [...new Set([...(issues.length ? issues.map(({ ref }) => ref) : tickets), ...Object.keys(launched)])];
+  const view = (ref: string): TicketView => {
+    const issue = issues.find((issue) => issue.ref === ref);
+    const title = issue?.title ?? null;
+    const taskId = launched[ref];
+    if (taskId && lifecycle.tasks[taskId]?.state === 'done') return { ref, title, state: 'merged', taskId };
+    if (issue && !issue.open) return { ref, title, state: 'merged', taskId: taskId ?? null };
+    // A cancelled ticket task's ticket is skipped, though it was launched.
+    if (skipped?.includes(ref)) return { ref, title, state: 'skipped' };
+    if (taskId) return { ref, title, state: 'launched', taskId };
+    if (toLaunch.includes(ref)) return { ref, title, state: 'launching' };
+    // A ticket labelled for neither an agent nor the operator never launches, blocked or not.
+    if (issue && heldBack(issue)) return { ref, title, state: 'held-back' };
+    if (!issue || issue.openBlockers.length) return { ref, title, state: 'waiting', blockers: [...(issue?.openBlockers ?? [])] };
+    return { ref, title, state: 'held-back' };
+  };
+  return { spec, tickets: refs.map(view), problem };
 }

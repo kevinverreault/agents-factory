@@ -210,6 +210,7 @@ describe('skipping optional stages', () => {
         permission: null,
         recovery: null,
         deniedHosts: null,
+        skipped: null,
       },
     ]);
     expect(factory.executor.started).toHaveLength(1);

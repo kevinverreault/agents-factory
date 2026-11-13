@@ -1,8 +1,7 @@
 // Seam 1: the review stage and the PR body. A review stage with
 // `on_findings: fix-once` that reports findings gets exactly one AFK fix
 // pass, never a loop, and what that pass leaves over goes into the PR body.
-// The PR body stage writes the body through the factory, which lists every
-// ticket the task closed as `Implements #n` (ADR 0006). At L1 `open-pr` is
+// The PR body stage writes the body through the factory. At L1 `open-pr` is
 // skipped and the root goes In review, its task branch still only local
 // (ADR 0007).
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -209,36 +208,7 @@ describe('the PR body', () => {
         'Carry on, unattended, from where this conversation left off.\n\n' +
         '## Factory context\n' +
         'Write the PR body through the factory’s write_pr_body tool before you end: the factory opens the PR with it. ' +
-        'Leave out the tickets this task closed and the review findings left over: the factory adds those itself.',
+        'Leave out the review findings left over: the factory adds those itself.',
     });
-  });
-
-  test('lists every ticket the task closed as Implements #n, turning a closing keyword on one to Implements, through main-flow at L1, URL or not', async () => {
-    const factory = await startTestFactory();
-    factories.push(factory);
-    await factory.registerRepo();
-    factory.github.addIssue('acme/widgets#10');
-    for (const ticket of ['acme/widgets#11', 'acme/widgets#12']) factory.github.addIssue(ticket, { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
-    const operator = await factory.attach();
-    const tui = watch(operator);
-    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'] });
-    const worktree = (await tui.until((state) => state.tasks.T1?.liveRunId === 'R1')).tasks.T1!.worktree!;
-    for (const [runId, path, next] of [['R1', 'src/logout.ts', 'R2'], ['R2', 'src/session.ts', 'R3']] as const) {
-      factory.git.editFile(worktree, path);
-      factory.git.commitAll(worktree);
-      factory.executor.report(runId, { type: 'runCompleted' });
-      await tui.until((state) => state.tasks.T1?.liveRunId === next);
-    }
-    factory.executor.report('R3', { type: 'runCompleted' });
-    await tui.until((state) => state.tasks.T1?.liveRunId === 'R4');
-
-    factory.executor.report('R4', { type: 'prBodyWritten', body: 'Adds a logout button.\n\nResolves: https://github.com/acme/widgets/issues/11\nPre-fixes #12 stay.' });
-    factory.executor.report('R4', { type: 'runCompleted' });
-
-    const reviewed = await tui.until((state) => state.tasks.T1?.label === 'In review');
-    expect(reviewed.tasks.T1?.prBody).toBe(
-      'Adds a logout button.\n\nImplements https://github.com/acme/widgets/issues/11\nPre-fixes #12 stay.\n\n## Tickets\n\nImplements #12',
-    );
-    expect(reviewed.tasks.T1?.stage).toBe('pr-body');
   });
 });

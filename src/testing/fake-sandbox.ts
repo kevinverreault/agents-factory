@@ -99,6 +99,7 @@ export class FakeSandbox implements Sandbox {
     if (this.git.inHistory(mine, host)) this.git.moveBranch(path, spec.branch, host);
     else if (!this.git.inHistory(host, mine)) throw new SandboxError(`${spec.branch} has commits in the container and on the host that the other lacks.`);
     for (const branch of spec.branches) this.git.moveBranch(path, branch, this.git.branchTip(spec.clonePath, branch)!);
+    for (const branch of spec.fetched ?? []) this.git.setFetched(path, branch, this.git.fetchedTip(spec.clonePath, branch)!);
     return this.handle(spec);
   }
 

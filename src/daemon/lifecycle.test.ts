@@ -73,6 +73,7 @@ describe('tasks end only Done or Cancelled', () => {
         permission: null,
         recovery: null,
         deniedHosts: null,
+        skipped: null,
       },
     ]);
   });

@@ -39,18 +39,17 @@ async function running(preset = ''): Promise<{ factory: TestFactory; operator: F
   return { factory, operator, tui, worktree: state.tasks.T1!.worktree! };
 }
 
-// A factory with T1 launched from main-flow at its implement loop, on the
-// spec acme/widgets#10 whose one ready ticket is #11: its first iteration
-// is live.
-async function looping(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
+// A factory with T1 launched from the implement preset on the ticket
+// acme/widgets#11, which has no sub-issues: a ticket task, its implement
+// run live.
+async function onTicket(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
   const factory = await startTestFactory();
   factories.push(factory);
   await factory.registerRepo();
-  factory.github.addIssue('acme/widgets#10');
-  factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
+  factory.github.addIssue('acme/widgets#11', { labels: ['ready-for-agent'] });
   const operator = await factory.attach();
   const tui = watch(operator);
-  const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'] });
+  const launched = await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', issues: ['#11'] });
   if (!launched.ok) throw new Error(launched.reason);
   await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
   return { factory, operator, tui };
@@ -388,12 +387,12 @@ describe('awaited children', () => {
     expect(factory.git.branchTip(clone, `${branch}--c1`)).toBeNull();
   });
 
-  test('a Ralph iteration waiting on children resumes the same ticket afterwards', async () => {
-    const { factory, operator, tui } = await looping();
+  test('a ticket task’s run waiting on children resumes on the same ticket afterwards', async () => {
+    const { factory, operator, tui } = await onTicket();
     await operator.send({ type: 'setSlotCap', cap: 3 });
-    const iteration = await tui.until((state) => !!state.tasks.T1?.liveRunId);
-    const runId = iteration.tasks.T1!.liveRunId!;
-    expect(iteration.runs[runId]!.ticket).toBe('acme/widgets#11');
+    const implementing = await tui.until((state) => !!state.tasks.T1?.liveRunId);
+    const runId = implementing.tasks.T1!.liveRunId!;
+    expect(implementing.runs[runId]!.ticket).toBe('acme/widgets#11');
     await spawnAwaited(factory, runId, 'Write the logout handler.');
     const spawned = await tui.until((state) => !!state.tasks.T2?.liveRunId);
     factory.executor.report(runId, { type: 'runCompleted' });

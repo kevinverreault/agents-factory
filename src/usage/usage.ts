@@ -64,7 +64,7 @@ export type MeteredTask = { id: string; parent: string | null; groups: string[] 
 
 // Every usage view, each keyed by what it groups runs by: by model; by task;
 // by task tree, under every task in it the run's task descends from or is;
-// by group; by stage id across tasks; and by Ralph loop ticket.
+// by group; by stage id across tasks; and by a ticket task's ticket.
 export type UsageViews = {
   models: ModelUsage;
   tasks: Record<string, ModelUsage>;

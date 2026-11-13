@@ -105,6 +105,7 @@ describe('an AFK question', () => {
         permission: null,
         recovery: null,
         deniedHosts: null,
+        skipped: null,
       },
     ]);
   });

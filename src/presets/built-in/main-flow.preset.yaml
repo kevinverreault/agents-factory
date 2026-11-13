@@ -21,14 +21,16 @@ stages:
     mode: HITL
     model: opus
     exit: artifact:tickets
+  # A spec task: it launches a ticket task per takeable ticket of its spec
+  # (ADR 0013). Handed off with no ticket set, it is one run on the brief.
   - id: implement
-    kind: loop
+    kind: tickets
     skill: implement
     args: "{{artifacts.tickets}}"
     mode: AFK
     model: sonnet
     context: fresh
-    exit: tickets-closed
+    exit: spec-closed
   - id: review
     kind: run
     skill: code-review

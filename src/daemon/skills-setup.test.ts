@@ -152,7 +152,7 @@ describe('after the setup lands', () => {
     const { worktree, branch } = tui.state().tasks.T1!;
     for (const [path, content] of Object.entries(SETUP)) factory.git.editFile(worktree!, path, content);
     factory.git.commitAll(worktree!);
-    factory.git.merge(widgets, branch!, 'main');
+    factory.git.mergeIntoOrigin(widgets, branch!, 'main');
   }
 
   test('checking again fetches the base branch and reports the setup present', async () => {

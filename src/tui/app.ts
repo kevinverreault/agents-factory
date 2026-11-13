@@ -5,8 +5,8 @@
 // Cancelled tasks dimmed or hidden (`H`, remembered between sessions); the launch card (`N`), quick launch (`n`), the conversation view
 // (`enter` in a task's detail), re-tiering a task (`t`), conversing with or
 // taking over one (`c`), handing one off (`ctrl+h`), cancelling one with its
-// subtree (`x`, with the cancel sheet when work would be lost), finishing a
-// loop after its ticket (`F`), retrying a failed task from the tree (`y`),
+// subtree (`x`, with the cancel sheet when work would be lost), retrying a
+// failed task from the tree (`y`),
 // answering its request on Needs you's answer sheet (`a`), `?` help, and Set
 // up now (`s`) or Re-check (`R`) for a repository without the skill set's
 // setup. Over the same state, the condensed view (`v`): Needs you and the
@@ -20,7 +20,7 @@ import { Box, Text, useInput, useStdin } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
-import type { FactoryState, TaskView } from '../protocol/factory-state.ts';
+import type { FactoryState, TaskView, TicketView } from '../protocol/factory-state.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
@@ -333,13 +333,6 @@ export function App({
       setCancelSheet(asks);
     });
   };
-  // Finish after this ticket: the selected task's loop ends once its live
-  // iteration is done.
-  const finishLoop = () => {
-    const task = selected;
-    if (!task || !finishable(task)) return;
-    void connection.send({ type: 'finishLoop', taskId: task.id }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
-  };
   // Retries the selected task's failed run, as Needs you's Retry does: a
   // child's included, from the tree.
   const retry = () => {
@@ -434,7 +427,6 @@ export function App({
       if (input === 'c') converse();
       const cancels = selected ?? itemTask;
       if (input === 'x' && cancels) cancel({ type: 'cancel', taskId: cancels.id });
-      if (input === 'F') finishLoop();
       if (input === 'y') retry();
       if (key.ctrl && input === 'h') handOff();
       if (input === 's') setUp();
@@ -462,7 +454,6 @@ export function App({
         ['c', 'converse or take over'],
         ['t', 're-tier'],
         ['x', 'cancel'],
-        ...(finishable(tasks[cursor]) ? [['F', 'finish after this ticket'] as Hint] : []),
         ...(failedTask(state, tasks[cursor]) ? [['y', 'retry'] as Hint] : []),
         ['g', 'group'],
         ['H', hideFinished ? 'show finished' : 'hide finished'],
@@ -666,17 +657,27 @@ function TaskList({
 }
 
 // The tasks as a tree: each root newest first, its descendants under it,
-// depth first and newest first too.
+// depth first and newest first too. A spec task's ticket tasks show under
+// it as its children do, each indented by its depth in the tree as shown.
 function treeOrder(tasks: TaskView[]): TaskView[] {
   const newestFirst = [...tasks].sort(newerFirst);
   const ids = new Set(tasks.map(({ id }) => id));
   const ordered: TaskView[] = [];
-  const place = (task: TaskView) => {
-    ordered.push(task);
-    for (const child of newestFirst) if (child.parent === task.id) place(child);
+  const place = (task: TaskView, depth: number) => {
+    ordered.push(task.depth === depth ? task : { ...task, depth });
+    for (const child of newestFirst) if (shownUnder(child) === task.id) place(child, depth + 1);
   };
-  for (const task of newestFirst) if (!task.parent || !ids.has(task.parent)) place(task);
+  for (const task of newestFirst) {
+    const above = shownUnder(task);
+    if (!above || !ids.has(above)) place(task, 0);
+  }
   return ordered;
+}
+
+// The task a task shows under in the tree: its parent, or for a ticket
+// task its spec task.
+function shownUnder(task: TaskView): string | null {
+  return task.parent ?? task.specTask;
 }
 
 // Tasks have no creation time, but their ids count up as they are created:
@@ -701,7 +702,7 @@ function keepingAncestors(tree: TaskView[], keep: (task: TaskView) => boolean): 
   const kept = new Set<string>();
   for (const task of tree) {
     if (!keep(task)) continue;
-    for (let at: TaskView | undefined = task; at && !kept.has(at.id); at = at.parent ? byId.get(at.parent) : undefined) kept.add(at.id);
+    for (let at: TaskView | undefined = task; at && !kept.has(at.id); at = byId.get(shownUnder(at) ?? '')) kept.add(at.id);
   }
   return tree.filter((task) => kept.has(task.id));
 }
@@ -739,10 +740,32 @@ function rowLayout(tasks: TaskView[], columns: number, compact: boolean): RowLay
   return { compact, glyph, id, title, extras: rest - 1 - title, groups };
 }
 
-// What a row says past its state: its loop's ticket, its descendants'
-// rollup and its progress.
+// What a row says past its state: its work loop's ticket or its ticket task's,
+// a spec task's tickets by state, its descendants' rollup and its progress.
 function extrasOf(task: TaskView): string {
-  return joined([loopDetail(task), rollupDetail(task), task.progress]);
+  return joined([loopDetail(task), ticketDetail(task), ticketSetDetail(task), rollupDetail(task), task.progress]);
+}
+
+// The ticket a ticket task works.
+function ticketDetail({ kind, ticket }: TaskView): string {
+  return kind === 'ticket' && ticket ? `on ${ticket}` : '';
+}
+
+// A spec task's tickets counted by where they stand, in flight being those
+// launched or launching (ADR 0013).
+function ticketSetDetail({ ticketSet }: TaskView): string {
+  if (!ticketSet) return '';
+  const count = (states: TicketView['state'][]) => ticketSet.tickets.filter(({ state }) => states.includes(state)).length;
+  const counts = (
+    [
+      [count(['merged']), 'merged'],
+      [count(['launched', 'launching']), 'in flight'],
+      [count(['waiting']), 'waiting'],
+      [count(['held-back']), 'held back'],
+      [count(['skipped']), 'skipped'],
+    ] as const
+  ).flatMap(([n, what]) => (n ? [`${n} ${what}`] : []));
+  return counts.length ? `[${counts.join(', ')}]` : '';
 }
 
 // A task in the tree: its state's glyph, indented by its depth; its id and
@@ -806,16 +829,9 @@ function failedTask(state: FactoryState | null, task: TaskView | undefined): boo
   return !!task && !!state?.attentionQueue.some((item) => item.kind === 'attention' && item.taskId === task.id && item.attention === 'failure');
 }
 
-// Whether the task's Ralph loop can still be finished after its ticket.
-function finishable(task: TaskView | undefined): boolean {
-  return task?.mode === 'AFK' && !!task.loop && !task.loop.finishing;
-}
-
-// The ticket a task's loop works, and whether it ends after it.
+// The ticket of its map a task's work loop works.
 function loopDetail({ loop }: TaskView): string {
-  if (!loop) return '';
-  if (!loop.ticket) return loop.finishing ? 'finishing' : '';
-  return `on ${loop.ticket}${loop.finishing ? ', finishing after it' : ''}`;
+  return loop?.ticket ? `on ${loop.ticket}` : '';
 }
 
 // The widest Needs you kind (`repo missing`) and the title's width on a Needs you row.

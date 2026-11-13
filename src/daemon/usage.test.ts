@@ -308,21 +308,20 @@ describe('usage views', () => {
     factories.push(factory);
     await factory.registerRepo();
     const { github, git, executor } = factory;
-    github.addIssue('acme/widgets#10');
-    github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
-    github.addIssue('acme/widgets#12', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
+    github.addIssue('acme/widgets#11', { labels: ['ready-for-agent'] });
     const operator = await factory.attach();
     const tui = watch(operator);
     await tui.until(() => true);
-    // T1 loops over #11 and #12 at its implement stage.
-    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'], groups: ['login'] });
+    // T1 is a ticket task on #11: its implement run, then its review.
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', issues: ['#11'], groups: ['login'] });
     const worktree = (await tui.until((state) => state.tasks.T1?.liveRunId === 'R1')).tasks.T1!.worktree!;
     executor.report('R1', { type: 'usageTotaled', models: { [SONNET]: usage(1_000, 100, 0, 0, 0.25) } });
     git.editFile(worktree, 'src/logout.ts');
     git.commitAll(worktree);
     executor.report('R1', { type: 'runCompleted' });
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
-    executor.report('R2', { type: 'usageTotaled', models: { [SONNET]: usage(2_000, 200, 0, 0, 0.5) } });
+    // The review resumes the implement run's session: its total covers R1's too.
+    executor.report('R2', { type: 'usageTotaled', models: { [SONNET]: usage(3_000, 300, 0, 0, 0.75) } });
     // T2 is a HITL grilling in two groups.
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Grill me about the docs.', groups: ['login', 'docs'] });
     const r3 = (await tui.until((state) => !!state.tasks.T2?.liveRunId)).tasks.T2!.liveRunId!;
@@ -338,10 +337,7 @@ describe('usage views', () => {
     expect(views.tasks).toEqual({ T1: t1, T2: t2 });
     expect(views.trees).toEqual({ T1: t1, T2: t2 });
     expect(views.groups).toEqual({ login: both, docs: t2 });
-    expect(views.stages).toEqual({ implement: t1, grill: t2 });
-    expect(views.tickets).toEqual({
-      'acme/widgets#11': { [SONNET]: usage(1_000, 100, 0, 0, 0.25) },
-      'acme/widgets#12': { [SONNET]: usage(2_000, 200, 0, 0, 0.5) },
-    });
+    expect(views.stages).toEqual({ implement: { [SONNET]: usage(1_000, 100, 0, 0, 0.25) }, review: { [SONNET]: usage(2_000, 200, 0, 0, 0.5) }, grill: t2 });
+    expect(views.tickets).toEqual({ 'acme/widgets#11': t1 });
   });
 });

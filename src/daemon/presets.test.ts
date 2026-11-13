@@ -82,7 +82,7 @@ describe('the presets a launch card offers', () => {
     expect(presets.find((preset) => preset.name === 'broken')).toEqual({
       name: 'broken',
       source: 'user',
-      error: `Preset broken (user, ${join(factory.paths.presetsDir, 'broken.preset.yaml')}): stage a: exit when-done is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared).`,
+      error: `Preset broken (user, ${join(factory.paths.presetsDir, 'broken.preset.yaml')}): stage a: exit when-done is not an exit condition (run-completed, artifact:<kind>, map-cleared, spec-closed).`,
     });
   });
 
@@ -159,7 +159,7 @@ describe('launching from a preset', () => {
 
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'nightly', prompt })).toEqual({
       ok: false,
-      reason: `Preset nightly (user, ${path}): stage implement: exit all-green is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared).`,
+      reason: `Preset nightly (user, ${path}): stage implement: exit all-green is not an exit condition (run-completed, artifact:<kind>, map-cleared, spec-closed).`,
     });
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'sloppy', prompt })).toMatchObject({
       ok: false,
@@ -178,7 +178,7 @@ describe('launching from a preset', () => {
 });
 
 describe('starting at a stage', () => {
-  test('main-flow started at implement with issue refs skips the HITL stages and is AFK from the first second, looping over them as tickets', async () => {
+  test('main-flow started at implement with issue refs skips the HITL stages and is AFK from the first second, a spec task launching a ticket task per ref', async () => {
     const { factory, operator, tui } = await attached();
     for (const ref of ['acme/widgets#12', 'acme/widgets#13']) factory.github.addIssue(ref, { labels: ['ready-for-agent'] });
 
@@ -187,10 +187,11 @@ describe('starting at a stage', () => {
       value: { taskId: 'T1' },
     });
 
-    const { tasks } = await tui.until((state) => state.tasks.T1?.label === 'Running');
-    expect(tasks.T1).toMatchObject({ title: 'acme/widgets#12 acme/widgets#13', mode: 'AFK', autonomy: 'L1', stage: 'implement' });
+    const { tasks } = await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+    expect(tasks.T1).toMatchObject({ title: 'acme/widgets#12 acme/widgets#13', kind: 'spec', mode: 'AFK', autonomy: 'L1', stage: 'implement', liveRunId: null });
     expect(factory.executor.started).toMatchObject([
       { runId: 'R1', mode: 'AFK', autonomy: 'L1', firstMessage: expect.stringMatching(/^\/factory:implement acme\/widgets#12\n\n/), model: 'claude-sonnet-5-5' },
+      { runId: 'R2', firstMessage: expect.stringMatching(/^\/factory:implement acme\/widgets#13\n\n/) },
     ]);
   });
 

@@ -2,7 +2,7 @@
 // can't drift apart.
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import type { Git } from './git.ts';
+import { GitError, type Git } from './git.ts';
 
 export type CloneFixture = {
   git: Git;
@@ -182,6 +182,53 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
         const [head] = await git.worktrees(clone);
         expect(await git.commitsSince(path, base)).toEqual([first, head!.head]);
         expect(await git.commitsSince(path, first)).toEqual([head!.head]);
+      }));
+
+    test('merging a ref into a worktree brings its commits beside the branch’s own, fast-forwards a branch with none, and does nothing once merged', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, advanceOrigin, editFile, commitAll }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        const behind = join(root, 'wt', 'T2');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        await git.addWorktree(clone, { path: behind, branch: 'factory/T2-b', startPoint: 'origin/main' });
+        await editFile(path, 'GLOSSARY.md');
+        await commitAll(path);
+        const mine = (await git.worktrees(clone)).find((worktree) => worktree.path === path)!.head;
+        const theirs = await advanceOrigin(clone, 'main', { 'src/login.ts': 'export {};\n' });
+        await git.fetch(clone, 'main');
+        // A branch to tell origin's tip by, as the clone fetched it.
+        await git.addWorktree(clone, { path: join(root, 'wt', 'T3'), branch: 'factory/T3-c', startPoint: 'origin/main' });
+
+        await git.merge(path, 'origin/main', 'Merge main into factory/T1-a');
+        await git.merge(behind, 'origin/main', 'Merge main into factory/T2-b');
+
+        const heads = Object.fromEntries((await git.worktrees(clone)).map((worktree) => [worktree.branch, worktree.head]));
+        expect(await git.isMerged(clone, 'factory/T3-c', 'factory/T1-a')).toBe(true);
+        expect(await git.commitsSince(path, mine)).toContain(heads['factory/T1-a']);
+        expect(heads['factory/T2-b']).toBe(theirs);
+        expect((await git.worktreeState(path)).uncommitted).toEqual([]);
+
+        await git.merge(path, 'origin/main', 'Merge main into factory/T1-a');
+        expect((await git.worktrees(clone)).find((worktree) => worktree.path === path)!.head).toBe(heads['factory/T1-a']);
+      }));
+
+    test('a merge that conflicts fails, leaving the worktree as it was', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, advanceOrigin, editFile, commitAll }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        await editFile(path, 'README.md');
+        await commitAll(path);
+        const [before] = await git.worktrees(clone);
+        await advanceOrigin(clone, 'main', { 'README.md': 'Widgets.\n' });
+        await git.fetch(clone, 'main');
+
+        await expect(git.merge(path, 'origin/main', 'Merge main into factory/T1-a')).rejects.toThrow(GitError);
+
+        expect(await git.worktrees(clone)).toEqual([before]);
+        expect(await git.worktreeState(path)).toMatchObject({ branch: 'factory/T1-a', uncommitted: [] });
       }));
 
     test('a task worktree stops working when its clone moves, and works again once repaired from the new path', () =>

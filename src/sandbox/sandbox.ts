@@ -22,6 +22,11 @@ export type ContainerSpec = {
   // Other branches of the host clone the container's clone gets as local
   // branches, such as the task's awaited children's, which its run merges.
   branches: string[];
+  // Branches of the host clone's origin, as the host last fetched them, the
+  // container's clone gets as its own `origin/<branch>`, such as the base
+  // branch an update run merges in (ADR 0013). Its own origin is the host
+  // clone, whose local branches may lag behind.
+  fetched?: string[];
   // The skill set plugin's directory on the host, copied in read-only, or
   // null for a task that froze none.
   plugin: string | null;

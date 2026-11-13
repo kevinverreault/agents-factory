@@ -14,8 +14,13 @@ export type SandboxFixture = {
   branchOnHost(spec: ContainerSpec, branch: string): Promise<string>;
   // Commits a change on the task branch in the container's clone, and returns the new tip.
   commitInContainer(container: Container): Promise<string>;
+  // Moves the host clone's `origin/<branch>` on by a commit, as fetching it
+  // would, and returns its tip.
+  fetchOnHost(spec: ContainerSpec, branch: string): Promise<string>;
   // A branch's tip in the host clone.
   hostTip(spec: ContainerSpec, branch: string): Promise<string>;
+  // Where `origin/<branch>` points in the container's clone, which must be running.
+  containerFetchedTip(container: Container, branch: string): Promise<string>;
   // A branch's tip in the container's clone, which must be running.
   containerTip(container: Container, branch: string): Promise<string>;
   // Makes an HTTPS request from the container to `host`, as a run would,
@@ -75,6 +80,17 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
         const container = await sandbox.prepare(spec);
 
         expect(await containerTip(container, spec.branch)).toBe(tip);
+      }));
+
+    test('the branches of origin the spec names come in as the container’s own origin’s, as the host last fetched them', () =>
+      withFixture(async ({ sandbox, task, fetchOnHost, containerFetchedTip }) => {
+        const { spec } = await task('T1');
+        await sandbox.prepare(spec);
+        const tip = await fetchOnHost(spec, 'main');
+
+        const container = await sandbox.prepare({ ...spec, fetched: ['main'] });
+
+        expect(await containerFetchedTip(container, 'main')).toBe(tip);
       }));
 
     test('the other branches the spec names come in as local branches, at the host’s tips', () =>

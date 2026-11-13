@@ -1,17 +1,18 @@
 // The handoff sheet (`ctrl+h` or `/handoff` in a conversation): open while
 // the task's handoff is, so it is back on reattach. The HITL run writes the
-// brief; the operator edits it line by line, sets continue-as, autonomy
+// brief; the operator edits it line by line, picks the ticket set from the
+// spec candidates the factory found (ADR 0013), sets continue-as, autonomy
 // level, tier and max turns, and confirms. Esc backs out and the conversation carries on.
 import { createElement as h, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
-import { AUTONOMY_LEVELS, CONTINUE_AS, type AutonomyLevel, type Brief, type ContinueAs } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, readyNow, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
 import { autonomyText, cycle } from './launch-card.ts';
 import { CursorWindow, fixed } from './screen.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
-import { choosable, Cursor, GLYPH, Sheet, tone } from './theme.ts';
+import { choosable, Cursor, GLYPH, Sheet, Tick, tone } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -28,24 +29,36 @@ const LISTS: [List, string][] = [
   ['links', 'Links'],
 ];
 // A line of the sheet: the goal, an item of a list (one past its last adds
-// one), or a field.
-type Line = { kind: 'goal' } | { kind: 'item'; list: List; index: number } | { kind: 'field'; field: 'continueAs' | 'autonomy' | 'tier' | 'maxTurns' };
+// one), a spec candidate, or a field.
+type Line =
+  | { kind: 'goal' }
+  | { kind: 'item'; list: List; index: number }
+  | { kind: 'spec'; index: number }
+  | { kind: 'field'; field: 'continueAs' | 'autonomy' | 'tier' | 'maxTurns' };
 const LABEL_WIDTH = 14;
 
 // What the operator has made of the sheet so far, and the caret in the line
-// being typed into, back at its end on another line.
-type Draft = { brief: Brief | null; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: string; line: number; caret: Caret };
+// being typed into, back at its end on another line. `specs` are the spec
+// candidates selected, null until the factory has read them.
+type Draft = { brief: Brief | null; specs: string[] | null; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: string; line: number; caret: Caret };
 
 export function HandoffSheet({ connection, task, run }: Props) {
   const { handoff } = task;
   // Keys typed in one burst arrive before a re-render, so the draft is kept here.
-  const draft = useRef<Draft>({ brief: null, continueAs: handoff.continueAs, autonomy: handoff.autonomy, tier: handoff.tier, maxTurns: String(handoff.maxTurns), line: 0, caret: null });
+  const draft = useRef<Draft>({ brief: null, specs: null, continueAs: handoff.continueAs, autonomy: handoff.autonomy, tier: handoff.tier, maxTurns: String(handoff.maxTurns), line: 0, caret: null });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const [refusal, setRefusal] = useState<string | null>(null);
   // The brief is the operator's to edit once the agent has written it.
   if (handoff.brief && !draft.current.brief) draft.current.brief = structuredClone(handoff.brief);
+  // The factory's pick of the spec candidates, until the operator picks;
+  // read again with other candidates, it picks afresh.
+  const candidates = handoff.ticketSets?.candidates ?? [];
+  const { specs } = draft.current;
+  if (handoff.ticketSets && (!specs || specs.some((spec) => !candidates.some((candidate) => candidate.spec === spec)))) {
+    draft.current.specs = handoff.ticketSets.selected ? [handoff.ticketSets.selected] : [];
+  }
   const { brief } = draft.current;
-  const lines = linesOf(brief);
+  const lines = linesOf(brief, candidates.length);
   const writing = !brief && run?.status === 'active' && run.turn === 'agent';
 
   const send = (command: Parameters<FactoryConnection['send']>[0]) =>
@@ -61,13 +74,14 @@ export function HandoffSheet({ connection, task, run }: Props) {
         return;
       }
       const { continueAs, autonomy, tier, maxTurns } = current;
-      return send({ type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, tier, maxTurns: Number(maxTurns) });
+      const specs = current.specs && { specs: current.specs };
+      return send({ type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, tier, maxTurns: Number(maxTurns), ...specs });
     }
     if (key.upArrow || key.downArrow) {
       const line = Math.min(Math.max(current.line + (key.upArrow ? -1 : 1), 0), lines.length - 1);
       if (line !== current.line) Object.assign(current, { line, caret: null });
     } else {
-      step(current, lines[current.line]!, input, key);
+      step(current, lines[current.line]!, input, key, candidates);
     }
     rerender();
   });
@@ -76,11 +90,11 @@ export function HandoffSheet({ connection, task, run }: Props) {
   const to = handoff.stage ? `to ${handoff.stage} (AFK)` : 'to one AFK run on the brief';
   const share = handoff.contextShare === null ? null : `the conversation fills ${Math.round(handoff.contextShare * 100)}% of the context window`;
   const { blockers, toCommit } = handoff.readiness;
-  // The brief's lines, before the fields: on a field, the brief shows its end.
-  const briefLines = lines.filter((line) => line.kind !== 'field');
+  // The brief's lines, before the ticket set and the fields: on those, the brief shows its end.
+  const briefLines = lines.filter((line) => line.kind === 'goal' || line.kind === 'item');
   return h(
     Sheet,
-    { title: `Hand off ${task.id} ${to}`, hint: `${brief ? 'enter hand off · ↑↓ line · type to edit · ←→ change' : 'enter ask again'} · esc keep talking`, shrinks: true },
+    { title: `Hand off ${task.id} ${to}`, hint: `${brief ? `enter hand off · ↑↓ line · ${at?.kind === 'spec' ? 'space select' : 'type to edit · ←→ change'}` : 'enter ask again'} · esc keep talking`, shrinks: true },
     // On a short screen only the brief gives way, scrolled to keep the
     // selected line in view: the fields and what blocks the handoff stay.
     brief
@@ -90,6 +104,7 @@ export function HandoffSheet({ connection, task, run }: Props) {
         })
       : fixed(h(Text, tone('warn'), writing ? 'The agent is writing the brief…' : 'The agent ended its turn without writing the brief: enter asks again.')),
     fixed(
+      ...(handoff.ticketSets ? ticketSetLines(handoff.ticketSets, draft.current.specs ?? [], task.repo, at?.kind === 'spec' ? at.index : null) : []),
       h(Field, { key: 'continueAs', label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, choosable(draft.current.continueAs), share && h(Text, tone('dim'), ` ${share}`)),
       h(Field, { key: 'autonomy', label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, choosable(autonomyText(draft.current.autonomy))),
       h(Field, { key: 'tier', label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, choosable(draft.current.tier)),
@@ -101,9 +116,12 @@ export function HandoffSheet({ connection, task, run }: Props) {
   );
 }
 
-// The goal, each list's items with a line to add one, then the fields.
-function linesOf(brief: Brief | null): Line[] {
+// The goal, each list's items with a line to add one, then the spec
+// candidates, then the fields.
+function linesOf(brief: Brief | null, candidates: number): Line[] {
+  const specs = Array.from({ length: candidates }, (_, index): Line => ({ kind: 'spec', index }));
   const fields: Line[] = [
+    ...specs,
     { kind: 'field', field: 'continueAs' },
     { kind: 'field', field: 'autonomy' },
     { kind: 'field', field: 'tier' },
@@ -121,13 +139,20 @@ function startsSection(lines: Line[], i: number): boolean {
 }
 
 // The draft after a key on `line` that isn't enter, esc or ↑↓.
-function step(draft: Draft, line: Line, input: string, key: Key): void {
+function step(draft: Draft, line: Line, input: string, key: Key, candidates: SpecCandidate[]): void {
   // The line's text after the key, its caret moved with it, or null when the key doesn't type.
   const type = (text: string, typed = input): string | null => {
     const edited = edit(text, draft.caret, typed, key);
     if (edited) draft.caret = edited.caret;
     return edited?.text ?? null;
   };
+  // Space or ←→ selects a spec candidate alone, or deselects it.
+  if (line.kind === 'spec') {
+    if (input !== ' ' && !key.leftArrow && !key.rightArrow) return;
+    const { spec } = candidates[line.index]!;
+    draft.specs = draft.specs?.includes(spec) ? [] : [spec];
+    return;
+  }
   if (line.kind === 'field') {
     const by = key.leftArrow ? -1 : key.rightArrow ? 1 : 0;
     if (line.field === 'continueAs' && by) draft.continueAs = cycle(CONTINUE_AS, draft.continueAs, by);
@@ -148,10 +173,39 @@ function step(draft: Draft, line: Line, input: string, key: Key): void {
   if (edited !== null && (line.index < items.length || edited)) items[line.index] = edited;
 }
 
+// The ticket set's lines: each spec candidate, selected or not, with its
+// tickets, how many are ready now and those held back by their label; the
+// issues the task recorded with 0 tickets; what a handoff with none
+// selected is; and why the factory couldn't read them. `at` is the candidate the cursor is on.
+function ticketSetLines({ candidates, withoutTickets, problem }: HandoffTicketSets, specs: string[], repo: string, at: number | null): ReactNode[] {
+  const short = (ref: string) => (ref.toLowerCase().startsWith(`${repo.toLowerCase()}#`) ? ref.slice(repo.length) : ref);
+  const lines: ReactNode[] = candidates.flatMap(({ spec, title, tickets }, i) => {
+    const ready = tickets.filter(readyNow).length;
+    const count = `${tickets.length} ticket${tickets.length === 1 ? '' : 's'}, ${ready} ready now`;
+    // The open tickets its spec task would never launch, by their label.
+    const held = tickets.filter(heldBack).map((ticket) => heldBackLabel(ticket, short));
+    return [
+      h(
+        Field,
+        { key: `spec-${spec}`, label: i === 0 ? 'Ticket set' : '', selected: at === i },
+        h(Tick, { on: specs.includes(spec) }),
+        ` Spec ${short(spec)} ${title} ${GLYPH.launches} ${count}`,
+      ),
+      ...(held.length ? [h(Field, { key: `held-${spec}`, label: '', selected: false }, h(Text, tone('dim'), `    Held back by their label: ${held.join(', ')}`))] : []),
+    ];
+  });
+  for (const { ref, title } of withoutTickets) {
+    lines.push(h(Text, { key: `none-${ref}`, ...tone('dim') }, `${short(ref)} ${title} ${GLYPH.launches} 0 tickets: none are its sub-issues`));
+  }
+  if (!candidates.some(({ spec }) => specs.includes(spec))) lines.push(h(Text, { key: 'one-run', ...tone('warn') }, 'No ticket set: the handoff is one run on the brief.'));
+  if (problem) lines.push(h(Text, { key: 'problem', ...tone('bad') }, `${GLYPH.failed} ${problem}`));
+  return lines;
+}
+
 // `caret` on the selected line, which shows it; undefined on the others.
 function BriefLine({ line, brief, caret, first }: { line: Line; brief: Brief; caret: Caret | undefined; first: boolean }) {
   const selected = caret !== undefined;
-  if (line.kind === 'field') return null;
+  if (line.kind === 'field' || line.kind === 'spec') return null;
   const label = line.kind === 'goal' ? 'Goal' : first ? LISTS.find(([list]) => list === line.list)![1] : '';
   const text = line.kind === 'goal' ? brief.goal : brief[line.list][line.index];
   return h(

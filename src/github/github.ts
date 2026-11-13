@@ -2,8 +2,8 @@
 // identity, a GitHub App. It turns the manifest flow's code into the App,
 // says whether the App is installed on a repository, and mints installation
 // tokens narrowed to one repository and the permissions asked for. With such
-// a token it reads the Ralph loop's tickets, closes them, and reopens them
-// when their task is cancelled (ADR 0006), pushes task branches, and opens
+// a token it reads specs, maps and their tickets, closes them (ADR 0013),
+// pushes task branches, and opens
 // their draft PRs, reads those PRs, closes or reopens them, and deletes the
 // task branches it pushed (ADR 0011). The REST adapter (`gitHubApi`) is the real one.
 import { execFile } from 'node:child_process';
@@ -22,7 +22,7 @@ export type Permissions = Partial<Record<Permission, 'read' | 'write'>>;
 // (ADR 0011): Issues, Pull requests and Metadata read.
 export const READ_ONLY: Permissions = { issues: 'read', pull_requests: 'read', metadata: 'read' };
 
-// What closing a ticket, or reopening it, writes with: a comment and the issue's state.
+// What closing a ticket writes with: a comment and the issue's state.
 export const TICKET_WRITE: Permissions = { issues: 'write', metadata: 'read' };
 
 // What pushing a task branch writes with: the repository's contents alone.
@@ -51,6 +51,12 @@ export const PR_WRITE: Permissions = { pull_requests: 'write', metadata: 'read' 
 
 // Where a PR stands on GitHub: open, merged, or closed without merging.
 export type PrState = 'open' | 'merged' | 'closed';
+// Whether GitHub finds the PR mergeable into its base, or conflicting with
+// it, or unknown while it is still working that out after a push (ADR 0013),
+// as it may stay for a PR that isn't open.
+export type Mergeability = 'mergeable' | 'conflicting' | 'unknown';
+// What a read of a PR says of it.
+export type PrStatus = { state: PrState; mergeable: Mergeability };
 
 // A draft PR the factory opens (ADR 0004): of the pushed task branch `head`
 // into `base`, assigned to `assignee`, the operator.
@@ -83,9 +89,6 @@ export interface GitHub {
   // Comments `comment` on the issue, then closes it as completed, with
   // `token`, which needs Issues write.
   closeIssue(token: string, ref: string, comment: string): Promise<void>;
-  // Comments `comment` on the issue, then reopens it, with `token`, which
-  // needs Issues write.
-  reopenIssue(token: string, ref: string, comment: string): Promise<void>;
   // Pushes the task branch with `token`, which needs Contents write, under a
   // fixed refspec: the branch's tip to the same branch on GitHub, never
   // forced, and with no hooks run. A branch GitHub already has at that tip,
@@ -98,9 +101,9 @@ export interface GitHub {
   // stopped before it could record that it opened it. Where GitHub offers no
   // draft PRs, it opens a regular one instead.
   openDraftPr(token: string, pr: DraftPr): Promise<PullRequest>;
-  // Where the PR `ref` (`owner/name#n`) stands, read with `token`, which
-  // needs Pull requests read (ADR 0011).
-  readPr(token: string, ref: string): Promise<PrState>;
+  // Where the PR `ref` (`owner/name#n`) stands, and whether it is
+  // mergeable, read with `token`, which needs Pull requests read (ADR 0011).
+  readPr(token: string, ref: string): Promise<PrStatus>;
   // Comments `comment` on the open PR, then closes it, with `token`, which
   // needs Pull requests write. A PR already closed or merged is left as it is.
   closePr(token: string, ref: string, comment: string): Promise<void>;
@@ -256,12 +259,6 @@ export function gitHubApi(): GitHub {
       const closed = await call('PATCH', issuePath(ref), token, { state: 'closed', state_reason: 'completed' });
       if (closed.status !== 200) throw refused(`close ${ref}`, closed);
     },
-    async reopenIssue(token, ref, comment) {
-      const commented = await call('POST', `${issuePath(ref)}/comments`, token, { body: comment });
-      if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
-      const reopened = await call('PATCH', issuePath(ref), token, { state: 'open', state_reason: 'reopened' });
-      if (reopened.status !== 200) throw refused(`reopen ${ref}`, reopened);
-    },
     async push(token, { clonePath, repo, branch }) {
       const refusal = pushRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
@@ -302,7 +299,8 @@ export function gitHubApi(): GitHub {
       return { number: pr.number, url: pr.html_url, draft: pr.draft === true };
     },
     async readPr(token, ref) {
-      return stateOf(await pullRequest(token, ref));
+      const pr = await pullRequest(token, ref);
+      return { state: stateOf(pr), mergeable: mergeabilityOf(pr) };
     },
     async closePr(token, ref, comment) {
       if (stateOf(await pullRequest(token, ref)) !== 'open') return;
@@ -388,6 +386,12 @@ export function goneHead(head: string, number: string | number): string {
 // Where the PR stands, from GitHub's own account of it.
 function stateOf(pr: { merged: boolean; state: string }): PrState {
   return pr.merged ? 'merged' : pr.state === 'open' ? 'open' : 'closed';
+}
+
+// Whether the PR is mergeable, as GitHub last worked it out: GitHub says
+// null until it has.
+function mergeabilityOf(pr: { mergeable?: boolean | null }): Mergeability {
+  return pr.mergeable === true ? 'mergeable' : pr.mergeable === false ? 'conflicting' : 'unknown';
 }
 
 // The REST path of a PR `owner/name#n`.

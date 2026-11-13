@@ -149,6 +149,8 @@ export const GLYPH = {
   advances: '←',
   // Between a question and the operator's answer to it.
   answers: '→',
+  // Between a spec and the tickets its spec task would launch.
+  launches: '→',
   // What leads a line saying the operator's answer went through.
   answered: '✓',
   // Around a value ←→ changes.

@@ -81,11 +81,21 @@ async function fixture(): Promise<DockerFixture> {
       if (code !== 0) throw new Error(`The commit in the container failed: ${stdout}`);
       return stdout.trim();
     },
+    async fetchOnHost(spec, branch) {
+      // The fixture's clone has no origin: its remote-tracking branch is made from the local one.
+      const from = `refs/heads/${branch}`;
+      const tip = git(spec.clonePath, 'commit-tree', '-p', from, '-m', `Fetched ${branch}`, `${from}^{tree}`);
+      git(spec.clonePath, 'update-ref', `refs/remotes/origin/${branch}`, tip);
+      return tip;
+    },
     async hostTip(spec, branch) {
       return git(spec.clonePath, 'rev-parse', `refs/heads/${branch}`);
     },
     async containerTip(container, branch) {
       return (await container.git(['rev-parse', `refs/heads/${branch}`])).stdout.trim();
+    },
+    async containerFetchedTip(container, branch) {
+      return (await container.git(['rev-parse', `refs/remotes/origin/${branch}`])).stdout.trim();
     },
     async reach(container, host) {
       return (await sh(container, `curl --silent --output /dev/null --max-time 20 https://${host}/`)).code === 0;

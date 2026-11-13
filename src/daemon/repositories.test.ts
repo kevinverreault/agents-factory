@@ -271,6 +271,7 @@ describe('a missing clone', () => {
     permission: null,
     recovery: null,
     deniedHosts: null,
+    skipped: null,
   });
 
   test('a moved clone raises exactly one repo-missing attention request, however many runs would start', async () => {

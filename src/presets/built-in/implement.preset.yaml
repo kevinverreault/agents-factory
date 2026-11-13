@@ -1,9 +1,11 @@
 # Work you've already worked out: main-flow from its implement stage, on the
-# issue refs, the prompt or both. Refs run main-flow's ticket loop, one
-# session per ticket; a prompt alone is one implement run. Review and a PR
+# issue refs, the prompt or both. One ref with no sub-issues makes the task
+# a ticket task, one implement run on it whose PR closes it (ADR 0013);
+# a spec ref or several refs make a spec task, launching a ticket task per
+# takeable ticket; a prompt alone is one implement run. Review and a PR
 # follow. At L1 open-pr is skipped: the operator's Push & open draft PR
 # makes it (ADR 0007).
-description: Implement issues or a prompt unattended, one ticket per session, then a review and a PR.
+description: Implement issues or a prompt unattended, one ticket task per ticket, each with its review and PR.
 extends: main-flow
 from: implement
 stages:

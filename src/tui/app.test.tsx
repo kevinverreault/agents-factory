@@ -37,7 +37,7 @@ async function spinsWhileLaunching(app: { lastFrame(): string | undefined; stdin
 }
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null, launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, resolving: null, specTask: null, ticketSet: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, loop: null, launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -152,7 +152,7 @@ describe('the frame', () => {
     // Any foreground or background colour, of the 16, the 256 or truecolour.
     const COLOURED = /\x1b\[(?:3[0-9]|4[0-9]|9[0-7]|10[0-7])(?:;[\d;]*)?m/;
     const failed: FactoryState['attentionQueue'][number] = {
-      kind: 'attention', recovery: null, deniedHosts: null, taskId: 'T3', repo: 'acme/widgets', requestId: 'A1', attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+      kind: 'attention', recovery: null, deniedHosts: null, skipped: null, taskId: 'T3', repo: 'acme/widgets', requestId: 'A1', attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
     };
     const { app } = await started(
       factoryState([task('T1', 'Implement the store', 'running', 'Running'), task('T2', 'Settle the glossary', 'done', 'Done'), task('T3', 'Write the docs', 'waiting', 'Needs you')], [failed]),
@@ -245,7 +245,7 @@ describe('the bare TUI', () => {
           {
             kind: 'attention',
             recovery: null,
-            deniedHosts: null,
+            deniedHosts: null, skipped: null,
             taskId: 'T2',
             repo: 'acme/widgets',
             requestId: 'A1',
@@ -395,26 +395,11 @@ describe('cancelling', () => {
   });
 });
 
-describe('finishing a loop', () => {
-  test('F finishes the selected loop after its ticket, and its row says so', async () => {
-    const looping = { ...task('T1', 'Implement the spec', 'running', 'Running'), loop: { ticket: 'acme/widgets#11', finishing: false, frontier: null, cleared: false } };
-    const { app, connection } = await started(factoryState([looping]));
-    await eventually(() => expect(app.lastFrame()).toMatch(/T1\s+Implement the spec\s+AFK L1\s+Running\s+on acme\/widgets#11/));
-    expect(app.lastFrame()).toContain('F finish after this ticket');
-
-    await press(app, 'F');
-
-    await eventually(() => expect(connection.sent).toEqual([{ type: 'finishLoop', taskId: 'T1' }]));
-    connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'loop'], value: { ticket: 'acme/widgets#11', finishing: true } }]);
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Running on acme\/widgets#11, finishing after it/));
-  });
-});
-
 describe('the task tree', () => {
   const failure = (taskId: string): FactoryState['attentionQueue'][number] => ({
     kind: 'attention',
     recovery: null,
-    deniedHosts: null,
+    deniedHosts: null, skipped: null,
     taskId,
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -490,6 +475,103 @@ describe('the task tree', () => {
     await press(app, 'y');
 
     expect(connection.sent).toEqual([]);
+  });
+});
+
+describe('spec tasks', () => {
+  // T1, a spec task over #10, with ticket tasks T2 on #11 (In review), T3
+  // on #15 (Running) with a child T5, and T4 on #16 (Done); #12 waits on
+  // #11, #13 is held back, #14 was skipped and #17 is about to launch. T6
+  // is a root launched after.
+  const specTree = () =>
+    factoryState([
+      {
+        ...task('T1', 'Sign-in', 'running', 'Running'),
+        kind: 'spec',
+        mergePolicy: 'operator',
+        ticketSet: {
+          spec: 'acme/widgets#10',
+          tickets: [
+            { ref: 'acme/widgets#11', title: 'A login form', state: 'launched', taskId: 'T2' },
+            { ref: 'acme/widgets#12', title: 'Remember me', state: 'waiting', blockers: ['acme/widgets#11'] },
+            { ref: 'acme/widgets#13', title: 'SSO', state: 'held-back' },
+            { ref: 'acme/widgets#14', title: 'The sign-in route', state: 'skipped' },
+            { ref: 'acme/widgets#15', title: 'Sign out', state: 'launched', taskId: 'T3' },
+            { ref: 'acme/widgets#16', title: 'Lock out', state: 'merged', taskId: 'T4' },
+            { ref: 'acme/widgets#17', title: 'Audit log', state: 'launching' },
+          ],
+          problem: null,
+        },
+      },
+      { ...ticketTask('T2', 'A login form', 'acme/widgets#11'), state: 'in-review', label: 'In review' },
+      { ...ticketTask('T3', 'Sign out', 'acme/widgets#15'), rollup: { done: 0, running: 1, needsYou: 0, cancelled: 0, failed: [] } },
+      { ...ticketTask('T4', 'Lock out', 'acme/widgets#16'), state: 'done', label: 'Done' },
+      { ...task('T5', 'Check the links', 'running', 'Running'), parent: 'T3', depth: 1 },
+      task('T6', 'Another root', 'queued', 'Queued'),
+    ]);
+
+  function ticketTask(id: string, title: string, ticket: string): TaskView {
+    return { ...task(id, title, 'running', 'Running'), kind: 'ticket', ticket, specTask: 'T1', mergePolicy: 'operator' };
+  }
+
+  test('ticket tasks show under their spec task, which counts its tickets by state, each ticket task naming its ticket', async () => {
+    const { app } = await started(specTree());
+    widen(app, 140);
+
+    await eventually(() => {
+      const rows = lines(app).filter((line) => /^[›\s]+\S\s+T\d/.test(line));
+      // Newest first: the roots, and each spec task's ticket tasks under it, as children are.
+      expect(rows.map((row) => /T\d/.exec(row)![0])).toEqual(['T6', 'T1', 'T4', 'T3', 'T5', 'T2']);
+      const glyphAt = rows.map((row) => row.search(/[^›\s]/));
+      expect(glyphAt[1]).toBe(glyphAt[0]);
+      expect(glyphAt[2]).toBeGreaterThan(glyphAt[1]!);
+      expect(glyphAt[3]).toBe(glyphAt[2]);
+      // A ticket task's child sits past its ticket task.
+      expect(glyphAt[4]).toBeGreaterThan(glyphAt[3]!);
+      expect(glyphAt[5]).toBe(glyphAt[2]);
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toMatch(/T1 +Sign-in +AFK L1 +Running +\[1 merged, 3 in flight, 1 waiting, 1 held back, 1 skipped\]/);
+      expect(frame).toMatch(/T2 +A login form +AFK L1 +In review +on acme\/widgets#11/);
+      expect(frame).toMatch(/T3 +Sign out +AFK L1 +Running +on acme\/widgets#15 · \[1 running\]/);
+    });
+  });
+
+  test('H hides a Done ticket task, keeping its spec task and the rest under it', async () => {
+    const { app } = await started(specTree());
+    await press(app, 'H');
+
+    await eventually(() => {
+      const rows = lines(app).filter((line) => /^[›\s]+\S\s+T\d/.test(line));
+      expect(rows.map((row) => /T\d/.exec(row)![0])).toEqual(['T6', 'T1', 'T3', 'T5', 'T2']);
+    });
+  });
+
+  test('the spec task’s detail lists its tickets, each with where it stands', async () => {
+    const { app } = await started(specTree());
+    widen(app, 140);
+    // T1 is the second row: T6, T1.
+    await press(app, '\x1b[B', '\r');
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('TICKETS OF ACME/WIDGETS#10');
+      expect(frame).toMatch(/acme\/widgets#11 A login form T2 In review/);
+      expect(frame).toMatch(/acme\/widgets#12 Remember me waiting on acme\/widgets#11/);
+      expect(frame).toMatch(/acme\/widgets#13 SSO held back/);
+      expect(frame).toMatch(/acme\/widgets#14 The sign-in route skipped/);
+      expect(frame).toMatch(/acme\/widgets#15 Sign out T3 Running/);
+      expect(frame).toMatch(/acme\/widgets#16 Lock out merged \(T4\)/);
+      expect(frame).toMatch(/acme\/widgets#17 Audit log launching/);
+    });
+  });
+
+  test('a spec task’s detail says why the factory couldn’t read or launch its tickets', async () => {
+    const state = specTree();
+    state.tasks.T1!.ticketSet!.problem = 'The factory couldn’t read T1’s tickets from GitHub: Bad gateway.';
+    const { app } = await started(state);
+    await press(app, '\x1b[B', '\r');
+
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('The factory couldn’t read T1’s tickets from GitHub: Bad gateway.'));
   });
 });
 
@@ -620,7 +702,7 @@ describe('repositories', () => {
           {
             kind: 'attention',
             recovery: null,
-            deniedHosts: null,
+            deniedHosts: null, skipped: null,
             taskId: null,
             repo: 'acme/widgets',
             requestId: 'A1',
@@ -652,7 +734,7 @@ describe('repositories', () => {
       reason: 'The factory restarted after it stopped uncleanly. Requeued T1 (R1).',
       question: null,
       permission: null,
-      deniedHosts: null,
+      deniedHosts: null, skipped: null,
       recovery: { requeued: [{ taskId: 'T1', runId: 'R1' }], parked: [], failed: [] },
     };
     const { app } = await started(factoryState([task('T1', 'Implement the store', 'running', 'Running')], [report]), { connection });
@@ -1388,7 +1470,7 @@ describe('launching and conversing', () => {
   const failure = {
     kind: 'attention' as const,
     recovery: null,
-    deniedHosts: null,
+    deniedHosts: null, skipped: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -1641,6 +1723,7 @@ describe('launching and conversing', () => {
     maxTurns: 300,
     contextShare: 0.23,
     readiness: { blockers: [], toCommit: ['GLOSSARY.md'] },
+    ticketSets: null,
   };
 
   test('the agent’s proposal to hand off shows as a banner, and ctrl+h or /handoff opens the handoff sheet, even over an open card', async () => {
@@ -1823,6 +1906,102 @@ describe('launching and conversing', () => {
     );
   });
 
+  // A ticket of a spec candidate on the handoff sheet.
+  const ticket = (n: number, more: { open?: boolean; openBlockers?: string[]; labels?: string[] } = {}) => ({
+    ref: `acme/widgets#${n}`,
+    title: `Ticket ${n}`,
+    open: more.open ?? true,
+    labels: more.labels ?? ['ready-for-agent'],
+    openBlockers: more.openBlockers ?? [],
+  });
+  const ticketSets = {
+    candidates: [
+      { spec: 'acme/widgets#11', title: 'Webhooks', tickets: [ticket(12)] },
+      { spec: 'acme/widgets#132', title: 'Webhook retries', tickets: [ticket(133), ticket(134, { openBlockers: ['acme/widgets#133'] }), ticket(135), ticket(136, { open: false }), ticket(137, { labels: [] })] },
+    ],
+    selected: 'acme/widgets#132',
+    withoutTickets: [{ ref: 'acme/widgets#140', title: 'Retries (Part of #132)' }],
+    problem: null,
+  };
+
+  test('the sheet shows each spec candidate with its tickets and how many are ready now, the factory’s pick selected, and issues with 0 tickets', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('[ ] Spec #11 Webhooks → 1 ticket, 1 ready now');
+      expect(frame).toContain('[x] Spec #132 Webhook retries → 5 tickets, 2 ready now');
+      expect(frame).toContain('#140 Retries (Part of #132) → 0 tickets: none are its sub-issues');
+    });
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', taskId: 'T1', specs: ['acme/widgets#132'] }]));
+  });
+
+  test('the sheet lists each spec candidate’s tickets held back by their label, and counts a ready-for-human one as ready now', async () => {
+    const tickets = [ticket(133), ticket(134, { labels: ['ready-for-human'] }), ticket(137, { labels: [] }), ticket(138, { labels: ['needs-triage'], openBlockers: ['acme/widgets#133'] }), ticket(139, { labels: [], open: false })];
+    const sets = { ...ticketSets, candidates: [{ spec: 'acme/widgets#132', title: 'Webhook retries', tickets }], withoutTickets: [] };
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets: sets } }]), runs: { R1: { ...run, turn: 'operator' as const } } });
+    await press(app, '\r', '\r');
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('[x] Spec #132 Webhook retries → 5 tickets, 2 ready now');
+      expect(frame).toContain('Held back by their label: #137 (no label), #138 (needs-triage)');
+    });
+  });
+
+  test('on the sheet, space toggles a spec candidate, selecting it alone; with none selected the handoff is one run on the brief', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[x] Spec #132'));
+
+    // Down past the brief's goal and lists, onto the first candidate.
+    await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ' ');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('› Ticket set [x] Spec #11 Webhooks');
+      expect(frame).toContain('[ ] Spec #132 Webhook retries');
+    });
+    await press(app, ' ');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('› Ticket set [ ] Spec #11 Webhooks');
+      expect(frame).toContain('No ticket set: the handoff is one run on the brief.');
+    });
+
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', taskId: 'T1', specs: [] }]));
+  });
+
+  test('the sheet starts on the factory’s pick, and picks afresh when the factory reads other candidates', async () => {
+    const connection = new FakeConnection();
+    const onSpec11 = { ...ticketSets, selected: 'acme/widgets#11' };
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets: onSpec11 } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[x] Spec #11 Webhooks'));
+
+    const reread = { ...ticketSets, candidates: [{ spec: 'acme/widgets#150', title: 'Signing', tickets: [ticket(151)] }], selected: 'acme/widgets#150' };
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...onLean, handoff: { ...sheet, brief, ticketSets: reread } } }]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[x] Spec #150 Signing'));
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', specs: ['acme/widgets#150'] }]));
+  });
+
+  test('a handoff with no spec candidate says it is one run on the brief, and why the factory couldn’t read them', async () => {
+    const problem = 'The factory couldn’t read T1’s issues’ sub-issues from GitHub: GitHub refused the call (HTTP 404: Not Found).';
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets: { candidates: [], selected: null, withoutTickets: [], problem } } }]), runs: { R1: run } });
+    await press(app, '\r', '\r');
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('No ticket set: the handoff is one run on the brief.');
+      expect(frame).toContain(problem);
+    });
+  });
+
   test('a blocked handoff shows what blocks it, and esc backs out of the sheet to keep talking', async () => {
     const connection = new FakeConnection();
     connection.replyTo('handoff', { ok: false, reason: 'The handoff is blocked. spike is checked out.' });
@@ -1874,7 +2053,7 @@ describe('answering from Needs you', () => {
   const asked = {
     kind: 'attention' as const,
     recovery: null,
-    deniedHosts: null,
+    deniedHosts: null, skipped: null,
     taskId: 'T1',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -1887,7 +2066,7 @@ describe('answering from Needs you', () => {
   const failure = {
     kind: 'attention' as const,
     recovery: null,
-    deniedHosts: null,
+    deniedHosts: null, skipped: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A2',
@@ -1983,18 +2162,12 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(app.lastFrame()).not.toContain('a answer'));
   });
 
-  test('a failed iteration of a loop can be retried, skipped, taken over or cancelled: a digit skips its ticket', async () => {
-    const connection = new FakeConnection();
-    const looping = { ...failing, loop: { ticket: 'acme/widgets#11', finishing: false, frontier: null, cleared: false } };
-    const { app } = await started(factoryState([looping], [failure]), { connection });
+  test('a failed ticket task’s run can be retried, taken over or cancelled: there is no ticket to skip', async () => {
+    const ticketTask = { ...failing, kind: 'ticket' as const, ticket: 'acme/widgets#11' };
+    const { app } = await started(factoryState([ticketTask], [failure]));
     await press(app, '2');
-    await eventually(() =>
-      expect(unwrapped(app.lastFrame()!)).toContain('FAILURE The agent hit max turns. [1] Retry [2] Skip acme/widgets#11 [3] Take over [4] Cancel a answer'),
-    );
 
-    await press(app, 'a', '2');
-
-    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', skip: true }));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('FAILURE The agent hit max turns. [1] Retry [2] Take over [3] Cancel a answer'));
   });
 
   test('a failed L2 run lists the hosts it was denied: a digit allows them for its task and retries it', async () => {
@@ -2021,25 +2194,22 @@ describe('answering from Needs you', () => {
     await eventually(() => expect(again.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2', allowHosts: ['pypi.org', 'files.pythonhosted.org'] }));
   });
 
-  test('a failure of a loop’s ticket taken over offers no skip: the operator works it', async () => {
-    const takenOver = { ...failing, mode: 'HITL' as const, loop: { ticket: 'acme/widgets#11', finishing: false, frontier: null, cleared: false } };
-    const { app } = await started(factoryState([takenOver], [failure]));
-    await press(app, '2');
-
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('FAILURE The agent hit max turns. [1] Retry [2] Cancel a answer'));
-  });
-
-  test('a stalled loop can be retried once its blockers move, taken over or cancelled', async () => {
+  test('a task frozen on the retired Ralph loop can only be cancelled, to relaunch it', async () => {
     const connection = new FakeConnection();
-    const stalled = { ...failing, loop: { ticket: null, finishing: false, frontier: null, cleared: false } };
-    const blocked = { ...failure, attention: 'stage-blocked' as const, reason: 'implement’s loop stalled: every open ticket is blocked (acme/widgets#12 by acme/widgets#11).' };
-    const { app } = await started(factoryState([stalled], [blocked]), { connection });
+    const retired = {
+      ...failing,
+      stage: 'implement',
+      preset: { ...wayfinder, stages: [{ id: 'implement', kind: 'loop' as const, skill: 'implement', mode: 'AFK' as const, exit: 'tickets-closed' }] },
+    };
+    const reason = 'This preset’s loop was retired: implement works tickets through the Ralph loop (exit tickets-closed), which the factory no longer runs. Cancel T2, or relaunch it.';
+    const blocked = { ...failure, attention: 'stage-blocked' as const, reason };
+    const { app } = await started(factoryState([retired], [blocked]), { connection });
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('acme/widgets#11). [1] Retry [2] Take over [3] Cancel a answer'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('or relaunch it. [1] Cancel a answer'));
 
     await press(app, 'a', '1');
 
-    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T2' }));
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'cancel', taskId: 'T2' }));
   });
 
   test('a GitHub write the factory couldn’t make is tried again once the operator answers', async () => {
@@ -2437,7 +2607,7 @@ describe('answering in the conversation', () => {
   const permission = {
     kind: 'attention' as const,
     recovery: null,
-    deniedHosts: null,
+    deniedHosts: null, skipped: null,
     taskId: 'T1',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -2720,7 +2890,7 @@ describe('taking over with c', () => {
   const permission = {
     kind: 'attention' as const,
     recovery: null,
-    deniedHosts: null,
+    deniedHosts: null, skipped: null,
     taskId: 'T2',
     repo: 'acme/widgets',
     requestId: 'A1',
@@ -3022,7 +3192,7 @@ describe('the screens view', () => {
       tier: 'opus' as const,
     };
     const failed: FactoryState['attentionQueue'][number] = {
-      kind: 'attention', recovery: null, deniedHosts: null, taskId: 'T2', repo: 'acme/widgets', requestId: 'Q1', attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+      kind: 'attention', recovery: null, deniedHosts: null, skipped: null, taskId: 'T2', repo: 'acme/widgets', requestId: 'Q1', attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
     };
     const runs = { R3: ran('R3', 'T2', 5, { status: 'active', outcome: null, endedAt: null }) };
     const { app } = await started({ ...factoryState([grilling, child], [failed]), runs });
@@ -3361,7 +3531,7 @@ describe('the screens view', () => {
 
   test('a answers the selected task’s request: from the Tasks screen or a task’s detail it goes to Needs you, the digits on that request', async () => {
     const failure = (taskId: string, requestId: string): FactoryState['attentionQueue'][number] => ({
-      kind: 'attention', recovery: null, deniedHosts: null, taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+      kind: 'attention', recovery: null, deniedHosts: null, skipped: null, taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
     });
     const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
     const { app, connection } = await started(factoryState([{ ...grilling, state: 'waiting', label: 'Needs you' }, failing], [failure('T1', 'A1'), failure('T2', 'A2')]));
@@ -3403,7 +3573,7 @@ describe('the screens view', () => {
     await press(app, '?');
     await eventually(() => {
       const frame = app.lastFrame()!;
-      for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', 'v', 'tab', 'f', 'F', ':', 'g', '\\?']) expect(frame).toMatch(new RegExp(`^[│\\s]*${key}\\s{2,}\\S`, 'm'));
+      for (const key of ['1–4', 'enter', 'esc', 'N', 'a', 'c', 'x', 'H', 'v', 'tab', 'f', ':', 'g', '\\?']) expect(frame).toMatch(new RegExp(`^[│\\s]*${key}\\s{2,}\\S`, 'm'));
       // Its own hint says what closes it, once, under the last key it lists
       // and not on the footer, the screen's last line, which gives way to it.
       const lines = frame.trimEnd().split('\n');
@@ -3434,7 +3604,7 @@ const wayfinder = {
     { id: 'work', kind: 'loop' as const, skill: 'wayfinder', mode: 'HITL' as const, model: 'opus' as const, exit: 'map-cleared' },
     stage('spec', { exit: 'artifact:spec' }),
     stage('tickets', { exit: 'artifact:tickets' }),
-    { id: 'implement', kind: 'loop' as const, skill: 'implement', mode: 'AFK' as const, model: 'sonnet' as const },
+    { id: 'implement', kind: 'tickets' as const, skill: 'implement', mode: 'AFK' as const, model: 'sonnet' as const, exit: 'spec-closed' },
   ],
 };
 
@@ -3447,9 +3617,9 @@ describe('the wayfinder work loop', () => {
     ...task('T1', 'Overhaul billing', 'queued', 'Ready for you', 'HITL'),
     preset: wayfinder,
     stage: 'work',
-    loop: { ticket: null, finishing: false, frontier, cleared: false },
+    loop: { ticket: null, frontier, cleared: false },
   };
-  const cleared: TaskView = { ...picking, loop: { ticket: null, finishing: false, frontier: null, cleared: true } };
+  const cleared: TaskView = { ...picking, loop: { ticket: null, frontier: null, cleared: true } };
   const ready = [{ kind: 'ready' as const, taskId: 'T1' }];
 
   test('the frontier tickets show under the task in Ready for you, and a digit picks one into its conversation', async () => {
@@ -3519,7 +3689,7 @@ describe('the wayfinder work loop', () => {
 
   test('in a ticket’s conversation, the advance sheet finishes the ticket', async () => {
     const connection = new FakeConnection();
-    const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', finishing: false, frontier: null, cleared: false } };
+    const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', frontier: null, cleared: false } };
     const run = {
       id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, interruption: null, turn: 'operator' as const, queued: [] as string[],
       question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {}, deniedHosts: [] as string[], waitingForWindow: null,
@@ -3539,9 +3709,9 @@ describe('the wayfinder work loop', () => {
 describe('a stalled work loop', () => {
   test('offers to read the map again once its blockers move, or cancel', async () => {
     const connection = new FakeConnection();
-    const stalled: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: false } };
+    const stalled: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, frontier: null, cleared: false } };
     const blocked = {
-      kind: 'attention' as const, recovery: null, deniedHosts: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      kind: 'attention' as const, recovery: null, deniedHosts: null, skipped: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
       reason: 'work’s map has no frontier: every open ticket is blocked (acme/widgets#31 by acme/widgets#39).', question: null, permission: null,
     };
     const { app } = await started(factoryState([stalled], [blocked]), { connection });
@@ -3555,15 +3725,37 @@ describe('a stalled work loop', () => {
 
   test('once the map has cleared, a next stage that couldn’t start is only dismissed: nothing is read again', async () => {
     const connection = new FakeConnection();
-    const blockedNext: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, finishing: false, frontier: null, cleared: true } };
+    const blockedNext: TaskView = { ...task('T1', 'Overhaul billing', 'waiting', 'Needs you', 'HITL'), preset: wayfinder, stage: 'work', loop: { ticket: null, frontier: null, cleared: true } };
     const blocked = {
-      kind: 'attention' as const, recovery: null, deniedHosts: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      kind: 'attention' as const, recovery: null, deniedHosts: null, skipped: null, taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
       reason: 'spec can’t start: its args need {{artifacts.map}}, and T1 has no map.', question: null, permission: null,
     };
     const { app } = await started(factoryState([blockedNext], [blocked]), { connection });
     await press(app, '2');
 
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('has no map. [1] Dismiss a answer'));
+  });
+});
+
+describe('a spec task left with skipped tickets', () => {
+  test('offers to relaunch each skipped ticket, end leaving the spec open, close the spec anyway, or cancel', async () => {
+    const connection = new FakeConnection();
+    const stalled: TaskView = {
+      ...task('T1', 'Sign-in', 'waiting', 'Needs you', 'AFK'),
+      kind: 'spec',
+      stage: 'implement',
+      ticketSet: { spec: 'acme/widgets#10', tickets: [{ ref: 'acme/widgets#11', title: 'A login form', state: 'skipped' }], problem: null },
+    };
+    const asked = {
+      kind: 'attention' as const, recovery: null, deniedHosts: null, skipped: ['acme/widgets#11'], taskId: 'T1', repo: 'acme/widgets', requestId: 'A1', attention: 'stage-blocked' as const, holdsRun: false,
+      reason: 'implement can launch no more tickets: acme/widgets#11 was skipped when its ticket task was cancelled.', question: null, permission: null,
+    };
+    const { app } = await started(factoryState([stalled], [asked]), { connection });
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[1] Relaunch acme/widgets#11 [2] End, leaving the spec open [3] Close the spec anyway [4] Cancel'));
+
+    await press(app, 'a', '1');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', relaunch: 'acme/widgets#11' }));
   });
 });
 
@@ -3819,7 +4011,7 @@ describe('quick launch', () => {
 
 describe('the condensed view', () => {
   const failure = (taskId: string, requestId: string): FactoryState['attentionQueue'][number] => ({
-    kind: 'attention', recovery: null, deniedHosts: null, taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
+    kind: 'attention', recovery: null, deniedHosts: null, skipped: null, taskId, repo: 'acme/widgets', requestId, attention: 'failure', holdsRun: false, reason: 'The agent hit max turns.', question: null, permission: null,
   });
   const billing = { ...task('T1', 'Grill me about invoices', 'queued', 'Ready for you', 'HITL'), groups: ['billing'] };
   const failing = { ...task('T2', 'Implement the store', 'waiting', 'Needs you'), groups: ['billing', 'store'] };

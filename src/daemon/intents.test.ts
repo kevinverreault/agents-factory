@@ -244,28 +244,6 @@ describe('a cancel cascade', () => {
       recovery: { replayed: [{ taskId: 'T1', verb: 'cleanup', outcome: 'resumed' }] },
     });
   });
-
-  test('crashed before it reopened the tickets the task closed reopens them on the next start', async () => {
-    const { factory, operator, tui } = await attached();
-    factory.github.addIssue('acme/widgets#10');
-    factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
-    factory.github.addIssue('acme/widgets#12', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
-    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'] });
-    const { worktree } = (await tui.until((state) => state.tasks.T1?.liveRunId === 'R1')).tasks.T1!;
-    factory.git.editFile(worktree!, 'src/logout.ts');
-    factory.git.commitAll(worktree!);
-    factory.executor.report('R1', { type: 'runCompleted' });
-    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
-    expect(factory.github.issueState('acme/widgets#11')).toMatchObject({ open: false });
-    const crashed = factory.crashAt('github', 'reopenIssue', 'before');
-    expect(await operator.send({ type: 'cancel', taskId: 'T1', branch: 'keep' })).toEqual({ ok: true });
-
-    const restarted = await crashAndRestart(factory, crashed);
-
-    const state = await restarted.tui.until((state) => state.tasks.T1?.reopening === null && state.tasks.T1.cleanup === null);
-    expect(factory.github.issueState('acme/widgets#11')).toMatchObject({ open: true, stateReason: 'reopened' });
-    expect(recoveryReport(state)!.recovery!.replayed).toEqual(expect.arrayContaining([{ taskId: 'T1', verb: 'cancel', outcome: 'resumed' }]));
-  });
 });
 
 describe('a spawn', () => {

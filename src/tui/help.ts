@@ -14,7 +14,6 @@ const KEYS: [string, string][] = [
   ['c', 'converse with a HITL task, or take an AFK one over'],
   ['x', 'cancel the selected task, with its subtree'],
   ['t', 're-tier the selected task’s next runs'],
-  ['F', 'finish a loop after its ticket'],
   ['y', 'retry a failed task'],
   ['H', 'hide or show Done and Cancelled tasks'],
   ['v', 'the condensed view: Needs you and groups, the task tree, and the selected task’s detail; v again for the screens'],

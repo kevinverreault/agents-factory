@@ -12,7 +12,9 @@ import {
   type Permissions,
   type Pushed,
   type DraftPr,
+  type Mergeability,
   type PrState,
+  type PrStatus,
   type PullRequest,
 } from '../github/github.ts';
 import { outsideResearch } from '../github/research-branch.ts';
@@ -36,6 +38,8 @@ type FakePullRequest = PullRequest & {
   token: Minted;
   state: PrState;
   comments: string[];
+  // What GitHub says of its mergeability as a test set it, if it did.
+  mergeable?: Mergeability | null;
 };
 
 // The token as it was minted, kept with a write it made.
@@ -55,12 +59,14 @@ type FakeIssue = { title: string; open: boolean; stateReason: StateReason; label
 // can make it unreachable, or hold its writes mid-call.
 export class FakeGitHub implements GitHub {
   readonly minted: Minted[] = [];
-  readonly writes: { action: 'close' | 'reopen'; ref: string; comment: string; token: Minted }[] = [];
+  readonly writes: { action: 'close'; ref: string; comment: string; token: Minted }[] = [];
   // Each push that reached GitHub, with the tip it sent and its token.
   readonly pushes: { repo: string; branch: string; tip: string; token: Minted }[] = [];
   // Every PR opened, in order.
   readonly pullRequests: FakePullRequest[] = [];
   // Each PR closed or reopened through the port, with its token.
+  // Each PR read that reached GitHub, by its ref.
+  readonly prReads: string[] = [];
   readonly prWrites: { action: 'close' | 'reopen'; repo: string; number: number; token: Minted }[] = [];
   // Each branch deleted through the port, with its token.
   readonly branchDeletes: { repo: string; branch: string; token: Minted }[] = [];
@@ -73,6 +79,7 @@ export class FakeGitHub implements GitHub {
   private readonly noDrafts = new Set<string>();
   private failure: string | null = null;
   private prFailure: string | null = null;
+  private issueWriteFailure: string | null = null;
   private hold: { arrived(): void; released: Promise<void> } | null = null;
 
   // `git` holds the clones pushes come from, whose origin is this GitHub.
@@ -115,6 +122,11 @@ export class FakeGitHub implements GitHub {
     this.prFailure = reason;
   }
 
+  // Closing issues fails with `reason` from now on, or works again with null.
+  failIssueWrites(reason: string | null): void {
+    this.issueWriteFailure = reason;
+  }
+
   // The writes from now on wait, unmade, until `release`: `held` settles
   // once the first of them arrives.
   holdWrites(): { held: Promise<void>; release(): void } {
@@ -148,6 +160,11 @@ export class FakeGitHub implements GitHub {
   // Someone marks the issue blocked by `blocker` on GitHub.
   block(ref: string, blocker: string): void {
     this.issueAt(ref).blockedBy.push(blocker);
+  }
+
+  // Someone relabels the issue on GitHub.
+  relabel(ref: string, labels: string[]): void {
+    this.issueAt(ref).labels = [...labels];
   }
 
   // Someone closes the issue on GitHub.
@@ -203,6 +220,7 @@ export class FakeGitHub implements GitHub {
 
   async closeIssue(token: string, ref: string, comment: string): Promise<void> {
     await this.held();
+    if (this.issueWriteFailure) throw new GitHubError(this.issueWriteFailure);
     const minted = this.scoped(token, ref, 'issues', 'write');
     const issue = this.found(ref);
     issue.comments.push(comment);
@@ -211,14 +229,11 @@ export class FakeGitHub implements GitHub {
     this.writes.push({ action: 'close', ref, comment, token: snapshot(minted) });
   }
 
-  async reopenIssue(token: string, ref: string, comment: string): Promise<void> {
-    await this.held();
-    const minted = this.scoped(token, ref, 'issues', 'write');
+  // Someone reopens the issue on GitHub.
+  reopenIssue(ref: string): void {
     const issue = this.found(ref);
-    issue.comments.push(comment);
     issue.open = true;
     issue.stateReason = 'reopened';
-    this.writes.push({ action: 'reopen', ref, comment, token: snapshot(minted) });
   }
 
   async push(token: string, { clonePath, repo, branch }: BranchPush): Promise<Pushed> {
@@ -274,9 +289,23 @@ export class FakeGitHub implements GitHub {
     this.prAt(number).state = 'open';
   }
 
-  async readPr(token: string, ref: string): Promise<PrState> {
+  async readPr(token: string, ref: string): Promise<PrStatus> {
     this.scoped(token, ref, 'pull_requests', 'read');
-    return this.foundPr(ref).state;
+    const pr = this.foundPr(ref);
+    this.prReads.push(ref);
+    return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown' };
+  }
+
+  // Whether GitHub finds the open PR mergeable: as a test set it, or as its
+  // branches on origin merge.
+  private mergeabilityOf(pr: FakePullRequest): Mergeability {
+    return pr.mergeable ?? (this.git.conflictsOnOrigin(pr.repo, pr.head, pr.base) ? 'conflicting' : 'mergeable');
+  }
+
+  // GitHub finds the PR `mergeable` from now on, whatever its branches, or
+  // works it out from them again with null.
+  setMergeable(number: number, mergeable: Mergeability | null): void {
+    this.prAt(number).mergeable = mergeable;
   }
 
   async closePr(token: string, ref: string, comment: string): Promise<void> {
