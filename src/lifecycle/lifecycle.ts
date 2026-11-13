@@ -8,7 +8,7 @@
 // (ADR 0006); child tasks arrive with their own slice.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
-import type { Issue, PrState, PullRequest } from '../github/github.ts';
+import type { Issue, Mergeability, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isWorkLoop, launchesTickets, namesPrompt, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
@@ -456,6 +456,11 @@ export type Task = {
   // True once the operator requested changes on it in review: past its last
   // stage, each of its runs that completes puts it back In review.
   changesRequested?: boolean;
+  // True once a PR poll found a ticket task's PR conflicting with its base
+  // and queued its update run (ADR 0013), until a poll finds it mergeable:
+  // no other update run is queued meanwhile. Like changes requested, each
+  // of its runs that completes puts it back In review.
+  conflicted?: boolean;
   // Its Push & open draft PR while under way, and the draft PR it opened.
   publishing?: Publishing | null;
   pr?: PullRequest | null;
@@ -1018,8 +1023,9 @@ export type SpecClosingEvent = { type: 'specClosed'; taskId: string } | { type: 
 // run, on the operator's turn.
 export type NoteEvent = { type: 'notesDelivered'; taskId: string };
 
-// What the daemon read of an In review root's PR on GitHub (ADR 0011).
-export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState };
+// What the daemon read of an In review root's PR on GitHub (ADR 0011):
+// where it stands, and whether GitHub finds it mergeable (ADR 0013).
+export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; mergeable: Mergeability };
 
 export type LifecycleAction =
   | OperatorCommand
@@ -2974,6 +2980,24 @@ function foundText({ containers, worktrees }: Found): string {
   return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0]!;
 }
 
+// Whether a conflicting PR queues an update run on the root: an AFK ticket
+// task's, unless one was queued since its PR was last found mergeable.
+function updatesOnConflict(task: Task): boolean {
+  return task.kind === 'ticket' && task.mode === 'AFK' && !task.conflicted;
+}
+
+// What the update run on a ticket task's conflicting PR opens on.
+function updateOpening(state: Lifecycle, task: Task): string {
+  const base = state.repositories[task.repo]!.baseBranch;
+  return (
+    `GitHub finds PR #${task.pr!.number} of ${task.id} conflicting with ${base}, which moved on since its branch was cut. ` +
+    `Unattended, merge \`origin/${base}\` into the task branch ${task.worktree!.branch} (merge, never rebase: the factory fetched it for you), ` +
+    'resolve the conflicts, check the merged work still builds and passes its tests, and commit the merge. ' +
+    'The task goes back to the operator’s review once your run ends. If you can’t resolve them, leave the merge unfinished and end your run: ' +
+    'the factory fails it and asks the operator.'
+  );
+}
+
 // What the run that resumes a root on the operator's review comments opens on.
 function changesOpening(task: Task, comments: string): string {
   const asked = `The operator reviewed ${task.id} and requested changes:\n\n${comments.trim()}`;
@@ -3481,6 +3505,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       } else if (action.state === 'open' && asked) {
         // Reopened on GitHub: nothing is left to ask.
         request!.status = 'closed';
+      } else if (action.state === 'open' && action.mergeable === 'mergeable') {
+        task.conflicted = false;
+      } else if (action.state === 'open' && action.mergeable === 'conflicting' && updatesOnConflict(task) && !request) {
+        // A ticket task's PR its base moved on under (ADR 0013): one update
+        // run, resuming its session, merges the base in. At L2 the factory
+        // pushes what it did once it is back In review.
+        task.conflicted = true;
+        task.resumeWith = updateOpening(state, task);
+        task.state = 'queued';
       }
       break;
     }
@@ -3760,7 +3793,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // A run of an AFK stage moves the task on by itself. Any other (a task
       // with no preset, or one handed off with no AFK stage ahead) is its last.
       const from = stageOf(task, run!.stage);
-      if (from?.mode !== 'AFK' || task.changesRequested) {
+      if (from?.mode !== 'AFK' || task.changesRequested || task.conflicted) {
         reachReview(task);
         break;
       }

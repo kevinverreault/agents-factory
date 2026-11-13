@@ -319,7 +319,14 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
   async function bringIn(spec: ContainerSpec): Promise<void> {
     const { taskId, branch } = spec;
     const tracking = `refs/remotes/origin/${branch}`;
-    await gitOut(taskId, ['fetch', '--quiet', 'origin', `+refs/heads/${branch}:${tracking}`, ...spec.branches.map((other) => `+refs/heads/${other}:refs/heads/${other}`)]);
+    await gitOut(taskId, [
+      'fetch',
+      '--quiet',
+      'origin',
+      `+refs/heads/${branch}:${tracking}`,
+      ...spec.branches.map((other) => `+refs/heads/${other}:refs/heads/${other}`),
+      ...(spec.fetched ?? []).map((other) => `+refs/remotes/origin/${other}:refs/remotes/origin/${other}`),
+    ]);
     const [mine, host] = await Promise.all([gitOut(taskId, ['rev-parse', `refs/heads/${branch}`]), gitOut(taskId, ['rev-parse', tracking])]);
     if (mine === host) return;
     if ((await gitIn(taskId, ['merge-base', '--is-ancestor', mine, host])).code === 0) {

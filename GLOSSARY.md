@@ -182,6 +182,10 @@ _Avoid_: Permission level, trust level
 Where a ticket task's PR waits until it is merged into the base branch. Its spec's merge policy decides who lets it through.
 _Avoid_: Approval, review step
 
+**Update run**:
+The run the factory queues on a ticket task In review once GitHub finds its PR conflicting with the base branch. It resumes the task's session, merges `origin/<base>` into the task branch and resolves the conflicts, and the task goes back In review.
+_Avoid_: Rebase run, conflict fix
+
 **Merge policy**:
 Who passes a spec's merge gates, fixed when the spec task is handed off. Under the operator policy, every ticket task goes In review and the operator merges it.
 _Avoid_: Auto-merge setting, review mode

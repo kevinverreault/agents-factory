@@ -30,6 +30,16 @@ describeSandboxContract('the fake sandbox', async () => {
       return commit(path);
     },
     commitInContainer: (container) => commit(container.workdir),
+    async fetchOnHost(spec, branch) {
+      const path = resolve(`/host/${spec.taskId}-fetched-${branch}`);
+      await git.addWorktree(spec.clonePath, { path, branch: `fetched/${branch}`, startPoint: `origin/${branch}` });
+      const tip = await commit(path);
+      git.setFetched(spec.clonePath, branch, tip);
+      return tip;
+    },
+    async containerFetchedTip(container, branch) {
+      return git.fetchedTip(sandbox.clonePathOf(container.taskId), branch)!;
+    },
     async hostTip(spec, branch) {
       return git.branchTip(spec.clonePath, branch)!;
     },

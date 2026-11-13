@@ -51,6 +51,11 @@ export const PR_WRITE: Permissions = { pull_requests: 'write', metadata: 'read' 
 
 // Where a PR stands on GitHub: open, merged, or closed without merging.
 export type PrState = 'open' | 'merged' | 'closed';
+// Whether GitHub finds the PR mergeable into its base, or conflicting with
+// it, or unknown while it is still working that out after a push (ADR 0013).
+export type Mergeability = 'mergeable' | 'conflicting' | 'unknown';
+// What a read of a PR says of it.
+export type PrStatus = { state: PrState; mergeable: Mergeability };
 
 // A draft PR the factory opens (ADR 0004): of the pushed task branch `head`
 // into `base`, assigned to `assignee`, the operator.
@@ -98,9 +103,9 @@ export interface GitHub {
   // stopped before it could record that it opened it. Where GitHub offers no
   // draft PRs, it opens a regular one instead.
   openDraftPr(token: string, pr: DraftPr): Promise<PullRequest>;
-  // Where the PR `ref` (`owner/name#n`) stands, read with `token`, which
-  // needs Pull requests read (ADR 0011).
-  readPr(token: string, ref: string): Promise<PrState>;
+  // Where the PR `ref` (`owner/name#n`) stands, and whether it is
+  // mergeable, read with `token`, which needs Pull requests read (ADR 0011).
+  readPr(token: string, ref: string): Promise<PrStatus>;
   // Comments `comment` on the open PR, then closes it, with `token`, which
   // needs Pull requests write. A PR already closed or merged is left as it is.
   closePr(token: string, ref: string, comment: string): Promise<void>;
@@ -302,7 +307,8 @@ export function gitHubApi(): GitHub {
       return { number: pr.number, url: pr.html_url, draft: pr.draft === true };
     },
     async readPr(token, ref) {
-      return stateOf(await pullRequest(token, ref));
+      const pr = await pullRequest(token, ref);
+      return { state: stateOf(pr), mergeable: mergeabilityOf(pr) };
     },
     async closePr(token, ref, comment) {
       if (stateOf(await pullRequest(token, ref)) !== 'open') return;
@@ -388,6 +394,11 @@ export function goneHead(head: string, number: string | number): string {
 // Where the PR stands, from GitHub's own account of it.
 function stateOf(pr: { merged: boolean; state: string }): PrState {
   return pr.merged ? 'merged' : pr.state === 'open' ? 'open' : 'closed';
+}
+
+// Whether the PR is mergeable, as GitHub last worked it out: null until it has.
+function mergeabilityOf(pr: { mergeable?: boolean | null }): Mergeability {
+  return pr.mergeable === true ? 'mergeable' : pr.mergeable === false ? 'conflicting' : 'unknown';
 }
 
 // The REST path of a PR `owner/name#n`.

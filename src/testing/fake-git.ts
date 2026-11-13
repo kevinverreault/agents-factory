@@ -353,6 +353,20 @@ export class FakeGit implements Git {
       this.moveBranch(worktree.linkedTo, worktree.branch, theirs);
       return;
     }
+    const merged = this.mergedTree(mine, theirs);
+    if (typeof merged === 'string') throw new GitError(`CONFLICT (content): Merge conflict in ${merged}`);
+    const commit = this.newCommit(merged);
+    this.parents.set(commit, mine);
+    this.mergedParents.set(commit, theirs);
+    this.moveBranch(worktree.linkedTo, worktree.branch, commit);
+    this.commits.push({ worktreePath, paths: [], message });
+  }
+
+  // The tree merging `theirs` into `mine` makes, or the first path they
+  // conflict on: one both sides changed differently since their merge base,
+  // the newest commit in both histories along `mine`'s own.
+  private mergedTree(mine: string, theirs: string): Map<string, string> | string {
+    const theirAncestry = this.ancestry(theirs);
     let base: string | undefined = mine;
     while (base && !theirAncestry.has(base)) base = this.parents.get(base);
     const treeOf = (commit: string | undefined) => this.trees.get(commit ?? '') ?? new Map<string, string>();
@@ -361,15 +375,30 @@ export class FakeGit implements Git {
     for (const path of new Set([...theirTree.keys(), ...baseTree.keys()])) {
       const [was, my, their] = [baseTree.get(path), myTree.get(path), theirTree.get(path)];
       if (their === was || their === my) continue;
-      if (my !== was) throw new GitError(`CONFLICT (content): Merge conflict in ${path}`);
+      if (my !== was) return path;
       if (their === undefined) tree.delete(path);
       else tree.set(path, their);
     }
-    const commit = this.newCommit(tree);
-    this.parents.set(commit, mine);
-    this.mergedParents.set(commit, theirs);
-    this.moveBranch(worktree.linkedTo, worktree.branch, commit);
-    this.commits.push({ worktreePath, paths: [], message });
+    return tree;
+  }
+
+  // Whether GitHub's `head` branch of the repository conflicts with its
+  // `base`, as a PR of one into the other would.
+  conflictsOnOrigin(repo: string, head: string, base: string): boolean {
+    const clone = this.clonesOf(repo).find((clone) => clone.origin.has(head) && clone.origin.has(base));
+    if (!clone) return false;
+    return typeof this.mergedTree(clone.origin.get(head)!, clone.origin.get(base)!) === 'string';
+  }
+
+  // What the clone last fetched of origin's `branch`, or null when it hasn't.
+  fetchedTip(clonePath: string, branch: string): string | null {
+    return this.cloneAt(clonePath).fetched.get(branch) ?? null;
+  }
+
+  // The clone's `origin/<branch>` moves to `tip`, as fetching it from an
+  // origin that has it there would.
+  setFetched(clonePath: string, branch: string, tip: string): void {
+    this.cloneAt(clonePath).fetched.set(branch, tip);
   }
 
   async commit(worktreePath: string, paths: string[], message: string): Promise<string> {

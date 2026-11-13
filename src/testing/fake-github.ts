@@ -12,7 +12,9 @@ import {
   type Permissions,
   type Pushed,
   type DraftPr,
+  type Mergeability,
   type PrState,
+  type PrStatus,
   type PullRequest,
 } from '../github/github.ts';
 import { outsideResearch } from '../github/research-branch.ts';
@@ -36,6 +38,8 @@ type FakePullRequest = PullRequest & {
   token: Minted;
   state: PrState;
   comments: string[];
+  // What GitHub says of its mergeability as a test set it, if it did.
+  mergeable?: Mergeability | null;
 };
 
 // The token as it was minted, kept with a write it made.
@@ -287,9 +291,22 @@ export class FakeGitHub implements GitHub {
     this.prAt(number).state = 'open';
   }
 
-  async readPr(token: string, ref: string): Promise<PrState> {
+  async readPr(token: string, ref: string): Promise<PrStatus> {
     this.scoped(token, ref, 'pull_requests', 'read');
-    return this.foundPr(ref).state;
+    const pr = this.foundPr(ref);
+    return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown' };
+  }
+
+  // Whether GitHub finds the open PR mergeable: as a test set it, or as its
+  // branches on origin merge.
+  private mergeabilityOf(pr: FakePullRequest): Mergeability {
+    return pr.mergeable ?? (this.git.conflictsOnOrigin(pr.repo, pr.head, pr.base) ? 'conflicting' : 'mergeable');
+  }
+
+  // GitHub finds the PR `mergeable` from now on, whatever its branches, or
+  // works it out from them again with null.
+  setMergeable(number: number, mergeable: Mergeability | null): void {
+    this.prAt(number).mergeable = mergeable;
   }
 
   async closePr(token: string, ref: string, comment: string): Promise<void> {

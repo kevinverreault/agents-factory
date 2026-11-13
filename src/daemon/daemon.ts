@@ -204,8 +204,10 @@ const AFTER_WAKE_MS = 10 * 60_000;
 // How long after a failed keep-awake block the daemon asks for it again.
 const AWAKE_RETRY_MS = 60_000;
 // How often the daemon reads the PRs of the roots In review (ADR 0011), besides
-// whenever a TUI attaches: the factory's only poll.
+// whenever a TUI attaches: the factory's only poll. It reads them more often
+// while any ticket task is In review (ADR 0013), whose PR may conflict.
 export const PR_POLL_MS = 15 * 60_000;
+export const TICKET_PR_POLL_MS = 2 * 60_000;
 
 export interface Daemon {
   // Settles once the daemon has stopped, for whatever reason.
@@ -289,7 +291,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // The tasks whose quick launch is opening its handoff sheet.
   const quickInFlight = new Set<string>();
   // The In review roots whose PR this daemon is reading on GitHub, and when
-  // it next reads them all.
+  // it last read them all.
   const prReadsInFlight = new Set<string>();
   // The merged ticket tasks whose ticket this daemon has tried to resolve
   // since the last PR poll, and those it is resolving now (ADR 0013).
@@ -308,7 +310,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Each task's last job on its transcripts under way (ADR 0011): archiving
   // an ended run's, or putting one back. They go one at a time per task.
   const transcriptJobs = new Map<string, Promise<void>>();
-  let nextPrPoll = clock.now() + PR_POLL_MS;
+  let lastPrPoll = clock.now();
   // The factory identity's App, once read from the credential store: null
   // when there is none yet. `setup github` replaces it.
   let storedApp: Promise<FactoryApp | null> | null = null;
@@ -350,7 +352,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     publish();
     fireOverdueDeadlines();
     refreshBotTokens();
-    if (clock.now() >= nextPrPoll) pollPrs();
+    if (clock.now() >= lastPrPoll + prPollMs()) pollPrs();
     if (needsAClock()) idleSince = null;
     else if ((idleSince ??= clock.now()) + (options.idleExitMs ?? IDLE_EXIT_MS) <= clock.now()) void stop();
   });
@@ -910,7 +912,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // It is only a read: one that fails, however it fails, is made again at
   // the next poll, and never stops the daemon.
   function pollPrs(): void {
-    nextPrPoll = clock.now() + PR_POLL_MS;
+    lastPrPoll = clock.now();
     // A ticket the factory couldn't close is tried again at every poll, and
     // so are a spec task's tickets it couldn't read or launch.
     resolutionsTried.clear();
@@ -936,16 +938,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
   }
 
+  // How long after the last PR poll the next one is due: sooner while a
+  // ticket task waits In review on its PR (ADR 0013).
+  function prPollMs(): number {
+    return Object.values(lifecycle.tasks).some((task) => task.kind === 'ticket' && waitsOnPr(task)) ? TICKET_PR_POLL_MS : PR_POLL_MS;
+  }
+
   // Where the root's PR stands, read as the App with a read-only token, or
-  // null when GitHub couldn't say: the next poll asks again.
+  // null when GitHub couldn't say: the next poll asks again. A PR found
+  // conflicting has its base fetched first, for the update run it may
+  // queue to merge in; one that can't be fetched leaves the run to try.
   async function readPr(task: Task): Promise<PrReadEvent | null> {
+    let event: PrReadEvent;
     try {
       const { token } = await appToken(task.repo, READ_ONLY);
-      return { type: 'prRead', taskId: task.id, state: await github.readPr(token, prRef(task.repo, task.pr!.number)) };
+      event = { type: 'prRead', taskId: task.id, ...(await github.readPr(token, prRef(task.repo, task.pr!.number))) };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
       return null;
     }
+    const repository = lifecycle.repositories[task.repo];
+    if (event.mergeable === 'conflicting' && repository) await fetchBase(git, repository);
+    return event;
   }
 
   // What deleting the root task's branch would lose, or null when nothing
@@ -2725,7 +2739,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // The run's task's container, running, with the host task branch's
-  // commits in it, and the branches of the children it awaits to merge.
+  // commits in it, the branches of the children it awaits to merge, and the
+  // base branch as fetched.
   function prepareContainer(task: Task, run: Run, runDir: string): Promise<Container> {
     const { path, branch } = task.worktree!;
     const branches = childrenOf(lifecycle, task)
@@ -2742,7 +2757,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
       const plugin = run.skillSet ? skillSets.pathOf(run.skillSet) : null;
       const egress = egressFor(task.egressHosts ?? []);
-      const container = await sandbox.prepare({ taskId: task.id, clonePath: lifecycle.repositories[task.repo]!.path, branch, branches, plugin, runDir, sessionsDir, egress });
+      const { path: clonePath, baseBranch } = lifecycle.repositories[task.repo]!;
+      // The base branch as the host last fetched it, which an update run merges in.
+      const container = await sandbox.prepare({ taskId: task.id, clonePath, branch, branches, fetched: [baseBranch], plugin, runDir, sessionsDir, egress });
       containers.set(task.id, true);
       return container;
     });
