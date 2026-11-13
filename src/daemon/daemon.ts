@@ -766,9 +766,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const blocked = appBlock(resolved.preset.name, stages, check);
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
       }
-      // One issue ref with no sub-issues, at a stage working tickets, is a
-      // ticket task's ticket (ADR 0013).
-      if (worksTickets(start.stage) && action.issues.length === 1) {
+      // One issue ref with no sub-issues, at an AFK stage working tickets,
+      // is a ticket task's ticket (ADR 0013).
+      if (worksTickets(start.stage) && start.stage.mode === 'AFK' && action.issues.length === 1) {
         const read = await loneTicket(repo, action.issues[0]!);
         if ('error' in read) return { ok: false, reason: read.error };
         action.ticket = read.ticket;

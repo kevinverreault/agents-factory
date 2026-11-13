@@ -56,8 +56,9 @@ export type TaskView = {
   progress: string | null;
   // Its descendants' counts, and their failures waiting on the operator.
   rollup: Rollup | null;
-  // What kind of root it is (ADR 0013): for a ticket task, its ticket and
-  // the merge policy its merge gate goes by. A child is a plain root's kin.
+  // What kind of task it is (ADR 0013), plain for children and roots that
+  // are neither a spec task nor a ticket task: for a ticket task, its
+  // ticket and the merge policy its merge gate goes by.
   kind: TaskKind;
   ticket: string | null;
   mergePolicy: MergePolicy | null;
@@ -182,7 +183,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       child: task.child ? { awaited: task.child.awaited, base: task.child.base, report: structuredClone(task.child.report) } : null,
       progress: task.progress ?? null,
       rollup: treeRollup(lifecycle, task),
-      kind: task.kind ?? 'root',
+      kind: task.kind ?? 'plain',
       ticket: task.ticket ?? null,
       mergePolicy: task.mergePolicy ?? null,
       resolving: task.resolving ? { ...task.resolving } : null,

@@ -249,7 +249,7 @@ export type Findings = { found: string[]; fixPass: boolean; leftOver: string[] }
 // What a root task is (ADR 0013): a plain root, a spec task that launches
 // ticket tasks over its spec's tickets, or a ticket task working one ticket
 // into its own PR. Tasks stored before kinds are plain roots.
-export type TaskKind = 'root' | 'spec' | 'ticket';
+export type TaskKind = 'plain' | 'spec' | 'ticket';
 // Who passes a ticket task's merge gate. v1 has one policy, the operator's:
 // the ticket task goes In review, and the operator merges its PR.
 export type MergePolicy = 'operator';
@@ -1392,9 +1392,15 @@ function citedIssue(repo: string, ref: string): string {
 
 // Whether `text` has a closing keyword on the issue `ref`, in any form GitHub reads.
 function closesIssue(text: string, repo: string, ref: string): boolean {
+  return new RegExp(CLOSING + issuePattern(repo, ref), 'i').test(text);
+}
+
+// A pattern matching the issue `ref` in any form a PR body of `repo` may
+// cite it in, captured: `#n` in its own repository, `owner/name#n`, or its URL.
+function issuePattern(repo: string, ref: string): string {
   const [owner, number] = ref.split('#');
   const forms = [citedIssue(repo, ref), ref, `https://github.com/${owner}/issues/${number}`].map((form) => form.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'));
-  return new RegExp(`${CLOSING}(${forms.join('|')})(?!\\d)`, 'i').test(text);
+  return `(${forms.join('|')})(?!\\d)`;
 }
 
 // The PR body from the agent's `body`: its closing keywords on the tickets
@@ -1405,12 +1411,9 @@ function prBody(task: Task, body: string): string {
   let text = body.trim();
   const implemented: string[] = [];
   for (const { ref } of task.closedTickets ?? []) {
-    const [repo, number] = ref.split('#');
-    const cited = repo!.toLowerCase() === task.repo.toLowerCase() ? `#${number}` : ref;
-    const forms = [cited, ref, `https://github.com/${repo}/issues/${number}`].map((form) => form.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'));
-    const any = `(${forms.join('|')})(?!\\d)`;
+    const any = issuePattern(task.repo, ref);
     text = text.replace(new RegExp(CLOSING + any, 'gi'), 'Implements $1');
-    if (!new RegExp(String.raw`\bImplements\s+${any}`, 'i').test(text)) implemented.push(`Implements ${cited}`);
+    if (!new RegExp(String.raw`\bImplements\s+${any}`, 'i').test(text)) implemented.push(`Implements ${citedIssue(task.repo, ref)}`);
   }
   // A ticket task's PR closes its ticket on merging (ADR 0013), whatever the agent wrote.
   const closes = task.kind === 'ticket' && task.ticket && !closesIssue(text, task.repo, task.ticket) ? [`Closes ${citedIssue(task.repo, task.ticket)}`] : [];

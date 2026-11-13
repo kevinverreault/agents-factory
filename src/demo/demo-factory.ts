@@ -24,7 +24,7 @@ const gadgets: RepositoryView = { ...widgets, id: 'acme/gadgets', path: '/clones
 function task(id: string, title: string, state: TaskView['state'], label: string, more: Partial<TaskView> = {}): TaskView {
   const mode = more.mode ?? 'AFK';
   return {
-    id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'root', ticket: null, mergePolicy: null, resolving: null, mode, autonomy: mode === 'AFK' ? 'L1' : null,
+    id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, resolving: null, mode, autonomy: mode === 'AFK' ? 'L1' : null,
     priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null,
     tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, closedTickets: [], skippedTickets: [], loop: null, reopening: null,
     launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null,
