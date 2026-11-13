@@ -1581,23 +1581,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Launches the spec task's ticket task on `ticket`, if it still has it to
   // launch: titled after the ticket, on its own task branch, journaled first
   // (ADR 0003), keyed by the spec task and the ticket.
-  async function launchTicketTask(specId: string, ticket: string): Promise<void> {
-    const spec = lifecycle.tasks[specId];
+  async function launchTicketTask(specTaskId: string, ticket: string): Promise<void> {
+    const spec = lifecycle.tasks[specTaskId];
     const repository = spec && lifecycle.repositories[spec.repo];
     if (stopping || !spec || !repository || isTerminal(spec) || !spec.ticketSet?.toLaunch.includes(ticket)) return;
     const ticketTaskId = nextTaskId(lifecycle);
     const title = titleFrom(spec.ticketSet.issues.find(({ ref }) => ref === ticket)?.title || ticket);
     const launch: Omit<TicketTaskLaunched, 'intent'> = {
       type: 'ticketTaskLaunched',
-      taskId: specId,
+      taskId: specTaskId,
       ticket,
       ticketTaskId,
       title,
       worktree: taskWorktree(options.worktreeRoot, repository, ticketTaskId, title),
       sessionId: randomUUID(),
     };
-    const intent: Intent = { id: launchId(specId, ticket), verb: 'launch', taskId: specId, launch };
-    if (await settle({ type: 'intentJournaled', taskId: specId, intent }, new Set())) return;
+    const intent: Intent = { id: launchId(specTaskId, ticket), verb: 'launch', taskId: specTaskId, launch };
+    if (await settle({ type: 'intentJournaled', taskId: specTaskId, intent }, new Set())) return;
     await finishLaunch(intent);
   }
 
@@ -1618,12 +1618,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     const repository = lifecycle.repositories[spec.repo]!;
     const { path, branch } = action.worktree;
-    // Whether the ticket task's worktree is this launch's: only then does a rollback remove it.
-    let cut = false;
+    // Whether the ticket task's worktree is this launch's, maybe cut by the
+    // daemon before: only then does a rollback remove it.
+    let cut = await git.worktrees(repository.path).then(
+      (worktrees) => worktrees.some((worktree) => worktree.path === path),
+      (error) => {
+        if (!(error instanceof GitError)) throw error;
+        return false;
+      },
+    );
     let problem = guard(lifecycle, action) ?? (await fetchBase(git, repository));
     if (!problem) {
       try {
-        cut = (await git.worktrees(repository.path)).some((worktree) => worktree.path === path);
         if (!cut) await git.addWorktree(repository.path, { path, branch, startPoint: spec.worktree!.branch });
         cut = true;
         const base = `origin/${repository.baseBranch}`;
@@ -2877,13 +2883,13 @@ function closingComment(task: Task, commits: string[]): string {
   );
 }
 
-// What closing a merged ticket task's ticket says on it (ADR 0013): the PR
-// that did its work was merged.
 // The id of the intent launching the spec task's ticket task on `ticket`.
-function launchId(specId: string, ticket: string): string {
-  return `launch:${specId}:${ticket}`;
+function launchId(specTaskId: string, ticket: string): string {
+  return `launch:${specTaskId}:${ticket}`;
 }
 
+// What closing a merged ticket task's ticket says on it (ADR 0013): the PR
+// that did its work was merged.
 function resolvingComment(task: Task): string {
   return `Done in ${task.pr!.url}, merged, by the agents factory’s task ${task.id} (${task.title}).`;
 }

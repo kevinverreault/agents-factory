@@ -267,7 +267,7 @@ describe('a crash while launching a ticket task', () => {
     ['before', 'addWorktree'],
     ['after', 'addWorktree'],
     ['after', 'merge'],
-  ] as const)('%s %s is finished on the next start, launching the ticket once on one branch', async (when, step) => {
+  ] as const)('%s %s is finished on the next start, launching one ticket task on one branch', async (when, step) => {
     const { factory, operator, tui } = await attached();
     await crashingAt(factory, operator, tui, step, when);
     await factory.startDaemon();

@@ -339,8 +339,10 @@ export function applyPatch(state: FactoryState, ops: PatchOp[]): FactoryState {
   return next as unknown as FactoryState;
 }
 
+// A spec task's ticket set as the TUI sees it (ADR 0013).
 export type TicketSetView = { spec: string | null; tickets: string[]; launched: Record<string, string>; problem: string | null };
 
+// The ticket set's view, copied so the store's never leaks out.
 function ticketSetView({ spec, tickets, launched, problem }: TicketSet): TicketSetView {
   return { spec, tickets: [...tickets], launched: { ...launched }, problem };
 }
