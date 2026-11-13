@@ -49,6 +49,11 @@ describe('text of several lines the operator types', () => {
     expect(typed('9. a', null, BREAK, ['b', {}], BREAK)).toBe('9. a\n10. b\n11. ▏');
   });
 
+  test('a numbered item keeps its zero padding, and counts past what a number holds', () => {
+    expect(typed('01. a', null, BREAK)).toBe('01. a\n02. ▏');
+    expect(typed('99999999999999999999. a', null, BREAK)).toBe('99999999999999999999. a\n100000000000000000000. ▏');
+  });
+
   test('a break on an empty item ends the list, leaving an empty line', () => {
     expect(typed('- a', null, BREAK, BREAK)).toBe('- a\n▏');
     expect(typed('1. a', null, BREAK, BREAK, ['After.', {}])).toBe('1. a\nAfter.▏');
@@ -103,6 +108,14 @@ describe('a long text on show', () => {
     expect(windowed(text, 6, 3)).toEqual({ shown: '3\n▏4\n5', above: 2, below: 1 });
     expect(windowed(text, null, 3)).toEqual({ shown: '4\n5\n6▏', above: 3, below: 0 });
     expect(windowed(text, 0, 3)).toEqual({ shown: '▏1\n2\n3', above: 0, below: 3 });
+  });
+
+  test('counts the rows a long line wraps to, keeping the caret’s in view', () => {
+    const paragraph = 'aaaa bbbb cccc dddd eeee ffff';
+    expect(windowed(paragraph, null, 2, 10)).toEqual({ shown: 'cccc dddd \neeee ffff▏', above: 1, below: 0 });
+    // The caret takes a column of its own.
+    expect(windowed(paragraph, 0, 2, 10)).toEqual({ shown: '▏aaaa \nbbbb cccc ', above: 0, below: 2 });
+    expect(windowed(`x\n${paragraph}`, 7, 2, 10)).toEqual({ shown: 'aaaa \n▏bbbb ', above: 1, below: 2 });
   });
 
   test('without a caret, shows its first lines', () => {

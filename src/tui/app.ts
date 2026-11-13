@@ -19,10 +19,10 @@ import { createElement as h, useEffect, useRef, useState, type ReactNode } from 
 import { Box, Text, useInput, useStdin } from 'ink';
 import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
+import { editExternally, type Edited } from '../os/edit-externally.ts';
+import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, TaskView, TicketView } from '../protocol/factory-state.ts';
-import type { Edited } from '../os/edit-externally.ts';
-import { openUrl as openInBrowser } from '../os/open-url.ts';
 import type { CloneView, Command, Option } from '../protocol/protocol.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import { AnswerSheet, answerable, askedFor, reopens, titleOf, useAnswering } from './answer-sheet.ts';
@@ -80,7 +80,7 @@ export function App({
   connection,
   cwd,
   openUrl = openInBrowser,
-  editText,
+  editText = editExternally,
   prefs,
 }: {
   connection: FactoryConnection;

@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { lineBreaks } from '../text/lines.ts';
 
 export type Edited = { ok: true; text: string } | { ok: false; reason: string };
 
@@ -16,13 +17,13 @@ export function editorCommand(env: NodeJS.ProcessEnv = process.env, platform: No
 
 // `text` after the operator saved it and quit their editor. Editors end
 // the file with a line break; one the text didn't have is dropped.
-export async function editExternally(text: string, name = 'prompt.md', command = editorCommand()): Promise<Edited> {
+export async function editExternally(text: string, command = editorCommand()): Promise<Edited> {
   const dir = await mkdtemp(join(tmpdir(), 'agents-factory-'));
-  const path = join(dir, name);
+  const path = join(dir, 'prompt.md');
   try {
     await writeFile(path, text, 'utf8');
     const exit = await new Promise<{ code: number | null; signal?: NodeJS.Signals | null; error?: Error }>((resolve) => {
-      const child = spawn(`${command} ${quoted(path)}`, { shell: true, stdio: 'inherit' });
+      const child = spawn(`${command} ${shellQuoted(path)}`, { shell: true, stdio: 'inherit' });
       child.on('error', (error) => resolve({ code: null, error }));
       child.on('exit', (code, signal) => resolve({ code, signal }));
     });
@@ -32,7 +33,7 @@ export async function editExternally(text: string, name = 'prompt.md', command =
       return { ok: false, reason: `${command} ${how}: the prompt is unchanged.` };
     }
     // Notepad starts what it saves with a byte order mark.
-    const saved = (await readFile(path, 'utf8')).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+    const saved = lineBreaks((await readFile(path, 'utf8')).replace(/^\uFEFF/, ''));
     return { ok: true, text: !text.endsWith('\n') && saved.endsWith('\n') ? saved.slice(0, -1) : saved };
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -41,6 +42,6 @@ export async function editExternally(text: string, name = 'prompt.md', command =
 
 // A path as one word to the shell: cmd takes it in double quotes, which a
 // Windows path can't hold; a POSIX shell expands nothing in single quotes.
-function quoted(path: string): string {
-  return process.platform === 'win32' ? `"${path}"` : `'${path.replaceAll("'", `'\\''`)}'`;
+export function shellQuoted(path: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? `"${path}"` : `'${path.replaceAll("'", `'\\''`)}'`;
 }

@@ -2,8 +2,8 @@
 import chalk from 'chalk';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest';
-import type { Edited } from '../os/edit-externally.ts';
 import type { ConversationEvent } from '../executor/executor.ts';
+import type { Edited } from '../os/edit-externally.ts';
 import type { FactoryState, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { LeftoversView, PresetsView } from '../protocol/protocol.ts';
 import { FakeConnection } from '../testing/fake-connection.ts';
@@ -1091,6 +1091,42 @@ describe('launching and conversing', () => {
     await eventually(() => {
       expect(app.lastFrame()).toContain('vi exited with code 1');
       expect(app.lastFrame()).toMatch(new RegExp(`Fix it${GLYPH.caret}`));
+    });
+  });
+
+  test('a paste keeps its line breaks, and one in it never launches', async () => {
+    const connection = inWidgets();
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/LAUNCH A TASK/));
+    await press(app, '\x1b[200~First.\r\n\r- one\r\x1b[201~');
+    await eventually(() => expect(app.lastFrame()).toMatch(/- one\s*│\n│\s+▏/));
+    expect(connection.sent.filter((command) => command.type === 'launchTask')).toEqual([]);
+    app.stdin.write('\r');
+    await settle();
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', prompt: 'First.\n\n- one\n' }));
+  });
+
+  test('a long prompt shows at most eight rows, wrapped ones counted, around the caret', async () => {
+    const connection = inWidgets();
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/LAUNCH A TASK/));
+    await press(app, `\x1b[200~${'word '.repeat(400)}end\x1b[201~`);
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/… \d+ more lines above/);
+      expect(frame).toContain(`end${GLYPH.caret}`);
+      const rows = frame.split('\n');
+      const first = rows.findIndex((row) => row.includes('more lines above'));
+      const last = rows.findIndex((row) => row.includes(`end${GLYPH.caret}`));
+      expect(last - first).toBe(8);
     });
   });
 

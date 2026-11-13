@@ -5,6 +5,7 @@
 //   home end          the start or end of the caret's line
 // Text pasted with line breaks keeps them, as \n.
 import type { Key } from 'ink';
+import { lineBreaks, wrapped } from '../text/lines.ts';
 import { caretIn, edit, isHigh, isLow, withCaret, type Caret, type Typed } from './text-input.ts';
 
 // The text and its caret after `input`, or null when the key neither edits
@@ -35,13 +36,18 @@ export function breakLine(text: string, at: number): Typed {
   if (item && at >= start + item[0].length) {
     const [prefix, indent, marker, gap] = item as unknown as [string, string, string, string];
     if (text.slice(start + prefix.length, end).trim() === '') return { text: text.slice(0, start) + text.slice(end), caret: start };
-    const next = /^\d+\.$/.test(marker) ? `${Number(marker.slice(0, -1)) + 1}.` : marker;
+    const next = /^\d+\.$/.test(marker) ? `${nextNumber(marker.slice(0, -1))}.` : marker;
     const inserted = `\n${indent}${next}${gap}`;
     return { text: text.slice(0, at) + inserted + text.slice(at), caret: at + inserted.length };
   }
   return { text: text.slice(0, at) + '\n' + text.slice(at), caret: at + 1 };
 }
 const LIST_ITEM = /^([ \t]*)([-*]|\d+\.)([ \t]+)/;
+
+// The number after `digits`, as long as they were: 01 goes on to 02.
+function nextNumber(digits: string): string {
+  return (BigInt(digits) + 1n).toString().padStart(digits.length, '0');
+}
 
 // The caret on the line `by` above (-1) or below (1), at its column or the
 // end of a shorter line, or null when there is no such line.
@@ -62,17 +68,26 @@ export function lineAt(text: string, at: number): { start: number; end: number }
   return { start, end: found === -1 ? text.length : found };
 }
 
-// Line breaks as \n, however the terminal or the paste sent them.
-export function lineBreaks(text: string): string {
-  return text.replace(/\r\n?/g, '\n');
-}
-
-// The text with its caret, held to `size` lines: those around the caret, or
-// the first when it has none. `above` and `below` count the lines left out.
-export function windowed(text: string, caret: Caret | undefined, size: number): { shown: string; above: number; below: number } {
-  const lines = (caret === undefined ? text : withCaret(text, caret)).split('\n');
-  if (lines.length <= size) return { shown: lines.join('\n'), above: 0, below: 0 };
-  const on = caret === undefined ? 0 : text.slice(0, caretIn(text, caret)).split('\n').length - 1;
-  const from = Math.min(Math.max(on - Math.floor(size / 2), 0), lines.length - size);
-  return { shown: lines.slice(from, from + size).join('\n'), above: from, below: lines.length - from - size };
+// The text with its caret, wrapped `width` columns wide and held to `size`
+// rows: those around the caret's, or the first when it has none. `above`
+// and `below` count the rows left out.
+export function windowed(text: string, caret: Caret | undefined, size: number, width = Infinity): { shown: string; above: number; below: number } {
+  const rows: string[] = [];
+  let caretRow = 0;
+  const at = caret === undefined ? null : caretIn(text, caret);
+  const caretLine = at === null ? -1 : text.slice(0, at).split('\n').length - 1;
+  (at === null ? text : withCaret(text, at)).split('\n').forEach((line, index) => {
+    const lineRows = wrapped(line, width);
+    if (index === caretLine) {
+      // The caret is on the first row its column doesn't reach the end of.
+      let column = Array.from(text.slice(lineAt(text, at!).start, at!)).length;
+      let row = 0;
+      while (row < lineRows.length - 1 && column >= Array.from(lineRows[row]!).length) column -= Array.from(lineRows[row++]!).length;
+      caretRow = rows.length + row;
+    }
+    rows.push(...lineRows);
+  });
+  if (rows.length <= size) return { shown: rows.join('\n'), above: 0, below: 0 };
+  const from = Math.min(Math.max(caretRow - Math.floor(size / 2), 0), rows.length - size);
+  return { shown: rows.slice(from, from + size).join('\n'), above: from, below: rows.length - from - size };
 }
