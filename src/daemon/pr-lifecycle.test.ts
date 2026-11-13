@@ -260,7 +260,7 @@ describe('cancelling a published root whose work isn’t on the base branch', ()
 describe('Mark done on a root with a PR', () => {
   test('once its branch is merged, deletes its remote task branch too', async () => {
     const { factory, operator, tui } = await withDraftPr();
-    factory.git.merge(clone, branch, 'main');
+    factory.git.mergeIntoOrigin(clone, branch, 'main');
 
     expect(await operator.send({ type: 'markDone', taskId: 'T1' })).toEqual({ ok: true });
 

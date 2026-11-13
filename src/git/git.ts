@@ -68,6 +68,12 @@ export interface Git {
   readFiles(clonePath: string, ref: string, paths: string[]): Promise<{ commit: string; files: DirectoryFile[] }>;
   // How the worktree stands for a handoff.
   worktreeState(worktreePath: string): Promise<WorktreeState>;
+  // Merges `ref` (such as `origin/main`) into the worktree's branch, under
+  // the worktree's own git identity with `message`: a fast-forward when the
+  // branch has nothing of its own, nothing once `ref` is in its history.
+  // Throws a `GitError` when the merge conflicts, leaving the worktree as
+  // it was.
+  merge(worktreePath: string, ref: string, message: string): Promise<void>;
   // Commits exactly `paths` (relative, with `/`), new files included, under
   // the worktree's own git identity, and returns the commit.
   // Changes to other paths stay uncommitted.
@@ -339,6 +345,16 @@ export const gitCli: Git = {
     await run(worktreePath, 'add', '--all', '--', ...paths);
     await run(worktreePath, 'commit', '--quiet', '--only', '--message', message, '--', ...paths);
     return run(worktreePath, 'rev-parse', 'HEAD');
+  },
+
+  async merge(worktreePath, ref, message) {
+    try {
+      await run(worktreePath, 'merge', '--quiet', '--no-edit', '--message', message, '--end-of-options', ref);
+    } catch (error) {
+      // A conflict leaves a merge under way: it goes, and the tree with it.
+      await git(worktreePath, 'merge', '--abort');
+      throw error;
+    }
   },
 
   async repairWorktree(clonePath, path) {

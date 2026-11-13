@@ -37,6 +37,7 @@ import {
   type TaskKind,
   type TaskState,
   type TicketResolution,
+  type TicketSet,
 } from '../lifecycle/lifecycle.ts';
 import type { PullRequest } from '../github/github.ts';
 import type { Tier } from '../models/routing.ts';
@@ -65,6 +66,12 @@ export type TaskView = {
   // While the factory still owes a merged ticket task's ticket its closing,
   // and why it last couldn't.
   resolving: TicketResolution | null;
+  // A ticket task's spec task, if one launched it (ADR 0013).
+  specTask: string | null;
+  // A spec task's ticket set: its spec, its tickets in order, the ticket
+  // task launched on each so far, and why the factory last couldn't read or
+  // launch them.
+  ticketSet: TicketSetView | null;
   mode: Mode;
   autonomy: AutonomyLevel | null;
   priority: Priority;
@@ -187,6 +194,8 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       ticket: task.ticket ?? null,
       mergePolicy: task.mergePolicy ?? null,
       resolving: task.resolving ? { ...task.resolving } : null,
+      specTask: task.specTask ?? null,
+      ticketSet: task.ticketSet ? ticketSetView(task.ticketSet) : null,
       mode: task.mode,
       autonomy: task.autonomy,
       priority: task.priority ?? 'normal',
@@ -328,4 +337,10 @@ export function applyPatch(state: FactoryState, ops: PatchOp[]): FactoryState {
     else delete parent[key];
   }
   return next as unknown as FactoryState;
+}
+
+export type TicketSetView = { spec: string | null; tickets: string[]; launched: Record<string, string>; problem: string | null };
+
+function ticketSetView({ spec, tickets, launched, problem }: TicketSet): TicketSetView {
+  return { spec, tickets: [...tickets], launched: { ...launched }, problem };
 }

@@ -22,7 +22,7 @@ export type PresetFile = { scope: PresetScope; name: string; path: string; conte
 
 const stageFields = {
   id: z.string().regex(/^[a-z][a-z0-9-]*$/, 'a stage id is lowercase letters, digits and dashes'),
-  kind: z.enum(['run', 'loop', 'action']),
+  kind: z.enum(['run', 'loop', 'tickets', 'action']),
   skill: z.string().min(1).optional(),
   args: z.string().optional(),
   mode: z.enum(['HITL', 'AFK']),
@@ -44,7 +44,7 @@ export type Stage = z.infer<typeof stageSchema>;
 export const ARTIFACT_KINDS = ['map', 'spec', 'tickets', 'pr-body'] as const;
 // The artifact kinds that are GitHub issues, which issue refs can stand for.
 const ISSUE_KINDS = new Set(['map', 'spec', 'tickets']);
-const EXITS = ['run-completed', 'artifact:<kind>', 'tickets-closed', 'map-cleared'];
+const EXITS = ['run-completed', 'artifact:<kind>', 'tickets-closed', 'map-cleared', 'spec-closed'];
 const FACTORY_ACTIONS = ['open-pr', 'close-ticket', 'push'];
 const TEMPLATE = /\{\{\s*([^{}]*?)\s*\}\}/g;
 
@@ -189,8 +189,16 @@ export function isWorkLoop(stage: Stage | undefined): boolean {
 
 // Whether the stage works a spec's tickets: launched on one issue ref with
 // no sub-issues, it makes the task a ticket task for that issue (ADR 0013).
+// So does the retired Ralph loop's, until it goes.
 export function worksTickets(stage: Stage): boolean {
-  return stage.kind === 'loop' && stage.exit === 'tickets-closed';
+  return launchesTickets(stage) || (stage.kind === 'loop' && stage.exit === 'tickets-closed');
+}
+
+// Whether the stage launches ticket tasks (ADR 0013): a spec task at it
+// runs no agent, and launches a ticket task per frontier ticket, each of
+// which works it as one run of its skill on its ticket.
+export function launchesTickets(stage: Stage | undefined): boolean {
+  return stage?.kind === 'tickets';
 }
 
 // The artifact kinds a stage's args name, such as `spec` for `{{artifacts.spec}}`.
@@ -319,6 +327,8 @@ function stageProblem(stage: Stage): string | null {
     if (stage.skill !== undefined) return 'an action stage runs no skill.';
   }
   if (stage.kind === 'loop' && stage.skill === undefined) return 'a loop stage needs a skill.';
+  // Each ticket task's first run invokes it on its ticket (ADR 0013).
+  if (stage.kind === 'tickets' && stage.skill === undefined) return 'a tickets stage needs a skill.';
   if (stage.kind === 'run' && stage.skill === undefined && stage.args === undefined) return 'a run stage needs a skill or args.';
   if (stage.mode === 'HITL' && stage.autonomy !== undefined) return 'only an AFK stage has an autonomy ceiling.';
   return null;

@@ -27,8 +27,9 @@ export class FakeGit implements Git {
   private readonly edits = new Map<string, Map<string, string>>();
   // Each commit's files, by path from the top.
   private readonly trees = new Map<string, Map<string, string>>();
-  // Each commit's parent, if it has one.
+  // Each commit's parent, if it has one, and a merge commit's second parent.
   private readonly parents = new Map<string, string>();
+  private readonly mergedParents = new Map<string, string>();
   private commitCount = 0;
   // What each worktree's AFK run broke, as the check after the run says it.
   private readonly broken = new Map<string, string[]>();
@@ -113,7 +114,7 @@ export class FakeGit implements Git {
   }
 
   // Origin's `base` moves to the clone's `branch`, as merging its PR would.
-  merge(clonePath: string, branch: string, base: string): void {
+  mergeIntoOrigin(clonePath: string, branch: string, base: string): void {
     const clone = this.cloneAt(clonePath);
     clone.origin.set(base, clone.branches.get(branch)!);
   }
@@ -157,8 +158,20 @@ export class FakeGit implements Git {
 
   // Whether `ancestor` is `commit` or in its history.
   inHistory(ancestor: string, commit: string): boolean {
-    for (let at: string | undefined = commit; at; at = this.parents.get(at)) if (at === ancestor) return true;
-    return false;
+    return this.ancestry(commit).has(ancestor);
+  }
+
+  // The commit and every commit in its history, merged ones included.
+  private ancestry(commit: string | undefined): Set<string> {
+    const seen = new Set<string>();
+    const next = commit ? [commit] : [];
+    while (next.length) {
+      const at = next.pop()!;
+      if (seen.has(at)) continue;
+      seen.add(at);
+      for (const parent of [this.parents.get(at), this.mergedParents.get(at)]) if (parent) next.push(parent);
+    }
+    return seen;
   }
 
   // Moves (or makes) the clone's `branch` at `tip`, with the worktree it is
@@ -237,8 +250,7 @@ export class FakeGit implements Git {
     const tip = clone.branches.get(branch);
     const base = into.startsWith('origin/') ? clone.fetched.get(into.slice('origin/'.length)) : clone.branches.get(into);
     if (!tip || !base) throw new GitError(`fatal: Not a valid commit name ${tip ? into : branch}`);
-    for (let commit: string | undefined = base; commit; commit = this.parents.get(commit)) if (commit === tip) return true;
-    return false;
+    return this.ancestry(base).has(tip);
   }
 
   async unpushed(clonePath: string, branch: string, { besides }: { besides?: string } = {}): Promise<string[]> {
@@ -246,7 +258,7 @@ export class FakeGit implements Git {
     const onOrigin = new Set<string>();
     for (const [name, tip] of clone.fetched) {
       if (name === besides) continue;
-      for (let commit: string | undefined = tip; commit && !onOrigin.has(commit); commit = this.parents.get(commit)) onOrigin.add(commit);
+      for (const commit of this.ancestry(tip)) onOrigin.add(commit);
     }
     const unpushed: string[] = [];
     for (let commit = clone.branches.get(branch); commit && !onOrigin.has(commit); commit = this.parents.get(commit)) unpushed.push(commit);
@@ -325,6 +337,39 @@ export class FakeGit implements Git {
     const { branch } = this.worktreeAt(worktreePath);
     const pushUrls = [...(this.pushUrls.get(worktreePath)?.keys() ?? [])].map((remote) => `remote.${remote}.pushurl`);
     return { branch, uncommitted: [...(this.changes.get(worktreePath) ?? [])], pushUrls };
+  }
+
+  // A conflict is a path both sides changed differently since their merge
+  // base, the newest commit in both histories along the branch's own.
+  async merge(worktreePath: string, ref: string, message: string): Promise<void> {
+    const worktree = this.worktreeAt(worktreePath);
+    const clone = this.cloneAt(worktree.linkedTo);
+    const theirs = ref.startsWith('origin/') ? clone.fetched.get(ref.slice('origin/'.length)) : (clone.branches.get(ref) ?? (this.trees.has(ref) ? ref : undefined));
+    if (!theirs) throw new GitError(`merge: ${ref} - not something we can merge`);
+    const mine = worktree.head;
+    const theirAncestry = this.ancestry(theirs);
+    if (this.ancestry(mine).has(theirs)) return;
+    if (theirAncestry.has(mine)) {
+      this.moveBranch(worktree.linkedTo, worktree.branch, theirs);
+      return;
+    }
+    let base: string | undefined = mine;
+    while (base && !theirAncestry.has(base)) base = this.parents.get(base);
+    const treeOf = (commit: string | undefined) => this.trees.get(commit ?? '') ?? new Map<string, string>();
+    const [baseTree, myTree, theirTree] = [treeOf(base), treeOf(mine), treeOf(theirs)];
+    const tree = new Map(myTree);
+    for (const path of new Set([...theirTree.keys(), ...baseTree.keys()])) {
+      const [was, my, their] = [baseTree.get(path), myTree.get(path), theirTree.get(path)];
+      if (their === was || their === my) continue;
+      if (my !== was) throw new GitError(`CONFLICT (content): Merge conflict in ${path}`);
+      if (their === undefined) tree.delete(path);
+      else tree.set(path, their);
+    }
+    const commit = this.newCommit(tree);
+    this.parents.set(commit, mine);
+    this.mergedParents.set(commit, theirs);
+    this.moveBranch(worktree.linkedTo, worktree.branch, commit);
+    this.commits.push({ worktreePath, paths: [], message });
   }
 
   async commit(worktreePath: string, paths: string[], message: string): Promise<string> {

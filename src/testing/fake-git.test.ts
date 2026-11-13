@@ -40,7 +40,7 @@ describeGitContract('the fake git', async () => {
       git.push(clonePath, branch);
     },
     async merge(clonePath, branch, base) {
-      git.merge(clonePath, branch, base);
+      git.mergeIntoOrigin(clonePath, branch, base);
     },
     async dispose() {},
   };

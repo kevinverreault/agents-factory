@@ -167,7 +167,7 @@ describe('the schema', () => {
 
   test('an unknown exit condition, or an artifact kind outside the vocabulary, is refused with the vocabulary', () => {
     expect(refusal(nightly('{ id: implement, kind: loop, skill: implement, mode: AFK, exit: tickets-done }'), 'nightly')).toBe(
-      `${at}: stage implement: exit tickets-done is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared).`,
+      `${at}: stage implement: exit tickets-done is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared, spec-closed).`,
     );
     expect(refusal(nightly('{ id: draw, kind: run, skill: draw, mode: HITL, exit: "artifact:diagram" }'), 'nightly')).toBe(
       `${at}: stage draw: exit artifact:diagram names no artifact kind (map, spec, tickets, pr-body).`,
@@ -206,6 +206,16 @@ describe('the schema', () => {
     expect(refusal(nightly('{ id: implement, kind: loop, mode: AFK }'), 'nightly')).toBe(`${at}: stage implement: a loop stage needs a skill.`);
     expect(refusal(nightly('{ id: grill, kind: run, skill: grill-me, mode: HITL, autonomy: L1 }'), 'nightly')).toBe(
       `${at}: stage grill: only an AFK stage has an autonomy ceiling.`,
+    );
+  });
+
+  test('a tickets stage launches ticket tasks on a skill until its spec closes: it needs the skill', () => {
+    const preset = resolved(nightly('{ id: implement, kind: tickets, skill: implement, args: "{{artifacts.tickets}}", mode: AFK, exit: spec-closed }'), 'nightly');
+    expect(preset.stages).toEqual([{ id: 'implement', kind: 'tickets', skill: 'implement', args: '{{artifacts.tickets}}', mode: 'AFK', exit: 'spec-closed' }]);
+
+    expect(refusal(nightly('{ id: implement, kind: tickets, mode: AFK, exit: spec-closed }'), 'nightly')).toBe(`${at}: stage implement: a tickets stage needs a skill.`);
+    expect(refusal(nightly('{ id: implement, kind: batch, skill: implement, mode: AFK }'), 'nightly')).toBe(
+      `${at}: stage implement: kind must be run, loop, tickets or action.`,
     );
   });
 

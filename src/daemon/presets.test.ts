@@ -82,7 +82,7 @@ describe('the presets a launch card offers', () => {
     expect(presets.find((preset) => preset.name === 'broken')).toEqual({
       name: 'broken',
       source: 'user',
-      error: `Preset broken (user, ${join(factory.paths.presetsDir, 'broken.preset.yaml')}): stage a: exit when-done is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared).`,
+      error: `Preset broken (user, ${join(factory.paths.presetsDir, 'broken.preset.yaml')}): stage a: exit when-done is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared, spec-closed).`,
     });
   });
 
@@ -159,7 +159,7 @@ describe('launching from a preset', () => {
 
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'nightly', prompt })).toEqual({
       ok: false,
-      reason: `Preset nightly (user, ${path}): stage implement: exit all-green is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared).`,
+      reason: `Preset nightly (user, ${path}): stage implement: exit all-green is not an exit condition (run-completed, artifact:<kind>, tickets-closed, map-cleared, spec-closed).`,
     });
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'sloppy', prompt })).toMatchObject({
       ok: false,

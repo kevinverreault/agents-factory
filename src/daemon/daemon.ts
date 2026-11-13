@@ -73,6 +73,8 @@ import {
   type PublishEvent,
   type ResearchEvent,
   type ResolutionEvent,
+  type TicketSetEvent,
+  type TicketTaskLaunched,
   type ReopenEvent,
   type Repository,
   type RepoEvent,
@@ -124,6 +126,7 @@ import {
   REPO_PRESETS,
   resolvePreset,
   userPresets,
+  launchesTickets,
   worksTickets,
   type PresetFile,
 } from '../presets/presets.ts';
@@ -286,6 +289,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // since the last PR poll, and those it is resolving now (ADR 0013).
   const resolutionsTried = new Set<string>();
   const resolutionsInFlight = new Set<string>();
+  // The spec tasks whose tickets this daemon has tried to read since the
+  // last PR poll, and those it is reading now; the launch intents it has
+  // tried since then, and the spec tasks it is launching a ticket task of
+  // now (ADR 0013).
+  const ticketReadsTried = new Set<string>();
+  const ticketReadsInFlight = new Set<string>();
+  const launchesTried = new Set<string>();
+  const launchesInFlight = new Set<string>();
   // The sweeps of ended runs' CLI trees under way (ADR 0003).
   const processSweeps = new Set<Promise<void>>();
   // Each task's last job on its transcripts under way (ADR 0011): archiving
@@ -767,11 +778,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
       }
       // One issue ref with no sub-issues, at an AFK stage working tickets,
-      // is a ticket task's ticket (ADR 0013).
-      if (worksTickets(start.stage) && start.stage.mode === 'AFK' && action.issues.length === 1) {
-        const read = await loneTicket(repo, action.issues[0]!);
-        if ('error' in read) return { ok: false, reason: read.error };
-        action.ticket = read.ticket;
+      // is a ticket task's ticket; at one launching ticket tasks, a spec ref
+      // or several refs make a spec task over their tickets (ADR 0013).
+      if (worksTickets(start.stage) && start.stage.mode === 'AFK' && action.issues.length) {
+        const spec = launchesTickets(start.stage);
+        if (action.issues.length === 1) {
+          const read = await subIssuesOf(repo, action.issues[0]!);
+          if ('error' in read) return { ok: false, reason: read.error };
+          if (read.subIssues.length === 0) action.ticket = action.issues[0]!;
+          else if (spec) action.specSet = { spec: action.issues[0]!, tickets: read.subIssues };
+        } else if (spec) action.specSet = { spec: null, tickets: [...new Set(action.issues)] };
       }
       action.preset = { ...resolved.preset, repoCommit: presets.commit };
       action.stage = start.stage.id;
@@ -793,12 +809,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
   }
 
-  // The issue `ref`, if it has no sub-issues, read as the App with a
-  // read-only token; null when it has some, so it is a spec.
-  async function loneTicket(repo: string, ref: string): Promise<{ ticket: string | null } | { error: string }> {
+  // The issue `ref`'s sub-issues, in order, read as the App with a
+  // read-only token: with none, it is a ticket; with some, a spec.
+  async function subIssuesOf(repo: string, ref: string): Promise<{ subIssues: string[] } | { error: string }> {
     try {
       const { token } = await appToken(repo, READ_ONLY);
-      return { ticket: (await github.subIssues(token, ref)).length ? null : ref };
+      return { subIssues: await github.subIssues(token, ref) };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
       return { error: `Couldn’t read ${ref}’s sub-issues on GitHub as the factory’s App: ${error.message}` };
@@ -889,9 +905,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // the next poll, and never stops the daemon.
   function pollPrs(): void {
     nextPrPoll = clock.now() + PR_POLL_MS;
-    // A ticket the factory couldn't close is tried again at every poll.
+    // A ticket the factory couldn't close is tried again at every poll, and
+    // so are a spec task's tickets it couldn't read or launch.
     resolutionsTried.clear();
     driveResolutions();
+    ticketReadsTried.clear();
+    launchesTried.clear();
+    driveSpecTasks();
     for (const task of Object.values(lifecycle.tasks)) {
       if (stopping || !waitsOnPr(task) || prReadsInFlight.has(task.id)) continue;
       prReadsInFlight.add(task.id);
@@ -1084,6 +1104,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           const outcome = typeof (await finishSpawn(intent)) === 'string' ? 'rolled back' : 'finished';
           replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome });
         }
+        if (intent.verb === 'launch') replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome: await finishLaunch(intent) });
       }
     } finally {
       replaying = false;
@@ -1226,11 +1247,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // An active or suspended run, a queued task (a HITL one Ready for you
   // included, as ADR 0002 says) or an attached TUI.
-  // A loop between its iterations does too, and a root waiting on its PR.
+  // A loop between its iterations does too, a root waiting on its PR, and a
+  // spec task at work on its tickets.
   function needsAClock(): boolean {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
+    // A spec task that couldn't read or launch its tickets tries again at the next poll.
+    const specsRetrying = Object.values(lifecycle.tasks).filter((task) => task.ticketSet?.problem && !isTerminal(task)).length;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + specsRetrying + ticketReadsInFlight.size + launchesInFlight.size + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -1309,6 +1333,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     drivePublishes();
     driveResearch();
     driveResolutions();
+    driveSpecTasks();
     driveNotes();
   });
 
@@ -1437,6 +1462,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     drivePublishes();
     driveResearch();
     driveResolutions();
+    driveSpecTasks();
     driveBranchSweeps(before);
     driveProcessSweeps(before);
     driveTranscriptArchives(before);
@@ -1497,6 +1523,126 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         },
       );
     }
+  }
+
+  // Takes each spec task's next step (ADR 0013): reading its tickets from
+  // GitHub, then launching a ticket task on each frontier ticket, one at a
+  // time, in frontier order. A read or a launch that failed is tried again
+  // at the next PR poll. What it did goes through the Lifecycle like any
+  // other event.
+  function driveSpecTasks(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      const set = task.ticketSet;
+      if (stopping || !set || isTerminal(task)) continue;
+      if (set.reading) {
+        if (ticketReadsTried.has(task.id) || ticketReadsInFlight.has(task.id)) continue;
+        ticketReadsTried.add(task.id);
+        ticketReadsInFlight.add(task.id);
+        void readTickets(task).then(
+          (event) =>
+            serially(async () => {
+              ticketReadsInFlight.delete(task.id);
+              if (!stopping) await settle(event, new Set());
+            }),
+          (error) => {
+            ticketReadsInFlight.delete(task.id);
+            throw error;
+          },
+        );
+        continue;
+      }
+      if (launchesInFlight.has(task.id)) continue;
+      const ticket = set.toLaunch.find((ref) => !launchesTried.has(launchId(task.id, ref)));
+      if (!ticket) continue;
+      launchesTried.add(launchId(task.id, ticket));
+      launchesInFlight.add(task.id);
+      void serially(() => launchTicketTask(task.id, ticket)).finally(() => {
+        launchesInFlight.delete(task.id);
+        // The next frontier ticket launches once this one has.
+        driveSpecTasks();
+      });
+    }
+  }
+
+  // The spec task's tickets as GitHub has them, in order, read as the App
+  // with a read-only token.
+  async function readTickets(task: Task): Promise<TicketSetEvent> {
+    try {
+      const { token } = await appToken(task.repo, READ_ONLY);
+      const issues: Issue[] = [];
+      for (const ref of task.ticketSet!.tickets) issues.push(await github.readIssue(token, ref));
+      return { type: 'ticketSetRead', taskId: task.id, issues };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'ticketSetUnread', taskId: task.id, reason: error.message };
+    }
+  }
+
+  // Launches the spec task's ticket task on `ticket`, if it still has it to
+  // launch: titled after the ticket, on its own task branch, journaled first
+  // (ADR 0003), keyed by the spec task and the ticket.
+  async function launchTicketTask(specId: string, ticket: string): Promise<void> {
+    const spec = lifecycle.tasks[specId];
+    const repository = spec && lifecycle.repositories[spec.repo];
+    if (stopping || !spec || !repository || isTerminal(spec) || !spec.ticketSet?.toLaunch.includes(ticket)) return;
+    const ticketTaskId = nextTaskId(lifecycle);
+    const title = titleFrom(spec.ticketSet.issues.find(({ ref }) => ref === ticket)?.title || ticket);
+    const launch: Omit<TicketTaskLaunched, 'intent'> = {
+      type: 'ticketTaskLaunched',
+      taskId: specId,
+      ticket,
+      ticketTaskId,
+      title,
+      worktree: taskWorktree(options.worktreeRoot, repository, ticketTaskId, title),
+      sessionId: randomUUID(),
+    };
+    const intent: Intent = { id: launchId(specId, ticket), verb: 'launch', taskId: specId, launch };
+    if (await settle({ type: 'intentJournaled', taskId: specId, intent }, new Set())) return;
+    await finishLaunch(intent);
+  }
+
+  // Takes a ticket task launch's steps, each of which can be taken again:
+  // fetches the base branch, cuts the ticket task's worktree from the spec
+  // task's branch unless it is cut already, and merges `origin/<base>` into
+  // it, then launches the ticket task, which finishes the intent. A launch
+  // the Lifecycle refuses, or whose worktree can't be cut or merged, is
+  // rolled back: what it cut goes again, and the spec task says why. A
+  // launch that already made its ticket task makes no other.
+  async function finishLaunch(intent: Extract<Intent, { verb: 'launch' }>): Promise<'finished' | 'rolled back'> {
+    const action: TicketTaskLaunched = { ...structuredClone(intent.launch), intent: intent.id };
+    const drop = () => settle({ type: 'intentDropped', taskId: intent.taskId, intentId: intent.id }, new Set());
+    const spec = lifecycle.tasks[intent.taskId]!;
+    if (spec.ticketSet?.launched[action.ticket]) {
+      await drop();
+      return 'finished';
+    }
+    const repository = lifecycle.repositories[spec.repo]!;
+    const { path, branch } = action.worktree;
+    // Whether the ticket task's worktree is this launch's: only then does a rollback remove it.
+    let cut = false;
+    let problem = guard(lifecycle, action) ?? (await fetchBase(git, repository));
+    if (!problem) {
+      try {
+        cut = (await git.worktrees(repository.path)).some((worktree) => worktree.path === path);
+        if (!cut) await git.addWorktree(repository.path, { path, branch, startPoint: spec.worktree!.branch });
+        cut = true;
+        const base = `origin/${repository.baseBranch}`;
+        await git.merge(path, base, `Merge ${base} into ${branch}`);
+      } catch (error) {
+        if (!(error instanceof GitError)) throw error;
+        problem = `The factory couldn’t cut ${branch} from ${spec.worktree!.branch} merged with origin/${repository.baseBranch}: ${error.message}`;
+      }
+    }
+    problem ??= await settle(action, new Set());
+    if (!problem) return 'finished';
+    if (cut) {
+      // No ticket task holds them: the worktree and branch cut for it go again.
+      await git.removeWorktree(repository.path, path).catch(() => {});
+      await git.deleteBranch(repository.path, branch).catch(() => {});
+    }
+    await drop();
+    await settle({ type: 'ticketTaskUnlaunched', taskId: intent.taskId, ticket: action.ticket, reason: problem }, new Set());
+    return 'rolled back';
   }
 
   // Closes the merged ticket task's ticket as completed if GitHub left it
@@ -2733,6 +2879,11 @@ function closingComment(task: Task, commits: string[]): string {
 
 // What closing a merged ticket task's ticket says on it (ADR 0013): the PR
 // that did its work was merged.
+// The id of the intent launching the spec task's ticket task on `ticket`.
+function launchId(specId: string, ticket: string): string {
+  return `launch:${specId}:${ticket}`;
+}
+
 function resolvingComment(task: Task): string {
   return `Done in ${task.pr!.url}, merged, by the agents factory’s task ${task.id} (${task.title}).`;
 }

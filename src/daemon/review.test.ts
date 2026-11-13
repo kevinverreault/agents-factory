@@ -84,7 +84,7 @@ describe('Mark done', () => {
   test('finishes a root whose branch is merged into the base branch on origin, fetched afresh', async () => {
     const { factory, operator, tui } = await inReview();
     committed(factory, tui);
-    factory.git.merge(clone, branch, 'main');
+    factory.git.mergeIntoOrigin(clone, branch, 'main');
 
     expect(await operator.send({ type: 'markDone', taskId: 'T1' })).toEqual({ ok: true });
 

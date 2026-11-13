@@ -126,14 +126,16 @@ export async function lookAround(
 export function matchLeftovers(lifecycle: Lifecycle, world: World): LeftoversView {
   const tasks = Object.values(lifecycle.tasks);
   const live = tasks.filter(isLive);
-  // The worktrees and branches live tasks have, and those a spawn under way
-  // cut or is about to (ADR 0003), and the children's branches kept for
-  // their parent's merge or their root's cleanup (ADR 0011).
+  // The worktrees and branches live tasks have, and those a spawn or a
+  // ticket task's launch under way cut or is about to (ADR 0003), and the
+  // children's branches kept for their parent's merge or their root's
+  // cleanup (ADR 0011).
   const held: { repo: string; worktree: TaskWorktree }[] = [];
   for (const task of [...live, ...keptChildBranches(tasks)]) if (task.worktree) held.push({ repo: task.repo, worktree: task.worktree });
   for (const intent of Object.values(lifecycle.intents)) {
     const parent = lifecycle.tasks[intent.taskId];
     if (intent.verb === 'spawn' && parent) held.push({ repo: parent.repo, worktree: intent.spawn.worktree });
+    if (intent.verb === 'launch' && parent) held.push({ repo: parent.repo, worktree: intent.launch.worktree });
   }
   const holdsPath = (repo: string, path: string) => held.some((owned) => owned.repo === repo && samePath(owned.worktree.path, path));
   const holdsBranch = (repo: string, branch: string) => held.some((owned) => owned.repo === repo && owned.worktree.branch === branch);

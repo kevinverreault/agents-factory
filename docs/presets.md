@@ -45,8 +45,8 @@ Stage fields:
 | Field | Values |
 |---|---|
 | `id` | Lowercase letters, digits and dashes, unique in the preset |
-| `kind` | `run` (one agent run of a skill), `loop` (repeated runs over tickets) or `action` (a factory step with no agent) |
-| `skill` | A skill of the skill set, invoked as `/factory:<skill>`. A `loop` needs one; a `run` without one sends its `args` as they are; an `action` has none |
+| `kind` | `run` (one agent run of a skill), `loop` (repeated runs over tickets), `tickets` (launches a ticket task per frontier ticket, ADR 0013) or `action` (a factory step with no agent) |
+| `skill` | A skill of the skill set, invoked as `/factory:<skill>`. A `loop` and a `tickets` stage need one (a `tickets` stage's is what each ticket task's first run invokes on its ticket); a `run` without one sends its `args` as they are; an `action` has none |
 | `args` | A template: `{{prompt}}` and `{{artifacts.<kind>}}`, with kinds `map`, `spec`, `tickets`, `pr-body` |
 | `mode` | `HITL` or `AFK` |
 | `model` | A model tier: `opus`, `sonnet` or `haiku` |
@@ -54,7 +54,7 @@ Stage fields:
 | `max_turns` | A whole number of at least 1, the runaway guard of an AFK stage's runs: hitting it ends the run `failed` with a failure attention request. Without it a run gets the global default of 300; the launch card's max turns overrides both |
 | `context` | `resume` (the default) or `fresh` |
 | `optional` | `true` when the advance sheet may skip it |
-| `exit` | `run-completed`, `artifact:<kind>`, `tickets-closed` or `map-cleared`. A HITL stage without one advances when the operator confirms |
+| `exit` | `run-completed`, `artifact:<kind>`, `tickets-closed`, `map-cleared` or `spec-closed` (holds once a spec task's spec is closed; a ticket task's run on the stage ends it). A HITL stage without one advances when the operator confirms |
 | `requires` | `L2` |
 | `on_findings` | `fix-once` |
 
