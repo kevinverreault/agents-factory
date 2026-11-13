@@ -1,6 +1,8 @@
 // A task's detail, drilled into from a screen with `enter`: its title, what
 // it is on one line, its open request, a spec task's tickets, its runs, its
-// usage and artifacts, and its output whole.
+// usage and artifacts, and its output whole. `condensed`, as the condensed
+// view's detail pane shows it, leaves out the usage and artifacts, so the
+// output has their rows.
 import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -14,7 +16,17 @@ import { fixed } from './screen.ts';
 import { GLYPH, joined, kindLook, Section, Sheet, stateLook, tone } from './theme.ts';
 import { dollars, tokens, TaskUsage } from './usage.ts';
 
-export function TaskDetail({ connection, state, task }: { connection: FactoryConnection; state: FactoryState; task: TaskView }) {
+export function TaskDetail({
+  connection,
+  state,
+  task,
+  condensed = false,
+}: {
+  connection: FactoryConnection;
+  state: FactoryState;
+  task: TaskView;
+  condensed?: boolean;
+}) {
   const runs = runsOf(state, task.id);
   // The model its live run is on, or its last run was.
   const model = (task.liveRunId ? state.runs[task.liveRunId] : runs.at(-1))?.model;
@@ -51,8 +63,8 @@ export function TaskDetail({ connection, state, task }: { connection: FactoryCon
         runs.length === 0 ? h(Text, tone('dim'), 'None yet.') : null,
         ...runs.map((run) => h(RunRow, { key: run.id, run })),
       ),
-      h(TaskUsage, { state, taskId: task.id }),
-      h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id) }),
+      condensed ? null : h(TaskUsage, { state, taskId: task.id }),
+      condensed ? null : h(ArtifactRail, { artifacts: Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id) }),
     ),
     h(Output, { connection, state, taskId: task.id }),
   );

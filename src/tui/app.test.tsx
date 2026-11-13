@@ -4072,6 +4072,35 @@ describe('the condensed view', () => {
     });
   });
 
+  test('the condensed view’s detail leaves out the usage and artifacts, zoomed or not, the live output taking their rows', async () => {
+    const { app } = await started(condensed());
+    await press(app, 'v');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toContain('OUTPUT · T3');
+      expect(frame).toMatch(/─ RUNS ─/);
+      expect(frame).not.toMatch(/─ USAGE ─/);
+      expect(frame).not.toMatch(/─ ARTIFACTS ─/);
+    });
+
+    await press(app, 'f');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/^\s*DETAIL · zoomed/m);
+      expect(frame).toContain('OUTPUT · T3');
+      expect(frame).not.toMatch(/─ USAGE ─/);
+      expect(frame).not.toMatch(/─ ARTIFACTS ─/);
+    });
+
+    // Drilled into from the screens, the detail keeps them.
+    await press(app, 'f', 'v', '\r');
+    await eventually(() => {
+      const frame = app.lastFrame()!;
+      expect(frame).toMatch(/─ USAGE ─/);
+      expect(frame).toMatch(/─ ARTIFACTS ─/);
+    });
+  });
+
   test('tab moves the focus from the tree to the detail, then the sidebar, the verbs acting on the focused pane’s task; f zooms the detail', async () => {
     const { app, connection } = await started(condensed());
     // T1, the oldest, at the bottom: T3, T2, T1.
