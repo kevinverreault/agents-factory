@@ -3780,6 +3780,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         break;
       }
       const { to, jumped } = plan;
+      // Advanced to the retired Ralph loop's stage, it asks the operator instead.
+      if (isRetiredLoop(to)) {
+        task.loop = null;
+        enterStage(task, to, action.sessionId);
+        blockRetiredLoop(state, task, at);
+        break;
+      }
       const filled = fillOpening(to, (variable) => jumpValue(state, task, jumped, variable));
       if ('missing' in filled) {
         // The stage raises an attention request instead of starting. The
@@ -3790,8 +3797,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.loop = null;
       // A stage jumped to starts fresh when the one jumped over would have.
       enterStage(task, to, action.sessionId, jumped?.context === 'fresh');
-      if (isRetiredLoop(to)) blockRetiredLoop(state, task, at);
-      else if (!enterLoop(state, task, to)) startRun(state, task, at, { opening: filled.opening });
+      if (!enterLoop(state, task, to)) startRun(state, task, at, { opening: filled.opening });
       break;
     }
     case 'turnEnded':

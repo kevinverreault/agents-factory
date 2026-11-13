@@ -269,7 +269,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // directory, and when it is next replaced.
   const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
   // The work loops whose read of their map is under way on GitHub.
-  const stepsInFlight = new Set<string>();
+  const mapReadsInFlight = new Set<string>();
   // The Done roots whose cleanup this daemon has started, and those of them
   // still under way. One that failed is tried again by the next daemon.
   const cleanupsStarted = new Set<string>();
@@ -1337,7 +1337,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // A spec task that couldn't read or launch its tickets tries again at the next poll.
     // So does a ticket or a spec the factory couldn't close.
     const retrying = Object.values(lifecycle.tasks).filter((task) => (task.ticketSet?.problem && !isTerminal(task)) || task.resolving?.problem).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + retrying + resolutionsInFlight.size + ticketReadsInFlight.size + launchesInFlight.size + stepsInFlight.size + cleanupsInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + retrying + resolutionsInFlight.size + ticketReadsInFlight.size + launchesInFlight.size + mapReadsInFlight.size + cleanupsInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -2142,18 +2142,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // outcome goes through the Lifecycle like any other event.
   function driveLoops(): void {
     for (const task of Object.values(lifecycle.tasks)) {
-      if (stopping || stepsInFlight.has(task.id) || !readingMap(lifecycle, task)) continue;
+      if (stopping || mapReadsInFlight.has(task.id) || !readingMap(lifecycle, task)) continue;
       const step = readMap(task);
-      stepsInFlight.add(task.id);
+      mapReadsInFlight.add(task.id);
       void step.then(
         (event) =>
           // The step is over once its event is in: the next one may start from there.
           serially(async () => {
-            stepsInFlight.delete(task.id);
+            mapReadsInFlight.delete(task.id);
             if (!stopping) await settle(event, new Set());
           }),
         (error) => {
-          stepsInFlight.delete(task.id);
+          mapReadsInFlight.delete(task.id);
           throw error;
         },
       );
@@ -2163,7 +2163,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Reads a work loop's map: its tickets, for the frontier the operator picks from.
   async function readMap(task: Task): Promise<LoopEvent> {
     try {
-      return { type: 'mapRead', taskId: task.id, tickets: await readTicketSet(task), sessionId: randomUUID() };
+      return { type: 'mapRead', taskId: task.id, tickets: await readMapTickets(task), sessionId: randomUUID() };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
       return { type: 'ticketsUnread', taskId: task.id, reason: error.message };
@@ -2172,7 +2172,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // Reads a work loop's tickets from GitHub with a read-only token, in
   // order: each of its maps' sub-issues. A map is never a ticket itself.
-  async function readTicketSet(task: Task): Promise<Issue[]> {
+  async function readMapTickets(task: Task): Promise<Issue[]> {
     const { token } = await appToken(task.repo, READ_ONLY);
     const refs: string[] = [];
     for (const map of workLoopMaps(lifecycle, task)) {

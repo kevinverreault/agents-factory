@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { Stage } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import { openStore } from '../store/store.ts';
+import { handOff } from '../testing/handoff.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -40,17 +41,17 @@ function writeUserPreset(factory: TestFactory, name: string, yaml: string): stri
   return path;
 }
 
-// T1 launched on a two-stage AFK preset, `build` then `implement`, its build
-// run R1 live. The daemon then stops, and `freeze` edits T1 in the store as
-// a daemon from before the loop was retired would have left it; a new
-// daemon starts over the store.
-async function frozen(freeze: (task: { preset: { stages: Stage[] }; stage: string; loop?: unknown }) => void) {
+// T1 launched on a two-stage preset, `build` (AFK, or HITL with `firstMode`)
+// then `implement`, its build run R1 live. The daemon then stops, and
+// `freeze` edits T1 in the store as a daemon from before the loop was
+// retired would have left it; a new daemon starts over the store.
+async function frozen(freeze: (task: { preset: { stages: Stage[] }; stage: string; loop?: unknown }) => void, firstMode: Stage['mode'] = 'AFK') {
   const { factory, operator, tui } = await attached();
   writeUserPreset(
     factory,
     'two-step',
     'stages:\n' +
-      '  - { id: build, kind: run, skill: implement, args: "{{prompt}}", mode: AFK, exit: run-completed }\n' +
+      `  - { id: build, kind: run, skill: implement, args: "{{prompt}}", mode: ${firstMode}, exit: run-completed }\n` +
       '  - { id: implement, kind: run, skill: implement, mode: AFK, exit: run-completed }\n',
   );
   expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'two-step', prompt: 'Add a logout button.' })).toMatchObject({ ok: true });
@@ -105,10 +106,43 @@ describe('a task frozen on the Ralph loop', () => {
     await tui.until((state) => state.tasks.T1?.label === 'Cancelled');
   });
 
+  test('handed off to the loop’s stage raises stage-blocked saying it was retired, and runs nothing there', async () => {
+    const { factory, operator, tui } = await frozen((task) => {
+      task.preset.stages[1] = RALPH_LOOP;
+    }, 'HITL');
+    // The conversation, parked by the stop, is Ready for you again.
+    await tui.until((state) => state.tasks.T1?.label === 'Ready for you');
+    await operator.send({ type: 'open', taskId: 'T1' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+
+    await handOff(operator, tui, factory.executor, 'T1');
+
+    const blocked = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(blocked.tasks.T1).toMatchObject({ mode: 'AFK', stage: 'implement', loop: null, liveRunId: null });
+    expect(blocked.attentionQueue).toMatchObject([{ attention: 'stage-blocked', taskId: 'T1', reason: RETIRED }]);
+    expect(factory.executor.started.map(({ runId }) => runId)).toEqual(['R1', 'R2']);
+  });
+
+  test('advanced to a HITL loop’s stage on the advance sheet raises stage-blocked saying it was retired', async () => {
+    const { factory, operator, tui } = await frozen((task) => {
+      task.preset.stages[1] = { ...RALPH_LOOP, mode: 'HITL' };
+    }, 'HITL');
+    await tui.until((state) => state.tasks.T1?.label === 'Ready for you');
+    await operator.send({ type: 'open', taskId: 'T1' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+
+    expect(await operator.send({ type: 'advanceStage', taskId: 'T1' })).toEqual({ ok: true });
+
+    const blocked = await tui.until((state) => state.tasks.T1?.label === 'Needs you');
+    expect(blocked.tasks.T1).toMatchObject({ stage: 'implement', loop: null, liveRunId: null });
+    expect(blocked.attentionQueue).toMatchObject([{ attention: 'stage-blocked', taskId: 'T1', reason: RETIRED }]);
+    expect(factory.executor.started.map(({ runId }) => runId)).toEqual(['R1', 'R2']);
+  });
+
   test('already at the loop’s stage when the daemon starts raises stage-blocked saying it was retired, once however often it restarts', async () => {
     const { factory, tui } = await frozen((task) => {
       task.preset.stages[0] = { ...RALPH_LOOP, id: 'build' };
-      // Between two iterations, picking its next ticket.
+      // As the old loop left it, about to pick its next ticket.
       task.loop = { step: 'pick', ticket: null, base: null, commits: [] };
     });
 
