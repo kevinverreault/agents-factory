@@ -3762,7 +3762,7 @@ describe('a stalled work loop', () => {
 });
 
 describe('a spec task left with skipped tickets', () => {
-  test('offers to relaunch each skipped ticket, end leaving the spec open, or close the spec anyway', async () => {
+  test('offers to relaunch each skipped ticket, end leaving the spec open, close the spec anyway, or cancel', async () => {
     const connection = new FakeConnection();
     const stalled: TaskView = {
       ...task('T1', 'Sign-in', 'waiting', 'Needs you', 'AFK'),
@@ -3776,7 +3776,7 @@ describe('a spec task left with skipped tickets', () => {
     };
     const { app } = await started(factoryState([stalled], [asked]), { connection });
     await press(app, '2');
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[1] Relaunch acme/widgets#11 [2] End, leaving the spec open [3] Close the spec anyway'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[1] Relaunch acme/widgets#11 [2] End, leaving the spec open [3] Close the spec anyway [4] Cancel'));
 
     await press(app, 'a', '1');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answer', taskId: 'T1', relaunch: 'acme/widgets#11' }));

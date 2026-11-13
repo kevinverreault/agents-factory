@@ -130,6 +130,7 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
           ...item.skipped.map((ref): Choice => ({ label: `Relaunch ${ref}`, command: { type: 'answer', taskId, relaunch: ref } })),
           { label: spec ? 'End, leaving the spec open' : 'End', command: { type: 'answer', taskId, end: 'spec-open' } },
           ...(spec ? [{ label: 'Close the spec anyway', command: { type: 'answer', taskId, end: 'close-spec' } } satisfies Choice] : []),
+          cancel,
         ];
       }
       // A stalled loop picks again once answered, and a work loop reads its map again.

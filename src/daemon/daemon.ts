@@ -92,7 +92,7 @@ import {
   type SkillsSetup,
   type Task,
   type TaskLaunched,
-  unmergedTicketTasks,
+  unfinishedTicketTasks,
 } from '../lifecycle/lifecycle.ts';
 import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
 import {
@@ -866,7 +866,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         // A spec task's cancel weighs the work of each ticket task it
         // cascades to as well, and asks once for the lot (ADR 0013).
         const task = lifecycle.tasks[taskId]!;
-        const cascade = [task, ...(task.kind === 'spec' ? unmergedTicketTasks(lifecycle, task) : [])];
+        const cascade = [task, ...(task.kind === 'spec' ? unfinishedTicketTasks(lifecycle, task) : [])];
         const stakes: string[] = [];
         for (const cancelled of cascade) {
           const stake = (await bringOutForCancel(cancelled)) ?? (await workAtStake(cancelled));

@@ -1627,12 +1627,17 @@ function oweTicketSetRead(state: Lifecycle, task: Task): void {
   const spec = task.specTask ? state.tasks[task.specTask] : undefined;
   const set = spec?.ticketSet;
   if (!spec || !set || isTerminal(spec) || set.closing) return;
+  oweRead(set);
+}
+
+// The spec task owes a read of its ticket set from GitHub.
+function oweRead(set: TicketSet): void {
   set.reading = true;
   set.reads = (set.reads ?? 0) + 1;
 }
 
-// The spec task's ticket tasks still unfinished: those its cancel cascades to.
-export function unmergedTicketTasks(state: Lifecycle, spec: Task): Task[] {
+// The spec task's ticket tasks not yet finished, merged or cancelled: those its cancel cascades to.
+export function unfinishedTicketTasks(state: Lifecycle, spec: Task): Task[] {
   return Object.values(spec.ticketSet?.launched ?? {}).flatMap((id) => {
     const ticketTask = state.tasks[id];
     return ticketTask && !isTerminal(ticketTask) ? [ticketTask] : [];
@@ -1786,8 +1791,7 @@ function answerSkipped(state: Lifecycle, task: Task, request: AttentionRequest, 
     const ticket = action.relaunch;
     set.skipped = (set.skipped ?? []).filter((ref) => ref !== ticket);
     delete set.launched[ticket];
-    set.reading = true;
-    set.reads = (set.reads ?? 0) + 1;
+    oweRead(set);
     task.state = 'running';
   } else if (action.end === 'close-spec') {
     set.closing = { problem: null, anyway: true };
@@ -3532,8 +3536,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // launching those relabelled meanwhile.
       if (request!.kind === 'stage-blocked' && task.kind === 'spec' && task.ticketSet) {
         task.state = 'running';
-        task.ticketSet.reading = true;
-        task.ticketSet.reads = (task.ticketSet.reads ?? 0) + 1;
+        oweRead(task.ticketSet);
         break;
       }
       // And at its open-pr stage, which carries on.
@@ -3709,7 +3712,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       cancelSubtree(state, task, action.branch !== 'discard', at);
       // A spec task's cancel cascades to each of its ticket tasks not yet
       // merged, under the operator's one branch choice (ADR 0013).
-      if (task.kind === 'spec') for (const ticketTask of unmergedTicketTasks(state, task)) cancelSubtree(state, ticketTask, action.branch !== 'discard', at);
+      if (task.kind === 'spec') for (const ticketTask of unfinishedTicketTasks(state, task)) cancelSubtree(state, ticketTask, action.branch !== 'discard', at);
       // A cancelled ticket task's ticket stays open, and its spec task
       // launches it no more: it is skipped, and reads its tickets again.
       if (task.kind === 'ticket') skipTicket(state, task);

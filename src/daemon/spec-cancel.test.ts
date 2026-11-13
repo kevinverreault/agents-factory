@@ -101,7 +101,7 @@ describe('cancelling a ticket task', () => {
     state = await tui.until((state) => ticketStates(state)['acme/widgets#11'] === 'skipped');
     expect(ticketStates(state)).toEqual({ 'acme/widgets#11': 'skipped', 'acme/widgets#12': 'waiting', 'acme/widgets#15': 'launched' });
 
-    // Reading the set again, at the next poll, launches nothing more.
+    // Nothing more launches, a poll later either.
     factory.clock.advance(15 * 60_000);
     await operator.send({ type: 'daemon.status' });
     state = await tui.until((state) => !state.tasks.T1?.ticketSet?.problem);
@@ -243,7 +243,9 @@ describe('cancelling the spec task', () => {
   });
 
   test('a crash in the middle of the cascade finishes on the next start', async () => {
-    const { factory, operator } = await launched();
+    const spec = await launched();
+    const { factory, operator } = spec;
+    const pr = await toReview(spec, 'T3');
     const crashed = factory.crashAt('git', 'removeWorktree', 'after');
     void operator.send({ type: 'cancel', taskId: 'T1', branch: 'discard' });
     await crashed;
@@ -255,5 +257,6 @@ describe('cancelling the spec task', () => {
     const state = await restarted.until((state) => ['T1', 'T2', 'T3'].every((id) => state.tasks[id]?.label === 'Cancelled' && state.tasks[id].cleanup === null));
     expect(Object.keys(state.tasks)).toEqual(['T1', 'T2', 'T3']);
     expect(await factory.git.worktrees(clone)).toEqual([]);
+    expect(factory.github.pullRequests.find(({ number }) => number === pr)?.state).toBe('closed');
   });
 });
