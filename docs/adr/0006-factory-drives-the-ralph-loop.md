@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR 0013
 ---
 
 # The factory drives the Ralph loop: it picks each ticket and closes it on the task branch

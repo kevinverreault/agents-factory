@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (map closing amended by ADR 0013)
 ---
 
 # The operator steers wayfinder's work loop, and a cleared map may stop short
