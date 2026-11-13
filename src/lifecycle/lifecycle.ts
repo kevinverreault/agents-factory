@@ -268,11 +268,17 @@ export type TicketResolution = { problem: string | null };
 // ticket to its ticket task. `problem` is why the factory last couldn't
 // read the tickets or launch one: it tries again at the next PR poll.
 // `skipped` are the tickets whose ticket task the operator cancelled, which
-// it doesn't launch again.
+// it doesn't launch again. `reads` counts the reads owed so far: a read the
+// daemon started before the last one was owed leaves the next still owed.
+// Once no ticket is open, `closing` holds while the factory owes the spec
+// its closing, and `closed` once it is closed (or the set has no spec).
 export type TicketSet = {
   spec: string | null;
   tickets: string[];
   reading: boolean;
+  reads?: number;
+  closing?: TicketResolution | null;
+  closed?: boolean;
   issues: Issue[];
   toLaunch: string[];
   launched: Record<string, string>;
@@ -845,8 +851,10 @@ export type TicketTaskLaunched = {
 // What the daemon did for a spec task on GitHub and in git (ADR 0013): it
 // read its tickets, or couldn't, or couldn't launch the ticket task of
 // `ticket`, saying why.
+// A read carries the count of reads owed when it started, and, for a set
+// with a spec, its sub-issues in their order then and whether it was open.
 export type TicketSetEvent =
-  | { type: 'ticketSetRead'; taskId: string; issues: Issue[] }
+  | { type: 'ticketSetRead'; taskId: string; issues: Issue[]; reads?: number; tickets?: string[]; specOpen?: boolean }
   | { type: 'ticketSetUnread'; taskId: string; reason: string }
   | { type: 'ticketTaskUnlaunched'; taskId: string; ticket: string; reason: string };
 
@@ -951,6 +959,11 @@ export type ResearchEvent =
 // found it closed, or closed it as its App, or couldn't, saying why.
 export type ResolutionEvent = { type: 'ticketResolved'; taskId: string } | { type: 'ticketUnresolved'; taskId: string; reason: string };
 
+// What the daemon did about a spec task's spec once none of its tickets was
+// open (ADR 0013): it found it closed, or closed it as its App, or couldn't,
+// saying why.
+export type SpecClosingEvent = { type: 'specClosed'; taskId: string } | { type: 'specUnclosed'; taskId: string; reason: string };
+
 // The daemon delivered the factory notes the HITL task held to its live
 // run, on the operator's turn.
 export type NoteEvent = { type: 'notesDelivered'; taskId: string };
@@ -978,6 +991,7 @@ export type LifecycleAction =
   | NoteEvent
   | ResearchEvent
   | ResolutionEvent
+  | SpecClosingEvent
   | TicketTaskLaunched
   | TicketSetEvent
   | CleanupEvent
@@ -1292,7 +1306,7 @@ function unmetExit(state: Lifecycle, task: Task, stage: Stage): string | null {
   if (stage.exit === 'tickets-closed' && (task.kind === 'ticket' || !ticketSources(state, task))) return null;
   // A spec task's holds once its spec closes; any other task's one run on
   // the stage ends it, as a ticket task's on its ticket.
-  if (stage.exit === 'spec-closed') return task.kind === 'spec' ? `${stage.id}’s exit, spec-closed, doesn’t hold: ${task.ticketSet?.spec ?? 'its spec'} is still open.` : null;
+  if (stage.exit === 'spec-closed') return task.kind !== 'spec' || task.ticketSet?.closed ? null : `${stage.id}’s exit, spec-closed, doesn’t hold: ${task.ticketSet?.spec ?? 'its spec'} is still open.`;
   // Read from GitHub between the work loop's tickets.
   if (stage.exit === 'map-cleared') {
     return task.loop?.cleared ? null : `${stage.id}’s exit, map-cleared, doesn’t hold: ${issuesFor(state, task, 'map').join(', ') || 'the map'} still has open tickets.`;
@@ -1529,6 +1543,16 @@ export function pullRequestOf(state: Lifecycle, task: Task): { title: string; bo
 function ticketOpening(stage: Stage, ticket: string, prompt: string): string {
   const opening = stage.skill ? `/factory:${stage.skill} ${ticket}` : ticket;
   return prompt.trim() ? `${opening}\n\n## Operator instructions\n${prompt.trim()}` : opening;
+}
+
+// A ticket task became Done, or its ticket closed (ADR 0013): its spec task
+// owes a read of its ticket set, which may free the tickets it blocked.
+function ticketTaskDone(state: Lifecycle, task: Task): void {
+  const spec = task.specTask ? state.tasks[task.specTask] : undefined;
+  const set = spec?.ticketSet;
+  if (!spec || !set || isTerminal(spec) || set.closing) return;
+  set.reading = true;
+  set.reads = (set.reads ?? 0) + 1;
 }
 
 // The ticket task the spec task launches on `ticket` (ADR 0013), but for
@@ -2139,6 +2163,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'ticketResolved':
     case 'ticketUnresolved':
       return task.resolving ? null : `${task.id} owes no ticket its closing.`;
+    case 'specClosed':
+    case 'specUnclosed':
+      return task.ticketSet?.closing && !isTerminal(task) ? null : `${task.id} isn’t closing its spec.`;
     case 'ticketSetRead':
     case 'ticketSetUnread':
       return task.ticketSet?.reading && !isTerminal(task) ? null : `${task.id} isn’t reading a ticket set.`;
@@ -3308,6 +3335,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'markDone':
       // Unless finished anyway, the daemon found the task branch merged.
       finishRoot(task, request, { merged: !action.anyway });
+      ticketTaskDone(state, task);
       break;
     case 'prRead': {
       const asked = request?.kind === 'pr-closed-unmerged';
@@ -3317,6 +3345,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         // GitHub left it open (ADR 0013).
         finishRoot(task, request, { merged: true });
         if (task.kind === 'ticket' && task.ticket) task.resolving = { problem: null };
+        ticketTaskDone(state, task);
       } else if (action.state === 'closed' && !asked) {
         // A failed push to the closed PR has nothing left to update: the
         // closed PR asks instead. Never cancelled on the factory's own say.
@@ -3333,17 +3362,41 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'ticketResolved':
       task.resolving = null;
+      // Its ticket closed, the tickets it blocked may be takeable now.
+      ticketTaskDone(state, task);
+      break;
+    case 'specClosed':
+      task.ticketSet!.closing = null;
+      task.ticketSet!.closed = true;
+      task.ticketSet!.problem = null;
+      finishRoot(task, request, { merged: true });
+      break;
+    case 'specUnclosed':
+      task.ticketSet!.closing = { problem: action.reason };
+      task.ticketSet!.problem = `The factory couldn’t close ${task.ticketSet!.spec} on GitHub: ${action.reason}`;
       break;
     case 'ticketSetRead': {
       const set = task.ticketSet!;
-      set.reading = false;
+      // A read started before the last one was owed leaves that one owed.
+      set.reading = (action.reads ?? 0) < (set.reads ?? 0);
       set.problem = null;
+      if (action.tickets) set.tickets = [...action.tickets];
       set.issues = structuredClone(action.issues);
       // The frontier: the open tickets with no open blockers, in sub-issue
-      // order. Those labelled ready-for-agent get AFK ticket tasks.
+      // order, that were neither launched nor skipped. Those labelled
+      // ready-for-agent get AFK ticket tasks.
       set.toLaunch = action.issues
-        .filter(({ ref, open, openBlockers, labels }) => open && openBlockers.length === 0 && labels.includes(READY_FOR_AGENT) && !set.launched[ref])
+        .filter(({ ref, open, openBlockers, labels }) => open && openBlockers.length === 0 && labels.includes(READY_FOR_AGENT) && !set.launched[ref] && !set.skipped?.includes(ref))
         .map(({ ref }) => ref);
+      // No ticket open, and no ticket task still at work: the spec closes,
+      // or with none (or one closed already) the spec task is Done.
+      if (!set.reading && action.issues.every(({ open }) => !open) && Object.values(set.launched).every((id) => isTerminal(state.tasks[id]!))) {
+        if (set.spec && action.specOpen !== false) set.closing = { problem: null };
+        else {
+          set.closed = true;
+          finishRoot(task, request, { merged: true });
+        }
+      }
       break;
     }
     case 'ticketSetUnread':

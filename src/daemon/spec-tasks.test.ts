@@ -328,3 +328,148 @@ describe('a crash while launching a ticket task', () => {
     expect(state.tasks.T1?.ticketSet?.tickets.filter(({ state }) => state === 'launched')).toEqual([]);
   });
 });
+
+// Works the ticket task `taskId`'s runs at L2 through its PR body (its
+// implementation commits), then waits for it In review with its PR, whose
+// number it returns.
+async function toReview({ factory, tui }: Factory, taskId: string): Promise<number> {
+  let state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId);
+  let run = state.tasks[taskId]!.liveRunId!;
+  const workdir = factory.sandbox.workdirOf(taskId);
+  factory.git.editFile(workdir, `src/${taskId}.ts`);
+  factory.git.commitAll(workdir);
+  factory.executor.report(run, { type: 'runCompleted' });
+  // The review finds nothing.
+  state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
+  run = state.tasks[taskId]!.liveRunId!;
+  factory.executor.report(run, { type: 'runCompleted' });
+  state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
+  run = state.tasks[taskId]!.liveRunId!;
+  factory.executor.report(run, { type: 'prBodyWritten', body: `The work of ${taskId}.` });
+  factory.executor.report(run, { type: 'runCompleted' });
+  state = await tui.until((state) => state.tasks[taskId]?.label === 'In review' && !!state.tasks[taskId].pr);
+  return state.tasks[taskId]!.pr!.number;
+}
+
+// Someone merges the PR on GitHub, and a TUI attaching makes the daemon read it.
+async function merge({ factory }: Factory, number: number): Promise<void> {
+  factory.github.merge(number);
+  watch(await factory.attach());
+}
+
+// The tickets the implement runs started on, in order.
+const runTickets = (factory: TestFactory) =>
+  factory.executor.started.flatMap(({ firstMessage }) => (firstMessage?.startsWith('/factory:implement ') ? [firstMessage.split('\n')[0]!.split(' ')[1]] : []));
+
+describe('blockers clearing on merge', () => {
+  test('a ticket whose blocker’s ticket task is at work or In review isn’t launched; it is once that PR merged and the blocker closed', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    await operator.send(onSpec({ autonomy: 'L2' }));
+    await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+
+    const pr = await toReview(launched, 'T2');
+    expect(Object.keys(ticketTasks(tui.state()))).not.toContain('acme/widgets#12');
+
+    await merge(launched, pr);
+
+    const state = await tui.until((state) => !!ticketTasks(state)['acme/widgets#12']);
+    expect(state.tasks.T2?.label).toBe('Done');
+    expect(factory.github.issueState('acme/widgets#11').open).toBe(false);
+    expect(ticketTasks(state)).toEqual({ 'acme/widgets#11': 'T2', 'acme/widgets#15': 'T3', 'acme/widgets#12': 'T4' });
+    await tui.until((state) => !!state.tasks.T4?.liveRunId);
+    expect(runTickets(factory).filter((ticket) => ticket === 'acme/widgets#12')).toHaveLength(1);
+  });
+
+  test('the spec task re-reads its sub-issues and blockers on GitHub: reordering and blocking edits there change the next launches, and no ticket launches twice', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    await operator.send(onSpec({ autonomy: 'L2' }));
+    await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+    const pr = await toReview(launched, 'T2');
+    // Meanwhile on GitHub: two new tickets blocked by #11, put first, and #12 now blocked by #15 too.
+    factory.github.addIssue('acme/widgets#16', { title: 'Lock out', parent: SPEC, labels: READY, blockedBy: ['acme/widgets#11'] });
+    factory.github.addIssue('acme/widgets#17', { title: 'Password reset', parent: SPEC, labels: READY, blockedBy: ['acme/widgets#11'] });
+    factory.github.reorder(SPEC, ['acme/widgets#17', 'acme/widgets#16', 'acme/widgets#11', 'acme/widgets#12', 'acme/widgets#13', 'acme/widgets#14', 'acme/widgets#15']);
+    factory.github.block('acme/widgets#12', 'acme/widgets#15');
+
+    await merge(launched, pr);
+
+    const state = await tui.until((state) => Object.keys(ticketTasks(state)).length === 4 && !!state.tasks.T5?.liveRunId);
+    expect(ticketTasks(state)).toEqual({ 'acme/widgets#11': 'T2', 'acme/widgets#15': 'T3', 'acme/widgets#17': 'T4', 'acme/widgets#16': 'T5' });
+    expect(state.tasks.T1?.ticketSet?.tickets.map(({ ref }) => ref)).toEqual([
+      'acme/widgets#17',
+      'acme/widgets#16',
+      'acme/widgets#11',
+      'acme/widgets#12',
+      'acme/widgets#13',
+      'acme/widgets#14',
+      'acme/widgets#15',
+    ]);
+    expect(state.tasks.T1?.ticketSet?.tickets.find(({ ref }) => ref === 'acme/widgets#12')).toMatchObject({ state: 'waiting', blockers: ['acme/widgets#15'] });
+    expect(runTickets(factory)).toEqual(['acme/widgets#11', 'acme/widgets#15', 'acme/widgets#17', 'acme/widgets#16']);
+  });
+});
+
+describe('the spec resolving', () => {
+  // The spec #10 with #12 and #13 closed too: #11 and #15 are its open tickets.
+  async function twoOpen(): Promise<Factory> {
+    const launched = await attached();
+    launched.factory.github.close('acme/widgets#12');
+    launched.factory.github.close('acme/widgets#13');
+    await launched.operator.send(onSpec({ autonomy: 'L2' }));
+    await launched.tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+    return launched;
+  }
+
+  test('once no ticket is open, the factory closes the spec as its App, with a token for that write alone and a comment listing each ticket and its merged PR; the spec task is Done and cleaned up, its branch included', async () => {
+    const launched = await twoOpen();
+    const { factory, tui } = launched;
+    const branch = tui.state().tasks.T1!.branch!;
+    const first = await toReview(launched, 'T2');
+    const second = await toReview(launched, 'T3');
+
+    await merge(launched, first);
+    await tui.until((state) => state.tasks.T2?.label === 'Done' && state.tasks.T2.resolving === null);
+    expect(tui.state().tasks.T1?.label).not.toBe('Done');
+    expect(factory.github.issueState(SPEC).open).toBe(true);
+
+    await merge(launched, second);
+
+    const done = await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.cleanup === null);
+    expect(factory.github.issueState(SPEC)).toMatchObject({ open: false, stateReason: 'completed' });
+    const close = factory.github.writes.find(({ ref }) => ref === SPEC)!;
+    expect(close).toMatchObject({ action: 'close', token: { repo: 'acme/widgets', permissions: { issues: 'write', metadata: 'read' } } });
+    expect(factory.github.minted.filter(({ token }) => token === close.token.token)).toHaveLength(1);
+    expect(close.comment).toContain(`acme/widgets#11, A login form: merged in https://github.com/acme/widgets/pull/${first}`);
+    expect(close.comment).toContain(`acme/widgets#15, Sign out: merged in https://github.com/acme/widgets/pull/${second}`);
+    expect(close.comment).toContain('acme/widgets#14, The sign-in route: closed');
+    expect(done.tasks.T1?.ticketSet?.tickets.every(({ state }) => state === 'merged')).toBe(true);
+    expect((await factory.git.worktrees(clone)).map(({ path }) => path)).not.toContain(done.tasks.T1!.worktree);
+    expect(factory.git.branchTip(clone, branch)).toBeNull();
+  });
+
+  test('a spec the factory couldn’t close is closed at the next poll', async () => {
+    const launched = await twoOpen();
+    const { factory, operator, tui } = launched;
+    const first = await toReview(launched, 'T2');
+    const second = await toReview(launched, 'T3');
+    await merge(launched, first);
+    await tui.until((state) => state.tasks.T2?.label === 'Done' && state.tasks.T2.resolving === null);
+    factory.github.close('acme/widgets#15');
+    factory.github.failIssueWrites('Service Unavailable.');
+
+    await merge(launched, second);
+
+    const failed = await tui.until((state) => !!state.tasks.T1?.ticketSet?.problem);
+    expect(failed.tasks.T1?.ticketSet?.problem).toBe('The factory couldn’t close acme/widgets#10 on GitHub: Service Unavailable.');
+    expect(failed.tasks.T1?.label).not.toBe('Done');
+    factory.github.failIssueWrites(null);
+
+    factory.clock.advance(15 * 60_000);
+    await operator.send({ type: 'daemon.status' });
+
+    await tui.until((state) => state.tasks.T1?.label === 'Done');
+    expect(factory.github.issueState(SPEC).open).toBe(false);
+  });
+});

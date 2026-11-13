@@ -73,6 +73,7 @@ import {
   type PublishEvent,
   type ResearchEvent,
   type ResolutionEvent,
+  type SpecClosingEvent,
   type TicketSetEvent,
   type TicketTaskLaunched,
   type ReopenEvent,
@@ -1253,8 +1254,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const { attachedTuis, activeRuns, suspendedRuns, queuedTasks } = status();
     const waitingOnPrs = Object.values(lifecycle.tasks).filter(waitsOnPr).length;
     // A spec task that couldn't read or launch its tickets tries again at the next poll.
-    const specsRetrying = Object.values(lifecycle.tasks).filter((task) => task.ticketSet?.problem && !isTerminal(task)).length;
-    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + specsRetrying + ticketReadsInFlight.size + launchesInFlight.size + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
+    // So does a ticket or a spec the factory couldn't close.
+    const specsRetrying = Object.values(lifecycle.tasks).filter((task) => (task.ticketSet?.problem && !isTerminal(task)) || task.resolving?.problem).length;
+    return attachedTuis + activeRuns + suspendedRuns + queuedTasks + waitingOnPrs + specsRetrying + resolutionsInFlight.size + ticketReadsInFlight.size + launchesInFlight.size + stepsInFlight.size + cleanupsInFlight.size + reopensInFlight.size + researchInFlight.size + sweepsPending + processSweeps.size + transcriptJobs.size > 0;
   }
 
   // The Lifecycle changes one action at a time: checking a clone before a run
@@ -1506,12 +1508,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Resolves each merged ticket task's ticket (ADR 0013): once per daemon,
   // and again at every PR poll while it fails. Its outcome goes through the
   // Lifecycle like any other event.
+  // A spec task's spec, once none of its tickets is open, is closed alike.
   function driveResolutions(): void {
     for (const task of Object.values(lifecycle.tasks)) {
-      if (stopping || !task.resolving || resolutionsTried.has(task.id) || resolutionsInFlight.has(task.id)) continue;
+      const closing = !!task.ticketSet?.closing && !isTerminal(task);
+      if (stopping || !(task.resolving || closing) || resolutionsTried.has(task.id) || resolutionsInFlight.has(task.id)) continue;
       resolutionsTried.add(task.id);
       resolutionsInFlight.add(task.id);
-      void resolveTicket(task).then(
+      void (closing ? closeSpec(task) : resolveTicket(task)).then(
         (event) =>
           serially(async () => {
             resolutionsInFlight.delete(task.id);
@@ -1535,8 +1539,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const set = task.ticketSet;
       if (stopping || !set || isTerminal(task)) continue;
       if (set.reading) {
-        if (ticketReadsTried.has(task.id) || ticketReadsInFlight.has(task.id)) continue;
-        ticketReadsTried.add(task.id);
+        // Each read owed is tried once until the next poll.
+        const read = `${task.id}:${set.reads ?? 0}`;
+        if (ticketReadsTried.has(read) || ticketReadsInFlight.has(task.id)) continue;
+        ticketReadsTried.add(read);
         ticketReadsInFlight.add(task.id);
         void readTickets(task).then(
           (event) =>
@@ -1565,13 +1571,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // The spec task's tickets as GitHub has them, in order, read as the App
-  // with a read-only token.
+  // with a read-only token: with a spec, its sub-issues read afresh, so
+  // reordering them or editing their blockers there steers the next launches.
   async function readTickets(task: Task): Promise<TicketSetEvent> {
+    const set = task.ticketSet!;
+    const reads = set.reads ?? 0;
     try {
       const { token } = await appToken(task.repo, READ_ONLY);
+      const spec = set.spec ? await github.readIssue(token, set.spec) : null;
+      const tickets = set.spec ? await github.subIssues(token, set.spec) : set.tickets;
       const issues: Issue[] = [];
-      for (const ref of task.ticketSet!.tickets) issues.push(await github.readIssue(token, ref));
-      return { type: 'ticketSetRead', taskId: task.id, issues };
+      for (const ref of tickets) issues.push(await github.readIssue(token, ref));
+      return { type: 'ticketSetRead', taskId: task.id, issues, reads, ...(spec && { tickets, specOpen: spec.open }) };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
       return { type: 'ticketSetUnread', taskId: task.id, reason: error.message };
@@ -1665,6 +1676,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
       return { type: 'ticketUnresolved', taskId: task.id, reason: error.message };
+    }
+  }
+
+  // Closes the spec task's spec as completed if it is still open, as the
+  // App: read with a read-only token, closed with a token minted for that
+  // write alone (ADR 0004), and a comment listing each ticket and its PR.
+  async function closeSpec(task: Task): Promise<SpecClosingEvent> {
+    const spec = task.ticketSet!.spec!;
+    try {
+      const { token: reading } = await appToken(task.repo, READ_ONLY);
+      if (!(await github.readIssue(reading, spec)).open) return { type: 'specClosed', taskId: task.id };
+      const { token } = await appToken(task.repo, TICKET_WRITE);
+      await github.closeIssue(token, spec, specComment(lifecycle, task));
+      return { type: 'specClosed', taskId: task.id };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'specUnclosed', taskId: task.id, reason: error.message };
     }
   }
 
@@ -2886,6 +2914,17 @@ function closingComment(task: Task, commits: string[]): string {
 // The id of the intent launching the spec task's ticket task on `ticket`.
 function launchId(specTaskId: string, ticket: string): string {
   return `launch:${specTaskId}:${ticket}`;
+}
+
+// What closing a spec says on it (ADR 0013): each of its tickets, with the
+// PR that did its work, merged, or closed with none.
+function specComment(state: Lifecycle, task: Task): string {
+  const set = task.ticketSet!;
+  const lines = set.issues.map((issue) => {
+    const pr = state.tasks[set.launched[issue.ref] ?? '']?.pr;
+    return `- ${issue.ref}, ${issue.title}: ${pr ? `merged in ${pr.url}` : 'closed'}`;
+  });
+  return [`Every ticket of this spec is closed, so the agents factory’s task ${task.id} (${task.title}) closes it:`, '', ...lines].join('\n');
 }
 
 // What closing a merged ticket task's ticket says on it (ADR 0013): the PR
