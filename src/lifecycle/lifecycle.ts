@@ -271,6 +271,13 @@ export type TaskKind = 'plain' | 'spec' | 'ticket';
 // the ticket task goes In review, and the operator merges its PR.
 export type MergePolicy = 'operator';
 
+// A wayfinder task's maps the factory owes their closing (ADR 0013), as
+// its App, and why it last couldn't. `spec` is the spec written from them,
+// which closed, or null once the task ended at its cleared map. It is tried
+// again at the next PR poll, or by the next daemon. The factory never
+// touches a map's decision tickets (ADR 0012).
+export type MapClosing = { maps: string[]; spec: string | null; problem: string | null };
+
 // A ticket task's merged PR left its ticket open (ADR 0013): the factory
 // closes it as its App, and `problem` is why it last couldn't. It is tried
 // again at the next PR poll, or by the next daemon.
@@ -367,6 +374,10 @@ export type Task = {
   specTask?: string | null;
   // A spec task's ticket set.
   ticketSet?: TicketSet | null;
+  // While the factory still owes a wayfinder task's maps their closing
+  // (ADR 0013): once the spec written from them closed, or once the task
+  // ended at its cleared map.
+  mapClosing?: MapClosing | null;
   // Its place in its tree, for a child task.
   child?: Child | null;
   // The one-line progress its agent last set through `report_progress`,
@@ -1031,6 +1042,11 @@ export type ResolutionEvent = { type: 'ticketResolved'; taskId: string } | { typ
 // saying why.
 export type SpecClosingEvent = { type: 'specClosed'; taskId: string } | { type: 'specUnclosed'; taskId: string; reason: string };
 
+// What the daemon did about a wayfinder task's maps it owed their closing
+// (ADR 0013): it found them closed, or closed them as its App, or couldn't,
+// saying why.
+export type MapClosingEvent = { type: 'mapClosed'; taskId: string } | { type: 'mapUnclosed'; taskId: string; reason: string };
+
 // The daemon delivered the factory notes the HITL task held to its live
 // run, on the operator's turn.
 export type NoteEvent = { type: 'notesDelivered'; taskId: string };
@@ -1060,6 +1076,7 @@ export type LifecycleAction =
   | ResearchEvent
   | ResolutionEvent
   | SpecClosingEvent
+  | MapClosingEvent
   | TicketTaskLaunched
   | TicketSetEvent
   | CleanupEvent
@@ -1202,6 +1219,13 @@ function issuesFor(state: Lifecycle, task: Task, kind: string): string[] {
   const issues = issuesOfKind(state, task, kind);
   if (issues.length) return issues;
   return task.inputs?.issueKinds.includes(kind) ? task.inputs.issues : [];
+}
+
+// The task's maps in its own repository, which the factory closes as its
+// App (ADR 0013): those its chart stage made, or the launch refs standing
+// for them.
+export function mapsOf(state: Lifecycle, task: Task): string[] {
+  return issuesFor(state, task, 'map').filter((ref) => ref.toLowerCase().startsWith(`${task.repo.toLowerCase()}#`));
 }
 
 // The issues a Ralph loop reads its ticket set from (ADR 0006): the task's
@@ -1658,6 +1682,19 @@ function skipTicket(state: Lifecycle, task: Task): void {
 // holds, and it is Done. Its branch goes with its worktree once a ticket
 // task merged, carrying its docs to the base branch; else it is kept, as
 // the only copy of them.
+// The spec task's spec closed, or it has none: the wayfinder maps it was
+// written from close next (ADR 0013), unless one of them is the spec, as
+// when the spec stage was jumped over; then the spec task is Done.
+function specResolved(state: Lifecycle, task: Task, request: AttentionRequest | undefined): void {
+  const spec = task.ticketSet!.spec;
+  const maps = spec ? mapsOf(state, task) : [];
+  if (spec && maps.length && !maps.includes(spec)) {
+    task.mapClosing = { maps, spec, problem: null };
+    return;
+  }
+  finishSpecTask(state, task, request);
+}
+
 function finishSpecTask(state: Lifecycle, task: Task, request: AttentionRequest | undefined, { specOpen = false } = {}): void {
   if (!specOpen) task.ticketSet!.closed = true;
   finishRoot(task, request, { merged: true });
@@ -2355,6 +2392,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'specClosed':
     case 'specUnclosed':
       return task.ticketSet?.closing && !isTerminal(task) ? null : `${task.id} isn’t closing its spec.`;
+    case 'mapClosed':
+    case 'mapUnclosed':
+      return task.mapClosing ? null : `${task.id} isn’t closing its map.`;
     case 'ticketSetRead':
     case 'ticketSetUnread':
       return task.ticketSet?.reading && !isTerminal(task) ? null : `${task.id} isn’t reading a ticket set.`;
@@ -3631,7 +3671,19 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'specClosed':
       task.ticketSet!.closing = null;
       task.ticketSet!.problem = null;
-      finishSpecTask(state, task, request);
+      specResolved(state, task, request);
+      break;
+    case 'mapClosed':
+      task.mapClosing = null;
+      // A spec task whose spec closed is Done once its maps are.
+      if (task.ticketSet && !isTerminal(task)) {
+        task.ticketSet.problem = null;
+        finishSpecTask(state, task, request);
+      }
+      break;
+    case 'mapUnclosed':
+      task.mapClosing!.problem = action.reason;
+      if (task.ticketSet) task.ticketSet.problem = `The factory couldn’t close ${listed(task.mapClosing!.maps)} on GitHub: ${action.reason}`;
       break;
     case 'specUnclosed':
       task.ticketSet!.closing = { ...task.ticketSet!.closing, problem: action.reason };
@@ -3659,7 +3711,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const settled = Object.values(set.launched).every((id) => isTerminal(state.tasks[id]!));
       if (resolved && settled) {
         if (set.spec && action.specOpen !== false) set.closing = { problem: null };
-        else finishSpecTask(state, task, request);
+        else specResolved(state, task, request);
         break;
       }
       // With nothing to launch and nothing in flight, the spec task asks the
@@ -3854,6 +3906,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       }
       // Past the last stage, or ended there, the root task is the operator's to review.
       if (plan.kind === 'end' || !plan.to) {
+        // Ended at its cleared map, a wayfinder task closes the map: its
+        // destination was the decisions themselves.
+        const maps = plan.kind === 'end' ? mapsOf(state, task) : [];
+        if (maps.length) task.mapClosing = { maps, spec: null, problem: null };
         task.loop = null;
         task.state = 'in-review';
         break;

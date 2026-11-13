@@ -80,6 +80,8 @@ import {
   type ResearchEvent,
   type ResolutionEvent,
   type SpecClosingEvent,
+  mapsOf,
+  type MapClosingEvent,
   type TicketSetEvent,
   type TicketTaskLaunched,
   type ReopenEvent,
@@ -1109,11 +1111,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // that has sub-issues, with those sub-issues as its tickets. Tickets
   // linked to it only by text are no sub-issues, so it has none. Issues of
   // other repositories are left out.
+  // A wayfinder map's tickets are its open sub-issues, those written from it
+  // once its spec was jumped over: its closed decision tickets are no
+  // tickets, and with none open it is no candidate.
   async function specCandidates(task: Task): Promise<HandoffTicketSets> {
     try {
       const { token } = await appToken(task.repo, READ_ONLY);
       const candidates: SpecCandidate[] = [];
       const childless: string[] = [];
+      const maps = mapsOf(lifecycle, task);
       // Its ticket tasks work in its repository alone.
       const ours = recordedIssues(lifecycle, task).filter((ref) => ref.toLowerCase().startsWith(`${task.repo.toLowerCase()}#`));
       for (const ref of ours) {
@@ -1125,16 +1131,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const { title } = await github.readIssue(token, ref);
         const tickets: Issue[] = [];
         for (const ticket of subIssues) tickets.push(await github.readIssue(token, ticket));
-        candidates.push({ spec: ref, title, tickets });
+        if (!maps.includes(ref)) candidates.push({ spec: ref, title, tickets });
+        else if (tickets.some(({ open }) => open)) candidates.push({ spec: ref, title, tickets: tickets.filter(({ open }) => open) });
       }
       const withoutTickets: HandoffTicketSets['withoutTickets'] = [];
       for (const ref of childless) {
         if (candidates.some(({ tickets }) => tickets.some((ticket) => ticket.ref === ref))) continue;
         withoutTickets.push({ ref, title: (await github.readIssue(token, ref)).title });
       }
-      // The spec the spec stage wrote is the likeliest, else the issue recorded last.
+      // The spec the spec stage wrote is the likeliest, else the map it was
+      // jumped over for, else the issue recorded last.
       const specs = issuesOfKind(lifecycle, task, 'spec');
-      const selected = candidates.find(({ spec }) => specs.includes(spec)) ?? candidates.at(-1);
+      const selected = candidates.find(({ spec }) => specs.includes(spec)) ?? candidates.find(({ spec }) => maps.includes(spec)) ?? candidates.at(-1);
       return { candidates, selected: selected?.spec ?? null, withoutTickets, problem: null };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
@@ -1591,14 +1599,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Resolves each merged ticket task's ticket (ADR 0013): once per daemon,
   // and again at every PR poll while it fails. Its outcome goes through the
   // Lifecycle like any other event.
-  // A spec task's spec, once none of its tickets is open, is closed alike.
+  // A spec task's spec, once none of its tickets is open, is closed alike,
+  // and a wayfinder task's maps once they are owed their closing.
   function driveResolutions(): void {
     for (const task of Object.values(lifecycle.tasks)) {
       const closing = !!task.ticketSet?.closing && !isTerminal(task);
-      if (stopping || !(task.resolving || closing) || resolutionsTried.has(task.id) || resolutionsInFlight.has(task.id)) continue;
-      resolutionsTried.add(task.id);
+      if (stopping || !(task.resolving || closing || task.mapClosing) || resolutionsInFlight.has(task.id)) continue;
+      // The maps close right after the spec: each closing is tried once per poll.
+      const tried = !closing && task.mapClosing ? `${task.id}:maps` : task.id;
+      if (resolutionsTried.has(tried)) continue;
+      resolutionsTried.add(tried);
       resolutionsInFlight.add(task.id);
-      void (closing ? closeSpec(task) : resolveTicket(task)).then(
+      void (closing ? closeSpec(task) : task.mapClosing ? closeMaps(task) : resolveTicket(task)).then(
         (event) =>
           serially(async () => {
             resolutionsInFlight.delete(task.id);
@@ -1665,9 +1677,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     try {
       const { token } = await appToken(task.repo, READ_ONLY);
       const spec = set.spec ? await github.readIssue(token, set.spec) : null;
-      const tickets = set.spec ? await github.subIssues(token, set.spec) : set.tickets;
-      const issues: Issue[] = [];
-      for (const ref of tickets) issues.push(await github.readIssue(token, ref));
+      const subIssues = set.spec ? await github.subIssues(token, set.spec) : set.tickets;
+      let issues: Issue[] = [];
+      for (const ref of subIssues) issues.push(await github.readIssue(token, ref));
+      // A map standing in for the spec: its closed decision tickets, none
+      // of those confirmed, are ignored (ADR 0013).
+      if (set.spec && mapsOf(lifecycle, task).includes(set.spec)) issues = issues.filter(({ ref, open }) => open || set.tickets.includes(ref));
+      const tickets = issues.map(({ ref }) => ref);
       return { type: 'ticketSetRead', taskId: task.id, issues, reads, ...(spec && { tickets, specOpen: spec.open }) };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
@@ -1779,6 +1795,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
       return { type: 'specUnclosed', taskId: task.id, reason: error.message };
+    }
+  }
+
+  // Closes the wayfinder task's maps as completed, those still open, as the
+  // App: read with a read-only token, closed with a token minted for that
+  // write alone (ADR 0004), and a comment pointing at the spec written from
+  // them, or saying the task ended at the cleared map. Their decision
+  // tickets are never touched (ADR 0012).
+  async function closeMaps(task: Task): Promise<MapClosingEvent> {
+    const { maps } = task.mapClosing!;
+    try {
+      const { token: reading } = await appToken(task.repo, READ_ONLY);
+      const open: string[] = [];
+      for (const map of maps) if ((await github.readIssue(reading, map)).open) open.push(map);
+      if (open.length) {
+        const { token } = await appToken(task.repo, TICKET_WRITE);
+        for (const map of open) await github.closeIssue(token, map, mapComment(task));
+      }
+      return { type: 'mapClosed', taskId: task.id };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'mapUnclosed', taskId: task.id, reason: error.message };
     }
   }
 
@@ -3021,6 +3059,16 @@ function specComment(state: Lifecycle, task: Task): string {
   });
   const why = set.closing?.anyway ? 'The operator closed this spec with tickets left open' : 'Every ticket of this spec is closed';
   return [`${why}, so the agents factory’s task ${task.id} (${task.title}) closes it:`, '', ...lines].join('\n');
+}
+
+// What closing a wayfinder map says on it (ADR 0013): the spec written from
+// it closed, or the operator ended the task at the cleared map.
+function mapComment(task: Task): string {
+  const { spec } = task.mapClosing!;
+  const by = `the agents factory’s task ${task.id} (${task.title})`;
+  return spec
+    ? `The spec written from this map, ${spec}, is closed, so ${by} closes it.`
+    : `This map cleared, and the operator ended ${by} there, so it closes it.`;
 }
 
 // What closing a merged ticket task's ticket says on it (ADR 0013): the PR

@@ -116,7 +116,7 @@ A spec's ticket whose ticket task the operator cancelled: it stays open, its spe
 _Avoid_: Dropped ticket, abandoned ticket
 
 **Map**:
-The GitHub issue a wayfinder task charts, whose sub-issues are the decision tickets that clear the way to its destination. It is never a ticket itself.
+The GitHub issue a wayfinder task charts, whose sub-issues are the decision tickets that clear the way to its destination. It is never a ticket itself. It closes right after the spec written from it, or as its task ends at the cleared map; with the spec jumped over, it stands in for the spec, its open sub-issues being the ticket set.
 _Avoid_: Plan, epic
 
 **Frontier**:
