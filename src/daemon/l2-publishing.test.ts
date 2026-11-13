@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { AutonomyLevel } from '../lifecycle/lifecycle.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
+import { keepRalphLoop } from '../testing/ralph-loop-preset.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
@@ -28,6 +29,7 @@ const CONTENTS_WRITE = { contents: 'write', metadata: 'read' };
 async function attached(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
   const factory = await startTestFactory();
   factories.push(factory);
+  keepRalphLoop(factory);
   await factory.secrets.write(SUBSCRIPTION_TOKEN_SECRET, 'sk-ant-oat01-token');
   await factory.registerRepo();
   factory.github.addIssue('acme/widgets#10');

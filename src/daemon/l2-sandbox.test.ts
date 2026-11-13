@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
 import { BUILT_IN_EGRESS } from '../sandbox/sandbox.ts';
+import { keepRalphLoop } from '../testing/ralph-loop-preset.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
@@ -182,6 +183,7 @@ describe('an L2 run’s egress', () => {
 
   test('denied to an iteration that completes with no new commit is listed on its failure request too, for the operator to allow', async () => {
     const { factory, operator, tui } = await attached();
+    keepRalphLoop(factory);
     factory.github.addIssue('acme/widgets#10');
     factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', issues: ['#10'], autonomy: 'L2' });

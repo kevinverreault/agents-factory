@@ -10,6 +10,7 @@ import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
 import { relayHook } from '../hooks/relay.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
+import { keepRalphLoop } from '../testing/ralph-loop-preset.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -247,6 +248,7 @@ describe('a cancel cascade', () => {
 
   test('crashed before it reopened the tickets the task closed reopens them on the next start', async () => {
     const { factory, operator, tui } = await attached();
+    keepRalphLoop(factory);
     factory.github.addIssue('acme/widgets#10');
     factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });
     factory.github.addIssue('acme/widgets#12', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });

@@ -30,6 +30,10 @@ import {
   allowedRules,
   allowsByRules,
   artifactsOf,
+  handoffStage,
+  recordedIssues,
+  type HandoffTicketSets,
+  type SpecCandidate,
   betweenIterations,
   readingMap,
   BRIEF_REQUEST,
@@ -1015,7 +1019,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const action: LifecycleAction = { type: 'handoffOpened', taskId, readiness: { blockers: [], toCommit: [] }, ...(quick && { quick }) };
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
-      action.readiness = await readiness(lifecycle.tasks[taskId]!);
+      const task = lifecycle.tasks[taskId]!;
+      action.readiness = await readiness(task);
+      action.ticketSets = launchesTickets(handoffStage(task) ?? undefined) ? await specCandidates(task) : null;
       const refusal = await settle(action, new Set());
       return refusal ? { ok: false, reason: refusal } : { ok: true };
     });
@@ -1025,10 +1031,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // its AFK run's guards accept it (ADR 0007), checked afresh. The task's
   // uncommitted files are then committed to the task branch, as the HITL
   // work they are, and the task goes AFK.
-  function handOff({ taskId, brief, continueAs, autonomy, tier, maxTurns }: Extract<HandoffCommand, { type: 'handoff' }>): Promise<Reply> {
+  function handOff({ taskId, brief, continueAs, autonomy, tier, maxTurns, specs }: Extract<HandoffCommand, { type: 'handoff' }>): Promise<Reply> {
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
-      const action: LifecycleAction = { type: 'handedOff', taskId, brief, continueAs, autonomy, tier, maxTurns, committed: [], sessionId: randomUUID() };
+      const action: LifecycleAction = {
+        type: 'handedOff',
+        taskId,
+        brief,
+        continueAs,
+        autonomy,
+        tier,
+        maxTurns,
+        ...(specs && { specs: [...specs] }),
+        committed: [],
+        sessionId: randomUUID(),
+      };
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
@@ -1057,6 +1074,41 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (refusal && action.intent) await settle({ type: 'intentDropped', taskId, intentId: action.intent }, new Set());
       return refusal ? { ok: false, reason: refusal } : { ok: true };
     });
+  }
+
+  // The spec candidates of the task's handoff (ADR 0013), read from GitHub
+  // as the App with a read-only token: each issue it recorded, at any stage,
+  // that has sub-issues, with those sub-issues as its tickets. Tickets
+  // linked to it only by text are no sub-issues, so it has none. Issues of
+  // other repositories are left out.
+  async function specCandidates(task: Task): Promise<HandoffTicketSets> {
+    try {
+      const { token } = await appToken(task.repo, READ_ONLY);
+      const candidates: SpecCandidate[] = [];
+      const childless: string[] = [];
+      // Its ticket tasks work in its repository alone.
+      const ours = recordedIssues(lifecycle, task).filter((ref) => ref.toLowerCase().startsWith(`${task.repo.toLowerCase()}#`));
+      for (const ref of ours) {
+        const subIssues = await github.subIssues(token, ref);
+        if (subIssues.length === 0) {
+          childless.push(ref);
+          continue;
+        }
+        const { title } = await github.readIssue(token, ref);
+        const tickets: Issue[] = [];
+        for (const ticket of subIssues) tickets.push(await github.readIssue(token, ticket));
+        candidates.push({ spec: ref, title, tickets });
+      }
+      const withoutTickets: HandoffTicketSets['withoutTickets'] = [];
+      for (const ref of childless) {
+        if (candidates.some(({ tickets }) => tickets.some((ticket) => ticket.ref === ref))) continue;
+        withoutTickets.push({ ref, title: (await github.readIssue(token, ref)).title });
+      }
+      return { candidates, withoutTickets, problem: null };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { candidates: [], withoutTickets: [], problem: `The factory couldn’t read ${task.id}’s issues’ sub-issues from GitHub: ${error.message}` };
+    }
   }
 
   // Commits those of the handoff's files still uncommitted, as the HITL

@@ -218,6 +218,7 @@ const HANDOFF_SHEET: NonNullable<TaskView['handoff']> = {
   maxTurns: 300,
   contextShare: 0.23,
   readiness: { blockers: [], toCommit: ['GLOSSARY.md'] },
+  ticketSets: null,
 };
 
 // The demo's connection: a FakeConnection that knows the widgets clone,

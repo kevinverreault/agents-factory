@@ -10,7 +10,7 @@ import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../m
 import { issueRef } from '../artifacts/capture.ts';
 import type { Issue, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
-import { artifactKindsIn, fillOpening, isWorkLoop, namesPrompt, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
+import { artifactKindsIn, fillOpening, isWorkLoop, launchesTickets, namesPrompt, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { cutToFit, oneLineOf } from '../text/lines.ts';
 import {
@@ -128,7 +128,22 @@ export type HandoffSheet = {
   // The share of the context window the conversation fills, when known.
   contextShare: number | null;
   readiness: Readiness;
+  // The spec candidates the factory found for a handoff to a stage that
+  // launches ticket tasks (ADR 0013), or null for one to any other stage.
+  // Sheets stored before ticket sets have none.
+  ticketSets?: HandoffTicketSets | null;
 };
+
+// A spec candidate of a handoff (ADR 0013): an issue the task recorded, at
+// any stage, that has sub-issues, which are its tickets, in their order.
+export type SpecCandidate = { spec: string; title: string; tickets: Issue[] };
+
+// The spec candidates the handoff sheet offers, as the factory read them
+// from GitHub when it opened, and why it couldn't read them, if it couldn't.
+// `withoutTickets` are the issues the task recorded with no sub-issues that
+// are no candidate's ticket: tickets linked to one only by text ("Part of
+// #n") leave it here, with 0 tickets.
+export type HandoffTicketSets = { candidates: SpecCandidate[]; withoutTickets: { ref: string; title: string }[]; problem: string | null };
 // A quick launch's grill, while it lasts (`n`): the questions the operator
 // has answered so far, of at most QUICK_QUESTIONS, and whether the grill is
 // `done`, so the factory opens its handoff sheet: once a turn of it ends on
@@ -868,14 +883,18 @@ export type StageAdvanced = { type: 'stageAdvanced'; taskId: string; skip: strin
 // The operator opened the handoff sheet (`ctrl+h` or `/handoff`), and the
 // daemon read how the task's worktree stands.
 // `quick` when the factory opened it to end a quick launch's grill.
-export type HandoffOpened = { type: 'handoffOpened'; taskId: string; readiness: Readiness; quick?: boolean };
+// For a handoff to a stage launching ticket tasks, it read the spec candidates too.
+export type HandoffOpened = { type: 'handoffOpened'; taskId: string; readiness: Readiness; quick?: boolean; ticketSets?: HandoffTicketSets | null };
 
 // The daemon read the worktree again for the open handoff sheet, such as
 // once the agent's turn ended: it may have changed files meanwhile.
 export type ReadinessRead = { type: 'readinessRead'; taskId: string; readiness: Readiness };
 
-// The brief and fields the operator confirms the handoff sheet with.
-export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: number };
+// The brief and fields the operator confirms the handoff sheet with, and
+// the spec candidates they kept selected: the one confirmed makes the task
+// a spec task over its tickets (ADR 0013), and with none it is one AFK run
+// on the brief.
+export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: number; specs?: string[] };
 
 // The operator confirmed the handoff sheet, and the daemon committed the
 // task's uncommitted files of `committed`. The daemon names a session, for
@@ -1107,6 +1126,13 @@ export function lastUsedRepo(state: Lifecycle): string | null {
 
 export function artifactsOf(state: Lifecycle, task: Task): Artifact[] {
   return Object.values(state.artifacts).filter((artifact) => artifact.taskId === task.id);
+}
+
+// Every issue the task recorded, at any stage, then those it launched on,
+// each once: the spec candidates of its handoff are among them (ADR 0013).
+export function recordedIssues(state: Lifecycle, task: Task): string[] {
+  const issues = artifactsOf(state, task).flatMap((artifact) => (artifact.kind === 'issue' ? [issueRef(artifact.url)] : []));
+  return [...new Set([...issues, ...(task.inputs?.issues ?? [])])];
 }
 
 // The task's issues of an artifact kind (`spec`…), as `owner/name#n`: those
@@ -1973,7 +1999,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!CONTINUE_AS.includes(action.continueAs)) return 'Continue as resume, or fresh from the brief.';
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
       if (!isTier(action.tier)) return tierRefusal(action.tier);
-      return Number.isInteger(action.maxTurns) && action.maxTurns >= 1 ? null : 'Max turns must be a whole number of at least 1.';
+      if (!(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) return 'Max turns must be a whole number of at least 1.';
+      return specsRefusal(task.handoff, action.specs ?? []);
     }
     case 'closeHandoff':
       return task.handoff ? null : `${task.id} has no handoff sheet open.`;
@@ -2600,10 +2627,27 @@ function sheetOpen(task: Task): string {
 // The AFK stage a handoff starts: the first from the task's own stage on.
 // Remaining HITL stages are skipped, and so is a stage that requires L2,
 // which a handoff doesn't reach yet. Null when the task has none ahead.
-function handoffStage(task: Task): Stage | null {
+export function handoffStage(task: Task): Stage | null {
   const stages = task.preset?.stages ?? [];
   const from = Math.max(stages.findIndex(({ id }) => id === task.stage), 0);
   return stages.slice(from).find((stage) => stage.mode === 'AFK' && stage.requires !== 'L2') ?? null;
+}
+
+// The handoff's files of `committed`, as the handoff commit took them.
+function commitArtifacts(state: Lifecycle, task: Task, committed: string[]): void {
+  for (const artifact of artifactsOf(state, task)) {
+    if (artifact.kind === 'file' && committed.includes(artifact.path)) artifact.committed = true;
+  }
+}
+
+// Why the handoff can't confirm the spec candidates `specs`, or null: each
+// must be one the sheet offers, and a spec task works one spec.
+function specsRefusal(sheet: HandoffSheet, specs: string[]): string | null {
+  const offered = sheet.ticketSets?.candidates.map(({ spec }) => spec) ?? [];
+  const unknown = specs.find((spec) => !offered.includes(spec));
+  if (unknown) return `${unknown} isn’t a spec candidate of this handoff${offered.length ? ` (${offered.join(', ')})` : ''}.`;
+  if (new Set(specs).size > 1) return `A spec task works one spec: keep one of ${[...new Set(specs)].join(', ')} selected.`;
+  return null;
 }
 
 // A new handoff sheet, pre-filled from the AFK stage it hands off to. It
@@ -3217,6 +3261,21 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.goal = briefText(tidyBrief(action.brief));
       task.brief = task.goal;
       const to = stageOf(task, sheet.stage);
+      // The spec candidate confirmed makes it a spec task over its tickets
+      // (ADR 0013): it runs no agent and holds no slot, and reads them
+      // from GitHub first.
+      const confirmed = sheet.ticketSets?.candidates.find(({ spec }) => action.specs?.includes(spec));
+      if (to && confirmed) {
+        task.stage = to.id;
+        task.kind = 'spec';
+        task.mergePolicy = 'operator';
+        task.ticketSet = { spec: confirmed.spec, tickets: confirmed.tickets.map(({ ref }) => ref), reading: true, issues: [], toLaunch: [], launched: {}, problem: null };
+        task.loop = null;
+        task.resumeWith = null;
+        commitArtifacts(state, task, action.committed);
+        task.state = 'running';
+        break;
+      }
       // A loop taken over before it closed its last ticket closes it first,
       // pushing the task branch before at L2, and one finishing ends at its next pick.
       const kept = to?.id === task.stage ? task.loop : null;
@@ -3235,9 +3294,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         task.newSession = true;
         task.context = null;
       }
-      for (const artifact of artifactsOf(state, task)) {
-        if (artifact.kind === 'file' && action.committed.includes(artifact.path)) artifact.committed = true;
-      }
+      commitArtifacts(state, task, action.committed);
       // Queued as work continuing something in flight, for the scheduler.
       task.state = 'queued';
       break;
@@ -3543,6 +3600,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       }
       const sheet = task.handoff;
       sheet.readiness = action.readiness;
+      if (action.ticketSets !== undefined) sheet.ticketSets = structuredClone(action.ticketSets);
       // A quick launch ends on its handoff sheet: backing out of it keeps the conversation going.
       task.quick = null;
       if (sheet.brief) break;

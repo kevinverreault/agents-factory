@@ -3,6 +3,7 @@
 // session's earlier runs, and every usage view is a query over runs.
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
+import { keepRalphLoop } from '../testing/ralph-loop-preset.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { usageViews } from '../usage/usage.ts';
@@ -306,6 +307,7 @@ describe('usage views', () => {
   test('task, tree, group, stage, ticket and model totals are queries over the same runs, so they agree', async () => {
     const factory = await startTestFactory();
     factories.push(factory);
+    keepRalphLoop(factory);
     await factory.registerRepo();
     const { github, git, executor } = factory;
     github.addIssue('acme/widgets#10');

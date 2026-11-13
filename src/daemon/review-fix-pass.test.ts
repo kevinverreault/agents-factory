@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import { handOff } from '../testing/handoff.ts';
+import { keepRalphLoop } from '../testing/ralph-loop-preset.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -216,6 +217,7 @@ describe('the PR body', () => {
   test('lists every ticket the task closed as Implements #n, turning a closing keyword on one to Implements, through main-flow at L1, URL or not', async () => {
     const factory = await startTestFactory();
     factories.push(factory);
+    keepRalphLoop(factory);
     await factory.registerRepo();
     factory.github.addIssue('acme/widgets#10');
     for (const ticket of ['acme/widgets#11', 'acme/widgets#12']) factory.github.addIssue(ticket, { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });

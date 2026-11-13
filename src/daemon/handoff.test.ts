@@ -380,3 +380,146 @@ describe('confirming the handoff', () => {
     await tui.until((state) => state.tasks.T1?.label === 'In review');
   });
 });
+
+// A tool of R1 prints an issue's URL, as `gh issue create` or `gh issue view`
+// does, and artifact capture links the issue to T1, at its grill stage.
+async function printsIssue(factory: TestFactory, tui: Watched, ref: string): Promise<void> {
+  const { sessionId, cwd } = factory.executor.started[0]!;
+  const before = Object.keys(tui.state().artifacts).length;
+  const event = { session_id: sessionId, cwd, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh issue create' } };
+  await relayHook(JSON.stringify({ ...event, tool_response: `https://github.com/acme/widgets/issues/${ref.split('#')[1]}\n` }), factory.paths);
+  await tui.until((state) => Object.keys(state.artifacts).length > before);
+}
+
+// The spec #132 with its tickets #133 (ready), #134 (ready, blocked by #133),
+// #135 (ready) and #136 (closed); and #11, an older issue with the sub-issue #12.
+function specOnGitHub(factory: TestFactory): void {
+  const { github } = factory;
+  const ready = ['ready-for-agent'];
+  github.addIssue('acme/widgets#132', { title: 'Webhook retries' });
+  github.addIssue('acme/widgets#133', { title: 'Retry 5xx', parent: 'acme/widgets#132', labels: ready });
+  github.addIssue('acme/widgets#134', { title: 'Dead letters', parent: 'acme/widgets#132', labels: ready, blockedBy: ['acme/widgets#133'] });
+  github.addIssue('acme/widgets#135', { title: 'Backoff', parent: 'acme/widgets#132', labels: ready });
+  github.addIssue('acme/widgets#136', { title: 'Timeouts', parent: 'acme/widgets#132', labels: ready });
+  github.close('acme/widgets#136');
+  github.addIssue('acme/widgets#11', { title: 'Webhooks' });
+  github.addIssue('acme/widgets#12', { title: 'Signing', parent: 'acme/widgets#11', labels: ready });
+}
+
+describe('the ticket set at handoff', () => {
+  test('a spec and tickets made during grill, with no advance, are found from GitHub’s sub-issues: confirming makes a spec task launching ticket tasks (T16)', async () => {
+    const { factory, operator, tui } = await grilling();
+    specOnGitHub(factory);
+    await printsIssue(factory, tui, 'acme/widgets#11');
+    await printsIssue(factory, tui, 'acme/widgets#132');
+    for (const ticket of ['#133', '#134', '#135', '#136']) await printsIssue(factory, tui, `acme/widgets${ticket}`);
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await operator.send({ type: 'openHandoff', taskId: 'T1' });
+    factory.executor.report('R1', { type: 'briefWritten', brief });
+
+    const sheet = await tui.until((state) => state.tasks.T1?.handoff?.brief !== null);
+    expect(sheet.tasks.T1?.handoff?.ticketSets).toEqual({
+      candidates: [
+        {
+          spec: 'acme/widgets#11',
+          title: 'Webhooks',
+          tickets: [{ ref: 'acme/widgets#12', title: 'Signing', open: true, labels: ['ready-for-agent'], openBlockers: [] }],
+        },
+        {
+          spec: 'acme/widgets#132',
+          title: 'Webhook retries',
+          tickets: [
+            { ref: 'acme/widgets#133', title: 'Retry 5xx', open: true, labels: ['ready-for-agent'], openBlockers: [] },
+            { ref: 'acme/widgets#134', title: 'Dead letters', open: true, labels: ['ready-for-agent'], openBlockers: ['acme/widgets#133'] },
+            { ref: 'acme/widgets#135', title: 'Backoff', open: true, labels: ['ready-for-agent'], openBlockers: [] },
+            { ref: 'acme/widgets#136', title: 'Timeouts', open: false, labels: ['ready-for-agent'], openBlockers: [] },
+          ],
+        },
+      ],
+      withoutTickets: [],
+      problem: null,
+    });
+
+    // The operator deselects #11, which the grill only read.
+    expect(await operator.send(confirm(sheet, { specs: ['acme/widgets#132'] }))).toEqual({ ok: true });
+
+    const state = await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+    expect(state.runs.R1).toMatchObject({ status: 'ended', outcome: 'handed off' });
+    expect(state.tasks.T1).toMatchObject({ kind: 'spec', mode: 'AFK', stage: 'implement', liveRunId: null, handoff: null });
+    expect(state.tasks.T1?.ticketSet?.spec).toBe('acme/widgets#132');
+    expect(state.tasks.T2).toMatchObject({ kind: 'ticket', ticket: 'acme/widgets#133', specTask: 'T1' });
+    expect(state.tasks.T3).toMatchObject({ kind: 'ticket', ticket: 'acme/widgets#135', specTask: 'T1' });
+    // No ticket task on the deselected #11's sub-issue, and no run on T1 itself.
+    expect(Object.values(state.runs).map(({ taskId }) => taskId)).toEqual(['T1', 'T2', 'T3']);
+    // The ticket tasks get the brief as their context.
+    expect(factory.executor.started[1]!.firstMessage).toContain('Failed webhook deliveries are retried instead of dropped.');
+  });
+
+  test('an issue whose tickets say “Part of #n” only in their text shows with 0 tickets, and a handoff with no ticket set is one run on the brief', async () => {
+    const { factory, operator, tui } = await grilling();
+    factory.github.addIssue('acme/widgets#140', { title: 'Webhook retries' });
+    factory.github.addIssue('acme/widgets#141', { title: 'Retry 5xx (Part of #140)', labels: ['ready-for-agent'] });
+    await printsIssue(factory, tui, 'acme/widgets#140');
+    await printsIssue(factory, tui, 'acme/widgets#141');
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await operator.send({ type: 'openHandoff', taskId: 'T1' });
+    factory.executor.report('R1', { type: 'briefWritten', brief });
+
+    const sheet = await tui.until((state) => state.tasks.T1?.handoff?.brief !== null);
+    expect(sheet.tasks.T1?.handoff?.ticketSets).toEqual({
+      candidates: [],
+      withoutTickets: [
+        { ref: 'acme/widgets#140', title: 'Webhook retries' },
+        { ref: 'acme/widgets#141', title: 'Retry 5xx (Part of #140)' },
+      ],
+      problem: null,
+    });
+    expect(await operator.send(confirm(sheet, { specs: [] }))).toEqual({ ok: true });
+
+    const state = await tui.until((state) => state.tasks.T1?.liveRunId === 'R2');
+    expect(state.tasks.T1).toMatchObject({ kind: 'plain', ticketSet: null, mode: 'AFK', stage: 'implement' });
+    expect(factory.executor.started[1]!.firstMessage).toBe(`/factory:implement\n\n${state.tasks.T1!.goal}`);
+  });
+
+  test('confirms one spec candidate the sheet offers, at most', async () => {
+    const { factory, operator, tui } = await grilling();
+    specOnGitHub(factory);
+    await printsIssue(factory, tui, 'acme/widgets#11');
+    await printsIssue(factory, tui, 'acme/widgets#132');
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await operator.send({ type: 'openHandoff', taskId: 'T1' });
+    factory.executor.report('R1', { type: 'briefWritten', brief });
+    const sheet = await tui.until((state) => state.tasks.T1?.handoff?.brief !== null);
+
+    expect(await operator.send(confirm(sheet, { specs: ['acme/widgets#11', 'acme/widgets#132'] }))).toEqual({
+      ok: false,
+      reason: 'A spec task works one spec: keep one of acme/widgets#11, acme/widgets#132 selected.',
+    });
+    expect(await operator.send(confirm(sheet, { specs: ['acme/widgets#99'] }))).toEqual({
+      ok: false,
+      reason: 'acme/widgets#99 isn’t a spec candidate of this handoff (acme/widgets#11, acme/widgets#132).',
+    });
+    expect(tui.state().tasks.T1).toMatchObject({ mode: 'HITL', liveRunId: 'R1', kind: 'plain' });
+  });
+
+  test('why the factory couldn’t read the sub-issues shows on the sheet', async () => {
+    const { factory, operator, tui } = await grilling();
+    await printsIssue(factory, tui, 'acme/widgets#77');
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await operator.send({ type: 'openHandoff', taskId: 'T1' });
+
+    const sheet = await tui.until((state) => state.tasks.T1?.handoff !== null);
+    expect(sheet.tasks.T1?.handoff?.ticketSets).toEqual({
+      candidates: [],
+      withoutTickets: [],
+      problem: 'The factory couldn’t read T1’s issues’ sub-issues from GitHub: GitHub refused the call (HTTP 404: Not Found).',
+    });
+  });
+
+  test('a handoff to a stage that launches no ticket tasks reads no ticket set', async () => {
+    const { operator, tui } = await grilling('setup');
+    await operator.send({ type: 'openHandoff', taskId: 'T1' });
+
+    expect((await tui.until((state) => state.tasks.T1?.handoff !== null)).tasks.T1?.handoff?.ticketSets).toBeNull();
+  });
+});

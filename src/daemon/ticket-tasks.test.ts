@@ -233,15 +233,16 @@ describe('the other implement launches', () => {
     expect(factory.executor.started.map(({ firstMessage }) => firstMessage)).toEqual(['/factory:implement Fix the login bug.']);
   });
 
-  test('a ref with sub-issues makes no ticket task', async () => {
+  test('a ref with sub-issues makes no ticket task of itself, but a spec task over them', async () => {
     const { factory, operator, tui } = await attached();
     factory.github.addIssue('acme/widgets#10');
     factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: READY });
 
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', issues: ['#10'] });
 
-    await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
-    expect(tui.state().tasks.T1).toMatchObject({ kind: 'plain', ticket: null });
+    await tui.until((state) => state.tasks.T2?.liveRunId === 'R1');
+    expect(tui.state().tasks.T1).toMatchObject({ kind: 'spec', ticket: null });
+    expect(tui.state().tasks.T2).toMatchObject({ kind: 'ticket', ticket: 'acme/widgets#11', specTask: 'T1' });
   });
 
   test('a ref whose sub-issues can’t be read is refused, saying why', async () => {

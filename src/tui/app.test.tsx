@@ -1738,6 +1738,7 @@ describe('launching and conversing', () => {
     maxTurns: 300,
     contextShare: 0.23,
     readiness: { blockers: [], toCommit: ['GLOSSARY.md'] },
+    ticketSets: null,
   };
 
   test('the agent’s proposal to hand off shows as a banner, and ctrl+h or /handoff opens the handoff sheet, even over an open card', async () => {
@@ -1918,6 +1919,74 @@ describe('launching and conversing', () => {
         { type: 'sendMessage', taskId: 'T1', text: 'Still there?' },
       ]),
     );
+  });
+
+  // A ticket of a spec candidate on the handoff sheet.
+  const ticket = (n: number, more: { open?: boolean; openBlockers?: string[]; labels?: string[] } = {}) => ({
+    ref: `acme/widgets#${n}`,
+    title: `Ticket ${n}`,
+    open: more.open ?? true,
+    labels: more.labels ?? ['ready-for-agent'],
+    openBlockers: more.openBlockers ?? [],
+  });
+  const ticketSets = {
+    candidates: [
+      { spec: 'acme/widgets#11', title: 'Webhooks', tickets: [ticket(12)] },
+      { spec: 'acme/widgets#132', title: 'Webhook retries', tickets: [ticket(133), ticket(134, { openBlockers: ['acme/widgets#133'] }), ticket(135), ticket(136, { open: false }), ticket(137, { labels: [] })] },
+    ],
+    withoutTickets: [{ ref: 'acme/widgets#140', title: 'Retries (Part of #132)' }],
+    problem: null,
+  };
+
+  test('the sheet shows each spec candidate with its tickets and how many are ready now, the last one selected, and issues with 0 tickets', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('[ ] Spec #11 Webhooks → 1 ticket, 1 ready now');
+      expect(frame).toContain('[x] Spec #132 Webhook retries → 5 tickets, 2 ready now');
+      expect(frame).toContain('#140 Retries (Part of #132) → 0 tickets: none are its sub-issues');
+    });
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', taskId: 'T1', specs: ['acme/widgets#132'] }]));
+  });
+
+  test('on the sheet, space toggles a spec candidate, selecting it alone; with none selected the handoff is one run on the brief', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('[x] Spec #132'));
+
+    // Down past the brief's goal and lists, onto the first candidate.
+    await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ' ');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('› Ticket set [x] Spec #11 Webhooks');
+      expect(frame).toContain('[ ] Spec #132 Webhook retries');
+    });
+    await press(app, ' ');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('› Ticket set [ ] Spec #11 Webhooks');
+      expect(frame).toContain('No ticket set: the handoff is one run on the brief.');
+    });
+
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toMatchObject([{ type: 'handoff', taskId: 'T1', specs: [] }]));
+  });
+
+  test('a handoff with no spec candidate says it is one run on the brief, and why the factory couldn’t read them', async () => {
+    const problem = 'The factory couldn’t read T1’s issues’ sub-issues from GitHub: GitHub refused the call (HTTP 404: Not Found).';
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief, ticketSets: { candidates: [], withoutTickets: [], problem } } }]), runs: { R1: run } });
+    await press(app, '\r', '\r');
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('No ticket set: the handoff is one run on the brief.');
+      expect(frame).toContain(problem);
+    });
   });
 
   test('a blocked handoff shows what blocks it, and esc backs out of the sheet to keep talking', async () => {

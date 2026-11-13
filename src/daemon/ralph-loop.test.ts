@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import { handOff } from '../testing/handoff.ts';
+import { keepRalphLoop } from '../testing/ralph-loop-preset.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -23,6 +24,7 @@ const READY = ['ready-for-agent'];
 async function withSpec(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
   const factory = await startTestFactory();
   factories.push(factory);
+  keepRalphLoop(factory);
   await factory.registerRepo();
   const { github } = factory;
   github.addIssue('acme/widgets#10');
@@ -125,6 +127,7 @@ describe('the next pick', () => {
   test('skips a ticket with an open blocker, and a stalled loop asks the operator', async () => {
     const factory = await startTestFactory();
     factories.push(factory);
+    keepRalphLoop(factory);
     await factory.registerRepo();
     factory.github.addIssue('acme/widgets#10');
     factory.github.addIssue('acme/widgets#20');
@@ -155,6 +158,7 @@ describe('a spec with no ready tickets', () => {
   test('is never a ticket itself: the loop asks the operator instead', async () => {
     const factory = await startTestFactory();
     factories.push(factory);
+    keepRalphLoop(factory);
     await factory.registerRepo();
     factory.github.addIssue('acme/widgets#10', { labels: READY });
     const operator = await factory.attach();

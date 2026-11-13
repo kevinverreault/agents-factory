@@ -178,7 +178,7 @@ describe('launching from a preset', () => {
 });
 
 describe('starting at a stage', () => {
-  test('main-flow started at implement with issue refs skips the HITL stages and is AFK from the first second, looping over them as tickets', async () => {
+  test('main-flow started at implement with issue refs skips the HITL stages and is AFK from the first second, a spec task launching a ticket task per ref', async () => {
     const { factory, operator, tui } = await attached();
     for (const ref of ['acme/widgets#12', 'acme/widgets#13']) factory.github.addIssue(ref, { labels: ['ready-for-agent'] });
 
@@ -187,10 +187,11 @@ describe('starting at a stage', () => {
       value: { taskId: 'T1' },
     });
 
-    const { tasks } = await tui.until((state) => state.tasks.T1?.label === 'Running');
-    expect(tasks.T1).toMatchObject({ title: 'acme/widgets#12 acme/widgets#13', mode: 'AFK', autonomy: 'L1', stage: 'implement' });
+    const { tasks } = await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
+    expect(tasks.T1).toMatchObject({ title: 'acme/widgets#12 acme/widgets#13', kind: 'spec', mode: 'AFK', autonomy: 'L1', stage: 'implement', liveRunId: null });
     expect(factory.executor.started).toMatchObject([
       { runId: 'R1', mode: 'AFK', autonomy: 'L1', firstMessage: expect.stringMatching(/^\/factory:implement acme\/widgets#12\n\n/), model: 'claude-sonnet-5-5' },
+      { runId: 'R2', firstMessage: expect.stringMatching(/^\/factory:implement acme\/widgets#13\n\n/) },
     ]);
   });
 

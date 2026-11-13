@@ -22,6 +22,7 @@ import {
   type FrontierTicket,
   type FrozenPreset,
   type HandoffSheet,
+  type HandoffTicketSets,
   type Lifecycle,
   type MergePolicy,
   type Mode,
@@ -129,7 +130,7 @@ export type TaskView = {
   transcripts: string | null;
 };
 
-export type HandoffView = Omit<HandoffSheet, 'asked'>;
+export type HandoffView = Omit<HandoffSheet, 'asked' | 'ticketSets'> & { ticketSets: HandoffTicketSets | null };
 
 export type RunView = Pick<
   Run,
@@ -297,7 +298,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
 function handoffView(sheet: HandoffSheet | null): HandoffView | null {
   if (!sheet) return null;
   const { asked, ...view } = structuredClone(sheet);
-  return view;
+  return { ...view, ticketSets: view.ticketSets ?? null };
 }
 
 export function repositoryView({ id, path, baseBranch, defaultPreset, missing, app, skills }: Repository): RepositoryView {

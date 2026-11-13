@@ -18,7 +18,7 @@ function refusal(files: PresetFile[], name: string): string {
 }
 
 describe('built-in presets', () => {
-  test('main-flow grills, specs and tickets HITL on opus, then implements, reviews and opens a PR AFK', () => {
+  test('main-flow grills, specs and tickets HITL on opus, then launches ticket tasks until its spec closes, reviews and opens a PR AFK', () => {
     const preset = resolved([], 'main-flow');
 
     expect(preset).toMatchObject({ name: 'main-flow', source: 'built-in' });
@@ -26,12 +26,12 @@ describe('built-in presets', () => {
       ['grill', 'run', 'grill-with-docs', 'HITL', 'opus'],
       ['spec', 'run', 'to-spec', 'HITL', 'opus'],
       ['tickets', 'run', 'to-tickets', 'HITL', 'opus'],
-      ['implement', 'loop', 'implement', 'AFK', 'sonnet'],
+      ['implement', 'tickets', 'implement', 'AFK', 'sonnet'],
       ['review', 'run', 'code-review', 'AFK', 'sonnet'],
       ['pr-body', 'run', 'pr', 'AFK', 'haiku'],
       ['open-pr', 'action', null, 'AFK', null],
     ]);
-    expect(preset.stages.find((stage) => stage.id === 'implement')).toMatchObject({ exit: 'tickets-closed' });
+    expect(preset.stages.find((stage) => stage.id === 'implement')).toMatchObject({ exit: 'spec-closed' });
     expect(preset.stages.find((stage) => stage.id === 'review')).toMatchObject({ on_findings: 'fix-once' });
     expect(preset.stages.find((stage) => stage.id === 'open-pr')).toMatchObject({ requires: 'L2' });
   });
@@ -50,22 +50,23 @@ describe('built-in presets', () => {
       context: 'fresh',
       exit: 'artifact:spec',
     });
+    expect(preset.stages.find((stage) => stage.id === 'implement')).toEqual(resolved([], 'main-flow').stages.find((stage) => stage.id === 'implement'));
   });
 
-  test('implement starts main-flow at its implement loop, on issue refs, a prompt or both, then reviews and opens a PR', () => {
+  test('implement starts main-flow at its tickets stage, on issue refs, a prompt or both, then reviews and opens a PR', () => {
     const preset = resolved([], 'implement');
     const mainFlow = resolved([], 'main-flow');
 
     expect(preset.stages.map((stage) => stage.id)).toEqual(['implement', 'review', 'pr-body', 'open-pr']);
     expect(preset.stages[0]).toEqual({
       id: 'implement',
-      kind: 'loop',
+      kind: 'tickets',
       skill: 'implement',
       args: '{{artifacts.tickets}} {{prompt}}',
       mode: 'AFK',
       model: 'sonnet',
       context: 'fresh',
-      exit: 'tickets-closed',
+      exit: 'spec-closed',
     });
     expect(preset.stages.slice(1)).toEqual(mainFlow.stages.slice(-3));
     // Either input starts it: its needs are alternatives.
@@ -129,14 +130,14 @@ describe('extends', () => {
     expect(preset.stages.map((stage) => stage.id)).toEqual(['grill', 'spec', 'tickets', 'implement', 'lint', 'review', 'pr-body', 'open-pr', 'changelog']);
     expect(preset.stages.find((stage) => stage.id === 'implement')).toEqual({
       id: 'implement',
-      kind: 'loop',
+      kind: 'tickets',
       skill: 'implement',
       args: '{{artifacts.tickets}}',
       mode: 'AFK',
       model: 'opus',
       max_turns: 80,
       context: 'fresh',
-      exit: 'tickets-closed',
+      exit: 'spec-closed',
     });
   });
 

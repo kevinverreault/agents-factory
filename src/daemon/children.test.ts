@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import { handOff } from '../testing/handoff.ts';
+import { keepRalphLoop } from '../testing/ralph-loop-preset.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -45,6 +46,7 @@ async function running(preset = ''): Promise<{ factory: TestFactory; operator: F
 async function looping(): Promise<{ factory: TestFactory; operator: FactoryConnection; tui: Watched }> {
   const factory = await startTestFactory();
   factories.push(factory);
+  keepRalphLoop(factory);
   await factory.registerRepo();
   factory.github.addIssue('acme/widgets#10');
   factory.github.addIssue('acme/widgets#11', { parent: 'acme/widgets#10', labels: ['ready-for-agent'] });

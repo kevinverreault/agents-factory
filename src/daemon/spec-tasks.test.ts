@@ -6,8 +6,7 @@
 // ticket task runs the spec task's frozen stages from the `tickets` stage
 // on, inherits its handoff fields, and is cut from its branch merged with
 // the latest `origin/<base>`.
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
@@ -28,26 +27,12 @@ const clone = resolve('/clones/widgets');
 
 type Factory = { factory: TestFactory; operator: FactoryConnection; tui: Watched };
 
-// The operator's `implement`, the built-in one with its implement stage
-// launching ticket tasks until the spec closes.
-const TICKETS_PRESET = [
-  'extends: implement',
-  'stages:',
-  '  - id: implement',
-  '    kind: tickets',
-  '    exit: spec-closed',
-  '',
-].join('\n');
-
-// A factory with the operator's `implement` launching ticket tasks, a
-// subscription token for L2 runs, and the spec #10 on GitHub with its
+// A factory with a subscription token for L2 runs, and the spec #10 on GitHub with its
 // sub-issues: #11 ready, #12 ready but blocked by #11, #13 untriaged, #14
 // ready but closed, and #15 ready.
 async function attached(): Promise<Factory> {
   const factory = await startTestFactory();
   factories.push(factory);
-  mkdirSync(factory.paths.presetsDir, { recursive: true });
-  writeFileSync(join(factory.paths.presetsDir, 'implement.preset.yaml'), TICKETS_PRESET);
   await factory.secrets.write(SUBSCRIPTION_TOKEN_SECRET, 'sk-ant-oat01-token');
   await factory.registerRepo();
   const { github } = factory;
@@ -211,7 +196,7 @@ describe('a ticket task', () => {
     const state = await tui.until((state) => !!state.tasks.T2?.liveRunId);
     const spec = state.tasks.T1!;
     expect(state.tasks.T2).toMatchObject({ autonomy: 'L2', tier: 'opus', groups: ['sign-in'], priority: 'urgent', mergePolicy: 'operator', specTask: 'T1' });
-    expect(state.tasks.T2?.preset).toMatchObject({ name: 'implement', source: 'user', hash: spec.preset!.hash, repoCommit: spec.preset!.repoCommit });
+    expect(state.tasks.T2?.preset).toMatchObject({ name: 'implement', source: 'built-in', hash: spec.preset!.hash, repoCommit: spec.preset!.repoCommit });
     expect(state.tasks.T2?.preset?.stages.map(({ id }) => id)).toEqual(['implement', 'review', 'pr-body', 'open-pr']);
     expect(state.runs.R1).toMatchObject({ taskId: 'T2', tier: 'opus', maxTurns: 40, autonomy: 'L2', stage: 'implement' });
     // At L2 it runs in its own container.
