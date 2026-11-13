@@ -142,7 +142,7 @@ import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.
 import type { AwakeBlock, Processes } from '../os/processes.ts';
 import { SandboxError, egressFor, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
-import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
+import { checkSkillsSetup, SETUP_FILES, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
@@ -1134,15 +1134,22 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // work they are: null once done, or why it couldn't. Done again, it
   // commits nothing twice.
   async function commitHandoff(task: Task, files: string[]): Promise<string | null> {
-    const { path } = task.worktree!;
     try {
-      const left = await git.uncommitted(path, files);
-      if (left.length) await git.commit(path, left, `Handoff of ${task.id}: ${task.title}`);
+      await commitUncommitted(task, files, `Handoff of ${task.id}: ${task.title}`);
       return null;
     } catch (error) {
       if (!(error instanceof GitError)) throw error;
       return `The handoff commit failed: ${error.message}`;
     }
+  }
+
+  // Commits those of `files` still uncommitted in the task's worktree, if
+  // any are, as the operator's HITL work. Done again, it commits nothing
+  // twice. Throws the GitError of a step that fails.
+  async function commitUncommitted(task: Task, files: string[], message: string): Promise<void> {
+    const { path } = task.worktree!;
+    const uncommitted = await git.uncommitted(path, files);
+    if (uncommitted.length) await git.commit(path, uncommitted, message);
   }
 
   // Finishes a confirmed handoff a crash cut short (ADR 0003): its commit,
@@ -1997,7 +2004,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (stopping || publishesInFlight.has(key) || (publishesStarted.has(key) && task.publishing.problem)) continue;
       publishesStarted.add(key);
       publishesInFlight.add(key);
-      void (task.publishing.step === 'push' ? pushBranch(task) : openPr(task)).then(
+      const publish = { commit: commitSetup, push: pushBranch, 'open-pr': openPr }[task.publishing.step];
+      void publish(task).then(
         (event) =>
           serially(async () => {
             publishesInFlight.delete(key);
@@ -2008,6 +2016,25 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           throw error;
         },
       );
+    }
+  }
+
+  // Commits the setup files a setup task's runs left uncommitted, as the
+  // operator's HITL work, like a handoff's (ADR 0010). Done again, it
+  // commits nothing twice. A branch that then has nothing the base branch
+  // lacks has nothing to publish.
+  async function commitSetup(task: Task): Promise<PublishEvent> {
+    const failed = (reason: string): PublishEvent => ({ type: 'publishFailed', taskId: task.id, step: 'commit', reason });
+    const repository = lifecycle.repositories[task.repo];
+    if (!repository) return failed(`${task.repo} isn’t registered any more.`);
+    const { branch } = task.worktree!;
+    try {
+      await commitUncommitted(task, SETUP_FILES, `Set up the skill set in ${task.repo}`);
+      const publish = !(await git.isMerged(repository.path, branch, `origin/${repository.baseBranch}`));
+      return { type: 'setupCommitted', taskId: task.id, publish };
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return failed(error.message);
     }
   }
 
