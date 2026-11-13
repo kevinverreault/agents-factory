@@ -13,6 +13,7 @@ import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { cutToFit, oneLineOf } from '../text/lines.ts';
+import { SETUP_PRESET } from '../skills/repo-setup.ts';
 import {
   correction,
   grown,
@@ -238,7 +239,9 @@ export type Research = { ticket: string; step: 'push' | 'close' | null; problem:
 // step the factory is on, pushing the task branch or opening its draft PR
 // (skipped once it has one), and why that step last failed, if it did. A
 // failed step is tried again once the operator answers the request it raised.
-export type Publishing = { step: 'push' | 'open-pr'; problem: string | null };
+// A setup task's publishing (ADR 0010) starts by committing the setup
+// files its HITL run left in the worktree.
+export type Publishing = { step: 'commit' | 'push' | 'open-pr'; problem: string | null };
 
 // What a `fix-once` review stage's runs found, whether its one fix pass
 // has begun, and what is left over: everything found, until the fix pass
@@ -963,10 +966,13 @@ export type LoopEvent =
   | { type: 'mapRead'; taskId: string; tickets: Issue[]; sessionId: string }
   | { type: 'ticketsUnread'; taskId: string; reason: string };
 
-// What the daemon did on GitHub for a root's Push & open draft PR: it pushed
-// the task branch's tip `commit`, found it changes workflow files it may
-// not push, opened the draft PR, or failed a step, saying why.
+// What the daemon did for a root's Push & open draft PR: it committed a
+// setup task's setup files, with `publish` false when its branch then has
+// nothing for the base branch, pushed the task branch's tip `commit`, found
+// it changes workflow files it may not push, opened the draft PR, or failed
+// a step, saying why.
 export type PublishEvent =
+  | { type: 'setupCommitted'; taskId: string; publish: boolean }
   | { type: 'branchPushed'; taskId: string; commit: string }
   | { type: 'pushRefused'; taskId: string; workflowFiles: string[] }
   | { type: 'prOpened'; taskId: string; pr: PullRequest }
@@ -1568,8 +1574,20 @@ export function pullRequestOf(state: Lifecycle, task: Task): { title: string; bo
     '',
     `Total tokens: ${tokens.toLocaleString('en-US')}`,
   ];
+  if (isSetupTask(task) && !task.prBody) return { title: SETUP_PR_TITLE, body: `${setupPrBody(task)}\n\n${footer.join('\n')}` };
   const body = task.prBody ?? prBody(task, task.brief?.trim() || task.launchSummary?.trim() || task.title);
   return { title: task.prTitle || task.title, body: `${body}\n\n${footer.join('\n')}` };
+}
+
+const SETUP_PR_TITLE = 'Set up the skill set';
+
+// What a setup task's PR says it does, and what merging it does (ADR 0010).
+function setupPrBody(task: Task): string {
+  return (
+    `Sets ${task.repo} up for the factory’s skill set: \`docs/agents/\` and the \`## Agent skills\` block tell its skills ` +
+    'where the issue tracker is, which triage labels to use and where the domain docs live. ' +
+    'Once it is merged, the factory finds the setup on the base branch and stops warning that it is missing.'
+  );
 }
 
 // What a ticket task's first run opens on (ADR 0013): its stage's skill on
@@ -2255,6 +2273,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return readingMap(state, task) ? null : `${task.id} isn’t reading a map.`;
     case 'ticketsUnread':
       return readingMap(state, task) ? null : `${task.id} isn’t reading a map.`;
+    case 'setupCommitted':
+      return task.publishing?.step === 'commit' ? null : `${task.id} isn’t committing its setup.`;
     case 'branchPushed':
     case 'pushRefused':
       return task.publishing?.step === 'push' ? null : `${task.id} isn’t pushing its task branch.`;
@@ -2339,6 +2359,12 @@ function failPublishing(state: Lifecycle, task: Task, request: AttentionRequest 
 function reachReview(task: Task): void {
   task.state = 'in-review';
   if (task.autonomy === 'L2' && !task.child && task.worktree && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
+}
+
+// Whether the root runs the skill set's per-repo setup: its preset is the
+// one "Set up now" launches (ADR 0010).
+function isSetupTask(task: Task): boolean {
+  return !task.parent && !!task.worktree && task.preset?.name === SETUP_PRESET;
 }
 
 // Whether the task's frozen preset has an open-pr stage.
@@ -3773,6 +3799,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         if (maps.length) task.mapClosing = { maps, spec: null, problem: null };
         task.loop = null;
         task.state = 'in-review';
+        // A setup task's work reaches its PR without the operator (ADR 0010).
+        if (isSetupTask(task)) task.publishing = { step: 'commit', problem: null };
         break;
       }
       const { to, jumped } = plan;
@@ -4023,6 +4051,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'pushAndOpenPr':
       task.publishing = { step: 'push', problem: null };
       break;
+    case 'setupCommitted':
+      task.publishing = action.publish ? { step: 'push', problem: null } : null;
+      break;
     case 'branchPushed':
       // A root with a draft PR already has it updated by the push.
       task.publishing = task.pr ? null : { step: 'open-pr', problem: null };
@@ -4046,6 +4077,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     }
     case 'publishFailed': {
       // Retried once the operator answers, and never as the operator (ADR 0004).
+      if (action.step === 'commit') {
+        failPublishing(state, task, request, `The factory couldn’t commit ${task.id}’s setup files: ${action.reason} Fix it, then answer to try again.`, at);
+        break;
+      }
       const what = action.step === 'push' ? `push ${task.worktree!.branch}` : `open ${task.id}’s draft PR`;
       failPublishing(state, task, request, `The factory couldn’t ${what} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`, at);
       break;

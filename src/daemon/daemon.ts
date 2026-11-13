@@ -142,7 +142,7 @@ import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.
 import type { AwakeBlock, Processes } from '../os/processes.ts';
 import { SandboxError, egressFor, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
-import { checkSkillsSetup, unchecked } from '../skills/repo-setup.ts';
+import { checkSkillsSetup, SETUP_FILES, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
 import type { Store } from '../store/store.ts';
 import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
@@ -1997,7 +1997,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (stopping || publishesInFlight.has(key) || (publishesStarted.has(key) && task.publishing.problem)) continue;
       publishesStarted.add(key);
       publishesInFlight.add(key);
-      void (task.publishing.step === 'push' ? pushBranch(task) : openPr(task)).then(
+      const step = { commit: commitSetup, push: pushBranch, 'open-pr': openPr }[task.publishing.step];
+      void step(task).then(
         (event) =>
           serially(async () => {
             publishesInFlight.delete(key);
@@ -2008,6 +2009,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           throw error;
         },
       );
+    }
+  }
+
+  // Commits the setup files a setup task's HITL run left uncommitted, as
+  // the operator's HITL work, like a handoff's (ADR 0010). Done again, it
+  // commits nothing twice. A branch that then has nothing the base branch
+  // lacks has nothing to publish.
+  async function commitSetup(task: Task): Promise<PublishEvent> {
+    const failed = (reason: string): PublishEvent => ({ type: 'publishFailed', taskId: task.id, step: 'commit', reason });
+    const repository = lifecycle.repositories[task.repo];
+    if (!repository) return failed(`${task.repo} isn’t registered any more.`);
+    const { path, branch } = task.worktree!;
+    try {
+      const left = await git.uncommitted(path, SETUP_FILES);
+      if (left.length) await git.commit(path, left, `Set up the skill set in ${task.repo}`);
+      const publish = !(await git.isMerged(repository.path, branch, `origin/${repository.baseBranch}`));
+      return { type: 'setupCommitted', taskId: task.id, publish };
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error;
+      return failed(error.message);
     }
   }
 

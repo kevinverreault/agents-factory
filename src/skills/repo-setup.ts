@@ -3,13 +3,17 @@
 // tracker and labels they expect. It is done when `docs/agents/issue-tracker.md`
 // and an `## Agent skills` block in `AGENTS.md` or `CLAUDE.md` are on the
 // repository's base branch on origin, where a setup task's work lands once
-// merged.
+// its PR, which the factory opens when the task reaches review, is merged.
 import { GitError, type Git } from '../git/git.ts';
 import type { Repository, SkillsSetup } from '../lifecycle/lifecycle.ts';
 
 const ISSUE_TRACKER = 'docs/agents/issue-tracker.md';
 const INSTRUCTIONS = ['AGENTS.md', 'CLAUDE.md'];
 const AGENT_SKILLS = /^## Agent skills[ \t]*\r?$/m;
+// What the setup skill writes, which a setup task commits and opens its PR
+// with once it reaches review: other changes in its worktree stay the
+// operator's.
+export const SETUP_FILES = [...INSTRUCTIONS, ISSUE_TRACKER, 'docs/agents/triage-labels.md', 'docs/agents/domain.md'];
 // The built-in preset "Set up now" launches.
 export const SETUP_PRESET = 'setup';
 

@@ -2,8 +2,9 @@
 // protocol. Each repository says whether `docs/agents/issue-tracker.md` and
 // an `## Agent skills` block in AGENTS.md or CLAUDE.md are on its base branch
 // on origin, as last checked; "Set up now" is the `setup` preset, one HITL
-// run of `/factory:setup-matt-pocock-skills`; and once that setup lands, the
-// check finds it.
+// run of `/factory:setup-matt-pocock-skills`, whose root in review the
+// factory commits the setup files of, pushes and opens a draft PR for; and
+// once that setup lands, the check finds it.
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -143,6 +144,84 @@ describe('Set up now', () => {
 
     expect(tui.state().tasks.T1).toMatchObject({ repo: 'acme/widgets', mode: 'HITL', stage: 'setup', preset: { name: 'setup' } });
     expect(factory.executor.started).toMatchObject([{ taskId: 'T1', mode: 'HITL', cwd: tui.state().tasks.T1!.worktree, firstMessage: '/factory:setup-matt-pocock-skills' }]);
+  });
+});
+
+describe('reaching review', () => {
+  // The setup skill writes its files and commits nothing, beside a note of
+  // the operator's that is no part of the setup.
+  function wroteSetup(factory: TestFactory, tui: Watched): string {
+    const { worktree } = tui.state().tasks.T1!;
+    for (const [path, content] of Object.entries(SETUP)) factory.git.editFile(worktree!, path, content);
+    factory.git.editFile(worktree!, 'docs/agents/domain.md', '# Domain Docs\n');
+    factory.git.editFile(worktree!, 'notes.txt', 'remember the labels\n');
+    return worktree!;
+  }
+
+  test('commits the setup files to the task branch, pushes it and opens a draft PR as the App', async () => {
+    const { factory, operator, tui } = await settingUp();
+    const worktree = wroteSetup(factory, tui);
+
+    expect(await operator.send({ type: 'advanceStage', taskId: 'T1' })).toEqual({ ok: true });
+
+    const published = await tui.until((state) => state.tasks.T1?.pr != null);
+    const { branch } = published.tasks.T1!;
+    expect(published.tasks.T1).toMatchObject({ label: 'In review', publishing: null, pr: { number: 101, draft: true } });
+    expect((await factory.git.worktreeState(worktree)).uncommitted).toEqual(['notes.txt']);
+    expect(factory.git.originTip(widgets, branch!)).toBe(factory.git.branchTip(widgets, branch!));
+    expect(factory.github.pullRequests).toEqual([expect.objectContaining({ repo: 'acme/widgets', head: branch, base: 'main', assignees: ['octo-operator'] })]);
+    expect(published.attentionQueue).toEqual([{ kind: 'review', taskId: 'T1' }]);
+  });
+
+  test('names the PR for the setup and says what merging it does', async () => {
+    const { factory, operator, tui } = await settingUp();
+    wroteSetup(factory, tui);
+
+    await operator.send({ type: 'advanceStage', taskId: 'T1' });
+
+    await tui.until((state) => state.tasks.T1?.pr != null);
+    const [pr] = factory.github.pullRequests;
+    expect(pr!.title).toBe('Set up the skill set');
+    expect(pr!.body).toMatch(
+      /^Sets acme\/widgets up for the factory’s skill set: `docs\/agents\/` and the `## Agent skills` block tell its skills .+\n\n---\nOpened by the agents factory for task T1\./,
+    );
+  });
+
+  test('that fails on GitHub raises a request, and answering it tries again without committing twice', async () => {
+    const { factory, operator, tui } = await settingUp();
+    const worktree = wroteSetup(factory, tui);
+    factory.github.uninstall('acme/widgets');
+
+    await operator.send({ type: 'advanceStage', taskId: 'T1' });
+
+    const asked = await tui.until((state) => state.attentionQueue.length === 2);
+    const { branch } = asked.tasks.T1!;
+    expect(asked.attentionQueue[0]).toMatchObject({
+      attention: 'github-write',
+      reason: `The factory couldn’t push ${branch} on GitHub as its App: The factory’s App isn’t installed on acme/widgets. Fix it, then answer to try again.`,
+    });
+    expect(asked.tasks.T1).toMatchObject({ label: 'In review', publishing: { step: 'push' } });
+    const tip = factory.git.branchTip(widgets, branch!);
+
+    factory.github.install('acme/widgets');
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+
+    await tui.until((state) => state.tasks.T1?.pr != null);
+    expect(factory.git.branchTip(widgets, branch!)).toBe(tip);
+    expect(factory.git.originTip(widgets, branch!)).toBe(tip);
+    expect((await factory.git.worktreeState(worktree)).uncommitted).toEqual(['notes.txt']);
+  });
+
+  test('with no setup written, has nothing to push and opens no PR', async () => {
+    const { factory, operator, tui } = await settingUp();
+
+    await operator.send({ type: 'advanceStage', taskId: 'T1' });
+
+    const reviewed = await tui.until((state) => state.tasks.T1?.label === 'In review' && state.tasks.T1.publishing === null);
+    expect(reviewed.tasks.T1!.pr).toBeNull();
+    expect(factory.github.pushes).toEqual([]);
+    expect(factory.github.pullRequests).toEqual([]);
+    expect(reviewed.attentionQueue).toEqual([{ kind: 'review', taskId: 'T1' }]);
   });
 });
 
