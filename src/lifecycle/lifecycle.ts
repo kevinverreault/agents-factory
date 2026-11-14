@@ -647,7 +647,14 @@ export type Intent =
   // ticket: the daemon cuts the ticket task's worktree from the spec task's
   // branch and merges `origin/<base>` into it, then the ticket task is
   // launched (ADR 0013).
-  | { id: string; verb: 'launch'; taskId: string; launch: Omit<TicketTaskLaunched, 'intent'> };
+  | { id: string; verb: 'launch'; taskId: string; launch: Omit<TicketTaskLaunched, 'intent'> }
+  // The factory's merge of a root's PR its merge gate let through (ADR
+  // 0014), journaled as the gate takes its first step: marking the draft
+  // ready, when `marksReady`, then merging it while its head is still the
+  // gate's. The next daemon reads the PR to tell which steps GitHub took: it
+  // finishes the merge, or finds it done, and one that took none is rolled
+  // back to wait at its gate. It lasts as long as the gate's step does.
+  | { id: string; verb: 'merge'; taskId: string; pr: number; marksReady: boolean };
 // The verbs a recovery report says it replayed: the journaled ones, and a
 // cleanup, which the task itself holds while it is under way (ADR 0011).
 export type IntentVerb = Intent['verb'] | 'cleanup';
@@ -1016,7 +1023,9 @@ export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: A
 export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string; intent?: string } & HandoffChoices;
 
 // The daemon journaled an intent before its first step outside the store,
-// or dropped it: finished outside the store, or rolled back (ADR 0003).
+// or dropped it: finished outside the store, or rolled back (ADR 0003). A
+// merge's intent is journaled by the PR read that lets its gate through
+// instead, and dropped with its gate's step, unless rolled back.
 export type IntentEvent = { type: 'intentJournaled'; taskId: string; intent: Intent } | { type: 'intentDropped'; taskId: string; intentId: string };
 
 // The daemon deleted a child's kept branch (ADR 0011): its parent's branch
@@ -2535,7 +2544,7 @@ function finishMerged(state: Lifecycle, task: Task, request: AttentionRequest | 
 // checks yet. Pending checks wait for the next read, and so do red ones. A
 // merge already under way is left to finish, and a failed step's problem
 // stays while its request is open.
-function readGate(task: Task, read: PrReadEvent, request: AttentionRequest | undefined): void {
+function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: AttentionRequest | undefined): void {
   if (!atMergeGate(task) || task.gate?.step) return;
   if (!read.checks || !read.head) {
     task.gate = null;
@@ -2546,6 +2555,26 @@ function readGate(task: Task, read: PrReadEvent, request: AttentionRequest | und
   if (read.draft !== undefined) task.pr!.draft = read.draft;
   const problem = request ? (task.gate?.problem ?? null) : null;
   task.gate = { checks: read.checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem };
+  // Journaled before the first step on GitHub, in the state that takes it.
+  if (passes) {
+    const id = mergeId(task.id);
+    state.intents[id] = { id, verb: 'merge', taskId: task.id, pr: task.pr!.number, marksReady: task.gate.step === 'ready' };
+  }
+}
+
+// The id of the intent merging the root's PR.
+export function mergeId(taskId: string): string {
+  return `merge:${taskId}`;
+}
+
+// A merge intent lasts only as long as its gate's step: merged, failed, or
+// left behind by its root, it goes.
+function dropSpentMerges(state: Lifecycle): void {
+  for (const intent of Object.values(state.intents)) {
+    if (intent.verb !== 'merge') continue;
+    const task = state.tasks[intent.taskId];
+    if (!task?.gate?.step || !atMergeGate(task)) delete state.intents[intent.id];
+  }
 }
 
 // What a pr-closed-unmerged request tells the operator.
@@ -3765,7 +3794,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
           task.resumeWith = updateOpening(state, task);
           task.state = 'queued';
         }
-        if (task.state === 'in-review') readGate(task, action, request);
+        if (task.state === 'in-review') readGate(state, task, action, request);
       }
       break;
     }
@@ -4274,6 +4303,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         const { brief, continueAs, autonomy, tier, maxTurns } = intent.handoff;
         Object.assign(task.handoff, structuredClone({ brief, continueAs, autonomy, mergePolicy: policyOf(intent.handoff), tier, maxTurns }));
       }
+      // A merge rolled back, as one that took no step on GitHub, has its gate read afresh.
+      if (intent.verb === 'merge') task.gate = null;
       delete state.intents[action.intentId];
       break;
     }
@@ -4337,6 +4368,7 @@ export function reduce(state: Lifecycle, action: LifecycleAction, at: number, ro
   apply(next, action, at);
   // The action is the last step of the intent it finishes.
   if ('intent' in action && typeof action.intent === 'string') delete next.intents[action.intent];
+  dropSpentMerges(next);
   wakeParents(next);
   placeInQueue(state, next);
   const held = 'unreadable' in routes ? routes.unreadable : holdRuns;
