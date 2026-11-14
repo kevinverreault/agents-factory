@@ -253,6 +253,13 @@ export type Publishing = { step: 'commit' | 'push' | 'open-pr'; problem: string 
 // reports what it left unfixed.
 export type Findings = { found: string[]; fixPass: boolean; leftOver: string[] };
 
+// A decision the factory made where an attended task would have asked the
+// operator (ADR 0014): so far, the answer a full-auto run assumed to a
+// question it asked, recorded through `record_assumption` by a run of
+// `taskId`, the task or one of its children. Kept on the root, whose PR
+// lists them.
+export type JudgementCall = { kind: 'assumption'; taskId: string; question: string; answer: string; reason: string | null };
+
 // What a root task is (ADR 0013): a plain root, a spec task that launches
 // ticket tasks over its spec's tickets, or a ticket task working one ticket
 // into its own PR. Tasks stored before kinds are plain roots.
@@ -478,6 +485,9 @@ export type Task = {
   // Its review's findings, once a `fix-once` review stage's run reported
   // some. They live on the task, so a run parked meanwhile loses none.
   findings?: Findings | null;
+  // A root's judgement calls, its children's included (ADR 0014), in the
+  // order they were made. Tasks stored before them have none.
+  judgementCalls?: JudgementCall[];
   // The PR body, once its `artifact:pr-body` stage wrote it: the agent's
   // text with what the factory adds.
   prBody?: string | null;
@@ -565,6 +575,11 @@ export type Run = {
   // The rules the operator allowed once for it: each lets one call with that
   // rule through. Runs stored before them have none.
   allowOnce?: string[];
+  // Whether it answers its own questions (ADR 0014): an AFK run whose tree
+  // went by full-auto when it started records the answer it assumed through
+  // `record_assumption`, and its questions never reach the operator. Runs
+  // stored before full-auto have none.
+  assumes?: boolean;
   // The hosts its container's egress proxy denied it, for an L2 run that
   // ended (ADR 0007). Runs stored before them have none.
   deniedHosts?: string[];
@@ -837,7 +852,10 @@ export type RunEvent =
   | { type: 'turnEnded'; runId: string; context?: ContextUse }
   | { type: 'questionAsked'; runId: string; question: Question }
   // An AFK run asked the operator through `AskUserQuestion`.
+  // A run that assumes its answers raises none (ADR 0014): the daemon tells it to choose.
   | { type: 'attentionRaised'; runId: string; kind: 'question'; question: Question }
+  // A full-auto run recorded the answer it assumed through `record_assumption`.
+  | { type: 'assumptionRecorded'; runId: string; question: string; answer: string; reason?: string }
   // An AFK run's tool call that neither the factory's allow list nor the
   // operator's rules cover (the daemon checks those): `parts` is the parts
   // of it they leave uncovered, the whole call if absent. `rulesProblem`
@@ -1244,6 +1262,17 @@ export function openRepoRequest(state: Lifecycle, repo: string): AttentionReques
 export function waitsOnPr(task: Task): boolean {
   return task.state === 'in-review' && !!task.pr;
 }
+
+// Whether the task's AFK runs answer their own questions (ADR 0014): its
+// tree goes by full-auto, which never stops for the operator.
+export function assumesAnswers(state: Lifecycle, task: Task): boolean {
+  return task.mode === 'AFK' && policyOf(rootOf(state, task)) === 'unattended';
+}
+
+// What a full-auto run's question is answered with: it chooses, records, and goes on.
+export const ASSUME_ANSWER =
+  'Nobody answers questions under full-auto: the operator isn’t asked. Pick the most reasonable answer yourself, record it through the ' +
+  'factory’s record_assumption tool with the question, your answer and why, then carry on as if they had answered so.';
 
 // Whether the policy is one the factory merges by: semi-auto or full-auto.
 export function agentPolicy(policy: MergePolicy | null | undefined): boolean {
@@ -1688,11 +1717,18 @@ function prBody(task: Task, body: string): string {
   // A ticket task's PR closes its ticket on merging (ADR 0013), whatever the agent wrote.
   const closes = task.kind === 'ticket' && task.ticket && !closesIssue(text, task.repo, task.ticket) ? [`Closes ${citedIssue(task.repo, task.ticket)}`] : [];
   const leftOver = task.findings?.leftOver ?? [];
+  const calls = task.judgementCalls ?? [];
   return [
     text,
     ...closes,
     ...(leftOver.length ? [`## Review findings left over\n\n${bulleted(leftOver)}`] : []),
+    ...(calls.length ? [`## Judgement calls\n\n${bulleted(calls.map(judgementCallLine))}`] : []),
   ].join('\n\n');
+}
+
+// A judgement call as the PR body lists it.
+function judgementCallLine(call: JudgementCall): string {
+  return `Assumed, asked “${oneLineOf(call.question)}”: ${oneLineOf(call.answer)}${call.reason ? ` (${oneLineOf(call.reason)})` : ''}`;
 }
 
 // GitHub caps a PR title at 256 characters.
@@ -2430,6 +2466,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'attentionRaised':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
+    case 'assumptionRecorded':
+      if (!state.runs[action.runId]!.assumes) return 'Only a full-auto run records the answers it assumed.';
+      return action.question.trim() && action.answer.trim() ? null : 'An assumption needs its question and its answer.';
     case 'permissionAsked':
       // A HITL run's call shows as a card in the conversation.
       return null;
@@ -3089,6 +3128,7 @@ function startRun(
     cli: null,
     parksAt: null,
     allowOnce,
+    assumes: assumesAnswers(state, task),
     // Tasks stored before skill sets were frozen have none.
     skillSet: task.skillSet ?? null,
     startedAt: at,
@@ -4145,6 +4185,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       state.snapshots[window] = updatedSnapshot(state.snapshots[window], { window, status, spent, resetsAt, seenAt: at });
       break;
     }
+    case 'assumptionRecorded': {
+      const root = rootOf(state, task);
+      const reason = action.reason?.trim() || null;
+      root.judgementCalls = [...(root.judgementCalls ?? []), { kind: 'assumption', taskId: task.id, question: action.question.trim(), answer: action.answer.trim(), reason }];
+      break;
+    }
     case 'prBodyWritten':
       task.prBody = prBody(task, action.body);
       task.prTitle = prTitleOf(action.title);
@@ -4170,6 +4216,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       run!.waitingForWindow = at + action.waitMs;
       break;
     case 'attentionRaised': {
+      // A full-auto run is told to choose, and carries on (ADR 0014).
+      if (run!.assumes) break;
       suspend(run!, at);
       // Named by what it asks.
       const reason = action.question.questions.map(({ question }) => question).join(' ');

@@ -44,6 +44,7 @@ export function afkRun(cwd: string, firstMessage: string, maxTurns: number, allo
     reports,
     child: false,
     spawns: false,
+    assumes: false,
   };
 }
 

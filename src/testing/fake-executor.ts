@@ -25,6 +25,7 @@ export class FakeExecutor implements Executor {
   readonly sent: { runId: string; text: string }[] = [];
   readonly interrupted: string[] = [];
   readonly answered: { runId: string; questionId: string; answers: Answers }[] = [];
+  readonly declined: { runId: string; questionId: string; message: string }[] = [];
   readonly permitted: { runId: string; callId: string; verdict: Verdict }[] = [];
   readonly historyReads: Session[] = [];
   // Each session archived, where, and how many events it held then.
@@ -61,6 +62,10 @@ export class FakeExecutor implements Executor {
 
   answer(runId: string, questionId: string, answers: Answers): void {
     this.answered.push({ runId, questionId, answers });
+  }
+
+  decline(runId: string, questionId: string, message: string): void {
+    this.declined.push({ runId, questionId, message });
   }
 
   permit(runId: string, callId: string, verdict: Verdict): void {

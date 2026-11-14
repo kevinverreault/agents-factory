@@ -47,6 +47,9 @@ export type RunStart = {
   // its own: `spawn_child` is registered only within depth (ADR 0009).
   child: boolean;
   spawns: boolean;
+  // Whether the run answers its own questions (ADR 0014), as a full-auto
+  // run does: it is given `record_assumption`, to record what it assumed.
+  assumes: boolean;
 };
 
 export type RunGuards = {
@@ -129,6 +132,9 @@ export interface Executor {
   interrupt(runId: string): void;
   // Answers the question card the run's turn waits on.
   answer(runId: string, questionId: string, answers: Answers): void;
+  // Refuses the question the run's turn waits on, with a message the agent
+  // reads: a full-auto run's, which nobody answers (ADR 0014).
+  decline(runId: string, questionId: string, message: string): void;
   // Decides the tool call the run asked permission for.
   permit(runId: string, callId: string, verdict: Verdict): void;
   stop(runId: string): void;
