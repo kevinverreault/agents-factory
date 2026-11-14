@@ -287,10 +287,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // tried again once the operator answers, or by the next daemon.
   const publishesStarted = new Set<string>();
   const publishesInFlight = new Set<string>();
-  // The merge gates' steps on GitHub (ADR 0014), as `<task> <step>`, this
-  // daemon has started, and those still under way. One that failed is tried
-  // again once the operator answers.
-  const mergesStarted = new Set<string>();
+  // The merge gates' steps on GitHub under way (ADR 0014), as `<task> <step>`.
   const mergesInFlight = new Set<string>();
   // The research children's steps on GitHub this daemon has started, and
   // those still under way, as `<task> <step>`. One that failed is tried
@@ -987,27 +984,27 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Reads the PR of each root that has just reached its merge gate (ADR
-  // 0014) at once, rather than at the next poll: a repo with no checks
+  // 0014), or whose gate was just dropped, as an answer to a failed merge
+  // drops it, at once rather than at the next poll: a repo with no checks
   // merges straight away.
   function driveGates(before: Lifecycle): void {
     for (const task of Object.values(lifecycle.tasks)) {
       const was = before.tasks[task.id];
-      if (atMergeGate(task) && !task.gate && !(was && atMergeGate(was))) pollPr(task);
+      if (atMergeGate(task) && !task.gate && !(was && atMergeGate(was) && !was.gate)) pollPr(task);
     }
   }
 
   // Takes the factory's next step merging each root its merge gate let
   // through (ADR 0014): marking its draft PR ready, then merging it, each
-  // with a token minted for that write alone. A step that failed is tried
-  // again once the operator answers. What it did goes through the Lifecycle
-  // like any other event.
+  // with a token minted for that write alone. A step that failed is dropped
+  // until the operator answers. What it did goes through the Lifecycle like
+  // any other event.
   function driveMerges(): void {
     for (const task of Object.values(lifecycle.tasks)) {
       const step = task.gate?.step;
       if (!step || !atMergeGate(task)) continue;
       const key = `${task.id} ${step}`;
-      if (stopping || mergesInFlight.has(key) || (mergesStarted.has(key) && task.gate!.problem)) continue;
-      mergesStarted.add(key);
+      if (stopping || mergesInFlight.has(key)) continue;
       mergesInFlight.add(key);
       void (step === 'ready' ? markReady(task) : mergePr(task)).then(
         (event) =>

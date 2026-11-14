@@ -263,6 +263,7 @@ export type TaskKind = 'plain' | 'spec' | 'ticket';
 // to the operator; under `unattended` (full-auto) the factory merges every PR
 // whose checks pass. The two agent policies need L3.
 export type MergePolicy = 'operator' | 'judged' | 'unattended';
+// Every merge policy, as a refusal names them.
 export const MERGE_POLICIES: readonly MergePolicy[] = ['operator', 'judged', 'unattended'];
 // Those the handoff sheet and the launch card offer: `judged` waits on its
 // gate check, which the factory can't run yet.
@@ -274,8 +275,9 @@ export const POLICY_NAMES: Record<MergePolicy, string> = { operator: 'operator',
 // Where an agent policy's merge gate stands (ADR 0014), as the PR poll last
 // read it: the combined checks on the PR's `head`, and, once they let it
 // through, the factory's step on GitHub: marking the draft ready, then
-// merging it. `problem` is why the step last failed, until the operator
-// answers the github-write request it raised.
+// merging it. `problem` is why a step last failed, until the operator
+// answers the github-write request it raised: the step is dropped, and the
+// gate is read afresh before it is taken again.
 export type MergeGate = { checks: ChecksState; head: string; step: 'ready' | 'merge' | null; problem: string | null };
 
 // A wayfinder task's maps the factory owes their closing (ADR 0013), as
@@ -1252,9 +1254,9 @@ export function atMergeGate(task: Task): boolean {
 }
 
 // Why the operator can't act on the root while the factory merges its PR,
-// or null: a step that failed waits on them, so it isn't.
+// or null.
 function mergingRefusal(task: Task): string | null {
-  return task.gate?.step && !task.gate.problem && atMergeGate(task) ? `${task.id} is merging its PR: wait for it to finish.` : null;
+  return task.gate?.step && atMergeGate(task) ? `${task.id} is merging its PR: wait for it to finish.` : null;
 }
 
 // Why the merge policy can't be picked for a task at `level` (null for a
@@ -1264,7 +1266,7 @@ export function policyRefusal(policy: MergePolicy, level: AutonomyLevel | null):
   if (policy === 'operator') return null;
   if (!OFFERED_POLICIES.includes(policy)) return `Semi-auto (${policy}) isn’t available yet: the factory can’t run its gate check. Pick operator or full-auto.`;
   if (level === null) return `A task starting at a HITL stage picks its merge policy at its handoff.`;
-  return level === 'L3' ? null : `${POLICY_NAMES[policy]} (${policy}) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.`;
+  return level === 'L3' ? null : `Full-auto (${policy}) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.`;
 }
 
 // The root's task branch, if the factory pushed it to GitHub: it has its
@@ -3658,7 +3660,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // its merge, again; the root stays In review, or at its merge gate.
       if (task.state === 'in-review') {
         if (task.publishing) task.publishing.problem = null;
-        if (task.gate?.problem) task.gate.problem = null;
+        // A failed merge is tried again on a fresh read of its gate.
+        task.gate = null;
         break;
       }
       // A spec task left with skipped tickets goes as the operator chose.
@@ -3754,8 +3757,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'mergeFailed': {
       // Retried once the operator answers, as a failed publishing step is.
+      // The head or checks may have moved meanwhile: the gate is read again first.
       const what = action.step === 'ready' ? `mark ${task.id}’s PR #${task.pr!.number} ready` : `merge ${task.id}’s PR #${task.pr!.number}`;
       task.gate!.problem = `The factory couldn’t ${what} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`;
+      task.gate!.step = null;
       if (!request) addRequest(state, task, lastRun(state, task), 'github-write', false, task.gate!.problem, at);
       break;
     }

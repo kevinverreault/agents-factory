@@ -402,6 +402,7 @@ export function policyText(policy: MergePolicy): string {
   return `${POLICY_NAMES[policy]} (${POLICY_TEXT[policy]})`;
 }
 
+// Who merges a task's PR under each policy.
 const POLICY_TEXT: Record<MergePolicy, string> = {
   operator: 'you merge its PR',
   judged: 'the factory merges unless it judges the PR worth your review',

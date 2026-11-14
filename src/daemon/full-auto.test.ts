@@ -169,9 +169,13 @@ describe('under full-auto (unattended)', () => {
     expect(asked.attentionQueue).toEqual([
       expect.objectContaining({ kind: 'attention', taskId: 'T1', attention: 'github-write', reason: 'The factory couldn’t merge T1’s PR #101 on GitHub as its App: GitHub refused to merge acme/widgets#101 (HTTP 405: Base branch was modified.). Fix it, then answer to try again.' }),
     ]);
-    expect(asked.tasks.T1).toMatchObject({ label: 'At merge gate', gate: { step: 'merge', problem: expect.any(String) } });
-
+    expect(asked.tasks.T1).toMatchObject({ label: 'At merge gate', gate: { step: null, problem: expect.any(String) } });
+    // Polled meanwhile, it isn't merged behind the operator's back.
     factory.github.failMerges(null);
+    factory.clock.advance(2 * MINUTE);
+    await operator.send({ type: 'daemon.status' });
+    expect(factory.github.prState(101).state).toBe('open');
+
     expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
 
     await tui.until((state) => state.tasks.T1?.label === 'Done');
@@ -185,7 +189,7 @@ describe('the merge policy at launch and handoff', () => {
 
     expect(await operator.send({ ...fullAuto, autonomy: 'L2' })).toEqual({
       ok: false,
-      reason: 'full-auto (unattended) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.',
+      reason: 'Full-auto (unattended) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.',
     });
     expect(await operator.send({ ...fullAuto, mergePolicy: 'judged' })).toMatchObject({ ok: false, reason: expect.stringMatching(/^Semi-auto \(judged\) isn’t available yet/) });
     expect(await operator.send({ ...fullAuto, mergePolicy: 'yolo' as never })).toEqual({ ok: false, reason: 'yolo is not a merge policy (operator, judged or unattended).' });

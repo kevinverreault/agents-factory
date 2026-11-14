@@ -128,6 +128,7 @@ export type TaskView = {
   transcripts: string | null;
 };
 
+// A root's merge gate as the TUI shows it (ADR 0014).
 export type GateView = { checks: MergeGate['checks'] | null; step: MergeGate['step']; problem: string | null };
 
 export type HandoffView = Omit<HandoffSheet, 'asked' | 'ticketSets'> & { ticketSets: HandoffTicketSets | null };

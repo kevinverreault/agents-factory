@@ -82,8 +82,8 @@ export function TaskDetail({
 export function gateText({ mergePolicy, gate }: Pick<TaskView, 'mergePolicy' | 'gate'>): string {
   const policy = `merge policy ${POLICY_NAMES[mergePolicy!]}`;
   if (!gate) return policy;
-  const step = gate.step === 'ready' ? 'marking its PR ready' : gate.step === 'merge' ? 'merging its PR' : null;
-  return joined([`${policy}: at its merge gate`, gate.checks ? CHECKS_TEXT[gate.checks] : 'reading its checks', gate.problem ? `${step} failed` : step]);
+  const step = gate.problem ? 'merging failed' : gate.step === 'ready' ? 'marking its PR ready' : gate.step === 'merge' ? 'merging its PR' : null;
+  return joined([`${policy}: at its merge gate`, gate.checks ? CHECKS_TEXT[gate.checks] : 'reading its checks', step]);
 }
 
 // The checks on a gated PR's head as task detail says them.
