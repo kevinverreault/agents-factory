@@ -4,7 +4,7 @@
 // and `write_handoff_brief`, and an AFK run `report_findings` or
 // `write_pr_body` when its stage reports through them, and a full-auto run
 // `record_assumption`. Both get the
-// delegation tools (ADR 0009): `spawn_child`, `list_children` and
+// delegation tools (ADR 0009), HITL and AFK runs alike: `spawn_child`, `list_children` and
 // `cancel_child`, a HITL run spawning fire-and-forget children only; an AFK
 // run also `report_progress`, and `report_result` on a child's run.
 import { randomUUID } from 'node:crypto';
@@ -109,8 +109,8 @@ export function afkFactoryTools(
       reason: z.string().optional().describe('Why it is the most reasonable answer, in a sentence.'),
     },
     async ({ question, answer, reason }) => {
-      sink.report({ type: 'assumptionRecorded', runId, question, answer, ...(reason?.trim() && { reason: reason.trim() }) });
-      return { content: [{ type: 'text', text: 'The factory recorded your assumption. Carry on with it.' }] };
+      sink.report({ type: 'answerAssumed', runId, question, answer, ...(reason !== undefined && { reason }) });
+      return { content: [{ type: 'text', text: 'The factory recorded the answer you assumed. Carry on with it.' }] };
     },
   );
   const tools = [

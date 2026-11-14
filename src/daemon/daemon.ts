@@ -57,7 +57,7 @@ import {
   pushedBranch,
   runsContained,
   l3RefusalText,
-  ASSUME_ANSWER,
+  UNASKED_QUESTION,
   atMergeGate,
   MERGE_STEP_DONE,
   policyOf,
@@ -2361,7 +2361,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       executor.answer(run!.id, action.questionId, action.answers);
     } else if (action.type === 'attentionRaised' && lifecycle.runs[action.runId]!.assumes) {
       // Nobody answers a full-auto run's question: it chooses, and records what it assumed (ADR 0014).
-      executor.decline(action.runId, action.question.id, ASSUME_ANSWER);
+      executor.decline(action.runId, action.question.id, UNASKED_QUESTION);
     } else if (action.type === 'answer' && openCard(before, before.tasks[action.taskId]!)) {
       // A HITL run's card: its call gets the operator's verdict, then the
       // calls it held go to the gate in turn.

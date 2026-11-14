@@ -6,6 +6,8 @@
 // across a restart, and the PR body lists it under a judgement-calls
 // heading. Under the operator policy questions reach the operator as before,
 // and failures and `stage-blocked` still raise attention requests.
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { Question } from '../lifecycle/lifecycle.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -22,6 +24,7 @@ afterEach(async () => {
 
 type Factory = { factory: TestFactory; operator: FactoryConnection; tui: Watched };
 
+// A factory with a subscription token for contained runs, and an operator attached.
 async function attached(): Promise<Factory> {
   const factory = await startTestFactory();
   factories.push(factory);
@@ -50,6 +53,7 @@ const question: Question = {
   ],
 };
 
+// The run that started `n`th, once the executor has it.
 async function started(factory: TestFactory, n: number) {
   await vi.waitFor(() => expect(factory.executor.started.length).toBeGreaterThanOrEqual(n));
   return factory.executor.started[n - 1]!;
@@ -70,11 +74,11 @@ async function throughPrBody({ factory }: Factory, implement: number): Promise<v
 }
 
 describe('under full-auto (unattended)', () => {
-  test('a run’s question raises no attention request: the run is told to choose and record its assumption, and carries on', async () => {
+  test('a run’s question raises no attention request: the run is told to choose and record the answer it assumed, and carries on', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(fullAuto);
     const run = await started(factory, 1);
-    // Its runs are given the tool they record assumptions with.
+    // Its runs are given the tool they record their assumed answers with.
     expect(run).toMatchObject({ runId: 'R1', assumes: true });
 
     factory.executor.report('R1', { type: 'attentionRaised', kind: 'question', question });
@@ -88,21 +92,21 @@ describe('under full-auto (unattended)', () => {
     expect(state.tasks.T1).toMatchObject({ label: 'Running' });
   });
 
-  test('the assumption a run records is kept on the task across a restart, and the PR body lists it under a judgement-calls heading', async () => {
+  test('the answer a run assumed is kept on the task across a restart, and the PR body lists it under a judgement-calls heading', async () => {
     const launched = await attached();
     const { factory, operator, tui } = launched;
     await operator.send(fullAuto);
     await started(factory, 1);
     factory.executor.report('R1', { type: 'attentionRaised', kind: 'question', question });
     factory.executor.report('R1', {
-      type: 'assumptionRecorded',
+      type: 'answerAssumed',
       question: 'Where should the logout button go?',
       answer: 'Header, by the avatar.',
       reason: 'The other account actions are there.',
     });
     const recorded = await tui.until((state) => (state.tasks.T1?.judgementCalls.length ?? 0) === 1);
     expect(recorded.tasks.T1!.judgementCalls).toEqual([
-      { kind: 'assumption', taskId: 'T1', question: 'Where should the logout button go?', answer: 'Header, by the avatar.', reason: 'The other account actions are there.' },
+      { kind: 'assumed-answer', taskId: 'T1', question: 'Where should the logout button go?', answer: 'Header, by the avatar.', reason: 'The other account actions are there.' },
     ]);
 
     // A restart interrupts R1; R2 carries the implement stage on.
@@ -112,21 +116,39 @@ describe('under full-auto (unattended)', () => {
     expect(resumed.tasks.T1!.judgementCalls).toHaveLength(1);
     await throughPrBody({ ...launched, tui: after }, 2);
 
-    const opened = await after.until((state) => state.tasks.T1?.pr !== null && state.tasks.T1?.pr !== undefined);
+    await after.until((state) => !!state.tasks.T1?.pr);
     const body = factory.github.pullRequests[0]!.body;
     expect(body).toContain(
       '## Judgement calls\n\n- Assumed, asked “Where should the logout button go?”: Header, by the avatar. (The other account actions are there.)',
     );
   });
 
-  test('a run with no assumptions gets no judgement-calls section', async () => {
+  test('a child of a full-auto root assumes too, and the answer it assumed is kept on the root', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(fullAuto);
+    await started(factory, 1);
+    const spawned = await factory.executor.delegate('R1', { type: 'spawnChild', toolUseId: 'toolu_spawn', goal: 'Survey sign-out.', await: false });
+    expect(spawned).toMatchObject({ ok: true });
+    const child = await started(factory, 2);
+    expect(child).toMatchObject({ taskId: 'T2', child: true, assumes: true });
+
+    factory.executor.report(child.runId, { type: 'attentionRaised', kind: 'question', question });
+    await vi.waitFor(() => expect(factory.executor.declined).toEqual([expect.objectContaining({ runId: child.runId })]));
+    factory.executor.report(child.runId, { type: 'answerAssumed', question: 'Which paths?', answer: 'The web ones.' });
+
+    const recorded = await tui.until((state) => (state.tasks.T1?.judgementCalls.length ?? 0) === 1);
+    expect(recorded.tasks.T1!.judgementCalls).toEqual([{ kind: 'assumed-answer', taskId: 'T2', question: 'Which paths?', answer: 'The web ones.', reason: null }]);
+    expect(recorded.attentionQueue).toEqual([]);
+  });
+
+  test('a run that assumed no answers gets no judgement-calls section', async () => {
     const launched = await attached();
     const { factory, tui } = launched;
     await launched.operator.send(fullAuto);
     await started(factory, 1);
     await throughPrBody(launched, 1);
 
-    const opened = await tui.until((state) => !!state.tasks.T1?.pr);
+    await tui.until((state) => !!state.tasks.T1?.pr);
     expect(factory.github.pullRequests[0]!.body).not.toContain('Judgement calls');
   });
 
@@ -153,8 +175,28 @@ describe('under full-auto (unattended)', () => {
   });
 });
 
+describe('at a stage capped at L2', () => {
+  test('a full-auto root’s run there asks the operator, as at L2, and the next stage at L3 assumes again', async () => {
+    const { factory, operator, tui } = await attached();
+    mkdirSync(factory.paths.presetsDir, { recursive: true });
+    const stages = '  - { id: build, kind: run, mode: AFK, skill: implement, args: "{{prompt}}", autonomy: L2 }\n  - { id: check, kind: run, mode: AFK, skill: code-review }\n';
+    writeFileSync(join(factory.paths.presetsDir, 'capped.preset.yaml'), `stages:\n${stages}`);
+    expect(await operator.send({ ...fullAuto, preset: 'capped' })).toEqual({ ok: true, value: { taskId: 'T1' } });
+    expect(await started(factory, 1)).toMatchObject({ autonomy: 'L2', assumes: false });
+
+    factory.executor.report('R1', { type: 'attentionRaised', kind: 'question', question });
+    const asked = await tui.until((state) => state.attentionQueue.length === 1);
+    expect(asked.attentionQueue).toEqual([expect.objectContaining({ taskId: 'T1', attention: 'question' })]);
+    expect(factory.executor.declined).toEqual([]);
+
+    await operator.send({ type: 'answer', taskId: 'T1', answers: { 'Where should the logout button go?': 'Menu' } });
+    factory.executor.report('R1', { type: 'runCompleted' });
+    expect(await started(factory, 2)).toMatchObject({ autonomy: 'L3', assumes: true });
+  });
+});
+
 describe('under the operator policy', () => {
-  test('a run’s question still reaches the operator, and its runs record no assumptions', async () => {
+  test('a run’s question still reaches the operator, and its runs assume no answers', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send({ ...fullAuto, mergePolicy: undefined });
     expect(await started(factory, 1)).toMatchObject({ assumes: false });
