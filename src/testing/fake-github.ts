@@ -112,6 +112,8 @@ export class FakeGitHub implements GitHub {
   private failure: string | null = null;
   private prFailure: string | null = null;
   private mergeFailure: string | null = null;
+  // The head each PR's reads report, while a test holds an old one.
+  private readonly reportedHeads = new Map<number, string>();
   private issueWriteFailure: string | null = null;
   private hold: { arrived(): void; released: Promise<void> } | null = null;
 
@@ -165,6 +167,13 @@ export class FakeGitHub implements GitHub {
   // Merging PRs fails with `reason` from now on, or works again with null.
   failMerges(reason: string | null): void {
     this.mergeFailure = reason;
+  }
+
+  // Reads of the PR `number` report `head` as its head from now on, as
+  // GitHub may for a moment after a push, or its real head again with null.
+  reportHead(number: number, head: string | null): void {
+    if (head) this.reportedHeads.set(number, head);
+    else this.reportedHeads.delete(number);
   }
 
   // Closing issues fails with `reason` from now on, or works again with null.
@@ -344,7 +353,7 @@ export class FakeGitHub implements GitHub {
     this.scoped(token, ref, 'pull_requests', 'read');
     const pr = this.foundPr(ref);
     this.prReads.push(ref);
-    return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown', head: this.headOf(pr), draft: pr.draft };
+    return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown', head: this.reportedHeads.get(pr.number) ?? this.headOf(pr), draft: pr.draft };
   }
 
   // The checks on the PR's head commit as it is now are `state` (ADR

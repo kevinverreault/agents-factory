@@ -174,4 +174,52 @@ describe('a red check at a full-auto gate', () => {
     expect(factory.github.prState(101).state).toBe('open');
     expect(factory.github.prWrites).toEqual([]);
   });
+
+  test('a read of the old red head right after the fix run’s push waits for the new head’s checks, rather than asking the operator', async () => {
+    const { factory, operator, tui } = await redAtGate();
+    await started(factory, 4);
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R4');
+    const redHead = factory.github.headOf(factory.github.pullRequests[0]!);
+    // GitHub hasn't caught up with the push yet: its reads still give the old head.
+    factory.github.reportHead(101, redHead);
+    commit(factory, 'export const fixed = true;\n');
+    const reads = factory.github.checkReads.length;
+
+    factory.executor.report('R4', { type: 'runCompleted' });
+
+    await vi.waitFor(() => expect(factory.github.checkReads.slice(reads).some(({ head }) => head === redHead)).toBe(true));
+    await operator.send({ type: 'daemon.status' });
+    expect(tui.state().attentionQueue).toEqual([]);
+    expect(tui.state().tasks.T1).toMatchObject({ label: 'At merge gate' });
+    expect(factory.executor.started).toHaveLength(4);
+
+    // Caught up, the new head's own red checks ask the operator.
+    factory.github.reportHead(101, null);
+    factory.github.setChecks(101, 'red', [LINT]);
+    factory.clock.advance(2 * MINUTE);
+    const asked = await tui.until((state) => state.attentionQueue.length === 1);
+    expect(asked.attentionQueue).toEqual([expect.objectContaining({ attention: 'failure', reason: expect.stringContaining('still failing after its fix run: lint') })]);
+  });
+
+  test('green checks spend the fix run no longer, even when the merge they let through fails: a later red gets a fix run of its own', async () => {
+    const { factory, operator, tui } = await redAtGate();
+    await started(factory, 4);
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R4');
+    commit(factory, 'export const fixed = true;\n');
+    factory.github.failMerges('GitHub refused to merge acme/widgets#101 (HTTP 405: Base branch was modified.).');
+    factory.executor.report('R4', { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.gate?.checks === 'pending');
+    factory.github.setChecks(101, 'green');
+    factory.clock.advance(2 * MINUTE);
+    await tui.until((state) => state.attentionQueue.some((item) => 'attention' in item && item.attention === 'github-write'));
+
+    // CI re-run on the same head goes red; the operator answers the failed merge.
+    factory.github.failMerges(null);
+    factory.github.setChecks(101, 'red', [BUILD]);
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+
+    const fix = await started(factory, 5);
+    expect(fix.firstMessage).toContain('build (https://github.com/acme/widgets/actions/runs/7/job/1)');
+    expect(tui.state().attentionQueue).toEqual([]);
+  });
 });
