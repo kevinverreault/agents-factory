@@ -8,7 +8,7 @@
 // loop (ADR 0012); child tasks arrive with their own slice.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
-import type { ChecksState, Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
+import type { ChecksState, FailedCheck, Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
@@ -495,6 +495,11 @@ export type Task = {
   // no other update run is queued meanwhile. Like changes requested, each
   // of its runs that completes puts it back In review.
   conflicted?: boolean;
+  // True once a PR poll found the checks on the PR of a root at its merge
+  // gate red and queued its one fix run (ADR 0014), until a poll finds them
+  // green: checks red again then raise a failure request instead. Like
+  // conflicted, each of its runs that completes puts it back at its gate.
+  checksFixed?: boolean;
   // Its Push & open draft PR while under way, and the draft PR it opened.
   publishing?: Publishing | null;
   pr?: PullRequest | null;
@@ -1094,7 +1099,7 @@ export type NoteEvent = { type: 'notesDelivered'; taskId: string };
 // where it stands, and whether GitHub finds it mergeable (ADR 0013); its
 // head commit, and for a root at an agent policy's merge gate the checks
 // on it (ADR 0014).
-export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; mergeable: Mergeability; head?: string; draft?: boolean; checks?: ChecksState | null };
+export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; mergeable: Mergeability; head?: string; draft?: boolean; checks?: ChecksState | null; failed?: FailedCheck[] };
 
 // What the daemon did on GitHub for a root its merge gate let through (ADR
 // 0014): it marked the draft PR ready, merged it, or failed a step, saying why.
@@ -2548,6 +2553,47 @@ function readGate(task: Task, read: PrReadEvent, request: AttentionRequest | und
   task.gate = { checks: read.checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem };
 }
 
+// The PR poll read the checks on the PR of a root at its merge gate (ADR
+// 0014). Green, its fix run is spent no longer. Red, with nothing asked,
+// the first time queues one fix run, resuming its session, as a conflict
+// queues an update run; red again after it raises a failure request naming
+// the checks, and the root stays at its gate, unmerged, until the operator
+// answers it and its gate is read afresh.
+function readRedChecks(state: Lifecycle, task: Task, read: PrReadEvent, request: AttentionRequest | undefined, at: number): void {
+  if (!atMergeGate(task) || task.gate?.step) return;
+  if (read.checks === 'green') task.checksFixed = false;
+  if (read.checks !== 'red' || request) return;
+  const failed = read.failed ?? [];
+  if (!task.checksFixed) {
+    task.checksFixed = true;
+    task.resumeWith = checksFixOpening(task, failed);
+    task.state = 'queued';
+    return;
+  }
+  const named = failed.length ? `: ${failedChecksText(failed)}` : '';
+  const reason = `The checks on PR #${task.pr!.number} of ${task.id} are still failing after its fix run${named}. Fix them and push to the task branch, then answer to send the task back to its merge gate.`;
+  addRequest(state, task, lastRun(state, task), 'failure', false, reason, at);
+}
+
+// The failed checks, each with the page that says why, if any.
+function failedChecksText(failed: FailedCheck[]): string {
+  return failed.map(({ name, url }) => (url ? `${name} (${url})` : name)).join(', ');
+}
+
+// What the fix run on a root's PR whose checks went red opens on.
+function checksFixOpening(task: Task, failed: FailedCheck[]): string {
+  const which = failed.length
+    ? `These checks failed: ${failedChecksText(failed)}. Each link is GitHub’s page for its check, with its log; a check without one is named as GitHub lists it.`
+    : 'GitHub names no failed check.';
+  return (
+    `The checks on PR #${task.pr!.number} of ${task.id} failed on its head, so the factory can’t merge it. ${which} ` +
+    'Unattended, find why: read those pages if your run can reach them, and run the same builds, tests and linters in the task’s worktree. ' +
+    `Fix the cause, check the work still builds and passes its tests, and commit the fix to the task branch ${task.worktree!.branch}. ` +
+    'The factory pushes it once your run ends, and the task goes back to its merge gate to wait on the new head’s checks. ' +
+    'This is the task’s one fix run: if its checks fail again, the factory asks the operator. If you can’t fix them, end your run without committing.'
+  );
+}
+
 // What a pr-closed-unmerged request tells the operator.
 function prClosedReason(task: Task): string {
   return `PR #${task.pr!.number} of ${task.id} was closed without merging. Cancel the task, or reopen the PR.`;
@@ -3765,7 +3811,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
           task.resumeWith = updateOpening(state, task);
           task.state = 'queued';
         }
-        if (task.state === 'in-review') readGate(task, action, request);
+        if (task.state === 'in-review') {
+          readGate(task, action, request);
+          readRedChecks(state, task, action, request, at);
+        }
       }
       break;
     }
@@ -4093,7 +4142,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // A run of an AFK stage moves the task on by itself. Any other (a task
       // with no preset, or one handed off with no AFK stage ahead) is its last.
       const from = stageOf(task, run!.stage);
-      if (from?.mode !== 'AFK' || task.changesRequested || task.conflicted) {
+      if (from?.mode !== 'AFK' || task.changesRequested || task.conflicted || task.checksFixed) {
         reachReview(task);
         break;
       }

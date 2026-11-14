@@ -194,6 +194,10 @@ _Avoid_: Approval, review step
 The run the factory queues on a ticket task In review, or on a root waiting at an agent policy's merge gate, once GitHub finds its PR conflicting with the base branch. It resumes the task's session, merges `origin/<base>` into the task branch and resolves the conflicts, and the task goes back In review, or to its gate.
 _Avoid_: Rebase run, conflict fix
 
+**Fix run**:
+The one run the factory queues on a root waiting at an agent policy's merge gate once its PR's checks go red. It resumes the task's session, told which checks failed and where to read them, and the factory pushes what it commits, so the gate waits on the new head's checks. Red again after it, the factory asks the operator instead.
+_Avoid_: CI fix, retry run
+
 **Merge policy**:
 Who passes a task's merge gate, picked at handoff, or at launch for a task starting AFK, and inherited by a spec's ticket tasks. Under **operator**, the task goes In review and the operator merges it. Under **judged** (semi-auto), the factory merges unless its gate check finds the PR worth the operator's review. Under **unattended** (full-auto), the factory merges every PR whose checks pass. Judged and unattended, the **agent policies**, need L3.
 _Avoid_: Auto-merge setting, review mode, auto (that is Claude Code's permission mode)

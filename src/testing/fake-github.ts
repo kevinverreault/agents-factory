@@ -7,7 +7,9 @@ import {
   pushRefusal,
   workflowFiles,
   type BranchPush,
+  type Checks,
   type ChecksState,
+  type FailedCheck,
   type FactoryApp,
   type GitHub,
   type Installation,
@@ -25,6 +27,9 @@ import {
 } from '../github/github.ts';
 import { outsideResearch } from '../github/research-branch.ts';
 import type { FakeClock } from './fake-clock.ts';
+
+// The check that fails on a red commit a test named none for.
+const REPO_CHECK: FailedCheck = { name: 'build', url: null };
 import type { FakeGit } from './fake-git.ts';
 
 // Those of `needed` that `granted` lacks, by name: a write grant covers a read.
@@ -99,7 +104,7 @@ export class FakeGitHub implements GitHub {
   // The combined state of the checks on each commit, as a test set it, and
   // on every other commit of each repository whose CI a test set: a commit
   // with neither has no checks.
-  private readonly checks = new Map<string, ChecksState>();
+  private readonly checks = new Map<string, Checks>();
   private readonly repoChecks = new Map<string, ChecksState>();
   private failure: string | null = null;
   private prFailure: string | null = null;
@@ -340,14 +345,16 @@ export class FakeGitHub implements GitHub {
   }
 
   // The checks on the PR's head commit as it is now are `state` (ADR
-  // 0014): a commit pushed after has none, until a test sets them.
-  setChecks(number: number, state: ChecksState): void {
-    this.setCommitChecks(this.headOf(this.prAt(number)), state);
+  // 0014), those of them `failed` failing: a commit pushed after has none,
+  // until a test sets them.
+  setChecks(number: number, state: ChecksState, failed?: FailedCheck[]): void {
+    this.setCommitChecks(this.headOf(this.prAt(number)), state, failed);
   }
 
-  // The checks on `commit` are `state`.
-  setCommitChecks(commit: string, state: ChecksState): void {
-    this.checks.set(commit, state);
+  // The checks on `commit` are `state`, those of them `failed` failing: by
+  // default, a red commit's one check, `build`, with no page.
+  setCommitChecks(commit: string, state: ChecksState, failed: FailedCheck[] = state === 'red' ? [REPO_CHECK] : []): void {
+    this.checks.set(commit, { state, failed });
   }
 
   // The repository's CI leaves every commit's checks `state` unless a test
@@ -362,11 +369,14 @@ export class FakeGitHub implements GitHub {
     return this.git.tipOnOrigin(pr.repo, pr.head) ?? '';
   }
 
-  async readChecks(token: string, repo: string, head: string): Promise<ChecksState> {
+  async readChecks(token: string, repo: string, head: string): Promise<Checks> {
     this.scoped(token, repo, 'checks', 'read');
     const minted = this.scoped(token, repo, 'statuses', 'read');
     this.checkReads.push({ repo, head, token: snapshot(minted) });
-    return this.checks.get(head) ?? this.repoChecks.get(repo) ?? 'none';
+    const set = this.checks.get(head);
+    if (set) return { state: set.state, failed: [...set.failed] };
+    const state = this.repoChecks.get(repo) ?? 'none';
+    return { state, failed: state === 'red' ? [REPO_CHECK] : [] };
   }
 
   async markReady(token: string, ref: string): Promise<void> {

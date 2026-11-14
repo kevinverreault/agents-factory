@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { APP_PERMISSIONS, combinedChecks, statusState } from '../github/github.ts';
+import { APP_PERMISSIONS, commitChecks } from '../github/github.ts';
 import { describeGitHubContract, type GitHubFixture } from '../github/github-contract.ts';
 import { FakeClock } from './fake-clock.ts';
 import { FakeGit } from './fake-git.ts';
@@ -45,7 +45,8 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
     async setStatus(commit, context, state) {
       const set = (statuses.get(commit) ?? new Map<string, string>()).set(context, state);
       statuses.set(commit, set);
-      github.setCommitChecks(commit, combinedChecks([...set.values()].map(statusState)));
+      const { state: combined, failed } = commitChecks([], [...set].map(([context, state]) => ({ context, state })));
+      github.setCommitChecks(commit, combined, failed);
     },
     draftsOffered,
     async pullRequest(number) {

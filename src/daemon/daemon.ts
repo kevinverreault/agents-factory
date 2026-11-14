@@ -1060,7 +1060,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       event = { type: 'prRead', taskId: task.id, ...(await github.readPr(token, prRef(task.repo, task.pr!.number))) };
       if (event.state === 'open' && atMergeGate(task)) {
         const checks = await appToken(task.repo, CHECKS_READ);
-        event.checks = await github.readChecks(checks.token, task.repo, event.head!);
+        const { state, failed } = await github.readChecks(checks.token, task.repo, event.head!);
+        event.checks = state;
+        event.failed = failed;
       }
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
