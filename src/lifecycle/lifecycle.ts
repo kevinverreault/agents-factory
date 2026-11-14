@@ -267,7 +267,7 @@ export type JudgementCall =
 // The issue a root's judgement calls are commented on once the factory
 // merged its PR (ADR 0014), and why the factory last couldn't. It is tried
 // again at the next PR poll, or by the next daemon.
-export type CallsComment = { on: string; problem: string | null };
+export type JudgementCallsComment = { on: string; problem: string | null };
 
 // What a root task is (ADR 0013): a plain root, a spec task that launches
 // ticket tasks over its spec's tickets, or a ticket task working one ticket
@@ -507,11 +507,8 @@ export type Task = {
   // A root's judgement calls, its children's included (ADR 0014), in the
   // order they were made. Tasks stored before them have none.
   judgementCalls?: JudgementCall[];
-  // How many of them its PR's body listed as the factory opened it: those
-  // after are written into it before the factory merges it.
-  listedCalls?: number;
   // While the factory still owes the comment listing them, once it merged.
-  callsComment?: CallsComment | null;
+  judgementCallsComment?: JudgementCallsComment | null;
   // The PR body, once its `artifact:pr-body` stage wrote it: the agent's
   // text with what the factory adds.
   prBody?: string | null;
@@ -1150,7 +1147,7 @@ export type MapClosingEvent = { type: 'mapClosed'; taskId: string } | { type: 'm
 
 // What the daemon did about the comment listing a merged root's judgement
 // calls (ADR 0014): it posted it as its App, or couldn't, saying why.
-export type CallsCommentEvent = { type: 'callsCommented'; taskId: string } | { type: 'callsUncommented'; taskId: string; reason: string };
+export type JudgementCallsCommentEvent = { type: 'judgementCallsCommented'; taskId: string } | { type: 'judgementCallsUncommented'; taskId: string; reason: string };
 
 // The daemon delivered the factory notes the HITL task held to its live
 // run, on the operator's turn.
@@ -1190,7 +1187,7 @@ export type LifecycleAction =
   | ResolutionEvent
   | SpecClosingEvent
   | MapClosingEvent
-  | CallsCommentEvent
+  | JudgementCallsCommentEvent
   | TicketTaskLaunched
   | TicketSetEvent
   | CleanupEvent
@@ -1800,40 +1797,46 @@ function prBody(task: Task, body: string): string {
 }
 
 // The heading of the PR body's judgement-calls section.
-const CALLS_HEADING = '## Judgement calls';
+const JUDGEMENT_CALLS_HEADING = '## Judgement calls';
+// Where the factory's footer starts in a PR body it wrote.
+const FOOTER_START = '---\nOpened by the agents factory';
 
-// The PR body with the judgement-calls section listing `calls`, after the
-// rest, or none without any. A body written before the factory added the
-// section as the PR opened has its own, last, replaced.
-function withCalls(body: string, calls: JudgementCall[]): string {
-  const at = body.lastIndexOf(`\n\n${CALLS_HEADING}\n\n`);
-  const rest = at === -1 ? body : body.slice(0, at);
-  return calls.length ? `${rest}\n\n${CALLS_HEADING}\n\n${bulleted(calls.map(judgementCallLine))}` : rest;
+// The PR body `body` with its judgement-calls section listing `calls`, or
+// with none when there are none, and the rest of it as it was, the
+// operator's edits on GitHub included. A body with no such section gets one
+// after the rest, before the factory's footer if it has one. The section
+// runs from its heading to the next heading, the footer, or the end.
+export function withJudgementCalls(body: string, calls: JudgementCall[]): string {
+  const text = body.replace(/\r\n/g, '\n');
+  const section = calls.length ? `\n\n${JUDGEMENT_CALLS_HEADING}\n\n${bulleted(calls.map((call) => judgementCallLine(call, 'pr-body')))}` : '';
+  const at = text.lastIndexOf(`\n\n${JUDGEMENT_CALLS_HEADING}\n`);
+  if (at !== -1) {
+    const after = text.slice(at + 2 + JUDGEMENT_CALLS_HEADING.length).search(/\n\n(## |---\n)/);
+    const end = after === -1 ? text.length : at + 2 + JUDGEMENT_CALLS_HEADING.length + after;
+    return text.slice(0, at) + section + text.slice(end);
+  }
+  const footer = text.lastIndexOf(`\n\n${FOOTER_START}`);
+  return footer === -1 ? text + section : text.slice(0, footer) + section + text.slice(footer);
 }
 
-// A judgement call as the PR body and the factory's comment list it.
-export function judgementCallLine(call: JudgementCall): string {
+// A judgement call as the PR body, or the factory's comment on an issue,
+// lists it: a merge with findings left over points at the PR body's own
+// list of them, while the comment names them.
+export function judgementCallLine(call: JudgementCall, where: 'pr-body' | 'issue'): string {
   if (call.kind === 'merged-with-findings') {
     const left = call.findings.length === 1 ? 'a review finding' : `${call.findings.length} review findings`;
-    return `Merged with ${left} left over: ${call.findings.map(oneLineOf).join('; ')}`;
+    return where === 'pr-body' ? `Merged with ${left} left over, listed above.` : `Merged with ${left} left over: ${call.findings.map(oneLineOf).join('; ')}`;
   }
   return `Assumed, asked “${oneLineOf(call.question)}”: ${oneLineOf(call.answer)}${call.reason ? ` (${oneLineOf(call.reason)})` : ''}`;
 }
 
 // The root's judgement calls once the factory merges its PR: those made so
 // far, and the merge itself when it leaves review findings over.
-export function callsAtMerge(task: Task): JudgementCall[] {
+export function judgementCallsAtMerge(task: Task): JudgementCall[] {
   const calls = task.judgementCalls ?? [];
   const leftOver = task.findings?.leftOver ?? [];
   if (!leftOver.length || calls.some((call) => call.kind === 'merged-with-findings')) return calls;
   return [...calls, { kind: 'merged-with-findings', taskId: task.id, findings: [...leftOver] }];
-}
-
-// Whether the factory writes the root's PR body afresh before it merges it:
-// only once it has judgement calls the body as opened didn't list, so a
-// body the operator edited is otherwise left as it is.
-export function callsUnlisted(task: Task): boolean {
-  return callsAtMerge(task).length > (task.listedCalls ?? 0);
 }
 
 // GitHub caps a PR title at 256 characters.
@@ -1850,8 +1853,8 @@ function prTitleOf(title: string | undefined): string | null {
 // title) above the
 // factory's footer, which names the task, each stage's models in preset
 // order, and the tokens its whole tree took.
-// Once `merging`, it lists the judgement calls the merge makes too.
-export function pullRequestOf(state: Lifecycle, task: Task, { merging = false }: { merging?: boolean } = {}): { title: string; body: string } {
+// Its judgement calls so far go in a section above the footer.
+export function pullRequestOf(state: Lifecycle, task: Task): { title: string; body: string } {
   const runs = task.runIds.map((id) => state.runs[id]!);
   const models = new Map<string, string[]>();
   for (const stage of task.preset?.stages ?? []) {
@@ -1870,10 +1873,10 @@ export function pullRequestOf(state: Lifecycle, task: Task, { merging = false }:
     '',
     `Total tokens: ${tokens.toLocaleString('en-US')}`,
   ];
-  const calls = merging ? callsAtMerge(task) : (task.judgementCalls ?? []);
-  if (isSetupTask(task) && !task.prBody) return { title: SETUP_PR_TITLE, body: `${withCalls(setupPrBody(task), calls)}\n\n${footer.join('\n')}` };
-  const body = task.prBody ?? prBody(task, task.brief?.trim() || task.launchSummary?.trim() || task.title);
-  return { title: task.prTitle || task.title, body: `${withCalls(body, calls)}\n\n${footer.join('\n')}` };
+  const calls = task.judgementCalls ?? [];
+  const footed = (body: string) => withJudgementCalls(`${body}\n\n${footer.join('\n')}`, calls);
+  if (isSetupTask(task) && !task.prBody) return { title: SETUP_PR_TITLE, body: footed(setupPrBody(task)) };
+  return { title: task.prTitle || task.title, body: footed(task.prBody ?? prBody(task, task.brief?.trim() || task.launchSummary?.trim() || task.title)) };
 }
 
 const SETUP_PR_TITLE = 'Set up the skill set';
@@ -2629,9 +2632,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'ticketResolved':
     case 'ticketUnresolved':
       return task.resolving ? null : `${task.id} owes no ticket its closing.`;
-    case 'callsCommented':
-    case 'callsUncommented':
-      return task.callsComment ? null : `${task.id} owes no comment listing its judgement calls.`;
+    case 'judgementCallsCommented':
+    case 'judgementCallsUncommented':
+      return task.judgementCallsComment ? null : `${task.id} owes no comment listing its judgement calls.`;
     case 'specClosed':
     case 'specUnclosed':
       return task.ticketSet?.closing && !isTerminal(task) ? null : `${task.id} isn’t closing its spec.`;
@@ -2687,10 +2690,16 @@ function finishMerged(state: Lifecycle, task: Task, request: AttentionRequest | 
 // its judgement calls, if it made any, on the spec of a ticket task under
 // one, so the spec reads as a log of every call made without the operator,
 // or else on its ticket. A task with no issue has them in its PR body alone.
-function oweCallsComment(state: Lifecycle, task: Task): void {
+function oweJudgementCallsComment(state: Lifecycle, task: Task): void {
   if (!task.judgementCalls?.length || task.kind !== 'ticket' || !task.ticket) return;
-  const spec = state.tasks[task.specTask ?? '']?.ticketSet?.spec;
-  task.callsComment = { on: spec ?? task.ticket, problem: null };
+  task.judgementCallsComment = { on: specOf(state, task) ?? task.ticket, problem: null };
+}
+
+// The spec of a ticket task its spec task launched over one, or null: one
+// launched on its ticket alone, or by a spec task that named its tickets, has none.
+function specOf(state: Lifecycle, task: Task): string | null {
+  const specTask = task.specTask ? state.tasks[task.specTask] : undefined;
+  return specTask?.ticketSet?.spec ?? null;
 }
 
 // The PR poll read the open PR of a root at its merge gate (ADR 0014): its
@@ -4013,15 +4022,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.gate!.step = 'merge';
       break;
     case 'prMerged':
-      task.judgementCalls = callsAtMerge(task);
+      task.judgementCalls = judgementCallsAtMerge(task);
       finishMerged(state, task, request);
-      oweCallsComment(state, task);
+      oweJudgementCallsComment(state, task);
       break;
-    case 'callsCommented':
-      task.callsComment = null;
+    case 'judgementCallsCommented':
+      task.judgementCallsComment = null;
       break;
-    case 'callsUncommented':
-      task.callsComment = { ...task.callsComment!, problem: action.reason };
+    case 'judgementCallsUncommented':
+      task.judgementCallsComment = { ...task.judgementCallsComment!, problem: action.reason };
       break;
     case 'mergeFailed': {
       // Retried once the operator answers, as a failed publishing step is.
@@ -4568,7 +4577,6 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'prOpened':
       task.pr = { ...action.pr };
-      task.listedCalls = (task.judgementCalls ?? []).length;
       task.publishing = null;
       actionStagePublished(state, task, at);
       break;

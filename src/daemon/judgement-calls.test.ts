@@ -163,10 +163,12 @@ describe('a factory merge', () => {
     expect(factory.github.pullRequests[0]!.body).not.toContain('Judgement calls');
     await merged(launched, 'T1');
 
-    const line = 'Merged with a review finding left over: The button has no label.';
+    // The comment names the findings; the PR body points at its own list of them.
     await vi.waitFor(() => expect(comments(factory)).toHaveLength(1));
-    expect(comments(factory)[0]!.comment).toContain(`- ${line}`);
-    expect(factory.github.pullRequests[0]!.body).toContain(`## Judgement calls\n\n- ${line}`);
+    expect(comments(factory)[0]!.comment).toContain('- Merged with a review finding left over: The button has no label.');
+    const body = factory.github.pullRequests[0]!.body;
+    expect(body).toContain('## Review findings left over\n\n- The button has no label.\n\n## Judgement calls\n\n- Merged with a review finding left over, listed above.');
+    expect(body.split('The button has no label.')).toHaveLength(2);
   });
 });
 
@@ -200,6 +202,70 @@ describe('a judgement call recorded after the PR body was written', () => {
     expect(factory.github.prWrites[1]).toMatchObject({ token: { repo: 'acme/widgets', permissions: { pull_requests: 'write', metadata: 'read' } } });
     await vi.waitFor(() => expect(comments(factory)).toHaveLength(1));
     expect(comments(factory)[0]!.comment).toContain(`- ${ASSUMED_LINE}`);
+  });
+});
+
+describe('the PR body at merge', () => {
+  test('keeps what the operator edited on GitHub, its judgement-calls section alone written, above the factory’s footer', async () => {
+    const launched = await attached();
+    const { factory, operator } = launched;
+    await operator.send(fullAuto({ prompt: '', issues: ['#39'] }));
+    // The merge, with a finding left over, is a judgement call the body as opened doesn't list.
+    await throughPr(launched, 'T1', { assumed: [ASSUMED], findings: ['The button has no label.'] });
+    // The operator rewords the body on GitHub, whose web editor saves it with CRLFs.
+    const pr = factory.github.pullRequests[0]!;
+    pr.body = pr.body.replace('The work of T1.', 'The work of T1, reworded by the operator.').replace(/\n/g, '\r\n');
+
+    await merged(launched, 'T1');
+
+    const body = factory.github.pullRequests[0]!.body;
+    expect(body).toMatch(/^The work of T1, reworded by the operator\.\n\nCloses #39\n\n## Review findings left over\n\n- The button has no label\.\n\n/);
+    expect(body).toContain(`## Judgement calls\n\n- ${ASSUMED_LINE}\n- Merged with a review finding left over, listed above.\n\n---\nOpened by the agents factory for task T1.`);
+    expect(body.match(/## Judgement calls/g)).toHaveLength(1);
+  });
+
+  test('a write GitHub refuses says so, and nothing merges', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    await operator.send(fullAuto({ prompt: '', issues: ['#39'] }));
+    await throughPr(launched, 'T1', { findings: ['The button has no label.'] });
+    factory.github.editPrBody = async () => {
+      throw new GitHubError('GitHub refused to edit the body of acme/widgets#101 (HTTP 422: Validation Failed).');
+    };
+    await tui.until((state) => state.tasks.T1?.gate?.checks === 'none');
+    factory.clock.advance(2 * MINUTE);
+
+    const asked = await tui.until((state) => state.attentionQueue.length === 1);
+    expect(asked.attentionQueue[0]).toMatchObject({
+      attention: 'github-write',
+      reason: expect.stringContaining('Writing its judgement calls into its PR body first failed: GitHub refused to edit the body of acme/widgets#101'),
+    });
+    expect(factory.github.prState(101).state).toBe('open');
+  });
+});
+
+describe('a comment whose post GitHub took but whose reply was lost', () => {
+  test('isn’t posted again at the next poll', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    await operator.send(fullAuto({ prompt: '', issues: ['#39'] }));
+    await throughPr(launched, 'T1', { assumed: [ASSUMED] });
+    const commentIssue = factory.github.commentIssue.bind(factory.github);
+    factory.github.commentIssue = async (token, ref, comment) => {
+      await commentIssue(token, ref, comment);
+      throw new GitHubError('GitHub couldn’t be reached: socket hang up');
+    };
+    await merged(launched, 'T1');
+    await vi.waitFor(() => expect(comments(factory)).toHaveLength(1));
+    await tui.until((state) => state.tasks.T1?.resolving === null);
+    const minted = factory.github.minted.length;
+
+    factory.github.commentIssue = commentIssue;
+    factory.clock.advance(15 * MINUTE);
+    // The next poll reads the ticket's comments, finds it there, and posts nothing.
+    await vi.waitFor(() => expect(factory.github.minted.length).toBeGreaterThan(minted));
+    await operator.send({ type: 'daemon.status' });
+    expect(comments(factory)).toHaveLength(1);
   });
 });
 

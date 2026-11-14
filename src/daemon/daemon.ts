@@ -55,7 +55,8 @@ import {
   openRequest,
   overdueRuns,
   pullRequestOf,
-  callsUnlisted,
+  judgementCallsAtMerge,
+  withJudgementCalls,
   judgementCallLine,
   pushedBranch,
   runsContained,
@@ -94,7 +95,7 @@ import {
   type PublishEvent,
   type ResearchEvent,
   type ResolutionEvent,
-  type CallsCommentEvent,
+  type JudgementCallsCommentEvent,
   type SpecClosingEvent,
   mapsOf,
   inRepo,
@@ -1043,16 +1044,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Takes the step of the factory's merge on GitHub as the App, with a
-  // token minted for that write alone (ADR 0004). Before merging, the PR
-  // body's judgement calls are brought up to date (ADR 0014), with a token
-  // of their own, should any have been made since it was opened.
+  // token minted for that write alone (ADR 0004).
   async function takeMergeStep(task: Task, step: MergeStep): Promise<MergeEvent> {
     const { permissions, take } = MERGE_WRITES[step];
     try {
-      if (step === 'merge' && callsUnlisted(task)) {
-        const { token } = await appToken(task.repo, PR_WRITE);
-        await github.editPrBody(token, prRef(task.repo, task.pr!.number), pullRequestOf(lifecycle, task, { merging: true }).body);
-      }
       const { token } = await appToken(task.repo, permissions);
       await take(token, prRef(task.repo, task.pr!.number), task);
       return { type: MERGE_STEP_DONE[step], taskId: task.id };
@@ -1112,11 +1107,35 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // takes Pull requests write, as GitHub merges no draft; merging takes
   // Contents and Pull requests write, with the method its frozen merge gate
   // config names (a merge commit for tasks frozen before it), and only while
-  // the PR's head is still the commit whose checks let it through.
+  // the PR's head is still the commit whose checks let it through, once the
+  // PR body lists its judgement calls.
   const MERGE_WRITES: Record<MergeStep, { permissions: Permissions; take(token: string, ref: string, task: Task): Promise<void> }> = {
     ready: { permissions: PR_WRITE, take: (token, ref) => github.markReady(token, ref) },
-    merge: { permissions: MERGE, take: (token, ref, task) => github.mergePr(token, ref, { method: (task.mergeGate ?? DEFAULT_MERGE_GATE).mergeMethod, head: task.gate!.head }) },
+    merge: {
+      permissions: MERGE,
+      async take(token, ref, task) {
+        await writeJudgementCalls(task, ref);
+        await github.mergePr(token, ref, { method: (task.mergeGate ?? DEFAULT_MERGE_GATE).mergeMethod, head: task.gate!.head });
+      },
+    },
   };
+
+  // Brings the judgement-calls section of the root's PR body up to date
+  // before the factory merges it (ADR 0014), with those made since it was
+  // written and the merge's own: the body is read as GitHub has it with a
+  // read-only token, and only its section rewritten, with a token minted
+  // for that write alone, so the operator's edits stay. A body already
+  // listing them all is left as it is. A failure says it was this write.
+  async function writeJudgementCalls(task: Task, ref: string): Promise<void> {
+    try {
+      const body = await github.readPrBody((await appToken(task.repo, READ_ONLY)).token, ref);
+      const written = withJudgementCalls(body, judgementCallsAtMerge(task));
+      if (written !== body.replace(/\r\n/g, '\n')) await github.editPrBody((await appToken(task.repo, PR_WRITE)).token, ref, written);
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      throw new GitHubError(`Writing its judgement calls into its PR body first failed: ${error.message}`);
+    }
+  }
 
   // Where the root's PR stands, read as the App with a read-only token, or
   // null when GitHub couldn't say: the next poll asks again. A PR found
@@ -1796,17 +1815,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // task the factory merged has its judgement calls commented first (ADR 0014).
   function driveResolutions(): void {
     for (const task of Object.values(lifecycle.tasks)) {
-      const closing = !!task.ticketSet?.closing && !isTerminal(task);
-      if (stopping || !(task.callsComment || task.resolving || closing || task.mapClosing) || resolutionsInFlight.has(task.id)) continue;
-      // The maps close right after the spec: each closing is tried once per
-      // poll. A comment that failed holds up no ticket's closing.
-      const commenting = !!task.callsComment && !(task.callsComment.problem && task.resolving && !resolutionsTried.has(task.id));
-      const tried = commenting ? `${task.id}:calls` : !closing && task.mapClosing ? `${task.id}:maps` : task.id;
-      if (resolutionsTried.has(tried)) continue;
-      resolutionsTried.add(tried);
+      if (stopping || resolutionsInFlight.has(task.id)) continue;
+      const owed = owedResolution(task);
+      if (!owed || resolutionsTried.has(owed.key)) continue;
+      resolutionsTried.add(owed.key);
       resolutionsInFlight.add(task.id);
-      const resolution = commenting ? commentCalls(task) : closing ? closeSpec(task) : task.mapClosing ? closeMaps(task) : resolveTicket(task);
-      void resolution.then(
+      void owed.resolve().then(
         (event) =>
           serially(async () => {
             resolutionsInFlight.delete(task.id);
@@ -1818,6 +1832,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         },
       );
     }
+  }
+
+  // The task's next resolution owed, if any, and the key it is tried once
+  // per poll under: the comment listing its judgement calls, unless it
+  // failed and its ticket's closing is yet to be tried this poll, so a
+  // failing comment holds up no closing; then its spec's closing, its
+  // maps', right after the spec, and its ticket's.
+  function owedResolution(task: Task): { key: string; resolve(): Promise<LifecycleAction> } | null {
+    const comment = task.judgementCallsComment;
+    const ticketTried = resolutionsTried.has(task.id);
+    if (comment && !(comment.problem && task.resolving && !ticketTried)) return { key: `${task.id}:judgement-calls`, resolve: () => commentJudgementCalls(task) };
+    if (task.ticketSet?.closing && !isTerminal(task)) return { key: task.id, resolve: () => closeSpec(task) };
+    if (task.mapClosing) return { key: `${task.id}:maps`, resolve: () => closeMaps(task) };
+    if (task.resolving) return { key: task.id, resolve: () => resolveTicket(task) };
+    return null;
   }
 
   // Takes each spec task's next step (ADR 0013): reading its tickets from
@@ -1961,16 +1990,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Comments the judgement calls of the ticket task the factory merged on
-  // its spec, or its ticket (ADR 0014), as the App, with a token minted for
-  // that write alone (ADR 0004).
-  async function commentCalls(task: Task): Promise<CallsCommentEvent> {
+  // its spec, or its ticket (ADR 0014), as the App: its comments read with
+  // a read-only token first, so one already posted, by a daemon that
+  // stopped before recording it or whose reply was lost, isn't posted
+  // again; then posted with a token minted for that write alone (ADR 0004).
+  async function commentJudgementCalls(task: Task): Promise<JudgementCallsCommentEvent> {
+    const { on } = task.judgementCallsComment!;
     try {
-      const { token } = await appToken(task.repo, TICKET_WRITE);
-      await github.commentIssue(token, task.callsComment!.on, callsComment(task));
-      return { type: 'callsCommented', taskId: task.id };
+      const { token: reading } = await appToken(task.repo, READ_ONLY);
+      const marker = judgementCallsMarker(task);
+      if (!(await github.readComments(reading, on)).some((comment) => comment.includes(marker))) {
+        const { token } = await appToken(task.repo, TICKET_WRITE);
+        await github.commentIssue(token, on, judgementCallsCommentText(task));
+      }
+      return { type: 'judgementCallsCommented', taskId: task.id };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
-      return { type: 'callsUncommented', taskId: task.id, reason: error.message };
+      return { type: 'judgementCallsUncommented', taskId: task.id, reason: error.message };
     }
   }
 
@@ -3231,11 +3267,18 @@ function mapComment(task: Task): string {
 }
 
 // The comment listing the judgement calls of the ticket task the factory
-// merged (ADR 0014): on its spec it names the ticket, and either way the PR.
-function callsComment(task: Task): string {
-  const what = task.callsComment!.on === task.ticket ? task.pr!.url : `${task.pr!.url}, for ${task.ticket}`;
-  const calls = (task.judgementCalls ?? []).map((call) => `- ${judgementCallLine(call)}`);
-  return [`The agents factory’s task ${task.id} (${task.title}) merged ${what}, making these judgement calls without the operator:`, '', ...calls].join('\n');
+// merged (ADR 0014): on its spec it names the ticket, and either way the
+// PR, ending with the marker that tells it is posted.
+function judgementCallsCommentText(task: Task): string {
+  const what = task.judgementCallsComment!.on === task.ticket ? task.pr!.url : `${task.pr!.url}, for ${task.ticket}`;
+  const calls = (task.judgementCalls ?? []).map((call) => `- ${judgementCallLine(call, 'issue')}`);
+  return [`The agents factory’s task ${task.id} (${task.title}) merged ${what}, making these judgement calls without the operator:`, '', ...calls, '', judgementCallsMarker(task)].join('\n');
+}
+
+// The hidden marker in the comment listing the task's judgement calls: its
+// task and PR, which a later daemon finds it posted by.
+function judgementCallsMarker(task: Task): string {
+  return `<!-- agents-factory judgement calls of ${task.id}, ${task.pr!.url} -->`;
 }
 
 // What closing a merged ticket task's ticket says on it (ADR 0013): the PR

@@ -120,7 +120,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
     });
 
-    test('a ticket-writing token comments on an issue, leaving it open, while a read-only token can’t', async () => {
+    test('a ticket-writing token comments on an issue, leaving it open, while a read-only token can’t, but reads the comments', async () => {
       const { github, app, installedRepo, openIssue, issueComments } = await makeFixture();
       const comment = `Commented by the contract test, ${unique()}.`;
 
@@ -130,6 +130,8 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
 
       expect((await issueComments(openIssue)).filter((each) => each === comment)).toHaveLength(1);
       expect(await github.readIssue(write, openIssue)).toMatchObject({ open: true });
+      // A read-only token reads it back, among the issue's comments.
+      expect(await github.readComments((await github.mintToken(app, installedRepo, READ_ONLY)).token, openIssue)).toContain(comment);
     });
 
     test('a push token pushes the task branch to the same branch on GitHub', async () => {
@@ -372,7 +374,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       await github.mergePr(merge, ref, { method: 'merge', head: tip });
     });
 
-    test('a PR-writing token replaces a PR’s body, while a read-only token can’t', async () => {
+    test('a PR-writing token replaces a PR’s body, while a read-only token can’t, but reads it', async () => {
       const { github, app, installedRepo, clone, operator, baseBranch, pullRequest } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Edited by the contract test.\n' });
@@ -386,6 +388,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       await github.editPrBody(write, ref, 'As edited.\n\n## Judgement calls\n\n- One.');
 
       expect((await pullRequest(number)).body).toBe('As edited.\n\n## Judgement calls\n\n- One.');
+      expect(await github.readPrBody((await github.mintToken(app, installedRepo, READ_ONLY)).token, ref)).toBe('As edited.\n\n## Judgement calls\n\n- One.');
       await github.closePr(write, ref, 'Closed by the contract test.');
     });
 

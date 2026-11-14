@@ -128,6 +128,9 @@ export interface GitHub {
   // Comments `comment` on the issue, open or closed, leaving its state as it
   // is, with `token`, which needs Issues write.
   commentIssue(token: string, ref: string, comment: string): Promise<void>;
+  // The bodies of the issue's comments, oldest first, read with `token`,
+  // which needs Issues read.
+  readComments(token: string, ref: string): Promise<string[]>;
   // Pushes the task branch with `token`, which needs Contents write, under a
   // fixed refspec: the branch's tip to the same branch on GitHub, never
   // forced, and with no hooks run. A branch GitHub already has at that tip,
@@ -149,6 +152,9 @@ export interface GitHub {
   // Marks the draft PR `ref` ready for review, with `token`, which needs
   // Pull requests write. A PR already ready is left as it is.
   markReady(token: string, ref: string): Promise<void>;
+  // The body of the PR `ref` as GitHub has it now, read with `token`, which
+  // needs Pull requests read.
+  readPrBody(token: string, ref: string): Promise<string>;
   // Replaces the body of the PR `ref` with `body`, with `token`, which needs
   // Pull requests write.
   editPrBody(token: string, ref: string, body: string): Promise<void>;
@@ -340,6 +346,10 @@ export function gitHubApi(): GitHub {
       if (closed.status !== 200) throw refused(`close ${ref}`, closed);
     },
     commentIssue: commentOn,
+    async readComments(token, ref) {
+      const comments = await list(`${issuePath(ref)}/comments`, token, `read the comments on ${ref}`);
+      return comments.map((comment) => String(comment.body ?? ''));
+    },
     async push(token, { clonePath, repo, branch }) {
       const refusal = pushRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
@@ -407,6 +417,9 @@ export function gitHubApi(): GitHub {
       if (reply.status !== 200 || errors.length) {
         throw new GitHubError(`GitHub refused to mark ${ref} ready (HTTP ${reply.status}${errors.length ? `: ${errors.map(({ message }) => message).join(': ')}` : ''}).`);
       }
+    },
+    async readPrBody(token, ref) {
+      return String((await pullRequest(token, ref)).body ?? '');
     },
     async editPrBody(token, ref, body) {
       const edited = await call('PATCH', pullPath(ref), token, { body });

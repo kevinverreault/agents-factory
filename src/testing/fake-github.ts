@@ -282,22 +282,31 @@ export class FakeGitHub implements GitHub {
   }
 
   async closeIssue(token: string, ref: string, comment: string): Promise<void> {
-    await this.held();
-    if (this.issueWriteFailure) throw new GitHubError(this.issueWriteFailure);
-    const minted = this.scoped(token, ref, 'issues', 'write');
-    const issue = this.found(ref);
-    issue.comments.push(comment);
+    const { issue, minted } = await this.writeComment(token, ref, comment);
     issue.open = false;
     issue.stateReason = 'completed';
     this.writes.push({ action: 'close', ref, comment, token: snapshot(minted) });
   }
 
   async commentIssue(token: string, ref: string, comment: string): Promise<void> {
+    const { minted } = await this.writeComment(token, ref, comment);
+    this.writes.push({ action: 'comment', ref, comment, token: snapshot(minted) });
+  }
+
+  // Comments `comment` on the issue with `token`, which needs Issues write,
+  // once held writes are released: the issue, and the token it was made with.
+  private async writeComment(token: string, ref: string, comment: string): Promise<{ issue: FakeIssue; minted: Minted }> {
     await this.held();
     if (this.issueWriteFailure) throw new GitHubError(this.issueWriteFailure);
     const minted = this.scoped(token, ref, 'issues', 'write');
-    this.found(ref).comments.push(comment);
-    this.writes.push({ action: 'comment', ref, comment, token: snapshot(minted) });
+    const issue = this.found(ref);
+    issue.comments.push(comment);
+    return { issue, minted };
+  }
+
+  async readComments(token: string, ref: string): Promise<string[]> {
+    this.scoped(token, ref, 'issues', 'read');
+    return [...this.found(ref).comments];
   }
 
   // Someone reopens the issue on GitHub.
@@ -408,6 +417,11 @@ export class FakeGitHub implements GitHub {
     if (!pr.draft) return;
     pr.draft = false;
     this.prWrites.push({ action: 'ready', repo: pr.repo, number: pr.number, token: snapshot(minted) });
+  }
+
+  async readPrBody(token: string, ref: string): Promise<string> {
+    this.scoped(token, ref, 'pull_requests', 'read');
+    return this.foundPr(ref).body;
   }
 
   async editPrBody(token: string, ref: string, body: string): Promise<void> {
