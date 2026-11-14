@@ -27,10 +27,13 @@ import {
 } from '../github/github.ts';
 import { outsideResearch } from '../github/research-branch.ts';
 import type { FakeClock } from './fake-clock.ts';
-
-// The check that fails on a red commit a test named none for.
-const REPO_CHECK: FailedCheck = { name: 'build', url: null };
 import type { FakeGit } from './fake-git.ts';
+
+// The checks that failed on a commit in `state` a test named none for: a
+// red commit's one check, `build`, with no page.
+function failedByDefault(state: ChecksState): FailedCheck[] {
+  return state === 'red' ? [{ name: 'build', url: null }] : [];
+}
 
 // Those of `needed` that `granted` lacks, by name: a write grant covers a read.
 function missingPermissions(granted: Permissions, needed: Permissions): Permission[] {
@@ -351,9 +354,8 @@ export class FakeGitHub implements GitHub {
     this.setCommitChecks(this.headOf(this.prAt(number)), state, failed);
   }
 
-  // The checks on `commit` are `state`, those of them `failed` failing: by
-  // default, a red commit's one check, `build`, with no page.
-  setCommitChecks(commit: string, state: ChecksState, failed: FailedCheck[] = state === 'red' ? [REPO_CHECK] : []): void {
+  // The checks on `commit` are `state`, those of them `failed` failing.
+  setCommitChecks(commit: string, state: ChecksState, failed: FailedCheck[] = failedByDefault(state)): void {
     this.checks.set(commit, { state, failed });
   }
 
@@ -376,7 +378,7 @@ export class FakeGitHub implements GitHub {
     const set = this.checks.get(head);
     if (set) return { state: set.state, failed: [...set.failed] };
     const state = this.repoChecks.get(repo) ?? 'none';
-    return { state, failed: state === 'red' ? [REPO_CHECK] : [] };
+    return { state, failed: failedByDefault(state) };
   }
 
   async markReady(token: string, ref: string): Promise<void> {

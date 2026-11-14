@@ -497,9 +497,9 @@ export type Task = {
   conflicted?: boolean;
   // True once a PR poll found the checks on the PR of a root at its merge
   // gate red and queued its one fix run (ADR 0014), until a poll finds them
-  // green: checks red again then raise a failure request instead. Like
-  // conflicted, each of its runs that completes puts it back at its gate.
-  checksFixed?: boolean;
+  // green or the operator takes it over: checks red again then raise a
+  // failure request instead. Like conflicted, each of its runs that completes puts it back at its gate.
+  fixRunSpent?: boolean;
   // Its Push & open draft PR while under way, and the draft PR it opened.
   publishing?: Publishing | null;
   pr?: PullRequest | null;
@@ -2559,13 +2559,13 @@ function readGate(task: Task, read: PrReadEvent, request: AttentionRequest | und
 // queues an update run; red again after it raises a failure request naming
 // the checks, and the root stays at its gate, unmerged, until the operator
 // answers it and its gate is read afresh.
-function readRedChecks(state: Lifecycle, task: Task, read: PrReadEvent, request: AttentionRequest | undefined, at: number): void {
+function fixRedChecks(state: Lifecycle, task: Task, read: PrReadEvent, request: AttentionRequest | undefined, at: number): void {
   if (!atMergeGate(task) || task.gate?.step) return;
-  if (read.checks === 'green') task.checksFixed = false;
+  if (read.checks === 'green') task.fixRunSpent = false;
   if (read.checks !== 'red' || request) return;
   const failed = read.failed ?? [];
-  if (!task.checksFixed) {
-    task.checksFixed = true;
+  if (!task.fixRunSpent) {
+    task.fixRunSpent = true;
     task.resumeWith = checksFixOpening(task, failed);
     task.state = 'queued';
     return;
@@ -3703,6 +3703,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.mode = 'HITL';
       task.autonomy = null;
       task.loop = null;
+      // Its work is the operator's now: handed back AFK, its stages carry on,
+      // and a red check at its gate gets a fix run again.
+      task.fixRunSpent = false;
       // What an AFK run was to open on is the operator's to say now.
       task.resumeWith = null;
       // A fresh session no run has started yet gives way to the one the
@@ -3813,7 +3816,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         }
         if (task.state === 'in-review') {
           readGate(task, action, request);
-          readRedChecks(state, task, action, request, at);
+          fixRedChecks(state, task, action, request, at);
         }
       }
       break;
@@ -4142,7 +4145,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // A run of an AFK stage moves the task on by itself. Any other (a task
       // with no preset, or one handed off with no AFK stage ahead) is its last.
       const from = stageOf(task, run!.stage);
-      if (from?.mode !== 'AFK' || task.changesRequested || task.conflicted || task.checksFixed) {
+      if (from?.mode !== 'AFK' || task.changesRequested || task.conflicted || task.fixRunSpent) {
         reachReview(task);
         break;
       }
