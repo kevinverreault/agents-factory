@@ -1260,6 +1260,12 @@ export function factoryMerges(task: Task): boolean {
   return !task.child && task.mode === 'AFK' && agentPolicy(task.mergePolicy) && atLeast(clampAutonomy(task.autonomy ?? 'L1', stageOf(task, task.stage)), 'L3');
 }
 
+// The AFK task's autonomy level at its merge gate, past its last stage: its
+// own, held to that stage's ceiling, which `factoryMerges` goes by there.
+function levelAtGate(task: Task): AutonomyLevel {
+  return clampAutonomy(task.autonomy ?? 'L1', task.preset?.stages.at(-1));
+}
+
 // Whether the root waits at its merge gate for the factory to merge it
 // (ADR 0014): past its last stage with its PR open and published, under an
 // agent policy, rather than In review for the operator.
@@ -1290,7 +1296,7 @@ function setPolicy(task: Task, policy: MergePolicy): void {
 // AFK one still at L3.
 function takesSpecPolicy(task: Task, policy: MergePolicy): boolean {
   if (task.state === 'in-review') return false;
-  return !agentPolicy(policy) || task.mode === 'HITL' || task.autonomy === 'L3';
+  return !agentPolicy(policy) || task.mode === 'HITL' || levelAtGate(task) === 'L3';
 }
 
 // Why the merge policy can't be picked for a task at `level` (null for a
@@ -2388,7 +2394,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (task.child) return `${task.id} is a child task: its work reaches the base branch through its parent’s PR.`;
       if (task.mode !== 'AFK') return `${task.id} is HITL: it picks its merge policy at its handoff.`;
       if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
-      return mergingRefusal(task) ?? policyRefusal(action.mergePolicy, task.autonomy ?? 'L1');
+      return mergingRefusal(task) ?? policyRefusal(action.mergePolicy, levelAtGate(task));
     }
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';

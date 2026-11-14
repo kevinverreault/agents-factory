@@ -35,7 +35,7 @@ import { GcSheet } from './gc-sheet.ts';
 import { GroupPicker, pickerKey } from './group-picker.ts';
 import { Conversation, conversationRunOf } from './conversation.ts';
 import { Help } from './help.ts';
-import { LaunchCard } from './launch-card.ts';
+import { cycle, LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
 import type { PrefsStore, TuiPrefs } from './prefs.ts';
 import { QuickLaunch } from './quick-launch.ts';
@@ -306,8 +306,8 @@ export function App({
   // Moves the drilled-into task to the next merge policy offered (ADR 0014).
   const repolicy = () => {
     const task = drilled;
-    if (!task || !changesPolicy(task)) return;
-    const to = OFFERED_POLICIES[(OFFERED_POLICIES.indexOf(policyOf(task)) + 1) % OFFERED_POLICIES.length]!;
+    if (!task || !offersPolicyChange(task)) return;
+    const to = cycle(OFFERED_POLICIES, policyOf(task), 1);
     void connection.send({ type: 'setMergePolicy', taskId: task.id, mergePolicy: to }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
   };
   // Sends the verb, then opens the task's conversation once the daemon took it.
@@ -463,7 +463,7 @@ export function App({
         ['enter', 'open conversation'],
         ['c', 'converse or take over'],
         ...(answers ? [['a', 'answer'] as Hint] : []),
-        ...(changesPolicy(drilled) ? [['p', 'merge policy'] as Hint] : []),
+        ...(offersPolicyChange(drilled) ? [['p', 'merge policy'] as Hint] : []),
         ['x', 'cancel'],
         ['esc', 'back'],
         ['?', 'keys'],
@@ -888,8 +888,9 @@ function column(children: ReactNode[]) {
   return h(Box, { flexDirection: 'column' }, ...children);
 }
 
-// Whether the operator may change the task's merge policy from its detail:
-// a live AFK root at L3, the only level an agent policy runs at (ADR 0014).
-function changesPolicy(task: TaskView): boolean {
+// Whether the task's detail offers `p` to change its merge policy: a live
+// AFK root at L3, the only level an agent policy runs at (ADR 0014). The
+// daemon's setMergePolicy guard has the last word, and says why it refuses.
+function offersPolicyChange(task: TaskView): boolean {
   return task.mode === 'AFK' && !task.parent && task.autonomy === 'L3' && !finished(task);
 }

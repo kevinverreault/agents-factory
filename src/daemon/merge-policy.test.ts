@@ -5,11 +5,14 @@
 // already there alone. Lowering a task below L3 resets it to `operator`.
 // A `ready-for-human` ticket still launches HITL under every policy, and
 // its handoff sheet pre-fills its spec's policy.
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
+import { throughPr } from '../testing/through-pr.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
 
@@ -25,12 +28,17 @@ const MINUTE = 60_000;
 
 type Factory = { factory: TestFactory; operator: FactoryConnection; tui: Watched };
 
-// A factory with a subscription token for contained runs, and the spec #10
-// on GitHub with its tickets #11 and #15, both ready.
-async function attached(): Promise<Factory> {
+// A factory with a subscription token for contained runs, the spec #10 on
+// GitHub with its tickets #11 and #15, both ready, and the user preset
+// `capped` when given.
+async function attached({ capped }: { capped?: string } = {}): Promise<Factory> {
   const factory = await startTestFactory();
   factories.push(factory);
   await factory.secrets.write(SUBSCRIPTION_TOKEN_SECRET, 'sk-ant-oat01-token');
+  if (capped) {
+    mkdirSync(factory.paths.presetsDir, { recursive: true });
+    writeFileSync(join(factory.paths.presetsDir, 'capped.preset.yaml'), capped);
+  }
   await factory.registerRepo();
   factory.github.addIssue(SPEC, { title: 'Sign-in' });
   factory.github.addIssue('acme/widgets#11', { title: 'A login form', parent: SPEC, labels: READY });
@@ -51,23 +59,6 @@ const onBrief = (extra: Partial<LaunchCommand> = {}): LaunchCommand => ({ type: 
 const ticketTasks = (state: FactoryState) =>
   Object.fromEntries(Object.values(state.tasks).flatMap((task) => (task.kind === 'ticket' && task.ticket ? [[task.ticket, task.id]] : [])));
 
-// Works the task's live runs through its PR: the implement run commits in
-// its container, the review finds nothing, and the PR body run writes it.
-async function toPr({ factory, tui }: Factory, taskId: string): Promise<void> {
-  let run = (await tui.until((state) => !!state.tasks[taskId]?.liveRunId)).tasks[taskId]!.liveRunId!;
-  const workdir = factory.sandbox.workdirOf(taskId);
-  factory.git.editFile(workdir, `src/${taskId}.ts`, 'export {};\n');
-  factory.git.commitAll(workdir);
-  factory.executor.report(run, { type: 'runCompleted' });
-  const next = async (after: string) => (await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== after)).tasks[taskId]!.liveRunId!;
-  run = await next(run);
-  factory.executor.report(run, { type: 'runCompleted' });
-  run = await next(run);
-  factory.executor.report(run, { type: 'prBodyWritten', body: `The work of ${taskId}.` });
-  factory.executor.report(run, { type: 'runCompleted' });
-  await tui.until((state) => state.tasks[taskId]?.state === 'in-review' && !!state.tasks[taskId].pr);
-}
-
 describe('ticket tasks', () => {
   test('a full-auto spec task’s ticket tasks are full-auto too', async () => {
     const { operator, tui } = await attached();
@@ -85,7 +76,7 @@ describe('changing a live task’s merge policy', () => {
   test('works at L3, and is refused below it, on a HITL task, or with a policy that isn’t one', async () => {
     const { operator, tui } = await attached();
     await operator.send(onBrief());
-    await operator.send({ ...onBrief(), autonomy: 'L2' });
+    await operator.send(onBrief({ autonomy: 'L2' }));
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Grill me.' });
     await tui.until((state) => !!state.tasks.T3);
 
@@ -110,7 +101,7 @@ describe('changing a live task’s merge policy', () => {
     const launched = await attached();
     const { factory, operator, tui } = launched;
     await operator.send(onBrief());
-    await toPr(launched, 'T1');
+    await throughPr(launched, 'T1');
     expect(tui.state().tasks.T1?.label).toBe('In review');
 
     await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' });
@@ -139,7 +130,7 @@ describe('changing a live task’s merge policy', () => {
     factory.github.addIssue('acme/widgets#16', { title: 'Remember me', parent: SPEC, labels: READY, blockedBy: ['acme/widgets#11'] });
     await operator.send(onSpec());
     await tui.until((state) => !!state.tasks.T2?.liveRunId && !!state.tasks.T3?.liveRunId);
-    await toPr(launched, 'T2');
+    await throughPr(launched, 'T2');
 
     expect(await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' })).toEqual({ ok: true });
 
@@ -171,12 +162,40 @@ describe('changing a live task’s merge policy', () => {
   });
 });
 
+describe('a preset stage capped at L2', () => {
+  // An L3 task's runs at a stage whose ceiling is L2 run at L2, and its gate
+  // goes by its last stage's ceiling.
+  const stages = (first: string, last: string) =>
+    `stages:\n  - { id: build, kind: run, mode: AFK, skill: implement, args: "{{prompt}}"${first} }\n  - { id: check, kind: run, mode: AFK, skill: code-review${last} }\n`;
+  const capped = { type: 'launchTask', repo: 'acme/widgets', preset: 'capped', prompt: 'Add a logout button.', autonomy: 'L3' } as const;
+
+  test('as the last one, refuses full-auto on an L3 task, which could never merge at its gate', async () => {
+    const { operator, tui } = await attached({ capped: stages('', ', autonomy: L2') });
+    await operator.send(capped);
+    await tui.until((state) => !!state.tasks.T1?.liveRunId);
+
+    expect(await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' })).toEqual({
+      ok: false,
+      reason: 'Full-auto (unattended) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.',
+    });
+  });
+
+  test('before the last one, takes full-auto on an L3 task, which merges past it', async () => {
+    const { operator, tui } = await attached({ capped: stages(', autonomy: L2', '') });
+    await operator.send(capped);
+    await tui.until((state) => !!state.tasks.T1?.liveRunId);
+
+    expect(await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' })).toEqual({ ok: true });
+    expect(tui.state().tasks.T1?.mergePolicy).toBe('unattended');
+  });
+});
+
 describe('lowering a task below L3', () => {
   test('resets its merge policy to operator', async () => {
     const { operator, tui } = await attached();
-    await operator.send({ ...onBrief({ mergePolicy: 'unattended' }) });
+    await operator.send(onBrief({ mergePolicy: 'unattended' }));
     await operator.send({ type: 'setSlotCap', cap: 1 });
-    await operator.send({ ...onBrief({ mergePolicy: 'unattended' }) });
+    await operator.send(onBrief({ mergePolicy: 'unattended' }));
     await tui.until((state) => state.tasks.T2?.state === 'queued');
 
     expect(await operator.send({ type: 'setAutonomy', taskId: 'T2', autonomy: 'L3' })).toEqual({ ok: true });

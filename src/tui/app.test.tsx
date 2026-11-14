@@ -2303,6 +2303,22 @@ describe('launching and conversing', () => {
     await eventually(() => expect(connection.sent).toContainEqual(expect.objectContaining({ type: 'handoff', taskId: 'T1', autonomy: 'L3', mergePolicy: 'unattended' })));
   });
 
+  test('a policy the factory changes on an open sheet, as its spec task’s change reaches it, shows and is sent', async () => {
+    const connection = new FakeConnection();
+    const ticketTask = { ...onLean, kind: 'ticket' as const, ticket: 'acme/widgets#16', specTask: 'T9', mergePolicy: 'unattended' as const };
+    const state = { ...factoryState([{ ...ticketTask, handoff: { ...sheet, brief, autonomy: 'L3' as const, mergePolicy: 'unattended' as const } }]), runs: { R1: run } };
+    const { app } = await started(state, { connection });
+    widen(app, 400);
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Merge policy ‹ full-auto'));
+
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'handoff', 'mergePolicy'], value: 'operator' }]);
+
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Merge policy ‹ operator (you merge its PR) ›'));
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toContainEqual(expect.objectContaining({ type: 'handoff', taskId: 'T1', autonomy: 'L3', mergePolicy: 'operator' })));
+  });
+
   test('ctrl+h on a HITL task in the list hands it off from its conversation, a parked one included', async () => {
     const connection = new FakeConnection();
     const parked = { ...onLean, state: 'queued' as const, label: 'Ready for you', liveRunId: null };

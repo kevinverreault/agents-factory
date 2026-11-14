@@ -3,6 +3,9 @@
 // task in Ready for you, and runs each ticket the operator picks (or the
 // first) in a fresh HITL session, until the map has no open ticket. Then
 // the operator chooses whether to continue to spec, jump to tickets, or end.
+// Under full-auto (ADR 0014), a spec written from the map runs from its
+// handoff to the spec and the map closed, the factory merging each ticket
+// task's PR and launching the tickets it unblocks.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -11,6 +14,7 @@ import type { AutonomyLevel, MergePolicy } from '../lifecycle/lifecycle.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
+import { throughPr } from '../testing/through-pr.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
 
@@ -21,6 +25,7 @@ afterEach(async () => {
 });
 
 const MAP = 'acme/widgets#30';
+const MINUTE = 60_000;
 
 // A factory with T1 launched from wayfinder, charting on R1, and the map
 // acme/widgets#30 on GitHub with the tickets #31, #32 (blocked by #31) and
@@ -250,7 +255,7 @@ describe('the map clearing', () => {
     expect(factory.github.issueState(MAP).open).toBe(true);
     factory.github.failIssueWrites(null);
 
-    factory.clock.advance(15 * 60_000);
+    factory.clock.advance(15 * MINUTE);
     await operator.send({ type: 'daemon.status' });
 
     await vi.waitFor(() => expect(factory.github.issueState(MAP).open).toBe(false));
@@ -330,24 +335,11 @@ async function handOff(
 
 // The ticket task `taskId` works its ticket, is reviewed and opens its PR,
 // which someone merges on GitHub; a TUI attaching makes the daemon read it.
-async function mergeTicketTask({ factory, tui }: Pick<Charted, 'factory' | 'tui'>, taskId: string): Promise<void> {
-  let state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId);
-  let run = state.tasks[taskId]!.liveRunId!;
-  const workdir = factory.sandbox.workdirOf(taskId);
-  factory.git.editFile(workdir, `src/${taskId}.ts`);
-  factory.git.commitAll(workdir);
-  factory.executor.report(run, { type: 'runCompleted' });
-  // The review finds nothing.
-  state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
-  run = state.tasks[taskId]!.liveRunId!;
-  factory.executor.report(run, { type: 'runCompleted' });
-  state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
-  run = state.tasks[taskId]!.liveRunId!;
-  factory.executor.report(run, { type: 'prBodyWritten', body: `The work of ${taskId}.` });
-  factory.executor.report(run, { type: 'runCompleted' });
-  state = await tui.until((state) => state.tasks[taskId]?.label === 'In review' && !!state.tasks[taskId].pr);
-  factory.github.merge(state.tasks[taskId]!.pr!.number);
-  watch(await factory.attach());
+async function mergeTicketTask(charted: Pick<Charted, 'factory' | 'tui'>, taskId: string): Promise<void> {
+  await throughPr(charted, taskId);
+  const state = await charted.tui.until((state) => state.tasks[taskId]?.label === 'In review');
+  charted.factory.github.merge(state.tasks[taskId]!.pr!.number);
+  watch(await charted.factory.attach());
 }
 
 describe('the map resolving', () => {
@@ -422,21 +414,11 @@ describe('under full-auto', () => {
   // The ticket task `taskId` works its ticket through its PR, which waits at
   // its merge gate. The repo runs no checks: the gate's second read, 2
   // minutes after the first, lets it through, and the factory merges it.
-  async function factoryMerges({ factory, tui }: Pick<Charted, 'factory' | 'tui'>, taskId: string): Promise<void> {
-    let state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId);
-    let run = state.tasks[taskId]!.liveRunId!;
-    const workdir = factory.sandbox.workdirOf(taskId);
-    factory.git.editFile(workdir, `src/${taskId}.ts`);
-    factory.git.commitAll(workdir);
-    factory.executor.report(run, { type: 'runCompleted' });
-    for (const report of ['review', 'pr-body'] as const) {
-      state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
-      run = state.tasks[taskId]!.liveRunId!;
-      if (report === 'pr-body') factory.executor.report(run, { type: 'prBodyWritten', body: `The work of ${taskId}.` });
-      factory.executor.report(run, { type: 'runCompleted' });
-    }
+  async function mergedByFactory(charted: Pick<Charted, 'factory' | 'tui'>, taskId: string): Promise<void> {
+    const { factory, tui } = charted;
+    await throughPr(charted, taskId);
     await tui.until((state) => state.tasks[taskId]?.gate?.checks === 'none');
-    factory.clock.advance(2 * 60_000);
+    factory.clock.advance(2 * MINUTE);
     await tui.until((state) => state.tasks[taskId]?.label === 'Done' && state.tasks[taskId].resolving === null);
   }
 
@@ -458,7 +440,7 @@ describe('under full-auto', () => {
       expect(state.tasks[taskId]).toMatchObject({ kind: 'ticket', ticket, autonomy: 'L3', mergePolicy: 'unattended' });
       // Only the ticket whose blockers merged is launched.
       expect(Object.values(state.tasks).filter((task) => task.kind === 'ticket' && task.label !== 'Done')).toHaveLength(1);
-      await factoryMerges(charted, taskId);
+      await mergedByFactory(charted, taskId);
       expect(factory.github.issueState(ticket).open).toBe(false);
     }
 
