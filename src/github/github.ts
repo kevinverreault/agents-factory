@@ -1,9 +1,9 @@
 // The GitHub port (ADR 0004): what the factory asks GitHub as its factory
 // identity, a GitHub App. It turns the manifest flow's code into the App,
-// says whether the App is installed on a repository, and mints installation
-// tokens narrowed to one repository and the permissions asked for. With such
-// a token it reads specs, maps and their tickets, closes them (ADR 0013),
-// pushes task branches, and opens
+// says whether the App is installed on a repository and with which
+// permissions, and mints installation tokens narrowed to one repository and
+// the permissions asked for. With such a token it reads specs, maps and
+// their tickets, closes them (ADR 0013), pushes task branches, and opens
 // their draft PRs, reads those PRs, closes or reopens them, and deletes the
 // task branches it pushed (ADR 0011). The REST adapter (`gitHubApi`) is the real one.
 import { execFile } from 'node:child_process';
@@ -15,7 +15,7 @@ import { isResearchBranch, outsideResearch } from './research-branch.ts';
 // the credential store.
 export type FactoryApp = { id: number; slug: string; privateKey: string };
 
-export type Permission = 'contents' | 'issues' | 'pull_requests' | 'metadata';
+export type Permission = 'contents' | 'issues' | 'pull_requests' | 'metadata' | 'checks' | 'statuses';
 export type Permissions = Partial<Record<Permission, 'read' | 'write'>>;
 
 // What an AFK run reads GitHub with, and the daemon reads a root's PR with
@@ -34,6 +34,12 @@ export const PUSH: Permissions = { contents: 'write', metadata: 'read' };
 export const OPEN_PR: Permissions = { contents: 'read', pull_requests: 'write', metadata: 'read' };
 
 export type InstallationToken = { token: string; expiresAt: number };
+
+// The App's installation on a repository as GitHub has it: the permissions
+// the operator granted it, which lag the App's own until they approve a
+// change of them, as when the App gains a permission (ADR 0014), and the
+// installation's settings page, where they approve it.
+export type Installation = { permissions: Permissions; settingsUrl: string };
 
 // What the factory pushes (ADR 0004): the task branch, or a research
 // branch (ADR 0007), of the clone at `clonePath`, to the branch of the same
@@ -78,8 +84,9 @@ export interface GitHub {
   // The App GitHub created from the factory's manifest, by the code its
   // redirect carried back (valid for an hour).
   createApp(code: string): Promise<FactoryApp>;
-  // Whether the App is installed on the repository (`owner/name`).
-  isInstalled(app: FactoryApp, repo: string): Promise<boolean>;
+  // The App's installation on the repository (`owner/name`), with the
+  // permissions it grants, or null when the App isn't installed there.
+  installation(app: FactoryApp, repo: string): Promise<Installation | null>;
   // A token of the App's installation on the repository, for that repository
   // alone and with those permissions alone.
   mintToken(app: FactoryApp, repo: string, permissions: Permissions): Promise<InstallationToken>;
@@ -150,8 +157,27 @@ export function installationSettings(slug: string): string {
   return `https://github.com/apps/${slug}/installations/new`;
 }
 
-// The App's permissions (ADR 0004): no Workflows, Actions, Checks or Administration.
-export const APP_PERMISSIONS: Permissions = { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' };
+// The kind of account an installation is on, as GitHub says.
+export type AccountType = 'User' | 'Organization';
+
+// An installation's own settings page, on the account it is installed on:
+// where the operator approves the App's new permissions.
+export function installationPage(id: number, account: string, accountType: AccountType): string {
+  return accountType === 'Organization'
+    ? `https://github.com/organizations/${account}/settings/installations/${id}`
+    : `https://github.com/settings/installations/${id}`;
+}
+
+// The App's permissions (ADR 0004): no Workflows, Actions or Administration,
+// and Checks and Statuses read alone, for L3's merges (ADR 0014).
+export const APP_PERMISSIONS: Permissions = {
+  contents: 'write',
+  pull_requests: 'write',
+  issues: 'write',
+  metadata: 'read',
+  checks: 'read',
+  statuses: 'read',
+};
 
 const API = 'https://api.github.com';
 // How long a call may take before GitHub counts as unreachable.
@@ -192,11 +218,13 @@ export function gitHubApi(): GitHub {
   };
 
   // The installation covering the repository, or null when there is none.
-  async function installationOf(app: FactoryApp, repo: string): Promise<number | null> {
+  async function installationOf(app: FactoryApp, repo: string): Promise<({ id: number } & Installation) | null> {
     const reply = await call('GET', `/repos/${repo}/installation`, appJwt(app));
     if (reply.status === 404) return null;
     if (reply.status !== 200) throw refused(`say whether the App is installed on ${repo}`, reply);
-    return reply.json.id as number;
+    const id = reply.json.id as number;
+    const { login, type } = reply.json.account as { login: string; type: AccountType };
+    return { id, permissions: { ...(reply.json.permissions as Permissions) }, settingsUrl: installationPage(id, login, type) };
   }
 
   // The PR `ref` as GitHub has it.
@@ -224,13 +252,14 @@ export function gitHubApi(): GitHub {
       const { id, slug, pem } = reply.json as { id: number; slug: string; pem: string };
       return { id, slug, privateKey: pem };
     },
-    async isInstalled(app, repo) {
-      return (await installationOf(app, repo)) !== null;
+    async installation(app, repo) {
+      const found = await installationOf(app, repo);
+      return found && { permissions: found.permissions, settingsUrl: found.settingsUrl };
     },
     async mintToken(app, repo, permissions) {
       const installation = await installationOf(app, repo);
       if (installation === null) throw new GitHubError(`The factory’s App isn’t installed on ${repo}.`);
-      const reply = await call('POST', `/app/installations/${installation}/access_tokens`, appJwt(app), {
+      const reply = await call('POST', `/app/installations/${installation.id}/access_tokens`, appJwt(app), {
         repositories: [repo.split('/')[1]],
         permissions,
       });

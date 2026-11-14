@@ -26,7 +26,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { HARD_DENY_RULES, refusal, runHistoryIn } from '../guards/hard-denies.ts';
 import { AFK_UNSET } from '../guards/run-git.ts';
-import type { Answers, Mode, Question, RunEvent } from '../lifecycle/lifecycle.ts';
+import { runsContained, type Answers, type Mode, type Question, type RunEvent } from '../lifecycle/lifecycle.ts';
 import type { ModelUsage, Usage, UsageWindowStatus } from '../usage/usage.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import type { Processes } from '../os/processes.ts';
@@ -505,10 +505,12 @@ function whyUnstartable({ mode, autonomy, cwd, firstMessage, guards, container, 
   if (cwd === null) return 'The task has no worktree to run in.';
   if (mode === 'HITL') return null;
   if (guards === null) return 'An AFK run never starts without its git guards.';
-  if (autonomy === 'L2' && (container === null || credential !== 'subscription-token' || !token)) {
-    return 'An L2 run starts only in its task’s container, with its subscription token.';
+  // An L3 run is contained as an L2 run is (ADR 0014).
+  const contained = runsContained(autonomy);
+  if (contained && (container === null || credential !== 'subscription-token' || !token)) {
+    return `An ${autonomy} run starts only in its task’s container, with its subscription token.`;
   }
-  if (autonomy !== 'L2' && container !== null) return 'Only an L2 run starts in a container.';
+  if (!contained && container !== null) return 'Only an L2 or L3 run starts in a container.';
   // An AFK run takes no chat, so with nothing to start on it would wait forever.
   return firstMessage === null ? 'The AFK run has no first message to work on.' : null;
 }

@@ -170,9 +170,9 @@ describe('launching at an AFK stage', () => {
 
     expect(await operator.send({ ...implement, maxTurns: 0 })).toEqual({ ok: false, reason: 'Max turns must be a whole number of at least 1.' });
     expect(await operator.send({ ...implement, priority: 'asap' as never })).toEqual({ ok: false, reason: 'asap is not a priority (normal or urgent).' });
-    expect(await operator.send({ ...implement, autonomy: 'L3' as never })).toEqual({
+    expect(await operator.send({ ...implement, autonomy: 'L4' as never })).toEqual({
       ok: false,
-      reason: 'L3 is not an autonomy level (L1 or L2).',
+      reason: 'L4 is not an autonomy level (L1, L2 or L3).',
     });
 
     await operator.send({ type: 'daemon.status' });
