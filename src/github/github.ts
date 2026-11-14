@@ -374,10 +374,7 @@ export function gitHubApi(): GitHub {
       }
       const status = await call('GET', `/repos/${repo}/commits/${head}/status?per_page=100`, token);
       if (status.status !== 200) throw refused(`read the commit statuses of ${head} in ${repo}`, status);
-      return combinedChecks(
-        runs.map((run) => (run.status === 'completed' ? (PASSED.includes(run.conclusion) ? 'green' : 'red') : 'pending')),
-        (status.json.statuses as { state: string }[]).map(({ state }) => (state === 'success' ? 'green' : state === 'pending' ? 'pending' : 'red')),
-      );
+      return combinedChecks(runs.map(checkRunState), (status.json.statuses as { state: string }[]).map(({ state }) => statusState(state)));
     },
     async markReady(token, ref) {
       const pr = await pullRequest(token, ref);
@@ -493,11 +490,24 @@ function mergeabilityOf(pr: { mergeable?: boolean | null }): Mergeability {
 // and neutral ones count as passing, as GitHub's own merge box counts them.
 const PASSED = ['success', 'neutral', 'skipped'];
 
+// A check run as the gate reads it: pending until it completes, then green
+// when its conclusion passes, else red.
+export function checkRunState({ status, conclusion }: { status: string; conclusion?: string | null }): ChecksState {
+  if (status !== 'completed') return 'pending';
+  return PASSED.includes(conclusion ?? '') ? 'green' : 'red';
+}
+
+// A commit status as the gate reads it: `success` green, `pending` pending,
+// and `failure` or `error` red.
+export function statusState(state: string): ChecksState {
+  return state === 'success' ? 'green' : state === 'pending' ? 'pending' : 'red';
+}
+
 // The combined state of a commit's check runs and commit statuses, each
-// already read as green, red or pending: any red is red, else any pending
-// is pending, else green, and with none at all, none.
-export function combinedChecks(...each: ChecksState[][]): ChecksState {
-  const all = each.flat();
+// list already read as green, red or pending: any red is red, else any
+// pending is pending, else green, and with none at all, none.
+export function combinedChecks(...lists: ChecksState[][]): ChecksState {
+  const all = lists.flat();
   if (all.length === 0) return 'none';
   if (all.includes('red')) return 'red';
   return all.includes('pending') ? 'pending' : 'green';

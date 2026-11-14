@@ -7,7 +7,7 @@ import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState, GateView, RunView, TaskView, TicketSetView, TicketView } from '../protocol/factory-state.ts';
-import { POLICY_NAMES } from '../lifecycle/lifecycle.ts';
+import { POLICY_NAMES, type MergeStep } from '../lifecycle/lifecycle.ts';
 import { overall, tokensOf } from '../usage/usage.ts';
 import { answerable, askedFor } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
@@ -82,9 +82,12 @@ export function TaskDetail({
 export function gateText({ mergePolicy, gate }: Pick<TaskView, 'mergePolicy' | 'gate'>): string {
   const policy = `merge policy ${POLICY_NAMES[mergePolicy!]}`;
   if (!gate) return policy;
-  const step = gate.problem ? 'merging failed' : gate.step === 'ready' ? 'marking its PR ready' : gate.step === 'merge' ? 'merging its PR' : null;
+  const step = gate.problem ? 'merging failed' : gate.step && STEP_TEXT[gate.step];
   return joined([`${policy}: at its merge gate`, gate.checks ? CHECKS_TEXT[gate.checks] : 'reading its checks', step]);
 }
+
+// The factory's step merging a gated PR as task detail says it.
+const STEP_TEXT: Record<MergeStep, string> = { ready: 'marking its PR ready', merge: 'merging its PR' };
 
 // The checks on a gated PR's head as task detail says them.
 const CHECKS_TEXT: Record<NonNullable<GateView['checks']>, string> = {

@@ -58,6 +58,8 @@ import {
   runsContained,
   l3RefusalText,
   atMergeGate,
+  MERGE_STEP_DONE,
+  policyOf,
   policyRefusal,
   reduce,
   rootOf,
@@ -82,6 +84,7 @@ import {
   type LoopEvent,
   type PermissionAnswer,
   type MergeEvent,
+  type MergeStep,
   type PrReadEvent,
   type PublishEvent,
   type ResearchEvent,
@@ -796,7 +799,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const start = planStart(resolved.preset, command.stage, action);
       if ('error' in start) return { ok: false, reason: start.error };
       // A merge policy is frozen on a task starting AFK alone (ADR 0014).
-      const refusedPolicy = policyRefusal(action.mergePolicy ?? 'operator', start.stage.mode === 'AFK' ? action.autonomy : null);
+      const refusedPolicy = policyRefusal(policyOf(action), start.stage.mode === 'AFK' ? action.autonomy : null);
       if (refusedPolicy) return { ok: false, reason: refusedPolicy };
       // No fallback to the operator's account (ADR 0004): a task whose
       // preset has AFK stages launches only where the App can work.
@@ -1006,7 +1009,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const key = `${task.id} ${step}`;
       if (stopping || mergesInFlight.has(key)) continue;
       mergesInFlight.add(key);
-      void (step === 'ready' ? markReady(task) : mergePr(task)).then(
+      void takeMergeStep(task, step).then(
         (event) =>
           serially(async () => {
             mergesInFlight.delete(key);
@@ -1021,32 +1024,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
   }
 
-  // Marks the root's draft PR ready as the App, with a token narrowed to
-  // Pull requests write: GitHub merges no draft.
-  async function markReady(task: Task): Promise<MergeEvent> {
+  // Takes the step of the factory's merge on GitHub as the App, with a
+  // token minted for that write alone (ADR 0004).
+  async function takeMergeStep(task: Task, step: MergeStep): Promise<MergeEvent> {
+    const { permissions, take } = MERGE_WRITES[step];
     try {
-      const { token } = await appToken(task.repo, PR_WRITE);
-      await github.markReady(token, prRef(task.repo, task.pr!.number));
-      return { type: 'prMarkedReady', taskId: task.id };
+      const { token } = await appToken(task.repo, permissions);
+      await take(token, prRef(task.repo, task.pr!.number), task);
+      return { type: MERGE_STEP_DONE[step], taskId: task.id };
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
-      return { type: 'mergeFailed', taskId: task.id, step: 'ready', reason: error.message };
+      return { type: 'mergeFailed', taskId: task.id, step, reason: error.message };
     }
   }
 
-  // Merges the root's PR into the base branch as the App, with a merge
-  // commit and a token narrowed to Contents and Pull requests write, only
-  // while its head is still the commit whose checks let it through.
-  async function mergePr(task: Task): Promise<MergeEvent> {
-    try {
-      const { token } = await appToken(task.repo, MERGE);
-      await github.mergePr(token, prRef(task.repo, task.pr!.number), { method: 'merge', head: task.gate!.head });
-      return { type: 'prMerged', taskId: task.id };
-    } catch (error) {
-      if (!isGitHubFailure(error)) throw error;
-      return { type: 'mergeFailed', taskId: task.id, step: 'merge', reason: error.message };
-    }
-  }
+  // What each step writes with, and the write: marking the draft PR ready
+  // takes Pull requests write, as GitHub merges no draft; merging takes
+  // Contents and Pull requests write, with a merge commit, and only while
+  // the PR's head is still the commit whose checks let it through.
+  const MERGE_WRITES: Record<MergeStep, { permissions: Permissions; take(token: string, ref: string, task: Task): Promise<void> }> = {
+    ready: { permissions: PR_WRITE, take: (token, ref) => github.markReady(token, ref) },
+    merge: { permissions: MERGE, take: (token, ref, task) => github.mergePr(token, ref, { method: 'merge', head: task.gate!.head }) },
+  };
 
   // Where the root's PR stands, read as the App with a read-only token, or
   // null when GitHub couldn't say: the next poll asks again. A PR found

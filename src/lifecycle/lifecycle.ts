@@ -272,13 +272,25 @@ export const OFFERED_POLICIES: readonly MergePolicy[] = ['operator', 'unattended
 // Code's permission mode.
 export const POLICY_NAMES: Record<MergePolicy, string> = { operator: 'operator', judged: 'semi-auto', unattended: 'full-auto' };
 
+// The merge policy a task, handoff sheet, launch or handoff goes by:
+// `operator` where it names none, as those stored before merge policies,
+// or a launch and a handoff that left it out.
+export function policyOf(holder: { mergePolicy?: MergePolicy | null } | null | undefined): MergePolicy {
+  return holder?.mergePolicy ?? 'operator';
+}
+
 // Where an agent policy's merge gate stands (ADR 0014), as the PR poll last
 // read it: the combined checks on the PR's `head`, and, once they let it
 // through, the factory's step on GitHub: marking the draft ready, then
 // merging it. `problem` is why a step last failed, until the operator
 // answers the github-write request it raised: the step is dropped, and the
 // gate is read afresh before it is taken again.
-export type MergeGate = { checks: ChecksState; head: string; step: 'ready' | 'merge' | null; problem: string | null };
+export type MergeGate = { checks: ChecksState; head: string; step: MergeStep | null; problem: string | null };
+// A step of the factory's merge, in order: marking the draft PR ready, then merging it.
+export type MergeStep = 'ready' | 'merge';
+export const MERGE_STEPS: readonly MergeStep[] = ['ready', 'merge'];
+// The event that says each step is done.
+export const MERGE_STEP_DONE = { ready: 'prMarkedReady', merge: 'prMerged' } as const satisfies Record<MergeStep, string>;
 
 // A wayfinder task's maps the factory owes their closing (ADR 0013), as
 // its App, and why it last couldn't. `spec` is the spec written from them,
@@ -1087,9 +1099,8 @@ export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; merg
 // What the daemon did on GitHub for a root its merge gate let through (ADR
 // 0014): it marked the draft PR ready, merged it, or failed a step, saying why.
 export type MergeEvent =
-  | { type: 'prMarkedReady'; taskId: string }
-  | { type: 'prMerged'; taskId: string }
-  | { type: 'mergeFailed'; taskId: string; step: NonNullable<MergeGate['step']>; reason: string };
+  | { type: (typeof MERGE_STEP_DONE)[MergeStep]; taskId: string }
+  | { type: 'mergeFailed'; taskId: string; step: MergeStep; reason: string };
 
 export type LifecycleAction =
   | OperatorCommand
@@ -1264,9 +1275,14 @@ function mergingRefusal(task: Task): string | null {
 export function policyRefusal(policy: MergePolicy, level: AutonomyLevel | null): string | null {
   if (!MERGE_POLICIES.includes(policy)) return `${policy} is not a merge policy (operator, judged or unattended).`;
   if (policy === 'operator') return null;
-  if (!OFFERED_POLICIES.includes(policy)) return `Semi-auto (${policy}) isn’t available yet: the factory can’t run its gate check. Pick operator or full-auto.`;
+  // As the TUI names it, with its value: `Full-auto (unattended)`.
+  const name = POLICY_NAMES[policy];
+  const named = `${name[0]!.toUpperCase()}${name.slice(1)} (${policy})`;
+  if (!OFFERED_POLICIES.includes(policy)) {
+    return `${named} isn’t available yet: the factory can’t run its gate check. Pick ${OFFERED_POLICIES.map((offered) => POLICY_NAMES[offered]).join(' or ')}.`;
+  }
   if (level === null) return `A task starting at a HITL stage picks its merge policy at its handoff.`;
-  return level === 'L3' ? null : `Full-auto (${policy}) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.`;
+  return level === 'L3' ? null : `${named} merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.`;
 }
 
 // The root's task branch, if the factory pushed it to GitHub: it has its
@@ -1813,7 +1829,7 @@ function launchedTicketTask(spec: Task, { ticket, title, worktree, sessionId }: 
     kind: 'ticket',
     ticket,
     specTask: spec.id,
-    mergePolicy: spec.mergePolicy ?? 'operator',
+    mergePolicy: policyOf(spec),
     repo: spec.repo,
     mode,
     autonomy: mode === 'AFK' ? (spec.autonomy ?? 'L1') : null,
@@ -2260,7 +2276,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!tidyBrief(action.brief).goal) return 'The brief needs a goal.';
       if (!CONTINUE_AS.includes(action.continueAs)) return 'Continue as resume, or fresh from the brief.';
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
-      const refused = levelRefused(state, task.repo, action.autonomy) ?? policyRefusal(action.mergePolicy ?? 'operator', action.autonomy);
+      const refused = levelRefused(state, task.repo, action.autonomy) ?? policyRefusal(policyOf(action), action.autonomy);
       if (refused) return refused;
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       if (!(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) return 'Max turns must be a whole number of at least 1.';
@@ -2325,7 +2341,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'prMarkedReady':
     case 'prMerged':
     case 'mergeFailed': {
-      const step = action.type === 'mergeFailed' ? action.step : action.type === 'prMarkedReady' ? 'ready' : 'merge';
+      const step = action.type === 'mergeFailed' ? action.step : MERGE_STEPS.find((each) => MERGE_STEP_DONE[each] === action.type)!;
       return atMergeGate(task) && task.gate?.step === step ? null : `${task.id} isn’t at its merge gate’s ${step} step.`;
     }
     case 'cancel':
@@ -2504,7 +2520,7 @@ function finishRoot(task: Task, request: AttentionRequest | undefined, { merged 
 // The root's PR merged, by the operator or the factory: the root is Done
 // (ADR 0011), whatever was left to ask. A ticket task's ticket closes with
 // it: the factory closes it if GitHub left it open (ADR 0013).
-function prMerged(state: Lifecycle, task: Task, request: AttentionRequest | undefined): void {
+function finishMerged(state: Lifecycle, task: Task, request: AttentionRequest | undefined): void {
   finishRoot(task, request, { merged: true });
   task.gate = null;
   if (task.kind === 'ticket' && task.ticket) task.resolving = { problem: null };
@@ -2514,17 +2530,22 @@ function prMerged(state: Lifecycle, task: Task, request: AttentionRequest | unde
 // The PR poll read the open PR of a root at its merge gate (ADR 0014): its
 // gate takes the checks on its head, and once they are green, or the repo
 // runs none, and GitHub finds it mergeable, the factory merges it, marking
-// the draft ready first. Pending checks wait for the next read, and so do
-// red ones. A merge already under way is left to finish.
+// the draft ready first. No checks counts only once two reads of the same
+// head both found none: right after a push, CI may not have registered its
+// checks yet. Pending checks wait for the next read, and so do red ones. A
+// merge already under way is left to finish, and a failed step's problem
+// stays while its request is open.
 function readGate(task: Task, read: PrReadEvent, request: AttentionRequest | undefined): void {
   if (!atMergeGate(task) || task.gate?.step) return;
   if (!read.checks || !read.head) {
     task.gate = null;
     return;
   }
-  const passes = (read.checks === 'green' || read.checks === 'none') && read.mergeable === 'mergeable' && !request;
+  const noneTwice = read.checks === 'none' && task.gate?.checks === 'none' && task.gate.head === read.head;
+  const passes = (read.checks === 'green' || noneTwice) && read.mergeable === 'mergeable' && !request;
   if (read.draft !== undefined) task.pr!.draft = read.draft;
-  task.gate = { checks: read.checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem: null };
+  const problem = request ? (task.gate?.problem ?? null) : null;
+  task.gate = { checks: read.checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem };
 }
 
 // What a pr-closed-unmerged request tells the operator.
@@ -3459,7 +3480,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         id: nextId(state, 'task'),
         title: action.title,
         // Frozen for a task starting AFK (ADR 0014); one starting HITL picks it at its handoff.
-        ...(mode === 'AFK' && { mergePolicy: action.mergePolicy ?? 'operator' }),
+        ...(mode === 'AFK' && { mergePolicy: policyOf(action) }),
         ...(ticket && { kind: 'ticket' as const, ticket }),
         // A spec task reads its tickets from GitHub first (ADR 0013).
         ...(specSet && {
@@ -3576,7 +3597,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.handoffDraft = null;
       task.mode = 'AFK';
       task.autonomy = action.autonomy;
-      task.mergePolicy = action.mergePolicy ?? 'operator';
+      task.mergePolicy = policyOf(action);
       // What the operator changed on the sheet holds for every later stage too.
       if (action.tier !== sheet.tier) task.operatorTier = action.tier;
       if (action.maxTurns !== sheet.maxTurns) task.maxTurns = action.maxTurns;
@@ -3726,7 +3747,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'prRead': {
       const asked = request?.kind === 'pr-closed-unmerged';
       if (action.state === 'merged') {
-        prMerged(state, task, request);
+        finishMerged(state, task, request);
       } else if (action.state === 'closed' && !asked) {
         // A failed push to the closed PR has nothing left to update: the
         // closed PR asks instead. Never cancelled on the factory's own say.
@@ -3753,7 +3774,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.gate!.step = 'merge';
       break;
     case 'prMerged':
-      prMerged(state, task, request);
+      finishMerged(state, task, request);
       break;
     case 'mergeFailed': {
       // Retried once the operator answers, as a failed publishing step is.
@@ -4250,8 +4271,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // A handoff rolled back keeps what the operator confirmed on its
       // sheet, which a stop saves as the draft.
       if (intent.verb === 'handoff' && task.handoff) {
-        const { brief, continueAs, autonomy, mergePolicy = 'operator', tier, maxTurns } = intent.handoff;
-        Object.assign(task.handoff, structuredClone({ brief, continueAs, autonomy, mergePolicy, tier, maxTurns }));
+        const { brief, continueAs, autonomy, tier, maxTurns } = intent.handoff;
+        Object.assign(task.handoff, structuredClone({ brief, continueAs, autonomy, mergePolicy: policyOf(intent.handoff), tier, maxTurns }));
       }
       delete state.intents[action.intentId];
       break;

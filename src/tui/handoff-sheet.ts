@@ -5,7 +5,7 @@
 // level, at L3 the merge policy (ADR 0014), tier and max turns, and confirms. Esc backs out and the conversation carries on.
 import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
-import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, l3RefusalText, OFFERED_POLICIES, readyNow, type AppCheck, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type MergePolicy, type SpecCandidate } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, l3RefusalText, OFFERED_POLICIES, policyOf, readyNow, type AppCheck, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type MergePolicy, type SpecCandidate } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
@@ -53,7 +53,7 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
     specs: null,
     continueAs: handoff.continueAs,
     autonomy: handoff.autonomy,
-    mergePolicy: handoff.mergePolicy ?? 'operator',
+    mergePolicy: policyOf(handoff),
     tier: handoff.tier,
     maxTurns: String(handoff.maxTurns),
     line: 0,

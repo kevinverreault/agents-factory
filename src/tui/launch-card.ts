@@ -9,7 +9,7 @@
 // and `ctrl+e` opens it in the operator's own editor.
 import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useApp, useInput, usePaste, type Key } from 'ink';
-import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, l3Refusal, OFFERED_POLICIES, POLICY_NAMES, PRIORITIES, type AutonomyLevel, type MergePolicy, type Priority } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, l3Refusal, OFFERED_POLICIES, POLICY_NAMES, policyOf, PRIORITIES, type AutonomyLevel, type MergePolicy, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
 import type { Edited } from '../os/edit-externally.ts';
 import { appBlock, lackingInputs, type PresetChoice, type StartStage } from '../presets/presets.ts';
@@ -239,7 +239,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     row('groups', 'Groups', draft.groups, false),
     afk ? row('autonomy', 'Autonomy', autonomyText(draft.autonomy ?? 'L1')) : null,
     refusedL3 ? note('l3', refusedL3.reason, 'bad') : null,
-    card.fields.includes('mergePolicy') ? row('mergePolicy', 'Merge policy', policyText(draft.mergePolicy ?? 'operator')) : null,
+    card.fields.includes('mergePolicy') ? row('mergePolicy', 'Merge policy', policyText(policyOf(draft))) : null,
     row('tier', 'Model tier', draft.tier ?? `stage default${start ? ` (${start.model ?? DEFAULT_TIER})` : ''}`),
     afk
       ? row(
@@ -339,7 +339,7 @@ function step(draft: Draft, card: Card, repositories: string[], input: string, k
         return { ...draft, autonomy, mergePolicy: autonomy === 'L3' ? draft.mergePolicy : null };
       }
       case 'mergePolicy':
-        return { ...draft, mergePolicy: cycle(OFFERED_POLICIES, draft.mergePolicy ?? 'operator', by) };
+        return { ...draft, mergePolicy: cycle(OFFERED_POLICIES, policyOf(draft), by) };
       case 'priority':
         return { ...draft, priority: cycle(PRIORITIES, draft.priority ?? 'normal', by) };
       default:
@@ -396,8 +396,8 @@ const AUTONOMY_TEXT: Record<AutonomyLevel, string> = {
   L3: 'L3 (in its own container; the factory may merge)',
 };
 
-// A merge policy as the card, the handoff sheet and task detail show it:
-// its TUI name, and who merges the task's PR (ADR 0014).
+// A merge policy as the card and the handoff sheet offer it: its TUI name,
+// and who merges the task's PR (ADR 0014). Task detail names it alone.
 export function policyText(policy: MergePolicy): string {
   return `${POLICY_NAMES[policy]} (${POLICY_TEXT[policy]})`;
 }

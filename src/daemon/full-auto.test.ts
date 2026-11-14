@@ -2,7 +2,7 @@
 // `unattended` merge policy, an L3 root past its last stage waits at its
 // merge gate instead of going In review. The PR poll reads the checks on its
 // PR's head, every 2 minutes while it waits: pending waits, and once they are
-// green, or the repo runs none, the factory marks the draft ready and merges
+// green, or two reads of the same head found none, the factory marks the draft ready and merges
 // it with a merge commit, each GitHub call with a token of its own. The root
 // then follows the merged-PR path: its ticket closes, and it is Done and
 // cleaned up. A red check is left waiting. Under `operator`, nothing changes.
@@ -63,6 +63,13 @@ async function throughOpenPr({ factory }: Factory, taskId = 'T1', first = 1): Pr
   factory.executor.report(`R${first + 2}`, { type: 'runCompleted' });
 }
 
+// A repo that runs no checks: the gate's first read found none on its head,
+// and the next, 2 minutes later, finds none again, which lets it through.
+async function noChecksTwice({ factory, tui }: Factory, taskId = 'T1'): Promise<void> {
+  await tui.until((state) => state.tasks[taskId]?.gate?.checks === 'none');
+  factory.clock.advance(2 * MINUTE);
+}
+
 describe('under full-auto (unattended)', () => {
   test('a single run on a brief waits at its gate while its checks are pending, and is marked ready and merged with a merge commit once they are green', async () => {
     const launched = await attached();
@@ -105,12 +112,17 @@ describe('under full-auto (unattended)', () => {
     }
   });
 
-  test('a repo with no checks merges straight away', async () => {
+  test('a repo with no checks merges once a second read of the same head finds none again, as CI may not have registered its checks yet at the first', async () => {
     const launched = await attached();
     const { factory, operator, tui } = launched;
     await operator.send(fullAuto);
 
     await throughOpenPr(launched);
+
+    const first = await tui.until((state) => state.tasks.T1?.gate?.checks === 'none');
+    expect(first.tasks.T1).toMatchObject({ label: 'At merge gate', gate: { checks: 'none', step: null } });
+    expect(factory.github.prWrites).toEqual([]);
+    factory.clock.advance(2 * MINUTE);
 
     await tui.until((state) => state.tasks.T1?.label === 'Done');
     expect(factory.github.prState(101).state).toBe('merged');
@@ -124,6 +136,7 @@ describe('under full-auto (unattended)', () => {
     await operator.send(fullAuto);
 
     await throughOpenPr(launched);
+    await noChecksTwice(launched);
 
     await tui.until((state) => state.tasks.T1?.label === 'Done');
     expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['merge']);
@@ -151,6 +164,7 @@ describe('under full-auto (unattended)', () => {
 
     expect(await operator.send({ ...fullAuto, prompt: '', issues: ['#39'] })).toEqual({ ok: true, value: { taskId: 'T1' } });
     await throughOpenPr(launched);
+    await noChecksTwice(launched);
 
     const done = await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.resolving === null && state.tasks.T1.cleanup === null);
     expect(done.tasks.T1).toMatchObject({ kind: 'ticket', ticket: TICKET, mergePolicy: 'unattended' });
@@ -164,19 +178,26 @@ describe('under full-auto (unattended)', () => {
     factory.github.failMerges('GitHub refused to merge acme/widgets#101 (HTTP 405: Base branch was modified.).');
     await operator.send(fullAuto);
     await throughOpenPr(launched);
+    await noChecksTwice(launched);
 
     const asked = await tui.until((state) => state.attentionQueue.length === 1);
     expect(asked.attentionQueue).toEqual([
       expect.objectContaining({ kind: 'attention', taskId: 'T1', attention: 'github-write', reason: 'The factory couldn’t merge T1’s PR #101 on GitHub as its App: GitHub refused to merge acme/widgets#101 (HTTP 405: Base branch was modified.). Fix it, then answer to try again.' }),
     ]);
     expect(asked.tasks.T1).toMatchObject({ label: 'At merge gate', gate: { step: null, problem: expect.any(String) } });
-    // Polled meanwhile, it isn't merged behind the operator's back.
+    // Polled meanwhile, it isn't merged behind the operator's back, and still says why it failed.
     factory.github.failMerges(null);
+    const reads = factory.github.checkReads.length;
     factory.clock.advance(2 * MINUTE);
+    await vi.waitFor(() => expect(factory.github.checkReads.length).toBeGreaterThan(reads));
     await operator.send({ type: 'daemon.status' });
     expect(factory.github.prState(101).state).toBe('open');
+    expect(tui.state().tasks.T1?.gate).toMatchObject({ step: null, problem: expect.stringMatching(/^The factory couldn’t merge T1’s PR #101/) });
 
+    // Answered, the gate is read afresh, and finds no checks twice again before it merges.
     expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.gate?.checks === 'none' && state.tasks.T1.gate.problem === null);
+    await noChecksTwice(launched);
 
     await tui.until((state) => state.tasks.T1?.label === 'Done');
     expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['ready', 'merge']);
@@ -218,6 +239,7 @@ describe('the merge policy at launch and handoff', () => {
     expect(tui.state().tasks.T1).toMatchObject({ mode: 'AFK', autonomy: 'L3', mergePolicy: 'unattended' });
 
     await throughOpenPr(launched, 'T1', 2);
+    await noChecksTwice(launched);
     await tui.until((state) => state.tasks.T1?.label === 'Done');
     expect(factory.github.prState(101).state).toBe('merged');
   });
