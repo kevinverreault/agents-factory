@@ -9,6 +9,8 @@ import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, l3RefusalText, O
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
+import type { Reply } from '../protocol/protocol.ts';
+import { useInFlight } from './in-flight.ts';
 import { autonomyText, cycle, policyText } from './launch-card.ts';
 import { CursorWindow, fixed } from './screen.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
@@ -39,6 +41,8 @@ type Line =
   | { kind: 'spec'; index: number }
   | { kind: 'field'; field: 'continueAs' | 'autonomy' | 'mergePolicy' | 'tier' | 'maxTurns' };
 const LABEL_WIDTH = 14;
+// What the sheet shows while the daemon hands the task off.
+const HANDING_OFF = 'Handing off…';
 
 // What the operator has made of the sheet so far, and the caret in the line
 // being typed into, back at its end on another line. `specs` are the spec
@@ -74,23 +78,27 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
   const lines = linesOf(brief, candidates.length, draft.current.autonomy);
   const writing = !brief && run?.status === 'active' && run.turn === 'agent';
 
-  const send = (command: Parameters<FactoryConnection['send']>[0]) =>
-    void connection.send(command).then((reply) => setRefusal(reply.ok ? null : reply.reason));
+  const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
+  const send = (command: Parameters<FactoryConnection['send']>[0]) => void connection.send(command).then(tell);
+  // The commands the daemon takes a while to answer, each spinning until it does.
+  const inFlight = useInFlight(connection);
 
   useInput((input, key) => {
     const current = draft.current;
-    if (key.escape) return send({ type: 'closeHandoff', taskId: task.id });
+    // A handoff under way isn't backed out of: its reply says how it ended.
+    // Asking for the brief again is, as opening the sheet is never a commitment.
+    if (key.escape) return inFlight.under() === HANDING_OFF ? undefined : send({ type: 'closeHandoff', taskId: task.id });
     if (key.return) {
       if (!current.brief) {
         // The agent ended its turn without the brief: ask it again.
-        if (!writing) send({ type: 'openHandoff', taskId: task.id });
+        if (!writing) void inFlight.send('Opening the handoff…', { type: 'openHandoff', taskId: task.id })?.then(tell);
         return;
       }
       const { continueAs, autonomy, tier, maxTurns } = current;
       const specs = current.specs && { specs: current.specs };
       // The policy goes at L3 alone: below it, the operator merges.
       const policy = autonomy === 'L3' && { mergePolicy: current.mergePolicy };
-      return send({ type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, ...policy, tier, maxTurns: Number(maxTurns), ...specs });
+      return void inFlight.send(HANDING_OFF, { type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, ...policy, tier, maxTurns: Number(maxTurns), ...specs })?.then(tell);
     }
     if (key.upArrow || key.downArrow) {
       const line = Math.min(Math.max(current.line + (key.upArrow ? -1 : 1), 0), lines.length - 1);
@@ -138,6 +146,7 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
       h(Field, { key: 'maxTurns', label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, at?.kind === 'field' && at.field === 'maxTurns' ? withCaret(draft.current.maxTurns, draft.current.caret) : draft.current.maxTurns || ' '),
       h(Text, { key: 'commit', ...tone('dim') }, toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
       ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
+      inFlight.indicator ? h(Box, { key: 'in-flight' }, inFlight.indicator) : null,
       refusal && refusal !== refusedL3 ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
     ),
   );

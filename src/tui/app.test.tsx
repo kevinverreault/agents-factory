@@ -37,6 +37,15 @@ async function spinsWhileLaunching(app: { lastFrame(): string | undefined; stdin
   expect(connection.sent.filter((command) => command.type === 'launchTask')).toHaveLength(1);
 }
 
+// The screen shows `label` after a spinner that turns.
+async function turns(app: { lastFrame(): string | undefined }, label: string) {
+  const frames = new RegExp(`([${GLYPH.spinner.join('')}]) ${label}`);
+  const spinner = () => app.lastFrame()!.match(frames)?.[1];
+  await eventually(() => expect(spinner()).toBeDefined());
+  const first = spinner();
+  await eventually(() => expect(spinner()).not.toBe(first));
+}
+
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
   return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, gate: null, resolving: null, specTask: null, ticketSet: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, loop: null, launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
@@ -1515,12 +1524,13 @@ describe('launching and conversing', () => {
     await eventually(() => expect(connection.conversed).toEqual(['R1']));
     const longMessage = Array.from({ length: 40 }, (_, i) => `Line ${i}.`).join('\n');
     connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: longMessage });
-    // The pane, inside its section's border, shows Line 30 to Line 39.
+    // The pane, inside its section's border, shows Line 31 to Line 39, then
+    // the agent working mid-turn.
     await eventually(() => {
       const frame = app.lastFrame()!;
       expect(frame.split('\n')).toHaveLength(20);
-      expect(frame).toMatch(/\bLine 30\.[\s\S]*Line 39\./);
-      expect(frame).not.toContain('Line 29.');
+      expect(frame).toMatch(/\bLine 31\.[\s\S]*Line 39\.[\s\S]*agent working…/);
+      expect(frame).not.toContain('Line 30.');
       expect(frame).toContain('pgup/pgdn scroll');
       expect(frame).not.toContain('newer below');
     });
@@ -1529,9 +1539,9 @@ describe('launching and conversing', () => {
     await press(app, PAGE_UP);
     await eventually(() => {
       const frame = app.lastFrame()!;
-      expect(frame).toMatch(/\bLine 21\.[\s\S]*Line 30\./);
-      expect(frame).not.toContain('Line 20.');
-      expect(frame).not.toContain('Line 31.');
+      expect(frame).toMatch(/\bLine 22\.[\s\S]*Line 31\./);
+      expect(frame).not.toContain('Line 21.');
+      expect(frame).not.toContain('Line 32.');
       expect(frame).toContain('pgup/pgdn scroll (newer below)');
     });
 
@@ -1661,20 +1671,44 @@ describe('launching and conversing', () => {
     await eventually(() => expect(app.lastFrame()).toContain('claude --resume 5f0c2a8e-3b1d-4c6e-9a7f-2d8b4e1c0a93'));
   });
 
-  test('the conversation opens under ◇ its task, then what it is (mode, model, state) and, mid-turn, that the agent is working; it shows no context share', async () => {
+  test('the conversation opens under ◇ its task, then what it is (mode, model, state); it shows no context share', async () => {
     const connection = new FakeConnection();
     const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
     await press(app, '\r', '\r');
     await eventually(() => {
       const lines = app.lastFrame()!.split('\n');
       expect(lines[0]).toMatch(/^◇ T1 Grill me about the login flow\./);
-      expect(lines[1]).toMatch(/^HITL · claude-sonnet-5-5 · In conversation · agent working… · factory\/T1-grill-me/);
+      expect(lines[1]).toMatch(/^HITL · claude-sonnet-5-5 · In conversation · factory\/T1-grill-me/);
       expect(lines[2]).toMatch(/^claude --resume /);
       expect(app.lastFrame()).not.toMatch(/ctx|\d+%\s+context/i);
     });
+  });
+
+  test('a conversation with no events yet shows a turning “Starting the agent…” spinner, gone at the first event', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await turns(app, 'Starting the agent…');
+    expect(app.lastFrame()).not.toContain('agent working…');
+
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Which identity provider?' });
+    await eventually(() => expect(app.lastFrame()).toContain('Which identity provider?'));
+    expect(app.lastFrame()).not.toContain('Starting the agent…');
+  });
+
+  test('mid-turn, a turning “agent working…” spinner shows below the last event, not in the header, and is gone once it is the operator’s turn', async () => {
+    const connection = new FakeConnection();
+    const { app } = await started({ ...factoryState([conversing]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    connection.serveConversation('R1', { type: 'message', id: 'E1', from: 'agent', text: 'Reading the login flow.' });
+    await turns(app, 'agent working…');
+    const frame = app.lastFrame()!;
+    expect(frame.indexOf('agent working…')).toBeGreaterThan(frame.indexOf('Reading the login flow.'));
+    expect(frame.split('\n')[1]).not.toContain('agent working');
 
     connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...run, turn: 'operator' } }]);
-    await eventually(() => expect(app.lastFrame()!.split('\n')[1]).not.toContain('agent working'));
+    await eventually(() => expect(app.lastFrame()).not.toContain('agent working'));
   });
 
   const failing = task('T2', 'Implement the store', 'waiting', 'Needs you');
@@ -1959,6 +1993,129 @@ describe('launching and conversing', () => {
     await type(app, '/handoff');
     app.stdin.write('\r');
     await eventually(() => expect(connection.sent).toEqual([{ type: 'openHandoff', taskId: 'T1' }, { type: 'openHandoff', taskId: 'T1' }]));
+  });
+
+  test('while the daemon opens the handoff, “Opening the handoff…” turns, a second ctrl+h sends nothing more, and the spinner gives way to the sheet or the refusal', async () => {
+    const connection = new FakeConnection();
+    const answer = connection.holdReplies('openHandoff');
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('/handoff hand off'));
+
+    app.stdin.write(CTRL_H);
+    await turns(app, 'Opening the handoff…');
+    await press(app, CTRL_H);
+    await type(app, '/handoff');
+    app.stdin.write('\r');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'openHandoff')).toHaveLength(1);
+
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...onLean, handoff: { ...sheet, brief } } }]);
+    answer({ ok: true });
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('HAND OFF T1 TO IMPLEMENT (AFK)'));
+    expect(app.lastFrame()).not.toContain('Opening the handoff…');
+
+    const refusing = new FakeConnection();
+    const refuse = refusing.holdReplies('openHandoff');
+    const { app: refused } = await started({ ...factoryState([onLean]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection: refusing });
+    await press(refused, '\r', '\r');
+    await eventually(() => expect(refused.lastFrame()).toContain('/handoff hand off'));
+    refused.stdin.write(CTRL_H);
+    await turns(refused, 'Opening the handoff…');
+    refuse({ ok: false, reason: 'T1 has no handoff to open.' });
+    await eventually(() => expect(refused.lastFrame()).toContain('T1 has no handoff to open.'));
+    expect(refused.lastFrame()).not.toContain('Opening the handoff…');
+  });
+
+  test('confirming the handoff sheet shows “Handing off…” turning until the daemon replies, and a second enter sends nothing more', async () => {
+    const connection = new FakeConnection();
+    const answer = connection.holdReplies('handoff');
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: { ...sheet, brief } }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('HAND OFF T1 TO IMPLEMENT (AFK)'));
+
+    app.stdin.write('\r');
+    await turns(app, 'Handing off…');
+    await press(app, '\r');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'handoff')).toHaveLength(1);
+
+    answer({ ok: false, reason: 'The handoff is blocked.' });
+    await eventually(() => expect(app.lastFrame()).toContain('The handoff is blocked.'));
+    expect(app.lastFrame()).not.toContain('Handing off…');
+
+    // Confirmed again and taken: the spinner and the sheet both go.
+    const handOff = connection.holdReplies('handoff');
+    app.stdin.write('\r');
+    await turns(app, 'Handing off…');
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: onLean }]);
+    handOff({ ok: true });
+    await eventually(() => expect(app.lastFrame()).not.toContain('HAND OFF T1'));
+    expect(app.lastFrame()).not.toContain('Handing off…');
+    expect(connection.sent.filter((command) => command.type === 'handoff')).toHaveLength(2);
+  });
+
+  test('while the sheet asks again for a brief the agent didn’t write, “Opening the handoff…” turns, and esc still backs out', async () => {
+    const connection = new FakeConnection();
+    connection.holdReplies('openHandoff');
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: sheet }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('enter asks again'));
+
+    app.stdin.write('\r');
+    await turns(app, 'Opening the handoff…');
+    app.stdin.write('\x1b');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'closeHandoff', taskId: 'T1' }));
+  });
+
+  test('while the daemon advances the task, “Advancing…” turns on the sheet, a second enter or esc does nothing, and the sheet closes on the reply', async () => {
+    const connection = new FakeConnection();
+    const answer = connection.holdReplies('advanceStage');
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await settle();
+    app.stdin.write(CTRL_N);
+    await eventually(() => expect(app.lastFrame()).toContain('ADVANCE T1 FROM GRILL'));
+
+    app.stdin.write('\r');
+    await turns(app, 'Advancing…');
+    await press(app, '\r', '\x1b');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'advanceStage')).toHaveLength(1);
+    expect(app.lastFrame()).toContain('ADVANCE T1 FROM GRILL');
+
+    answer({ ok: true });
+    await eventually(() => expect(app.lastFrame()).not.toContain('ADVANCE T1'));
+    expect(app.lastFrame()).not.toContain('Advancing…');
+  });
+
+  test('while the daemon reopens a parked conversation, “Reopening the conversation…” turns, a second enter sends nothing more, and the message follows the reply', async () => {
+    const connection = new FakeConnection();
+    const answer = connection.holdReplies('open');
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    connection.servePatch([
+      { op: 'set', path: ['runs', 'R1'], value: { ...run, turn: 'operator' as const, status: 'ended' as const, outcome: 'parked' as const } },
+      { op: 'set', path: ['tasks', 'T1'], value: { ...onLean, state: 'queued' as const, label: 'Ready for you', liveRunId: null } },
+    ]);
+    await eventually(() => expect(app.lastFrame()).toContain('enter reopens and sends'));
+
+    await type(app, 'Still there?');
+    app.stdin.write('\r');
+    await turns(app, 'Reopening the conversation…');
+    await press(app, '\r');
+    await settle();
+    expect(connection.sent).toEqual([{ type: 'open', taskId: 'T1' }]);
+
+    answer({ ok: true });
+    await eventually(() =>
+      expect(connection.sent).toEqual([
+        { type: 'open', taskId: 'T1' },
+        { type: 'sendMessage', taskId: 'T1', text: 'Still there?' },
+      ]),
+    );
+    expect(app.lastFrame()).not.toContain('Reopening the conversation…');
   });
 
   test('over the handoff sheet, pgup still pages back through the conversation', async () => {
@@ -3233,6 +3390,25 @@ describe('taking over with c', () => {
     await press(app, 'c');
 
     await eventually(() => expect(connection.sent).toEqual([{ type: 'takeOver', taskId: 'T2' }]));
+  });
+
+  test('while the daemon takes the task over from its conversation, “Taking over…” turns, and a second c sends nothing more', async () => {
+    const connection = new FakeConnection();
+    const answer = connection.holdReplies('takeOver');
+    const waiting = { ...task('T2', 'Publish the package', 'waiting', 'Needs you'), liveRunId: 'R1' };
+    const { app } = await started({ ...factoryState([waiting], [permission]), runs: { R1: { ...afkRun, taskId: 'T2', status: 'suspended' as const } } }, { connection });
+    await press(app, ENTER, ENTER);
+    await eventually(() => expect(app.lastFrame()).toContain('c take over'));
+
+    app.stdin.write('c');
+    await turns(app, 'Taking over…');
+    await press(app, 'c');
+    await settle();
+    expect(connection.sent).toEqual([{ type: 'takeOver', taskId: 'T2' }]);
+
+    answer({ ok: false, reason: 'T2 is no longer live.' });
+    await eventually(() => expect(app.lastFrame()).toContain('T2 is no longer live.'));
+    expect(app.lastFrame()).not.toContain('Taking over…');
   });
 });
 
