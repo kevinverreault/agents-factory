@@ -179,7 +179,7 @@ Moving a live AFK task back to HITL so the operator converses with it on the sam
 _Avoid_: Reverse handoff, hijack
 
 **Autonomy level**:
-The ceiling on what an AFK task may do unattended: at L1 the task's code stays on the operator's machine, and at L2 it runs in a sandbox and the factory may push it and open a draft PR. HITL tasks have none.
+The ceiling on what an AFK task may do unattended: at L1 the task's code stays on the operator's machine, at L2 it runs in a sandbox and the factory may push it and open a draft PR, and at L3 the factory may also merge that PR into the base branch, when its merge policy lets it. HITL tasks have none.
 _Avoid_: Permission level, trust level
 
 **Scratch folder**:
@@ -187,7 +187,7 @@ The folder in an L2 task's container, outside its clone, where its runs keep fil
 _Avoid_: Hand-over folder, temp dir (an L1 run's scratch space is the temp folder)
 
 **Merge gate**:
-Where a ticket task's PR waits until it is merged into the base branch. Its spec's merge policy decides who lets it through.
+Where an AFK root task's PR waits until it is merged into the base branch. Its merge policy decides who lets it through, and nothing passes it while the PR's checks are failing.
 _Avoid_: Approval, review step
 
 **Update run**:
@@ -195,8 +195,20 @@ The run the factory queues on a ticket task In review once GitHub finds its PR c
 _Avoid_: Rebase run, conflict fix
 
 **Merge policy**:
-Who passes a spec's merge gates, fixed when the spec task is handed off. Under the operator policy, every ticket task goes In review and the operator merges it.
-_Avoid_: Auto-merge setting, review mode
+Who passes a task's merge gate, picked at handoff and inherited by a spec's ticket tasks. Under **operator**, the task goes In review and the operator merges it. Under **judged** (semi-auto), the factory merges unless its gate check finds the PR worth the operator's review. Under **unattended** (full-auto), the factory merges every PR whose checks pass. Judged and unattended need L3.
+_Avoid_: Auto-merge setting, review mode, auto (that is Claude Code's permission mode)
+
+**Gate check**:
+The judged policy's look at a PR at its merge gate: its tripwires first, then a judging run against the operator's rubric, ending in a merge or in the task In review with the reason.
+_Avoid_: Merge review, approval
+
+**Tripwire**:
+A rule of the gate check, evaluated without a model, that sends a PR to the operator whatever the judging run would say, such as one touching database migrations.
+_Avoid_: Guard, blocker (a blocker is a ticket's)
+
+**Judgement call**:
+A decision the factory made where an attended task would have asked the operator: an unattended run's assumed answer to a question, a judged merge and its reason, or a merge with review findings left over. Each is listed on the task's spec, or on its ticket when it has no spec.
+_Avoid_: Assumption, auto-decision
 
 **Factory identity**:
 The GitHub identity the factory acts under for AFK work, distinct from the operator's own. HITL work stays under the operator's identity. One exception: once a setup task reaches review, the factory pushes its branch and opens its draft PR under this identity, HITL or not (ADR 0010).

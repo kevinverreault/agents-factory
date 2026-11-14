@@ -132,7 +132,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
   });
 
   const { draft, caret } = typing.current;
-  if (task && sheet) return h(HandoffSheet, { connection, task: { ...task, handoff: sheet }, run });
+  if (task && sheet) return h(HandoffSheet, { connection, task: { ...task, handoff: sheet }, run, app: state.repositories[task.repo]?.app ?? null });
   if (!task) {
     return h(
       Sheet,

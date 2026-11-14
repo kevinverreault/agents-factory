@@ -361,9 +361,9 @@ describe('confirming the handoff', () => {
     const { operator, tui } = await briefed();
 
     expect(await operator.send(confirm(tui.state(), { brief: { ...brief, goal: '  ' } }))).toEqual({ ok: false, reason: 'The brief needs a goal.' });
-    expect(await operator.send(confirm(tui.state(), { autonomy: 'L3' as never }))).toEqual({
+    expect(await operator.send(confirm(tui.state(), { autonomy: 'L4' as never }))).toEqual({
       ok: false,
-      reason: 'L3 is not an autonomy level (L1 or L2).',
+      reason: 'L4 is not an autonomy level (L1, L2 or L3).',
     });
     expect(await operator.send(confirm(tui.state(), { maxTurns: 0 }))).toEqual({ ok: false, reason: 'Max turns must be a whole number of at least 1.' });
   });

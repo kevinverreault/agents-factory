@@ -3,9 +3,9 @@
 // brief; the operator edits it line by line, picks the ticket set from the
 // spec candidates the factory found (ADR 0013), sets continue-as, autonomy
 // level, tier and max turns, and confirms. Esc backs out and the conversation carries on.
-import { createElement as h, useReducer, useRef, useState, type ReactNode } from 'react';
+import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
-import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, readyNow, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, l3RefusalText, readyNow, type AppCheck, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
@@ -19,6 +19,9 @@ type Props = {
   task: TaskView & { handoff: HandoffView };
   // The task's live run, if any: it writes the brief.
   run: RunView | undefined;
+  // The App's installation on the task's repository, as last checked: L3 is
+  // refused where it lacks what L3 needs (ADR 0014).
+  app?: AppCheck | null;
 };
 
 type List = 'decided' | 'doneWhen' | 'outOfScope' | 'links';
@@ -42,7 +45,7 @@ const LABEL_WIDTH = 14;
 // candidates selected, null until the factory has read them.
 type Draft = { brief: Brief | null; specs: string[] | null; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: string; line: number; caret: Caret };
 
-export function HandoffSheet({ connection, task, run }: Props) {
+export function HandoffSheet({ connection, task, run, app = null }: Props) {
   const { handoff } = task;
   // Keys typed in one burst arrive before a re-render, so the draft is kept here.
   const draft = useRef<Draft>({ brief: null, specs: null, continueAs: handoff.continueAs, autonomy: handoff.autonomy, tier: handoff.tier, maxTurns: String(handoff.maxTurns), line: 0, caret: null });
@@ -86,6 +89,14 @@ export function HandoffSheet({ connection, task, run }: Props) {
     rerender();
   });
 
+  // L3 picked where the installation, as last checked, refuses it: the sheet
+  // says why, with the link that approves it, and asks GitHub again, as the
+  // operator may have approved it since.
+  const refusedL3 = draft.current.autonomy === 'L3' ? l3RefusalText(task.repo, app) : null;
+  useEffect(() => {
+    if (refusedL3) void connection.send({ type: 'checkApp', repo: task.repo });
+  }, [connection, task.repo, !!refusedL3]);
+
   const at = lines[draft.current.line];
   const to = handoff.stage ? `to ${handoff.stage} (AFK)` : 'to one AFK run on the brief';
   const share = handoff.contextShare === null ? null : `the conversation fills ${Math.round(handoff.contextShare * 100)}% of the context window`;
@@ -107,11 +118,12 @@ export function HandoffSheet({ connection, task, run }: Props) {
       ...(handoff.ticketSets ? ticketSetLines(handoff.ticketSets, draft.current.specs ?? [], task.repo, at?.kind === 'spec' ? at.index : null) : []),
       h(Field, { key: 'continueAs', label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, choosable(draft.current.continueAs), share && h(Text, tone('dim'), ` ${share}`)),
       h(Field, { key: 'autonomy', label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, choosable(autonomyText(draft.current.autonomy))),
+      refusedL3 ? h(Text, { key: 'l3', ...tone('bad') }, refusedL3) : null,
       h(Field, { key: 'tier', label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, choosable(draft.current.tier)),
       h(Field, { key: 'maxTurns', label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, at?.kind === 'field' && at.field === 'maxTurns' ? withCaret(draft.current.maxTurns, draft.current.caret) : draft.current.maxTurns || ' '),
       h(Text, { key: 'commit', ...tone('dim') }, toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
       ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
-      refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
+      refusal && refusal !== refusedL3 ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
     ),
   );
 }

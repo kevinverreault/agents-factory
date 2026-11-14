@@ -245,7 +245,7 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
           ? h(Text, { key: 'handoff', ...tone('warn') }, `${GLYPH.conversation} The agent proposes handing off: ${run.proposal.reason} `, h(Text, { bold: true }, 'ctrl+h'), ' or ', h(Text, { bold: true }, '/handoff'), ' review')
           : null,
       ),
-      sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run }) : null,
+      sheet ? h(HandoffSheet, { connection, task: { ...task!, handoff: sheet }, run, app: state.repositories[task!.repo]?.app ?? null }) : null,
       fixed(
         advancing && canAdvance(task)
           ? h(AdvanceSheet, { key: 'advance', connection, task, onAdvanced: () => setAdvancing(false), onCancel: () => setAdvancing(false) })

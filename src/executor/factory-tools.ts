@@ -126,7 +126,7 @@ function childTools(sink: RunSink, mode: keyof typeof WAITING): [SdkTool, SdkToo
       title: z.string().optional().describe('A short title for the child’s row, a few words saying what it does. Without one, it is cut from the goal.'),
       skill: z.string().optional().describe('A skill of the factory’s skill set to invoke on the goal.'),
       tier: z.enum(TIERS).optional().describe('The model tier: yours or a lower one. A higher one is lowered to yours.'),
-      autonomy: z.enum(['L1', 'L2']).optional().describe('The autonomy level: yours or a lower one.'),
+      autonomy: z.enum(['L1', 'L2']).optional().describe('The autonomy level: yours or a lower one. A child never merges, so L2 at most.'),
       await: z
         .boolean()
         .optional()

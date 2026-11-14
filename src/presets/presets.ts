@@ -27,7 +27,7 @@ const stageFields = {
   args: z.string().optional(),
   mode: z.enum(['HITL', 'AFK']),
   model: z.enum(TIERS).optional(),
-  autonomy: z.enum(['L1', 'L2']).optional(),
+  autonomy: z.enum(['L1', 'L2', 'L3']).optional(),
   max_turns: z.int().positive().optional(),
   context: z.enum(['resume', 'fresh']).optional(),
   optional: z.boolean().optional(),

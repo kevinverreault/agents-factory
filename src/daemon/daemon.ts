@@ -53,6 +53,8 @@ import {
   overdueRuns,
   pullRequestOf,
   pushedBranch,
+  runsContained,
+  l3RefusalText,
   reduce,
   rootOf,
   runReports,
@@ -65,6 +67,7 @@ import {
   updatesOnConflict,
   waitsOnPr,
   type AppCheck,
+  type AutonomyLevel,
   type ChildSpawned,
   type CleanupEvent,
   type Found,
@@ -649,11 +652,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const found = await factoryApp();
       if (!found) {
         check = { installed: false, checkedAt, reason: NO_APP, fixUrl: null };
-      } else if (await github.isInstalled(found, repo)) {
-        check = { installed: true, checkedAt };
       } else {
+        const installation = await github.installation(found, repo);
         const reason = `The factory’s GitHub App, ${found.slug}, isn’t installed on ${repo}.`;
-        check = { installed: false, checkedAt, reason, fixUrl: installationSettings(found.slug) };
+        check = installation
+          ? { installed: true, checkedAt, ...installation }
+          : { installed: false, checkedAt, reason, fixUrl: installationSettings(found.slug) };
       }
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
@@ -663,6 +667,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // The repository may have been removed meanwhile.
     if (lifecycle.repositories[repo]) await settle({ type: 'appChecked', repo, check }, new Set());
     return check;
+  }
+
+  // Before the task is put at `level`: L3 is checked against the App's
+  // installation as it is now, not as last cached (ADR 0014). Called only
+  // from inside `serially`.
+  async function checkAppForL3(taskId: string, level: AutonomyLevel): Promise<void> {
+    const repo = lifecycle.tasks[taskId]?.repo;
+    if (level === 'L3' && repo && lifecycle.repositories[repo]) await checkApp(repo);
   }
 
   async function checkEveryApp(): Promise<void> {
@@ -782,6 +794,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const check = await checkApp(repo);
         const blocked = appBlock(resolved.preset.name, stages, check);
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
+        // L3 reads the PR's checks as the App (ADR 0014): refused, never
+        // lowered to L2, where its installation doesn't grant that.
+        const refusedL3 = action.autonomy === 'L3' && start.stage.mode === 'AFK' ? l3RefusalText(repo, check) : null;
+        if (refusedL3) return { ok: false, reason: refusedL3 };
       }
       // At an AFK stage launching ticket tasks, one issue ref with no
       // sub-issues is a ticket task's ticket, and a spec ref or several refs
@@ -1056,6 +1072,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         committed: [],
         sessionId: randomUUID(),
       };
+      await checkAppForL3(taskId, autonomy);
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
@@ -1431,6 +1448,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (action.type === 'answer' && allowsByRules(action.permission) && action.permission.allow === 'always') {
         return answerAlways(action.taskId, action.permission);
       }
+      if (action.type === 'setAutonomy') await checkAppForL3(action.taskId, action.autonomy);
       const refusal = await settle(action, new Set());
       if (refusal) return { ok: false, reason: refusal };
       if (action.type === 'createTask') return { ok: true, value: { taskId: `T${lifecycle.counters.task}` } };
@@ -2337,14 +2355,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // 0010); an L2 run's container installs its own. One that failed holds
     // the run back no more than a missing lockfile would.
     let uninstalled: string | null = null;
-    if (cwd && run.autonomy !== 'L2') {
+    if (cwd && !runsContained(run.autonomy)) {
       uninstalled = await installDependencies(cwd);
       if (lifecycle.runs[run.id]?.status !== 'active') return;
     }
     if (run.mode === 'AFK' && cwd) {
       const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
-      const l2 = run.autonomy === 'L2';
-      if (l2) {
+      const contained = runsContained(run.autonomy);
+      if (contained) {
         try {
           token = await secrets.read(SUBSCRIPTION_TOKEN_SECRET);
         } catch (error) {
@@ -2354,7 +2372,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!token) return fail(NO_SUBSCRIPTION_TOKEN);
       }
       let snapshot: RunSnapshot | null = null;
-      if (!l2) {
+      if (!contained) {
         try {
           snapshot = await git.snapshot(cwd);
         } catch (error) {
@@ -2372,8 +2390,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
       if (lifecycle.runs[run.id]?.status !== 'active') return;
       // An L2 run's are where its container mounts them, read-only.
-      const dir = l2 ? containerRunDir(task.id) : join(options.runsRoot, run.id);
-      if (l2) {
+      const dir = contained ? containerRunDir(task.id) : join(options.runsRoot, run.id);
+      if (contained) {
         try {
           container = await prepareContainer(task, run, dir);
           snapshot = await container.checks.snapshot(container.workdir);
@@ -2391,7 +2409,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
       guarded.set(run.id, { worktree: container?.workdir ?? cwd, host: cwd, dir, checks: container?.checks ?? git, container, snapshot: snapshot!, scripts: new Set() });
       botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
-      guards = { start: snapshot!.head, env: l2 ? inRunDir(env, dir) : env };
+      guards = { start: snapshot!.head, env: contained ? inRunDir(env, dir) : env };
     }
     const start: RunStart = {
       runId: run.id,
@@ -2916,9 +2934,10 @@ const NO_APP = 'The factory has no GitHub App yet: run `agents-factory setup git
 const NO_SUBSCRIPTION_TOKEN =
   'The factory has no subscription token for L2 runs yet: run `claude setup-token`, then `agents-factory setup token` to store what it prints.';
 
-// Whether the run executes in its task's container: an L2 AFK run (ADR 0007).
+// Whether the run executes in its task's container: an L2 AFK run (ADR
+// 0007), or an L3 one, contained alike (ADR 0014).
 function runsInContainer(run: Run): boolean {
-  return run.mode === 'AFK' && run.autonomy === 'L2';
+  return run.mode === 'AFK' && runsContained(run.autonomy);
 }
 
 // What the factory holds about a guarded AFK run while it runs (ADR 0007):

@@ -1,7 +1,7 @@
 // The GitHub port's contract, shared by the fake and the REST adapter so the
 // two can't drift apart.
 import { describe, expect, test } from 'vitest';
-import { GitHubError, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub, type PrStatus } from './github.ts';
+import { GitHubError, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub, type Permissions, type PrStatus } from './github.ts';
 
 export type GitHubFixture = {
   github: GitHub;
@@ -61,11 +61,14 @@ async function workedOut(read: () => Promise<PrStatus>): Promise<PrStatus> {
 
 export function describeGitHubContract(name: string, makeFixture: () => Promise<GitHubFixture>): void {
   describe(`${name}: the GitHub contract`, () => {
-    test('says whether the App is installed on a repository', async () => {
+    test('says whether the App is installed on a repository, and with which permissions', async () => {
       const { github, app, installedRepo, uninstalledRepo } = await makeFixture();
 
-      expect(await github.isInstalled(app, installedRepo)).toBe(true);
-      expect(await github.isInstalled(app, uninstalledRepo)).toBe(false);
+      const installation = await github.installation(app, installedRepo);
+      expect(installation?.permissions).toMatchObject({ metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'write' });
+      // Where the operator approves the App's new permissions on that installation.
+      expect(installation?.settingsUrl).toMatch(/^https:\/\/github\.com\/(settings|organizations\/[^/]+\/settings)\/installations\/\d+$/);
+      expect(await github.installation(app, uninstalledRepo)).toBeNull();
     });
 
     test('mints a token for a repository it is installed on, which lives at most an hour', async () => {
@@ -82,6 +85,14 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, uninstalledRepo } = await makeFixture();
 
       await expect(github.mintToken(app, uninstalledRepo, READ_ONLY)).rejects.toThrow(GitHubError);
+    });
+
+    test('refuses to mint a token for a permission the installation doesn’t grant', async () => {
+      const { github, app, installedRepo } = await makeFixture();
+
+      // The App never asks for Administration (ADR 0004), so no installation grants it.
+      const ungranted = { administration: 'read', metadata: 'read' } as unknown as Permissions;
+      await expect(github.mintToken(app, installedRepo, ungranted)).rejects.toThrow(GitHubError);
     });
 
     test('a read-only token reads an open issue, but can’t close it', async () => {
@@ -330,7 +341,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
         generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }),
       );
 
-      await expect(github.isInstalled({ ...app, privateKey }, installedRepo)).rejects.toThrow(GitHubError);
+      await expect(github.installation({ ...app, privateKey }, installedRepo)).rejects.toThrow(GitHubError);
     });
   });
 }

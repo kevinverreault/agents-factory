@@ -107,9 +107,9 @@ describe('the autonomy level', () => {
 
     expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L2' })).toEqual({ ok: true });
     expect(tui.state().tasks.T1).toMatchObject({ autonomy: 'L2' });
-    expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L3' as never })).toEqual({
+    expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L4' as never })).toEqual({
       ok: false,
-      reason: 'L3 is not an autonomy level (L1 or L2).',
+      reason: 'L4 is not an autonomy level (L1, L2 or L3).',
     });
     expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L1' })).toEqual({ ok: true });
 
