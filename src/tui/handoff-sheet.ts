@@ -65,6 +65,13 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
   });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const [refusal, setRefusal] = useState<string | null>(null);
+  // A policy the factory changed on the sheet since, as a spec task's change
+  // reaches its ticket tasks (ADR 0014), replaces the one drafted at L3.
+  const policySeen = useRef(policyOf(handoff));
+  if (policyOf(handoff) !== policySeen.current) {
+    policySeen.current = policyOf(handoff);
+    if (draft.current.autonomy === 'L3') draft.current.mergePolicy = policySeen.current;
+  }
   // The brief is the operator's to edit once the agent has written it.
   if (handoff.brief && !draft.current.brief) draft.current.brief = structuredClone(handoff.brief);
   // The factory's pick of the spec candidates, until the operator picks;

@@ -195,7 +195,7 @@ The run the factory queues on a ticket task In review, or on a root waiting at a
 _Avoid_: Rebase run, conflict fix
 
 **Merge policy**:
-Who passes a task's merge gate, picked at handoff, or at launch for a task starting AFK, and inherited by a spec's ticket tasks. Under **operator**, the task goes In review and the operator merges it. Under **judged** (semi-auto), the factory merges unless its gate check finds the PR worth the operator's review. Under **unattended** (full-auto), the factory merges every PR whose checks pass. Judged and unattended, the **agent policies**, need L3.
+Who passes a task's merge gate, picked at handoff, or at launch for a task starting AFK, inherited by a spec's ticket tasks, and changeable on a live task at L3. A spec task's change reaches its ticket tasks not yet at their gate. Under **operator**, the task goes In review and the operator merges it. Under **judged** (semi-auto), the factory merges unless its gate check finds the PR worth the operator's review. Under **unattended** (full-auto), the factory merges every PR whose checks pass. Judged and unattended, the **agent policies**, need L3.
 _Avoid_: Auto-merge setting, review mode, auto (that is Claude Code's permission mode)
 
 **Gate check**:

@@ -13,6 +13,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
+import { throughPr } from '../testing/through-pr.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
 
@@ -423,23 +424,9 @@ describe('a crash while launching a ticket task', () => {
 // Works the ticket task `taskId`'s runs at L2 through its PR body (its
 // implementation commits), then waits for it In review with its PR, whose
 // number it returns.
-async function toReview({ factory, tui }: Factory, taskId: string): Promise<number> {
-  let state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId);
-  let run = state.tasks[taskId]!.liveRunId!;
-  const workdir = factory.sandbox.workdirOf(taskId);
-  factory.git.editFile(workdir, `src/${taskId}.ts`);
-  factory.git.commitAll(workdir);
-  factory.executor.report(run, { type: 'runCompleted' });
-  // The review finds nothing.
-  state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
-  run = state.tasks[taskId]!.liveRunId!;
-  factory.executor.report(run, { type: 'runCompleted' });
-  state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
-  run = state.tasks[taskId]!.liveRunId!;
-  factory.executor.report(run, { type: 'prBodyWritten', body: `The work of ${taskId}.` });
-  factory.executor.report(run, { type: 'runCompleted' });
-  state = await tui.until((state) => state.tasks[taskId]?.label === 'In review' && !!state.tasks[taskId].pr);
-  return state.tasks[taskId]!.pr!.number;
+async function toReview(launched: Factory, taskId: string): Promise<number> {
+  await throughPr(launched, taskId);
+  return (await launched.tui.until((state) => state.tasks[taskId]?.label === 'In review')).tasks[taskId]!.pr!.number;
 }
 
 // Someone merges the PR on GitHub, and a TUI attaching makes the daemon read it.

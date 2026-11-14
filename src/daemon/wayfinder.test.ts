@@ -3,13 +3,18 @@
 // task in Ready for you, and runs each ticket the operator picks (or the
 // first) in a fresh HITL session, until the map has no open ticket. Then
 // the operator chooses whether to continue to spec, jump to tickets, or end.
+// Under full-auto (ADR 0014), a spec written from the map runs from its
+// handoff to the spec and the map closed, the factory merging each ticket
+// task's PR and launching the tickets it unblocks.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { relayHook } from '../hooks/relay.ts';
+import type { AutonomyLevel, MergePolicy } from '../lifecycle/lifecycle.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
+import { throughPr } from '../testing/through-pr.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
 
@@ -20,6 +25,7 @@ afterEach(async () => {
 });
 
 const MAP = 'acme/widgets#30';
+const MINUTE = 60_000;
 
 // A factory with T1 launched from wayfinder, charting on R1, and the map
 // acme/widgets#30 on GitHub with the tickets #31, #32 (blocked by #31) and
@@ -249,7 +255,7 @@ describe('the map clearing', () => {
     expect(factory.github.issueState(MAP).open).toBe(true);
     factory.github.failIssueWrites(null);
 
-    factory.clock.advance(15 * 60_000);
+    factory.clock.advance(15 * MINUTE);
     await operator.send({ type: 'daemon.status' });
 
     await vi.waitFor(() => expect(factory.github.issueState(MAP).open).toBe(false));
@@ -310,40 +316,30 @@ describe('a work loop with no map', () => {
 
 const DECISIONS = ['acme/widgets#31', 'acme/widgets#32', 'acme/widgets#33'];
 
-// The live HITL run hands T1 off at L2, confirming the sheet with the spec
-// candidate it offers selected, once it read the candidates.
-async function handOff({ factory, operator, tui }: Pick<Charted, 'factory' | 'operator' | 'tui'>): Promise<FactoryState> {
+// The live HITL run hands T1 off at L2, or as `picked`, confirming the
+// sheet with the spec candidate it offers selected, once it read the candidates.
+async function handOff(
+  { factory, operator, tui }: Pick<Charted, 'factory' | 'operator' | 'tui'>,
+  picked: { autonomy: AutonomyLevel; mergePolicy?: MergePolicy } = { autonomy: 'L2' },
+): Promise<FactoryState> {
   const run = tui.state().tasks.T1!.liveRunId!;
   factory.executor.report(run, { type: 'turnEnded' });
   await operator.send({ type: 'openHandoff', taskId: 'T1' });
   factory.executor.report(run, { type: 'briefWritten', brief: { goal: 'Overhaul billing.', decided: [], doneWhen: [], outOfScope: [], links: [] } });
   const sheet = await tui.until((state) => !!state.tasks.T1?.handoff?.brief);
   const { brief, continueAs, tier, maxTurns, ticketSets } = sheet.tasks.T1!.handoff!;
-  const confirmed = await operator.send({ type: 'handoff', taskId: 'T1', brief: brief!, continueAs, autonomy: 'L2', tier, maxTurns, specs: ticketSets?.selected ? [ticketSets.selected] : [] });
+  const confirmed = await operator.send({ type: 'handoff', taskId: 'T1', brief: brief!, continueAs, ...picked, tier, maxTurns, specs: ticketSets?.selected ? [ticketSets.selected] : [] });
   if (!confirmed.ok) throw new Error(confirmed.reason);
   return sheet;
 }
 
 // The ticket task `taskId` works its ticket, is reviewed and opens its PR,
 // which someone merges on GitHub; a TUI attaching makes the daemon read it.
-async function mergeTicketTask({ factory, tui }: Pick<Charted, 'factory' | 'tui'>, taskId: string): Promise<void> {
-  let state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId);
-  let run = state.tasks[taskId]!.liveRunId!;
-  const workdir = factory.sandbox.workdirOf(taskId);
-  factory.git.editFile(workdir, `src/${taskId}.ts`);
-  factory.git.commitAll(workdir);
-  factory.executor.report(run, { type: 'runCompleted' });
-  // The review finds nothing.
-  state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
-  run = state.tasks[taskId]!.liveRunId!;
-  factory.executor.report(run, { type: 'runCompleted' });
-  state = await tui.until((state) => !!state.tasks[taskId]?.liveRunId && state.tasks[taskId].liveRunId !== run);
-  run = state.tasks[taskId]!.liveRunId!;
-  factory.executor.report(run, { type: 'prBodyWritten', body: `The work of ${taskId}.` });
-  factory.executor.report(run, { type: 'runCompleted' });
-  state = await tui.until((state) => state.tasks[taskId]?.label === 'In review' && !!state.tasks[taskId].pr);
-  factory.github.merge(state.tasks[taskId]!.pr!.number);
-  watch(await factory.attach());
+async function mergeTicketTask(charted: Pick<Charted, 'factory' | 'tui'>, taskId: string): Promise<void> {
+  await throughPr(charted, taskId);
+  const state = await charted.tui.until((state) => state.tasks[taskId]?.label === 'In review');
+  charted.factory.github.merge(state.tasks[taskId]!.pr!.number);
+  watch(await charted.factory.attach());
 }
 
 describe('the map resolving', () => {
@@ -411,5 +407,47 @@ describe('the map resolving', () => {
     expect(map[0]!.comment).not.toContain('acme/widgets#31');
     expect(factory.github.writes.filter(({ ref }) => DECISIONS.includes(ref))).toEqual([]);
     for (const ref of DECISIONS) expect(factory.github.issueState(ref).comments).toEqual([]);
+  });
+});
+
+describe('under full-auto', () => {
+  // The ticket task `taskId` works its ticket through its PR, which waits at
+  // its merge gate. The repo runs no checks: the gate's second read, 2
+  // minutes after the first, lets it through, and the factory merges it.
+  async function mergedByFactory(charted: Pick<Charted, 'factory' | 'tui'>, taskId: string): Promise<void> {
+    const { factory, tui } = charted;
+    await throughPr(charted, taskId);
+    await tui.until((state) => state.tasks[taskId]?.gate?.checks === 'none');
+    factory.clock.advance(2 * MINUTE);
+    await tui.until((state) => state.tasks[taskId]?.label === 'Done' && state.tasks[taskId].resolving === null);
+  }
+
+  test('a spec with a chain of dependent tickets runs from the handoff to its spec and map closed: each factory merge closes its ticket and launches the next', async () => {
+    const charted = await cleared();
+    const { factory, operator, tui, printIssue } = charted;
+    await operator.send({ type: 'advanceStage', taskId: 'T1' });
+    await tui.until((state) => state.tasks.T1?.stage === 'spec' && !!state.tasks.T1.liveRunId);
+    factory.github.addIssue('acme/widgets#40', { title: 'Billing overhaul spec' });
+    factory.github.addIssue('acme/widgets#41', { title: 'Stripe checkout', parent: 'acme/widgets#40', labels: ['ready-for-agent'] });
+    factory.github.addIssue('acme/widgets#42', { title: 'Refund webhook', parent: 'acme/widgets#40', labels: ['ready-for-agent'], blockedBy: ['acme/widgets#41'] });
+    factory.github.addIssue('acme/widgets#43', { title: 'Refund emails', parent: 'acme/widgets#40', labels: ['ready-for-agent'], blockedBy: ['acme/widgets#42'] });
+    await printIssue(40);
+
+    await handOff(charted, { autonomy: 'L3', mergePolicy: 'unattended' });
+
+    for (const [taskId, ticket] of [['T2', 'acme/widgets#41'], ['T3', 'acme/widgets#42'], ['T4', 'acme/widgets#43']] as const) {
+      const state = await tui.until((state) => !!state.tasks[taskId]);
+      expect(state.tasks[taskId]).toMatchObject({ kind: 'ticket', ticket, autonomy: 'L3', mergePolicy: 'unattended' });
+      // Only the ticket whose blockers merged is launched.
+      expect(Object.values(state.tasks).filter((task) => task.kind === 'ticket' && task.label !== 'Done')).toHaveLength(1);
+      await mergedByFactory(charted, taskId);
+      expect(factory.github.issueState(ticket).open).toBe(false);
+    }
+
+    const done = await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.cleanup === null);
+    expect(done.attentionQueue).toEqual([]);
+    expect(factory.github.issueState('acme/widgets#40')).toMatchObject({ open: false, stateReason: 'completed' });
+    expect(factory.github.issueState(MAP)).toMatchObject({ open: false, stateReason: 'completed' });
+    expect(factory.github.prWrites.filter(({ action }) => action === 'merge').map(({ number }) => number)).toEqual([101, 102, 103]);
   });
 });

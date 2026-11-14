@@ -813,6 +813,9 @@ export type OperatorCommand =
   | { type: 'retier'; taskId: string; tier: Tier }
   // Sets an AFK task's autonomy level between runs, clamped by its stage's ceiling.
   | { type: 'setAutonomy'; taskId: string; autonomy: AutonomyLevel }
+  // Sets a live AFK root's merge policy (ADR 0014): an agent one only at L3.
+  // On a spec task it also reaches its ticket tasks not yet at their gate.
+  | { type: 'setMergePolicy'; taskId: string; mergePolicy: MergePolicy }
   | { type: 'setSlotCap'; cap: number }
   | { type: 'setKeepAwake'; on: boolean }
   // Unregisters the repository. Without `anyway`, the daemon asks the
@@ -1257,6 +1260,12 @@ export function factoryMerges(task: Task): boolean {
   return !task.child && task.mode === 'AFK' && agentPolicy(task.mergePolicy) && atLeast(clampAutonomy(task.autonomy ?? 'L1', stageOf(task, task.stage)), 'L3');
 }
 
+// The AFK task's autonomy level at its merge gate, past its last stage: its
+// own, held to that stage's ceiling, which `factoryMerges` goes by there.
+function levelAtGate(task: Task): AutonomyLevel {
+  return clampAutonomy(task.autonomy ?? 'L1', task.preset?.stages.at(-1));
+}
+
 // Whether the root waits at its merge gate for the factory to merge it
 // (ADR 0014): past its last stage with its PR open and published, under an
 // agent policy, rather than In review for the operator.
@@ -1268,6 +1277,26 @@ export function atMergeGate(task: Task): boolean {
 // or null.
 function mergingRefusal(task: Task): string | null {
   return task.gate?.step && atMergeGate(task) ? `${task.id} is merging its PR: wait for it to finish.` : null;
+}
+
+// Sets the root's merge policy. One that leaves its merge gate drops it;
+// one that reaches it has it read afresh (ADR 0014). A HITL ticket task's
+// open handoff sheet, or its saved draft, at L3 takes it too.
+function setPolicy(task: Task, policy: MergePolicy): void {
+  task.mergePolicy = policy;
+  if (!atMergeGate(task)) task.gate = null;
+  for (const sheet of [task.handoff, task.handoffDraft]) {
+    if (sheet?.autonomy === 'L3') sheet.mergePolicy = policy;
+  }
+}
+
+// Whether the spec task's new policy reaches its unfinished ticket task
+// (ADR 0014): one not yet at its gate (In review, it is, under any policy),
+// and for an agent policy, a HITL one, whose handoff picks its level, or an
+// AFK one still at L3.
+function takesSpecPolicy(task: Task, policy: MergePolicy): boolean {
+  if (task.state === 'in-review') return false;
+  return !agentPolicy(policy) || task.mode === 'HITL' || levelAtGate(task) === 'L3';
 }
 
 // Why the merge policy can't be picked for a task at `level` (null for a
@@ -2355,11 +2384,17 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
       if (task.mode !== 'AFK') return `${task.id} is HITL, so it has no autonomy level.`;
       if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
-      const refused = levelRefused(state, task.repo, action.autonomy);
+      const refused = levelRefused(state, task.repo, action.autonomy) ?? mergingRefusal(task);
       if (refused) return refused;
       // A run's containment never shifts under it.
       const run = liveRun(state, task);
       return run ? `${task.id}’s autonomy level changes only between runs, and its run ${run.id} is live.` : null;
+    }
+    case 'setMergePolicy': {
+      if (task.child) return `${task.id} is a child task: its work reaches the base branch through its parent’s PR.`;
+      if (task.mode !== 'AFK') return `${task.id} is HITL: it picks its merge policy at its handoff.`;
+      if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
+      return mergingRefusal(task) ?? policyRefusal(action.mergePolicy, levelAtGate(task));
     }
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';
@@ -2972,14 +3007,16 @@ function specsRefusal(sheet: HandoffSheet, specs: unknown): string | null {
 function newHandoffSheet(state: Lifecycle, task: Task, readiness: Readiness): HandoffSheet {
   const stage = handoffStage(task);
   const share = task.context ? task.context.used / task.context.window : null;
+  const specAutonomy = task.kind === 'ticket' && task.specTask ? state.tasks[task.specTask]?.autonomy : null;
   return {
     brief: null,
     asked: false,
     stage: stage?.id ?? null,
     continueAs: share !== null && share > FRESH_AT ? 'fresh' : 'resume',
     // A ticket task's handoff starts at the level its spec task was handed off at.
-    autonomy: (task.kind === 'ticket' && task.specTask && state.tasks[task.specTask]?.autonomy) || 'L1',
-    mergePolicy: 'operator',
+    autonomy: specAutonomy || 'L1',
+    // A ticket task's handoff pre-fills its spec task's policy, which it inherited.
+    mergePolicy: specAutonomy === 'L3' ? policyOf(task) : 'operator',
     tier: task.operatorTier ?? task.inputs?.tier ?? stage?.model ?? DEFAULT_TIER,
     maxTurns: task.maxTurns ?? stage?.max_turns ?? DEFAULT_MAX_TURNS,
     contextShare: share,
@@ -3955,6 +3992,14 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'setAutonomy':
       task.autonomy = clampAutonomy(action.autonomy, stageOf(task, task.stage));
+      // Below L3 the factory merges nothing (ADR 0014).
+      if (task.autonomy !== 'L3' && task.mergePolicy) setPolicy(task, 'operator');
+      break;
+    case 'setMergePolicy':
+      setPolicy(task, action.mergePolicy);
+      for (const ticketTask of task.kind === 'spec' ? unfinishedTicketTasks(state, task) : []) {
+        if (takesSpecPolicy(ticketTask, action.mergePolicy)) setPolicy(ticketTask, action.mergePolicy);
+      }
       break;
     case 'setSlotCap':
       state.slotCap = action.cap;
