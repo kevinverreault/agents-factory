@@ -46,13 +46,16 @@ type LiveRun = {
   cli: Promise<{ pid: number; createdAt: number }> | null;
   reportedStart: boolean;
   // The question card the turn waits on: resolved with the operator's answers,
-  // or null once the turn or the run is cut.
-  asking: { id: string; resolve(answers: Answers | null): void } | null;
+  // a refusal's message, or null once the turn or the run is cut.
+  asking: { id: string; resolve(reply: QuestionReply | null): void } | null;
   // The tool calls waiting on the factory's gate, by tool use id: resolved
   // with its verdict, or null once the run is cut.
   permitting: Map<string, (verdict: Verdict | null) => void>;
   stopped: boolean;
 };
+
+// What a question's tool call gets: the operator's answers, or a refusal.
+type QuestionReply = { answers: Answers } | { declined: string };
 
 const SUMMARY_LENGTH = 200;
 
@@ -178,7 +181,12 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
 
     answer(runId, questionId, answers) {
       const { asking } = runs.get(runId) ?? {};
-      if (asking?.id === questionId) asking.resolve(answers);
+      if (asking?.id === questionId) asking.resolve({ answers });
+    },
+
+    decline(runId, questionId, message) {
+      const { asking } = runs.get(runId) ?? {};
+      if (asking?.id === questionId) asking.resolve({ declined: message });
     },
 
     permit(runId, callId, verdict) {
@@ -552,14 +560,16 @@ function gateCall(run: Omit<LiveRun, 'query'>): CanUseTool {
 
 // `AskUserQuestion` holds the turn until the operator answers it: a question
 // card in a HITL conversation, a question attention request that suspends an
-// AFK run. Anything else that would prompt goes to `otherwise`.
+// AFK run, until the daemon either answers it with the operator's answers or,
+// for a full-auto run, declines it through `decline` with what the run should
+// do (ADR 0014). Anything else that would prompt goes to `otherwise`.
 function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>, otherwise: CanUseTool): CanUseTool {
   return async (toolName, input, options) => {
     if (toolName !== 'AskUserQuestion') return otherwise(toolName, input, options);
     const { signal, toolUseID } = options;
     // One question at a time.
     if (run.asking) return { behavior: 'deny', message: 'Another question is still open: ask one card at a time.' };
-    const answers = await new Promise<Answers | null>((resolve) => {
+    const reply = await new Promise<QuestionReply | null>((resolve) => {
       if (run.stopped || signal.aborted) return resolve(null);
       run.asking = { id: toolUseID, resolve };
       signal.addEventListener('abort', () => resolve(null), { once: true });
@@ -569,9 +579,8 @@ function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>, otherwise: C
       );
     });
     run.asking = null;
-    return answers
-      ? { behavior: 'allow', updatedInput: { ...input, answers } }
-      : { behavior: 'deny', message: 'The operator dismissed the question.' };
+    if (!reply) return { behavior: 'deny', message: 'The operator dismissed the question.' };
+    return 'declined' in reply ? { behavior: 'deny', message: reply.declined } : { behavior: 'allow', updatedInput: { ...input, answers: reply.answers } };
   };
 }
 
