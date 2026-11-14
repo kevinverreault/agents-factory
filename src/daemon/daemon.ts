@@ -159,7 +159,7 @@ import type { Store } from '../store/store.ts';
 import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
 import { NAMING_INSTRUCTIONS, nameTask, namingRequest, type Namer } from '../naming/task-naming.ts';
 import type { Clock } from './clock.ts';
-import { readMergeGate } from '../merge-gate/merge-gate.ts';
+import { DEFAULT_MERGE_GATE, readMergeGateConfig, type MergeGateConfig } from '../merge-gate/merge-gate.ts';
 
 export type DaemonOptions = {
   pipePath: string;
@@ -806,9 +806,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (refusedPolicy) return { ok: false, reason: refusedPolicy };
       // Frozen with it, from the operator's file alone, never the repository's (ADR 0014).
       if (start.stage.mode === 'AFK') {
-        const gate = readMergeGate(options.mergeGatePath, repo);
-        if ('error' in gate) return { ok: false, reason: gate.error };
-        action.mergeGate = gate.config;
+        const gateConfig = frozenGateConfig(repo);
+        if ('error' in gateConfig) return { ok: false, reason: gateConfig.error };
+        action.mergeGate = gateConfig;
       }
       // No fallback to the operator's account (ADR 0004): a task whose
       // preset has AFK stages launches only where the App can work.
@@ -1054,7 +1054,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // the PR's head is still the commit whose checks let it through.
   const MERGE_WRITES: Record<MergeStep, { permissions: Permissions; take(token: string, ref: string, task: Task): Promise<void> }> = {
     ready: { permissions: PR_WRITE, take: (token, ref) => github.markReady(token, ref) },
-    merge: { permissions: MERGE, take: (token, ref, task) => github.mergePr(token, ref, { method: task.mergeGate?.mergeMethod ?? 'merge', head: task.gate!.head }) },
+    merge: { permissions: MERGE, take: (token, ref, task) => github.mergePr(token, ref, { method: (task.mergeGate ?? DEFAULT_MERGE_GATE).mergeMethod, head: task.gate!.head }) },
   };
 
   // Where the root's PR stands, read as the App with a read-only token, or
@@ -1150,6 +1150,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
   }
 
+  // The merge gate config a task in `repo` freezes now, read afresh from the
+  // operator's file alone, never the repository's (ADR 0014), or why the
+  // file is refused.
+  function frozenGateConfig(repo: string): MergeGateConfig | { error: string } {
+    const read = readMergeGateConfig(options.mergeGatePath, repo);
+    return 'error' in read ? read : read.config;
+  }
+
   // The handoff sheet's confirm. Blocked unless the task's worktree is as
   // its AFK run's guards accept it (ADR 0007), checked afresh. The task's
   // uncommitted files are then committed to the task branch, as the HITL
@@ -1175,9 +1183,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
       // The merge gate config is frozen with the merge policy (ADR 0014).
-      const gate = readMergeGate(options.mergeGatePath, task.repo);
-      if ('error' in gate) return { ok: false, reason: gate.error };
-      action.mergeGate = gate.config;
+      const gateConfig = frozenGateConfig(task.repo);
+      if ('error' in gateConfig) return { ok: false, reason: gateConfig.error };
+      action.mergeGate = gateConfig;
       const ready = await readiness(task);
       if (ready.blockers.length) {
         // The sheet shows what blocks it.

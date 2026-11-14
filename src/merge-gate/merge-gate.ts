@@ -1,5 +1,5 @@
 // The merge gate's configuration (ADR 0014): what an agent policy's gate
-// goes by, owned by the operator and never by the target repository. It
+// goes by, owned by the operator and never by the repository it gates. It
 // resolves in three layers, each overriding the one before field by field:
 // the built-in defaults below, the operator's optional `merge-gate.yaml` in
 // the factory home, and that file's section for the task's repository. A
@@ -44,7 +44,10 @@ export const DEFAULT_MERGE_GATE: MergeGateConfig = {
   mergeMethod: 'merge',
 };
 
+// The fields a layer may override, as the file names them; the file itself
+// also has `repositories`, each section a layer of these.
 const FIELDS = ['tripwires', 'rubric', 'merge_method'] as const;
+// A list of lines, none blank.
 const strings = z.array(z.string().trim().min(1));
 const layerFields = {
   tripwires: z.strictObject({ paths: strings.optional(), predicates: z.array(z.enum(TRIPWIRE_PREDICATES)).optional() }).optional(),
@@ -52,6 +55,7 @@ const layerFields = {
   merge_method: z.enum(MERGE_METHODS).optional(),
 };
 const layerSchema = z.strictObject(layerFields);
+// One layer as the file writes it: the user file's own fields, or a repository's section.
 type Layer = z.infer<typeof layerSchema>;
 // A repository section is named owner/name.
 export const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -60,13 +64,20 @@ const fileSchema = z.strictObject({
   repositories: z.record(z.string().regex(REPOSITORY), layerSchema).optional(),
 });
 
+// The operator's file as read, `path` saying where, for refusals.
 export type MergeGateFile = { path: string; content: string };
+
+// The config resolved, and the name of the repository section laid over the
+// user file, if one was.
+export type ResolvedMergeGateConfig = { config: MergeGateConfig; section: string | null };
 
 // The config for `repo` (none: the user file alone), from the operator's
 // file, if there is one. An invalid file is refused whole, even when only
-// another repository's section is wrong.
-export function resolveMergeGate(file: MergeGateFile | null, repo: string | null): { config: MergeGateConfig } | { error: string } {
-  if (!file) return { config: structuredClone(DEFAULT_MERGE_GATE) };
+// another repository's section is wrong. Sections are matched whatever
+// their names' case, as GitHub names repositories, so two that differ only
+// by case are refused.
+export function resolveMergeGateConfig(file: MergeGateFile | null, repo: string | null): ResolvedMergeGateConfig | { error: string } {
+  if (!file) return { config: structuredClone(DEFAULT_MERGE_GATE), section: null };
   let raw: unknown;
   try {
     raw = parse(file.content);
@@ -78,21 +89,24 @@ export function resolveMergeGate(file: MergeGateFile | null, repo: string | null
   const checked = fileSchema.safeParse(raw, { reportInput: true });
   if (!checked.success) return { error: `The merge gate config at ${file.path} is invalid: ${describeIssue(checked.error.issues[0]!)}` };
   const { repositories = {}, ...user } = checked.data;
-  const section = repo === null ? undefined : Object.entries(repositories).find(([name]) => name.toLowerCase() === repo.toLowerCase())?.[1];
-  return { config: [user, section ?? {}].reduce(overlay, structuredClone(DEFAULT_MERGE_GATE)) };
+  const names = Object.keys(repositories);
+  const clash = names.find((name, at) => names.findIndex((other) => other.toLowerCase() === name.toLowerCase()) !== at);
+  if (clash) return { error: `The merge gate config at ${file.path} is invalid: repositories.${clash} names the same repository as another section, in another case.` };
+  const section = repo === null ? undefined : names.find((name) => name.toLowerCase() === repo.toLowerCase());
+  return { config: [user, section ? repositories[section]! : {}].reduce(overlay, structuredClone(DEFAULT_MERGE_GATE)), section: section ?? null };
 }
 
 // Reads the operator's file at `path` (none there: the defaults) and
 // resolves it for `repo`. Nothing is ever read from the repository itself.
-export function readMergeGate(path: string, repo: string | null): { config: MergeGateConfig } | { error: string } {
+export function readMergeGateConfig(path: string, repo: string | null): ResolvedMergeGateConfig | { error: string } {
   let content: string;
   try {
     content = readFileSync(path, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return resolveMergeGate(null, repo);
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return resolveMergeGateConfig(null, repo);
     return { error: `The merge gate config at ${path} can’t be read: ${(error as Error).message}` };
   }
-  return resolveMergeGate({ path, content }, repo);
+  return resolveMergeGateConfig({ path, content }, repo);
 }
 
 // The config as YAML, in the file's own field names, as `agents-factory
@@ -101,6 +115,7 @@ export function mergeGateYaml(config: MergeGateConfig): string {
   return stringify({ tripwires: config.tripwires, rubric: config.rubric, merge_method: config.mergeMethod }, { lineWidth: 0 });
 }
 
+// `layer` laid over `config`: each field it names replaces the one before, lists whole.
 function overlay(config: MergeGateConfig, layer: Layer): MergeGateConfig {
   return {
     tripwires: { ...config.tripwires, ...layer.tripwires },
@@ -109,6 +124,7 @@ function overlay(config: MergeGateConfig, layer: Layer): MergeGateConfig {
   };
 }
 
+// Words as a list ending in `or`.
 const or = (words: readonly string[]) => `${words.slice(0, -1).join(', ')} or ${words.at(-1)}`;
 
 // A schema issue as a sentence about the field it is on.

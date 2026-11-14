@@ -31,10 +31,17 @@ const SECTION = 'merge_method: rebase\nrepositories:\n  acme/widgets:\n    merge
 test('it prints the config resolved for the repository named', async () => {
   const { out, run, path } = setUp(SECTION);
   expect(await run('acme/widgets')).toBe(0);
-  expect(out[0]).toBe(`The merge gate for acme/widgets: the built-in defaults, overridden by ${path}, then by any section it has for acme/widgets.`);
+  expect(out[0]).toBe(`The merge gate for acme/widgets: the built-in defaults, overridden by ${path}, then by its section for acme/widgets.`);
   expect(out[1]).toContain('merge_method: squash\n');
   expect(out[1]).toContain('- "**/migrations/**"');
   expect(out[1]).toContain('- high-severity-finding');
+});
+
+test('a repository with no section of its own is told so', async () => {
+  const { out, run, path } = setUp(SECTION);
+  expect(await run('acme/gadgets')).toBe(0);
+  expect(out[0]).toBe(`The merge gate for acme/gadgets: the built-in defaults, overridden by ${path}, which has no section for acme/gadgets.`);
+  expect(out[1]).toContain('merge_method: rebase\n');
 });
 
 test('with no repository named, it is the working directory’s clone’s', async () => {
