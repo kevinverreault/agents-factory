@@ -3189,7 +3189,7 @@ describe('usage', () => {
     });
     // The frame with its lines run together: the strip's parts wrap on a narrow terminal.
     const oneLine = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.replace(/\s*\n\s*/g, ' ');
-    const strip = /window ██████░░░░░░░░ 42% ↻14:30 │ week █░░░░░ 18% │ slots ●○ 1\/2 │ ▁▁▁▁▁▁▁▁▁▂▅█ 800\/h │ claude-sonnet-5-5 2\.1M · claude-haiku-5-5 330/;
+    const strip = /window ██████░░░░░░░░ 42% ↻ 14:30 │ week █░░░░░ 18% │ slots ●○ 1\/2 │ ▁▁▁▁▁▁▁▁▁▂▅█ 800\/h │ claude-sonnet-5-5 2\.1M · claude-haiku-5-5 330/;
 
     test('shows the usage window and its reset, the weekly window, slots, a tokens/hour sparkline and tokens by model, on every screen', async () => {
       const { app } = await started(reading(metering()));
@@ -3216,7 +3216,7 @@ describe('usage', () => {
       await press(app, '\r', '\r');
 
       await eventually(() => expect(app.lastFrame()).toContain('Grill me about billing'));
-      expect(oneLine(app)).toMatch(/window ██████░░░░░░░░ 42% ↻14:30 │ week █░░░░░ 18% │ slots ●○ 1\/2/);
+      expect(oneLine(app)).toMatch(/window ██████░░░░░░░░ 42% ↻ 14:30 │ week █░░░░░ 18% │ slots ●○ 1\/2/);
     });
 
     test('a usage window with no snapshot to trust shows as unknown', async () => {
