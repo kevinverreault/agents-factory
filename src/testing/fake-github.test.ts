@@ -54,12 +54,12 @@ describe('the fake GitHub’s installations', () => {
     const app = await github.createApp(github.manifestCode());
     github.install('acme/widgets', { contents: 'write', metadata: 'read' });
 
-    expect(await github.installation(app, 'acme/widgets')).toEqual({ permissions: { contents: 'write', metadata: 'read' } });
+    expect(await github.installation(app, 'acme/widgets')).toEqual({ permissions: { contents: 'write', metadata: 'read' }, settingsUrl: 'https://github.com/settings/installations/1' });
     await expect(github.mintToken(app, 'acme/widgets', { checks: 'read' })).rejects.toThrow(/not granted to this installation/);
     await expect(github.mintToken(app, 'acme/widgets', { contents: 'read' })).resolves.toMatchObject({ token: expect.stringMatching(/^ghs_/) });
 
     github.approvePermissions('acme/widgets');
-    expect(await github.installation(app, 'acme/widgets')).toEqual({ permissions: APP_PERMISSIONS });
+    expect(await github.installation(app, 'acme/widgets')).toMatchObject({ permissions: APP_PERMISSIONS });
     expect(APP_PERMISSIONS).toMatchObject({ checks: 'read', statuses: 'read' });
   });
 });

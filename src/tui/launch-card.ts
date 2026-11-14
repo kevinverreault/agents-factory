@@ -378,6 +378,7 @@ export function autonomyText(level: AutonomyLevel): string {
   return AUTONOMY_TEXT[level];
 }
 
+// Each level as the card and the handoff sheet show it.
 const AUTONOMY_TEXT: Record<AutonomyLevel, string> = {
   L1: 'L1 (on this machine)',
   L2: 'L2 (in its own container)',

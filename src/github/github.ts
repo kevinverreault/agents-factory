@@ -1,8 +1,7 @@
 // The GitHub port (ADR 0004): what the factory asks GitHub as its factory
 // identity, a GitHub App. It turns the manifest flow's code into the App,
-// says whether the App is installed on a repository, with which permissions,
-// and mints installation
-// tokens narrowed to one repository and the permissions asked for. With such
+// says whether the App is installed on a repository and with which
+// permissions, and mints installation tokens narrowed to one repository and the permissions asked for. With such
 // a token it reads specs, maps and their tickets, closes them (ADR 0013),
 // pushes task branches, and opens
 // their draft PRs, reads those PRs, closes or reopens them, and deletes the
@@ -38,16 +37,9 @@ export type InstallationToken = { token: string; expiresAt: number };
 
 // The App's installation on a repository as GitHub has it: the permissions
 // the operator granted it, which lag the App's own until they approve a
-// change of them, as when the App gains a permission (ADR 0014).
-export type Installation = { permissions: Permissions };
-
-// Those of `needed` that `granted` lacks, by name: a write grant covers a read.
-export function missingPermissions(granted: Permissions, needed: Permissions): Permission[] {
-  return (Object.keys(needed) as Permission[]).filter((name) => {
-    const has = granted[name];
-    return !has || (needed[name] === 'write' && has !== 'write');
-  });
-}
+// change of them, as when the App gains a permission (ADR 0014), and the
+// installation's settings page, where they approve it.
+export type Installation = { permissions: Permissions; settingsUrl: string };
 
 // What the factory pushes (ADR 0004): the task branch, or a research
 // branch (ADR 0007), of the clone at `clonePath`, to the branch of the same
@@ -165,6 +157,14 @@ export function installationSettings(slug: string): string {
   return `https://github.com/apps/${slug}/installations/new`;
 }
 
+// An installation's own settings page, on the account it is installed on:
+// where the operator approves the App's new permissions.
+export function installationPage(id: number, account: string, accountType: string): string {
+  return accountType === 'Organization'
+    ? `https://github.com/organizations/${account}/settings/installations/${id}`
+    : `https://github.com/settings/installations/${id}`;
+}
+
 // The App's permissions (ADR 0004): no Workflows, Actions or Administration,
 // and Checks and Statuses read alone, for L3's merges (ADR 0014).
 export const APP_PERMISSIONS: Permissions = {
@@ -215,11 +215,13 @@ export function gitHubApi(): GitHub {
   };
 
   // The installation covering the repository, or null when there is none.
-  async function installationOf(app: FactoryApp, repo: string): Promise<{ id: number; permissions: Permissions } | null> {
+  async function installationOf(app: FactoryApp, repo: string): Promise<({ id: number } & Installation) | null> {
     const reply = await call('GET', `/repos/${repo}/installation`, appJwt(app));
     if (reply.status === 404) return null;
     if (reply.status !== 200) throw refused(`say whether the App is installed on ${repo}`, reply);
-    return { id: reply.json.id as number, permissions: { ...(reply.json.permissions as Permissions) } };
+    const id = reply.json.id as number;
+    const { login, type } = reply.json.account as { login: string; type: string };
+    return { id, permissions: { ...(reply.json.permissions as Permissions) }, settingsUrl: installationPage(id, login, type) };
   }
 
   // The PR `ref` as GitHub has it.
@@ -249,7 +251,7 @@ export function gitHubApi(): GitHub {
     },
     async installation(app, repo) {
       const found = await installationOf(app, repo);
-      return found && { permissions: found.permissions };
+      return found && { permissions: found.permissions, settingsUrl: found.settingsUrl };
     },
     async mintToken(app, repo, permissions) {
       const installation = await installationOf(app, repo);

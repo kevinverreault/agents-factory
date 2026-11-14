@@ -21,7 +21,8 @@ afterEach(async () => {
 });
 
 const clone = resolve('/clones/widgets');
-const SETTINGS = 'https://github.com/apps/agents-factory-operator/installations/new';
+// The installation's own settings page, where the operator approves the App's new permissions.
+const SETTINGS = 'https://github.com/settings/installations/1';
 // What an installation made before the App asked for Checks and Statuses grants.
 const BEFORE_L3 = { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' } as const;
 const REFUSED =

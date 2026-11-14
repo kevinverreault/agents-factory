@@ -1,7 +1,7 @@
 import {
   APP_PERMISSIONS,
   GitHubError,
-  missingPermissions,
+  installationPage,
   deleteRefusal,
   goneHead,
   pushRefusal,
@@ -12,6 +12,7 @@ import {
   type Installation,
   type InstallationToken,
   type Issue,
+  type Permission,
   type Permissions,
   type Pushed,
   type DraftPr,
@@ -23,6 +24,14 @@ import {
 import { outsideResearch } from '../github/research-branch.ts';
 import type { FakeClock } from './fake-clock.ts';
 import type { FakeGit } from './fake-git.ts';
+
+// Those of `needed` that `granted` lacks, by name: a write grant covers a read.
+function missingPermissions(granted: Permissions, needed: Permissions): Permission[] {
+  return (Object.keys(needed) as Permission[]).filter((name) => {
+    const has = granted[name];
+    return !has || (needed[name] === 'write' && has !== 'write');
+  });
+}
 
 // Installation tokens live an hour, as GitHub's do.
 const TOKEN_LIFETIME_MS = 60 * 60_000;
@@ -208,7 +217,8 @@ export class FakeGitHub implements GitHub {
   async installation(app: FactoryApp, repo: string): Promise<Installation | null> {
     this.authenticate(app);
     const permissions = this.installed.get(repo);
-    return permissions ? { permissions: { ...permissions } } : null;
+    const id = [...this.installed.keys()].indexOf(repo) + 1;
+    return permissions ? { permissions: { ...permissions }, settingsUrl: installationPage(id, repo.split('/')[0]!, 'User') } : null;
   }
 
   async mintToken(app: FactoryApp, repo: string, permissions: Permissions): Promise<InstallationToken> {

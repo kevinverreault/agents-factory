@@ -66,6 +66,8 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
 
       const installation = await github.installation(app, installedRepo);
       expect(installation?.permissions).toMatchObject({ metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'write' });
+      // Where the operator approves the App's new permissions on that installation.
+      expect(installation?.settingsUrl).toMatch(/^https:\/\/github\.com\/(settings|organizations\/[^/]+\/settings)\/installations\/\d+$/);
       expect(await github.installation(app, uninstalledRepo)).toBeNull();
     });
 

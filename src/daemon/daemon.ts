@@ -20,7 +20,6 @@ import {
   TICKET_WRITE,
   type FactoryApp,
   type GitHub,
-  type Installation,
   type InstallationToken,
   type Issue,
   type Permissions,
@@ -648,16 +647,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function checkApp(repo: string): Promise<AppCheck> {
     const checkedAt = clock.now();
     let check: AppCheck;
-    let installation: Installation | null;
     try {
       const found = await factoryApp();
       if (!found) {
         check = { installed: false, checkedAt, reason: NO_APP, fixUrl: null };
-      } else if ((installation = await github.installation(found, repo))) {
-        check = { installed: true, checkedAt, permissions: installation.permissions, settingsUrl: installationSettings(found.slug) };
       } else {
+        const installation = await github.installation(found, repo);
         const reason = `The factory’s GitHub App, ${found.slug}, isn’t installed on ${repo}.`;
-        check = { installed: false, checkedAt, reason, fixUrl: installationSettings(found.slug) };
+        check = installation
+          ? { installed: true, checkedAt, ...installation }
+          : { installed: false, checkedAt, reason, fixUrl: installationSettings(found.slug) };
       }
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
@@ -1442,6 +1441,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (action.type === 'answer' && allowsByRules(action.permission) && action.permission.allow === 'always') {
         return answerAlways(action.taskId, action.permission);
       }
+      // L3 is checked against the App's installation as it is now (ADR 0014).
+      const repo = action.type === 'setAutonomy' && action.autonomy === 'L3' ? lifecycle.tasks[action.taskId]?.repo : undefined;
+      if (repo && lifecycle.repositories[repo]) await checkApp(repo);
       const refusal = await settle(action, new Set());
       if (refusal) return { ok: false, reason: refusal };
       if (action.type === 'createTask') return { ok: true, value: { taskId: `T${lifecycle.counters.task}` } };
@@ -2354,8 +2356,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (run.mode === 'AFK' && cwd) {
       const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
-      const l2 = atLeast(run.autonomy, 'L2');
-      if (l2) {
+      const contained = atLeast(run.autonomy, 'L2');
+      if (contained) {
         try {
           token = await secrets.read(SUBSCRIPTION_TOKEN_SECRET);
         } catch (error) {
@@ -2365,7 +2367,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!token) return fail(NO_SUBSCRIPTION_TOKEN);
       }
       let snapshot: RunSnapshot | null = null;
-      if (!l2) {
+      if (!contained) {
         try {
           snapshot = await git.snapshot(cwd);
         } catch (error) {
@@ -2383,8 +2385,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
       if (lifecycle.runs[run.id]?.status !== 'active') return;
       // An L2 run's are where its container mounts them, read-only.
-      const dir = l2 ? containerRunDir(task.id) : join(options.runsRoot, run.id);
-      if (l2) {
+      const dir = contained ? containerRunDir(task.id) : join(options.runsRoot, run.id);
+      if (contained) {
         try {
           container = await prepareContainer(task, run, dir);
           snapshot = await container.checks.snapshot(container.workdir);
@@ -2402,7 +2404,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
       guarded.set(run.id, { worktree: container?.workdir ?? cwd, host: cwd, dir, checks: container?.checks ?? git, container, snapshot: snapshot!, scripts: new Set() });
       botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
-      guards = { start: snapshot!.head, env: l2 ? inRunDir(env, dir) : env };
+      guards = { start: snapshot!.head, env: contained ? inRunDir(env, dir) : env };
     }
     const start: RunStart = {
       runId: run.id,

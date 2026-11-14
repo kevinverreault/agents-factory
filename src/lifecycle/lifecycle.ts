@@ -651,7 +651,8 @@ export type AppCheck =
 
 // The permissions L3 needs the App's installation to grant beyond L2's
 // (ADR 0014): reading a PR's check runs and commit statuses before a merge.
-const L3_NEEDS: readonly AppPermission[] = ['checks', 'statuses'];
+// Each by the name GitHub's settings give it.
+const L3_NEEDS: Partial<Record<AppPermission, string>> = { checks: 'Checks read', statuses: 'Statuses read' };
 
 // Why an L3 task can't run on `repo` as its App was checked, with the link
 // that fixes it, or null when it can or the App is unchecked yet. There is no
@@ -660,9 +661,9 @@ const L3_NEEDS: readonly AppPermission[] = ['checks', 'statuses'];
 export function l3Refusal(repo: string, check: AppCheck | null | undefined): { reason: string; fixUrl: string | null } | null {
   if (!check) return null;
   if (!check.installed) return { reason: `L3 works as the factory’s App on ${repo}. ${check.reason}`, fixUrl: check.fixUrl };
-  const missing = L3_NEEDS.filter((name) => !check.permissions?.[name]);
+  const missing = (Object.keys(L3_NEEDS) as AppPermission[]).filter((name) => !check.permissions?.[name]);
   if (!missing.length) return null;
-  const named = missing.map((name) => `${name === 'checks' ? 'Checks' : 'Statuses'} read`).join(' and ');
+  const named = missing.map((name) => L3_NEEDS[name]).join(' and ');
   return {
     reason: `L3 merges a PR only once its checks pass, so the factory’s GitHub App needs ${named} on ${repo}, which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick L2.`,
     fixUrl: check.settingsUrl,
@@ -675,6 +676,12 @@ export function l3Refused(repo: string, check: AppCheck | null | undefined): str
   if (!refusal) return null;
   const fix = check?.installed ? 'Approve them at' : 'Install it from';
   return `${refusal.reason}${refusal.fixUrl ? ` ${fix} ${refusal.fixUrl}, then try again.` : ''}`;
+}
+
+// Why a task on `repo` can't be at `level`, as the guard says: only L3 is
+// refused, where the repository's App check refuses it.
+function levelRefused(state: Lifecycle, repo: string, level: AutonomyLevel): string | null {
+  return level === 'L3' ? l3Refused(repo, state.repositories[repo]?.app) : null;
 }
 
 // Whether the skill set's per-repo setup (ADR 0010) is on a repository's
@@ -2107,8 +2114,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
       if (state.repositories[action.repo]!.missing) return `${action.repo} is missing, so its runs can’t start.`;
       // The level counts only for a task starting AFK, at a stage its preset names once resolved.
-      if (action.autonomy === 'L3' && action.preset?.stages.find(({ id }) => id === action.stage)?.mode === 'AFK') {
-        const refused = l3Refused(action.repo, state.repositories[action.repo]!.app);
+      if (action.preset?.stages.find(({ id }) => id === action.stage)?.mode === 'AFK') {
+        const refused = levelRefused(state, action.repo, action.autonomy);
         if (refused) return refused;
       }
       if (action.quick && action.preset && action.preset.stages.find(({ id }) => id === action.stage)?.mode !== 'HITL') {
@@ -2158,10 +2165,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!tidyBrief(action.brief).goal) return 'The brief needs a goal.';
       if (!CONTINUE_AS.includes(action.continueAs)) return 'Continue as resume, or fresh from the brief.';
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
-      if (action.autonomy === 'L3') {
-        const refused = l3Refused(task.repo, state.repositories[task.repo]?.app);
-        if (refused) return refused;
-      }
+      const refused = levelRefused(state, task.repo, action.autonomy);
+      if (refused) return refused;
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       if (!(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) return 'Max turns must be a whole number of at least 1.';
       return specsRefusal(task.handoff, action.specs ?? []);
@@ -2231,10 +2236,8 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
       if (task.mode !== 'AFK') return `${task.id} is HITL, so it has no autonomy level.`;
       if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
-      if (action.autonomy === 'L3') {
-        const refused = l3Refused(task.repo, state.repositories[task.repo]?.app);
-        if (refused) return refused;
-      }
+      const refused = levelRefused(state, task.repo, action.autonomy);
+      if (refused) return refused;
       // A run's containment never shifts under it.
       const run = liveRun(state, task);
       return run ? `${task.id}’s autonomy level changes only between runs, and its run ${run.id} is live.` : null;
