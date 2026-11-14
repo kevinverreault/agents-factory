@@ -151,6 +151,7 @@ describe('changing a live task’s merge policy', () => {
 
     // The operator merges T2; #16, unblocked, launches under the new policy.
     factory.github.merge(101);
+    // Another TUI subscribing makes the daemon read the PR.
     watch(await factory.attach());
     state = await tui.until((state) => !!ticketTasks(state)['acme/widgets#16']);
     expect(state.tasks[ticketTasks(state)['acme/widgets#16']!]?.mergePolicy).toBe('unattended');
@@ -203,6 +204,11 @@ describe('a ready-for-human ticket under a full-auto spec', () => {
 
     const sheet = (await tui.until((state) => !!state.tasks.T4?.handoff?.brief)).tasks.T4!.handoff!;
     expect(sheet).toMatchObject({ autonomy: 'L3', mergePolicy: 'unattended' });
+    // A change on the spec task meanwhile reaches the open sheet, and back.
+    await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'operator' });
+    expect(tui.state().tasks.T4?.handoff?.mergePolicy).toBe('operator');
+    await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' });
+    expect(tui.state().tasks.T4?.handoff?.mergePolicy).toBe('unattended');
     const { continueAs, autonomy, mergePolicy, tier, maxTurns } = sheet;
     expect(await operator.send({ type: 'handoff', taskId: 'T4', brief, continueAs, autonomy, mergePolicy, tier, maxTurns })).toEqual({ ok: true });
     expect(tui.state().tasks.T4).toMatchObject({ mode: 'AFK', autonomy: 'L3', mergePolicy: 'unattended' });

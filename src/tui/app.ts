@@ -891,5 +891,5 @@ function column(children: ReactNode[]) {
 // Whether the operator may change the task's merge policy from its detail:
 // a live AFK root at L3, the only level an agent policy runs at (ADR 0014).
 function changesPolicy(task: TaskView): boolean {
-  return task.mode === 'AFK' && !task.parent && task.autonomy === 'L3' && task.state !== 'done' && task.state !== 'cancelled';
+  return task.mode === 'AFK' && !task.parent && task.autonomy === 'L3' && !finished(task);
 }

@@ -14,7 +14,7 @@ const KEYS: [string, string][] = [
   ['c', 'converse with a HITL task, or take an AFK one over'],
   ['x', 'cancel the selected task, with its subtree'],
   ['t', 're-tier the selected task’s next runs'],
-  ['p', 'in an L3 task’s detail, change its merge policy: operator or full-auto'],
+  ['p', 'in the detail of an AFK root task at L3, change its merge policy: operator or full-auto'],
   ['y', 'retry a failed task'],
   ['H', 'hide or show Done and Cancelled tasks'],
   ['v', 'the condensed view: Needs you and groups, the task tree, and the selected task’s detail; v again for the screens'],
