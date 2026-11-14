@@ -1799,6 +1799,7 @@ function prBody(task: Task, body: string): string {
   return [text, ...closes, ...(leftOver.length ? [`## Review findings left over\n\n${bulleted(leftOver)}`] : [])].join('\n\n');
 }
 
+// The heading of the PR body's judgement-calls section.
 const CALLS_HEADING = '## Judgement calls';
 
 // The PR body with the judgement-calls section listing `calls`, after the

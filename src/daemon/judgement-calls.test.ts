@@ -7,6 +7,7 @@
 // keeps them in its PR body alone, and a task with none posts nothing. A
 // merge with review findings left over is itself a judgement call.
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { GitHubError } from '../github/github.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
@@ -221,5 +222,28 @@ describe('a comment GitHub refuses', () => {
     factory.clock.advance(15 * MINUTE);
     await operator.send({ type: 'daemon.status' });
     expect(comments(factory)).toHaveLength(1);
+  });
+});
+
+describe('a comment that keeps failing', () => {
+  test('holds up no closing of the ticket', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    await operator.send(fullAuto({ prompt: '', issues: ['#39'] }));
+    await throughPr(launched, 'T1', { assumed: [ASSUMED] });
+    // GitHub refuses every comment on the ticket, but lets it close.
+    const commentIssue = factory.github.commentIssue.bind(factory.github);
+    factory.github.commentIssue = async () => {
+      throw new GitHubError('GitHub refused to comment on acme/widgets#39 (HTTP 403: Issue is locked).');
+    };
+    await merged(launched, 'T1');
+
+    await tui.until((state) => state.tasks.T1?.resolving === null);
+    expect(factory.github.issueState(LONE_TICKET).open).toBe(false);
+    expect(comments(factory)).toEqual([]);
+
+    factory.github.commentIssue = commentIssue;
+    factory.clock.advance(15 * MINUTE);
+    await vi.waitFor(() => expect(comments(factory)).toHaveLength(1));
   });
 });

@@ -1798,12 +1798,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     for (const task of Object.values(lifecycle.tasks)) {
       const closing = !!task.ticketSet?.closing && !isTerminal(task);
       if (stopping || !(task.callsComment || task.resolving || closing || task.mapClosing) || resolutionsInFlight.has(task.id)) continue;
-      // The maps close right after the spec: each closing is tried once per poll.
-      const tried = task.callsComment ? `${task.id}:calls` : !closing && task.mapClosing ? `${task.id}:maps` : task.id;
+      // The maps close right after the spec: each closing is tried once per
+      // poll. A comment that failed holds up no ticket's closing.
+      const commenting = !!task.callsComment && !(task.callsComment.problem && task.resolving && !resolutionsTried.has(task.id));
+      const tried = commenting ? `${task.id}:calls` : !closing && task.mapClosing ? `${task.id}:maps` : task.id;
       if (resolutionsTried.has(tried)) continue;
       resolutionsTried.add(tried);
       resolutionsInFlight.add(task.id);
-      const resolution = task.callsComment ? commentCalls(task) : closing ? closeSpec(task) : task.mapClosing ? closeMaps(task) : resolveTicket(task);
+      const resolution = commenting ? commentCalls(task) : closing ? closeSpec(task) : task.mapClosing ? closeMaps(task) : resolveTicket(task);
       void resolution.then(
         (event) =>
           serially(async () => {

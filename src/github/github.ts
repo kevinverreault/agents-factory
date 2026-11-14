@@ -280,6 +280,12 @@ export function gitHubApi(): GitHub {
     return reply.json;
   }
 
+  // Comments `comment` on the issue `ref`.
+  async function commentOn(token: string, ref: string, comment: string): Promise<void> {
+    const commented = await call('POST', `${issuePath(ref)}/comments`, token, { body: comment });
+    if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
+  }
+
   // Each page of a listing, a hundred at a time.
   async function list(path: string, token: string, what: string): Promise<any[]> {
     const items: any[] = [];
@@ -329,15 +335,11 @@ export function gitHubApi(): GitHub {
       };
     },
     async closeIssue(token, ref, comment) {
-      const commented = await call('POST', `${issuePath(ref)}/comments`, token, { body: comment });
-      if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
+      await commentOn(token, ref, comment);
       const closed = await call('PATCH', issuePath(ref), token, { state: 'closed', state_reason: 'completed' });
       if (closed.status !== 200) throw refused(`close ${ref}`, closed);
     },
-    async commentIssue(token, ref, comment) {
-      const commented = await call('POST', `${issuePath(ref)}/comments`, token, { body: comment });
-      if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
-    },
+    commentIssue: commentOn,
     async push(token, { clonePath, repo, branch }) {
       const refusal = pushRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
