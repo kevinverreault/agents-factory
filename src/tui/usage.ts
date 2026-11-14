@@ -189,7 +189,7 @@ export function UsageStrip({ state }: { state: FactoryState }) {
   // Each part with what goes before it: `│` between the parts, `·` between
   // the models. On a line it wraps, the divider ends the line it breaks.
   const parts: [string | null, ReactNode[]][] = [
-    [null, [label('window '), h(Spent, { window, cells: 14 }), ...(window ? [label(` ${GLYPH.resets}`), clockTime(window.resetsAt)] : [])]],
+    [null, [label('window '), h(Spent, { window, cells: 14 }), ...(window ? [label(` ${GLYPH.resets} `), clockTime(window.resetsAt)] : [])]],
     [GLYPH.divider, [label('week '), h(Spent, { window: weekly, cells: 6 })]],
     [GLYPH.divider, [label('slots '), h(Text, tone('ok'), slots(active, cap)), ` ${active}/${cap}`]],
     [GLYPH.divider, [h(Text, tone('accent'), sparkline(tokensPerHour)), ` ${tokens(tokensPerHour.at(-1) ?? 0)}/h`]],
