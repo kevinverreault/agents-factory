@@ -10,7 +10,8 @@ import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
-import type { FactoryState } from '../protocol/factory-state.ts';
+import { openStore } from '../store/store.ts';
+import { recoveryReport } from '../testing/recovery-report.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
@@ -269,10 +270,6 @@ describe('under the operator policy', () => {
 // reading the PR, and one that took no step on GitHub is rolled back to
 // wait at its gate.
 describe('a crash while merging', () => {
-  type Attention = Extract<FactoryState['attentionQueue'][number], { kind: 'attention' }>;
-  const recoveryReport = (state: FactoryState) =>
-    state.attentionQueue.find((item): item is Attention => item.kind === 'attention' && item.attention === 'recovery-report');
-
   // T1 at its gate with green checks, the daemon crashing at its call of `method` on GitHub, and a new one started.
   // `meanwhile` happens while it is down.
   async function crashingAt(
@@ -344,5 +341,31 @@ describe('a crash while merging', () => {
     factory.clock.advance(2 * MINUTE);
     await tui.until((state) => state.tasks.T1?.label === 'Done');
     expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['merge']);
+  });
+
+  test('one GitHub refuses to finish on restart is resumed: its github-write request asks the operator, and the PR stays unmerged', async () => {
+    const { factory, tui } = await crashingAt('mergePr', 'before', (factory) =>
+      factory.github.failMerges('GitHub refused to merge acme/widgets#101 (HTTP 405: Base branch was modified.).'),
+    );
+
+    const asked = await tui.until((state) => !!recoveryReport(state) && state.attentionQueue.some((item) => item.kind === 'attention' && item.attention === 'github-write'));
+    expect(recoveryReport(asked)?.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'merge', outcome: 'resumed' }]);
+    expect(asked.tasks.T1).toMatchObject({ label: 'At merge gate', pr: { draft: false }, gate: { step: null, problem: expect.stringMatching(/^The factory couldn’t merge T1’s PR #101/) } });
+    expect(factory.github.prState(101).state).toBe('open');
+  });
+
+  test('a store from before merges were journaled, its gate’s step left with no intent, is replayed too, with no second merge call', async () => {
+    const { factory, tui } = await crashingAt('mergePr', 'after', (factory) => {
+      const store = openStore(factory.paths.storePath);
+      const saved = store.loadLifecycle()!;
+      expect(saved.tasks.T1?.gate?.step).toBe('merge');
+      saved.intents = {};
+      store.saveLifecycle(saved);
+      store.close();
+    });
+
+    const done = await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.cleanup === null);
+    expect(factory.github.mergeCalls).toEqual(['acme/widgets#101']);
+    expect(recoveryReport(done)?.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'merge', outcome: 'finished' }]);
   });
 });

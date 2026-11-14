@@ -12,6 +12,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
+import { recoveryReport } from '../testing/recovery-report.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
@@ -368,10 +369,6 @@ describe('a ticket task', () => {
 });
 
 describe('a crash while launching a ticket task', () => {
-  type Attention = Extract<FactoryState['attentionQueue'][number], { kind: 'attention' }>;
-  const recoveryReport = (state: FactoryState) =>
-    state.attentionQueue.find((item): item is Attention => item.kind === 'attention' && item.attention === 'recovery-report');
-
   // A spec task over #11 and #77, which GitHub has only once the crash
   // point is armed: the next poll reads them and launches #11's ticket task.
   async function crashingAt(factory: TestFactory, operator: FactoryConnection, tui: Watched, step: string, when: 'before' | 'after') {

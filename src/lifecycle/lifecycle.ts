@@ -2563,7 +2563,7 @@ function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: Atte
 }
 
 // The id of the intent merging the root's PR.
-function mergeId(taskId: string): string {
+export function mergeId(taskId: string): string {
   return `merge:${taskId}`;
 }
 
@@ -4303,7 +4303,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         const { brief, continueAs, autonomy, tier, maxTurns } = intent.handoff;
         Object.assign(task.handoff, structuredClone({ brief, continueAs, autonomy, mergePolicy: policyOf(intent.handoff), tier, maxTurns }));
       }
-      // A merge rolled back took no step on GitHub: its gate is read afresh.
+      // A merge rolled back, as one that took no step on GitHub, has its gate read afresh.
       if (intent.verb === 'merge') task.gate = null;
       delete state.intents[action.intentId];
       break;
