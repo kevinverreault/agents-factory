@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
+import type { FactoryState } from '../protocol/factory-state.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
@@ -260,5 +261,68 @@ describe('under the operator policy', () => {
     await operator.send({ type: 'daemon.status' });
     expect(factory.github.checkReads).toEqual([]);
     expect(factory.github.prWrites).toEqual([]);
+  });
+});
+
+// A factory merge is journaled as an intent before its first GitHub step
+// (ADR 0003, ADR 0014): the next daemon finishes it, or finds it done, by
+// reading the PR, and one that took no step on GitHub is rolled back to
+// wait at its gate.
+describe('a crash while merging', () => {
+  type Attention = Extract<FactoryState['attentionQueue'][number], { kind: 'attention' }>;
+  const recoveryReport = (state: FactoryState) =>
+    state.attentionQueue.find((item): item is Attention => item.kind === 'attention' && item.attention === 'recovery-report');
+
+  // T1 at its gate with green checks, the daemon crashing at its call of `method` on GitHub, and a new one started.
+  // `meanwhile` happens while it is down.
+  async function crashingAt(method: 'markReady' | 'mergePr', when: 'before' | 'after', meanwhile = (_: TestFactory) => {}): Promise<{ factory: TestFactory; tui: Watched }> {
+    const launched = await attached();
+    const { factory, operator } = launched;
+    factory.github.runChecks('acme/widgets', 'green');
+    const crashed = factory.crashAt('github', method, when);
+    await operator.send(fullAuto);
+    await throughOpenPr(launched);
+    await crashed;
+    await factory.crash();
+    meanwhile(factory);
+    await factory.startDaemon();
+    return { factory, tui: watch(await factory.attach()) };
+  }
+
+  test.each([
+    ['after', 'markReady'],
+    ['before', 'mergePr'],
+  ] as const)('%s %s, the merge is finished on restart: the PR is merged once and the task is Done', async (when, method) => {
+    const { factory, tui } = await crashingAt(method, when);
+
+    const done = await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.cleanup === null);
+    expect(factory.github.prState(101).state).toBe('merged');
+    expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['ready', 'merge']);
+    expect(recoveryReport(done)?.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'merge', outcome: 'finished' }]);
+    expect(recoveryReport(done)?.reason).toContain('T1’s merge');
+  });
+
+  test('after GitHub merged the PR, the restart finds it merged and makes no second merge call', async () => {
+    const { factory, tui } = await crashingAt('mergePr', 'after');
+
+    const done = await tui.until((state) => state.tasks.T1?.label === 'Done' && state.tasks.T1.cleanup === null);
+    expect(factory.github.mergeCalls).toEqual(['acme/widgets#101']);
+    expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['ready', 'merge']);
+    expect(recoveryReport(done)?.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'merge', outcome: 'finished' }]);
+  });
+
+  test('before any GitHub step, the task is left waiting at its gate, and merges on the next green poll', async () => {
+    // A new commit's checks started meanwhile.
+    const { factory, tui } = await crashingAt('markReady', 'before', (factory) => factory.github.setChecks(101, 'pending'));
+
+    const back = await tui.until((state) => !!recoveryReport(state) && state.tasks.T1?.gate?.checks === 'pending');
+    expect(recoveryReport(back)?.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'merge', outcome: 'rolled back' }]);
+    expect(back.tasks.T1).toMatchObject({ label: 'At merge gate', pr: { draft: true }, gate: { step: null } });
+    expect(factory.github.prWrites).toEqual([]);
+
+    factory.github.setChecks(101, 'green');
+    factory.clock.advance(2 * MINUTE);
+    await tui.until((state) => state.tasks.T1?.label === 'Done');
+    expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['ready', 'merge']);
   });
 });

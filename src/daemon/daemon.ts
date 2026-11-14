@@ -337,6 +337,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Whether the start-up has replayed the takeovers' intents: until then,
   // the takeovers it finds are its own to finish, or to resume.
   let replayedTakeovers = false;
+  // Whether the start-up has replayed the merges' intents: until then, no
+  // merge step is taken, as GitHub may have taken it already.
+  let replayedMerges = false;
   let restartsWhenIdle = false;
 
   // Wake detection (ADR 0003): the last time the daemon looked at the clock,
@@ -1003,6 +1006,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // until the operator answers. What it did goes through the Lifecycle like
   // any other event.
   function driveMerges(): void {
+    if (!replayedMerges) return;
     for (const task of Object.values(lifecycle.tasks)) {
       const step = task.gate?.step;
       if (!step || !atMergeGate(task)) continue;
@@ -1036,6 +1040,42 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (!isGitHubFailure(error)) throw error;
       return { type: 'mergeFailed', taskId: task.id, step, reason: error.message };
     }
+  }
+
+  // Finishes a merge the daemon before left unfinished (ADR 0003, ADR
+  // 0014), reading the PR to tell which steps GitHub took: one it found
+  // ready is merged, and one it found merged is recorded so, with no second
+  // merge call. A merge that took no step on GitHub, or whose PR can't be
+  // read, is rolled back: its root waits at its gate, read afresh at the
+  // next poll, which merges it once its checks are green.
+  async function finishMerge(intent: Extract<Intent, { verb: 'merge' }>): Promise<'finished' | 'rolled back'> {
+    const { taskId } = intent;
+    const rollBack = async () => {
+      await settle({ type: 'intentDropped', taskId, intentId: intent.id }, new Set());
+      return 'rolled back' as const;
+    };
+    const task = lifecycle.tasks[taskId]!;
+    let read: Awaited<ReturnType<GitHub['readPr']>>;
+    try {
+      const { token } = await appToken(task.repo, READ_ONLY);
+      read = await github.readPr(token, prRef(task.repo, intent.pr));
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return rollBack();
+    }
+    const step = () => lifecycle.tasks[taskId]!.gate?.step;
+    // GitHub marked it ready, whatever the store says.
+    if (step() === 'ready' && (read.state === 'merged' || read.draft === false)) await settle({ type: 'prMarkedReady', taskId }, new Set());
+    let event: MergeEvent = { type: 'prMerged', taskId };
+    if (read.state !== 'merged') {
+      // No step was taken on GitHub: a regular PR's merge is its first.
+      if (read.state !== 'open' || step() !== 'merge' || !intent.ready) return rollBack();
+      event = await takeMergeStep(lifecycle.tasks[taskId]!, 'merge');
+    }
+    // A failed merge raises its github-write request, as at the gate.
+    if ((await settle(event, new Set())) || event.type !== 'prMerged') return 'rolled back';
+    await checkSkills(task.repo, { fetch: true });
+    return 'finished';
   }
 
   // What each step writes with, and the write: marking the draft PR ready
@@ -1288,9 +1328,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome });
         }
         if (intent.verb === 'launch') replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome: await finishLaunch(intent) });
+        if (intent.verb === 'merge') replayed.push({ taskId: intent.taskId, verb: intent.verb, outcome: await finishMerge(intent) });
       }
     } finally {
       replaying = false;
+      replayedMerges = true;
     }
     return replayed;
   }
