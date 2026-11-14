@@ -1,10 +1,10 @@
 // A launch from the TUI, while the daemon names and launches the task: one
 // at a time, shown with a turning spinner, and still answered if the
 // operator left the screen meanwhile. The launch card and quick launch use it.
-import { createElement as h, useReducer, useRef, type ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
-import { Spinner } from './theme.ts';
+import { useInFlight } from './in-flight.ts';
 
 // What a launch shows until the daemon answers it: it names the task meanwhile.
 export const LAUNCHING = 'Naming the task…';
@@ -25,22 +25,16 @@ export type Launch = {
 };
 
 export function useLaunch(connection: FactoryConnection): Launch {
-  const launching = useRef(false);
+  const inFlight = useInFlight(connection);
   const left = useRef(false);
-  const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   return {
     launch(command, done) {
-      if (launching.current) return;
-      launching.current = true;
-      rerender();
-      void connection.send(command).then((reply) => {
-        launching.current = false;
-        if (!left.current) rerender();
-        done({ ...(reply.ok ? { ok: true, taskId: (reply.value as { taskId: string }).taskId } : { ok: false, reason: reply.reason }), left: left.current });
-      });
+      void inFlight.send(LAUNCHING, command)?.then((reply) =>
+        done({ ...(reply.ok ? { ok: true, taskId: (reply.value as { taskId: string }).taskId } : { ok: false, reason: reply.reason }), left: left.current }),
+      );
     },
-    busy: () => launching.current,
+    busy: () => inFlight.under() !== null,
     leave: () => void (left.current = true),
-    indicator: launching.current ? h(Spinner, { label: LAUNCHING }) : null,
+    indicator: inFlight.indicator,
   };
 }
