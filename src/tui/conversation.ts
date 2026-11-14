@@ -16,7 +16,7 @@ import { AnswerSheet, answerable, cardItem, reopens, useAnswering } from './answ
 import { answeredLine, answersText, placed, type AnswerLog } from './answered.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
-import { usePending } from './pending.ts';
+import { useInFlight } from './in-flight.ts';
 import { Event, SystemLine } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { fixed, usePager, useRows } from './screen.ts';
@@ -78,9 +78,9 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
   const card = question && typing.current.cardFor === question.id ? typing.current.card : newCard();
   const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
   // The commands the daemon takes a while to answer, each spinning until it does.
-  const pending = usePending(connection);
+  const inFlight = useInFlight(connection);
   // The handoff sheet opens once the daemon has opened the task's handoff.
-  const handOff = () => void pending.send('Opening the handoff…', { type: 'openHandoff', taskId })?.then(tell);
+  const handOff = () => void inFlight.send('Opening the handoff…', { type: 'openHandoff', taskId })?.then(tell);
   const sheet = takesChat && task?.handoff ? task.handoff : null;
   // The task's open request, while it needs the operator, or else its HITL
   // run's permission card: when its sheet takes digits, every key but ctrl+b
@@ -104,7 +104,7 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
   // here too, unless the answer sheet is taking what the operator types.
   const canTakeOver =
     task?.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state) && answers.form === null && answers.confirm === null;
-  const takeOver = () => void pending.send('Taking over…', { type: 'takeOver', taskId })?.then(tell);
+  const takeOver = () => void inFlight.send('Taking over…', { type: 'takeOver', taskId })?.then(tell);
 
   // Paging through the conversation, whatever else takes the keys: a sheet over it too.
   useInput((_, key) => {
@@ -153,7 +153,7 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
     } else if (key.return && !live && reopens(task)) {
       // Parked while open: it reopens first, then takes the message, if any.
       const text = typed.draft.trim() ? typed.draft : null;
-      const opening = pending.send('Reopening the conversation…', { type: 'open', taskId });
+      const opening = inFlight.send('Reopening the conversation…', { type: 'open', taskId });
       if (!opening) return;
       void opening.then((reply) => {
         tell(reply);
@@ -261,7 +261,7 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
         request ? h(AnswerSheet, { key: 'request', item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, chosen: answers.chosen, escBack: false }) : null,
         live && (run.turn === 'operator' || question || run.permission) ? h(Text, { key: 'waiting', ...tone('warn') }, 'The agent is waiting on you.') : null,
         // Once the handoff sheet is up, its own spinner tells what it waits on.
-        pending.indicator && !sheet ? h(Box, { key: 'pending' }, pending.indicator) : null,
+        inFlight.indicator && !sheet ? h(Box, { key: 'in-flight' }, inFlight.indicator) : null,
         refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
         chat ? h(Text, { key: 'chat' }, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)) : null,
         h(Rule, { key: 'strip-rule' }),

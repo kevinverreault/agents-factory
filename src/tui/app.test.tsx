@@ -1945,6 +1945,79 @@ describe('launching and conversing', () => {
     answer({ ok: false, reason: 'The handoff is blocked.' });
     await eventually(() => expect(app.lastFrame()).toContain('The handoff is blocked.'));
     expect(app.lastFrame()).not.toContain('Handing off…');
+
+    // Confirmed again and taken: the spinner and the sheet both go.
+    const handOff = connection.holdReplies('handoff');
+    app.stdin.write('\r');
+    await turns(app, 'Handing off…');
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: onLean }]);
+    handOff({ ok: true });
+    await eventually(() => expect(app.lastFrame()).not.toContain('HAND OFF T1'));
+    expect(app.lastFrame()).not.toContain('Handing off…');
+    expect(connection.sent.filter((command) => command.type === 'handoff')).toHaveLength(2);
+  });
+
+  test('while the sheet asks again for a brief the agent didn’t write, “Opening the handoff…” turns, and esc still backs out', async () => {
+    const connection = new FakeConnection();
+    connection.holdReplies('openHandoff');
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: sheet }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('enter asks again'));
+
+    app.stdin.write('\r');
+    await turns(app, 'Opening the handoff…');
+    app.stdin.write('\x1b');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'closeHandoff', taskId: 'T1' }));
+  });
+
+  test('while the daemon advances the task, “Advancing…” turns on the sheet, a second enter or esc does nothing, and the sheet closes on the reply', async () => {
+    const connection = new FakeConnection();
+    const answer = connection.holdReplies('advanceStage');
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await settle();
+    app.stdin.write(CTRL_N);
+    await eventually(() => expect(app.lastFrame()).toContain('ADVANCE T1 FROM GRILL'));
+
+    app.stdin.write('\r');
+    await turns(app, 'Advancing…');
+    await press(app, '\r', '\x1b');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'advanceStage')).toHaveLength(1);
+    expect(app.lastFrame()).toContain('ADVANCE T1 FROM GRILL');
+
+    answer({ ok: true });
+    await eventually(() => expect(app.lastFrame()).not.toContain('ADVANCE T1'));
+    expect(app.lastFrame()).not.toContain('Advancing…');
+  });
+
+  test('while the daemon reopens a parked conversation, “Reopening the conversation…” turns, a second enter sends nothing more, and the message follows the reply', async () => {
+    const connection = new FakeConnection();
+    const answer = connection.holdReplies('open');
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    connection.servePatch([
+      { op: 'set', path: ['runs', 'R1'], value: { ...run, turn: 'operator' as const, status: 'ended' as const, outcome: 'parked' as const } },
+      { op: 'set', path: ['tasks', 'T1'], value: { ...onLean, state: 'queued' as const, label: 'Ready for you', liveRunId: null } },
+    ]);
+    await eventually(() => expect(app.lastFrame()).toContain('enter reopens and sends'));
+
+    await type(app, 'Still there?');
+    app.stdin.write('\r');
+    await turns(app, 'Reopening the conversation…');
+    await press(app, '\r');
+    await settle();
+    expect(connection.sent).toEqual([{ type: 'open', taskId: 'T1' }]);
+
+    answer({ ok: true });
+    await eventually(() =>
+      expect(connection.sent).toEqual([
+        { type: 'open', taskId: 'T1' },
+        { type: 'sendMessage', taskId: 'T1', text: 'Still there?' },
+      ]),
+    );
+    expect(app.lastFrame()).not.toContain('Reopening the conversation…');
   });
 
   test('over the handoff sheet, pgup still pages back through the conversation', async () => {

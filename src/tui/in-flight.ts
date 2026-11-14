@@ -6,30 +6,30 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { Command, Reply } from '../protocol/protocol.ts';
 import { Spinner } from './theme.ts';
 
-export type Pending = {
+export type InFlight = {
   // Sends `command`, shown as `label` until its reply, unless a command is
   // already under way: then it sends nothing and returns null.
   send(label: string, command: Command): Promise<Reply> | null;
-  // Whether a command is under way: read when keys arrive, before a re-render.
-  busy(): boolean;
+  // The label of the command under way, or null: read when keys arrive, before a re-render.
+  under(): string | null;
   // The spinner while a command is under way, else nothing.
   indicator: ReactNode;
 };
 
-export function usePending(connection: FactoryConnection): Pending {
-  const pending = useRef<string | null>(null);
+export function useInFlight(connection: FactoryConnection): InFlight {
+  const under = useRef<string | null>(null);
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   return {
     send(label, command) {
-      if (pending.current !== null) return null;
-      pending.current = label;
+      if (under.current !== null) return null;
+      under.current = label;
       rerender();
       return connection.send(command).finally(() => {
-        pending.current = null;
+        under.current = null;
         rerender();
       });
     },
-    busy: () => pending.current !== null,
-    indicator: pending.current === null ? null : h(Spinner, { label: pending.current }),
+    under: () => under.current,
+    indicator: under.current === null ? null : h(Spinner, { label: under.current }),
   };
 }
