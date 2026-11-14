@@ -275,10 +275,16 @@ describe('a crash while merging', () => {
 
   // T1 at its gate with green checks, the daemon crashing at its call of `method` on GitHub, and a new one started.
   // `meanwhile` happens while it is down.
-  async function crashingAt(method: 'markReady' | 'mergePr', when: 'before' | 'after', meanwhile = (_: TestFactory) => {}): Promise<{ factory: TestFactory; tui: Watched }> {
+  async function crashingAt(
+    method: 'markReady' | 'mergePr',
+    when: 'before' | 'after',
+    meanwhile = (_: TestFactory) => {},
+    { drafts = true } = {},
+  ): Promise<{ factory: TestFactory; tui: Watched }> {
     const launched = await attached();
     const { factory, operator } = launched;
     factory.github.runChecks('acme/widgets', 'green');
+    if (!drafts) factory.github.offerNoDrafts('acme/widgets');
     const crashed = factory.crashAt('github', method, when);
     await operator.send(fullAuto);
     await throughOpenPr(launched);
@@ -324,5 +330,19 @@ describe('a crash while merging', () => {
     factory.clock.advance(2 * MINUTE);
     await tui.until((state) => state.tasks.T1?.label === 'Done');
     expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['ready', 'merge']);
+  });
+
+  test('before merging a regular PR, where the merge is the first GitHub step, the task is left waiting at its gate', async () => {
+    const { factory, tui } = await crashingAt('mergePr', 'before', (factory) => factory.github.setChecks(101, 'pending'), { drafts: false });
+
+    const back = await tui.until((state) => !!recoveryReport(state) && state.tasks.T1?.gate?.checks === 'pending');
+    expect(recoveryReport(back)?.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'merge', outcome: 'rolled back' }]);
+    expect(back.tasks.T1).toMatchObject({ label: 'At merge gate', gate: { step: null } });
+    expect(factory.github.mergeCalls).toEqual([]);
+
+    factory.github.setChecks(101, 'green');
+    factory.clock.advance(2 * MINUTE);
+    await tui.until((state) => state.tasks.T1?.label === 'Done');
+    expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['merge']);
   });
 });

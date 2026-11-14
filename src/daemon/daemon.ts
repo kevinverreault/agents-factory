@@ -1063,13 +1063,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (!isGitHubFailure(error)) throw error;
       return rollBack();
     }
+    // The gate's step as the store now has it.
     const step = () => lifecycle.tasks[taskId]!.gate?.step;
     // GitHub marked it ready, whatever the store says.
     if (step() === 'ready' && (read.state === 'merged' || read.draft === false)) await settle({ type: 'prMarkedReady', taskId }, new Set());
     let event: MergeEvent = { type: 'prMerged', taskId };
     if (read.state !== 'merged') {
       // No step was taken on GitHub: a regular PR's merge is its first.
-      if (read.state !== 'open' || step() !== 'merge' || !intent.ready) return rollBack();
+      if (read.state !== 'open' || step() !== 'merge' || !intent.marksReady) return rollBack();
       event = await takeMergeStep(lifecycle.tasks[taskId]!, 'merge');
     }
     // A failed merge raises its github-write request, as at the gate.

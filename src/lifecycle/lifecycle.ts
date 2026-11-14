@@ -650,11 +650,11 @@ export type Intent =
   | { id: string; verb: 'launch'; taskId: string; launch: Omit<TicketTaskLaunched, 'intent'> }
   // The factory's merge of a root's PR its merge gate let through (ADR
   // 0014), journaled as the gate takes its first step: marking the draft
-  // ready, when `ready`, then merging it while its head is still `head`.
-  // The next daemon reads the PR to tell which steps GitHub took: it
+  // ready, when `marksReady`, then merging it while its head is still the
+  // gate's. The next daemon reads the PR to tell which steps GitHub took: it
   // finishes the merge, or finds it done, and one that took none is rolled
   // back to wait at its gate. It lasts as long as the gate's step does.
-  | { id: string; verb: 'merge'; taskId: string; pr: number; head: string; ready: boolean };
+  | { id: string; verb: 'merge'; taskId: string; pr: number; marksReady: boolean };
 // The verbs a recovery report says it replayed: the journaled ones, and a
 // cleanup, which the task itself holds while it is under way (ADR 0011).
 export type IntentVerb = Intent['verb'] | 'cleanup';
@@ -1023,7 +1023,9 @@ export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: A
 export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string; intent?: string } & HandoffChoices;
 
 // The daemon journaled an intent before its first step outside the store,
-// or dropped it: finished outside the store, or rolled back (ADR 0003).
+// or dropped it: finished outside the store, or rolled back (ADR 0003). A
+// merge's intent is journaled by the PR read that lets its gate through
+// instead, and dropped with its gate's step, unless rolled back.
 export type IntentEvent = { type: 'intentJournaled'; taskId: string; intent: Intent } | { type: 'intentDropped'; taskId: string; intentId: string };
 
 // The daemon deleted a child's kept branch (ADR 0011): its parent's branch
@@ -2556,7 +2558,7 @@ function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: Atte
   // Journaled before the first step on GitHub, in the state that takes it.
   if (passes) {
     const id = mergeId(task.id);
-    state.intents[id] = { id, verb: 'merge', taskId: task.id, pr: task.pr!.number, head: read.head, ready: task.gate.step === 'ready' };
+    state.intents[id] = { id, verb: 'merge', taskId: task.id, pr: task.pr!.number, marksReady: task.gate.step === 'ready' };
   }
 }
 
