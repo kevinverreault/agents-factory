@@ -10,6 +10,7 @@ import { SUBSCRIPTION_TOKEN_SECRET } from './daemon.ts';
 import { relayHook } from '../hooks/relay.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
+import { recoveryReport } from '../testing/recovery-report.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
 
@@ -37,10 +38,6 @@ async function crashAndRestart(factory: TestFactory, crashed: Promise<void>): Pr
   const operator = await factory.attach();
   return { operator, tui: watch(operator) };
 }
-
-type Attention = Extract<FactoryState['attentionQueue'][number], { kind: 'attention' }>;
-const recoveryReport = (state: FactoryState) =>
-  state.attentionQueue.find((item): item is Attention => item.kind === 'attention' && item.attention === 'recovery-report');
 
 const brief = {
   goal: 'Failed webhook deliveries are retried instead of dropped.',

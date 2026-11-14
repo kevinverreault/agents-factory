@@ -32,7 +32,7 @@ The operator wants AFK work to reach the base branch without them: semi-auto, wh
   - tripwires: touching `**/migrations/**`, `.github/**`, `docs/adr/**` or CI and deploy config; adding or upgrading a dependency; deleting or skipping tests; a high-severity finding left after fix-once;
   - rubric: the PR goes beyond or short of the ticket's done-when; it changes behaviour or an interface others rely on in a way the spec doesn't say; it touches security-sensitive code; it settled an ambiguity by an assumption the operator might not share; it's irreversible once deployed.
 
-- **Merging.** The factory marks the draft ready and merges with a merge commit by default, keeping the bot's trailers and the operator's HITL commits apart (ADR 0004). The method can be overridden per repository in `merge-gate.yaml`. Cleanup follows as for any merged PR (ADR 0011).
+- **Merging.** The factory marks the draft ready and merges with a merge commit by default, keeping the bot's trailers and the operator's HITL commits apart (ADR 0004). The method can be overridden per repository in `merge-gate.yaml`. The merge is journaled as an intent (ADR 0003): a crash mid-merge is finished, or found done, by the next daemon reading the PR, so a PR is never left half-merged nor merged twice. Cleanup follows as for any merged PR (ADR 0011).
 
 ## Considered options
 
