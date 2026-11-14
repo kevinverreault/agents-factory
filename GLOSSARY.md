@@ -215,7 +215,7 @@ What an agent policy's merge gate goes by: its tripwires, its rubric and the mer
 _Avoid_: Gate settings, repo merge config
 
 **Judgement call**:
-A decision the factory made where an attended task would have asked the operator: an unattended run's assumed answer to a question, a judged merge and its reason, or a merge with review findings left over. Each is listed on the task's spec, or on its ticket when it has no spec.
+A decision the factory made where an attended task would have asked the operator: an unattended run's assumed answer to a question, a judged merge and its reason, or a merge with review findings left over. Each is listed in the task's PR body, and once the factory merges a ticket task's PR, in one comment on its spec, or on its ticket when it has no spec. A task with no issue has them in its PR body alone.
 _Avoid_: Assumption, auto-decision
 
 **Factory identity**:

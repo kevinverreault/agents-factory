@@ -49,6 +49,7 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
       github.setCommitChecks(commit, combined, failed);
     },
     draftsOffered,
+    issueComments: async (ref) => github.issueState(ref).comments,
     async pullRequest(number) {
       const { draft, head, base, title, body, assignees } = github.pullRequests.find((pr) => pr.number === number)!;
       return { draft, head, base, title, body, assignees };
