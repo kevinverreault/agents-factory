@@ -37,6 +37,7 @@ import {
   type Run,
   type SkillsSetup,
   type TaskKind,
+  type JudgementCall,
   type TaskState,
   type TicketResolution,
   type TicketSet,
@@ -66,6 +67,8 @@ export type TaskView = {
   kind: TaskKind;
   ticket: string | null;
   mergePolicy: MergePolicy | null;
+  // A root's judgement calls so far, its children's included (ADR 0014).
+  judgementCalls: JudgementCall[];
   // While it waits at an agent policy's merge gate: the checks on its PR's
   // head as last read (null until read), the factory's step merging it, and
   // why that step last failed.
@@ -196,6 +199,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       kind: task.kind ?? 'plain',
       ticket: task.ticket ?? null,
       mergePolicy: task.mergePolicy ?? null,
+      judgementCalls: structuredClone(task.judgementCalls ?? []),
       gate: atMergeGate(task) ? { checks: task.gate?.checks ?? null, step: task.gate?.step ?? null, problem: task.gate?.problem ?? null } : null,
       resolving: task.resolving ? { ...task.resolving } : null,
       specTask: task.specTask ?? null,

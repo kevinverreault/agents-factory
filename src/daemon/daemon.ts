@@ -58,6 +58,7 @@ import {
   pushedBranch,
   runsContained,
   l3RefusalText,
+  DECLINED_QUESTION,
   atMergeGate,
   MERGE_STEP_DONE,
   mergeId,
@@ -2435,6 +2436,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         void startRun(run);
       }
     }
+    // Nobody answers a full-auto run's question: the daemon declines it, and
+    // the run chooses, records the answer it assumed and goes on (ADR 0014).
+    if (action.type === 'attentionRaised' && lifecycle.runs[action.runId]!.assumes) {
+      executor.decline(action.runId, action.question.id, DECLINED_QUESTION);
+    }
     // The conversation verbs act on the task's live run.
     const conversing = 'taskId' in action ? lifecycle.tasks[action.taskId] : undefined;
     const run = conversing && liveRun(lifecycle, conversing);
@@ -2617,6 +2623,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       reports: runReports(task, run),
       child: !!task.child,
       spawns: spawnsWithinDepth(lifecycle, task),
+      assumes: !!run.assumes,
     };
     executor.start(start, {
       // A session is named for each completed run now, in case the next

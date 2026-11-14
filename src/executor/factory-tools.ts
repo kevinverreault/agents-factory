@@ -2,10 +2,11 @@
 // agent calls as `mcp__factory__<tool>`. Each reports a run event; the daemon
 // decides what it means. A HITL run gets `propose_advance`, `propose_handoff`
 // and `write_handoff_brief`, and an AFK run `report_findings` or
-// `write_pr_body` when its stage reports through them. Both get the
-// delegation tools (ADR 0009): `spawn_child`, `list_children` and
-// `cancel_child`, a HITL run spawning fire-and-forget children only; an AFK
-// run also `report_progress`, and `report_result` on a child's run.
+// `write_pr_body` when its stage reports through them, and a full-auto run
+// `record_assumed_answer`. Both get the delegation tools (ADR 0009):
+// `spawn_child`, `list_children` and `cancel_child`, a HITL run spawning
+// fire-and-forget children only; an AFK run also `report_progress`, and
+// `report_result` on a child's run.
 import { randomUUID } from 'node:crypto';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
@@ -67,7 +68,13 @@ export function hitlFactoryTools(runId: string, sink: RunSink, { spawns }: { spa
 // The tools of what the AFK run reports, and the delegation tools: with
 // the one a child reports to its parent through, when `child`, and
 // `spawn_child` only while the run's tree `spawns` deeper.
-export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly Report[], { child, spawns }: { child: boolean; spawns: boolean }): FactoryTools {
+// `record_assumed_answer` too when the run `assumes` its answers (ADR 0014).
+export function afkFactoryTools(
+  runId: string,
+  sink: RunSink,
+  reports: readonly Report[],
+  { child, spawns, assumes }: { child: boolean; spawns: boolean; assumes: boolean },
+): FactoryTools {
   const reportFindings = tool(
     'report_findings',
     'Report the findings of this code review to the factory, one finding per item, each a sentence saying what is wrong and where. ' +
@@ -92,8 +99,23 @@ export function afkFactoryTools(runId: string, sink: RunSink, reports: readonly 
       return { content: [{ type: 'text', text: 'The factory has the PR body.' }] };
     },
   );
+  const recordAssumption = tool(
+    'record_assumed_answer',
+    'Record the answer you assumed to a question nobody is asked under full-auto: the question, the answer you picked as the most reasonable, and why. ' +
+      'The factory lists it as a judgement call on the PR, for the operator to audit.',
+    {
+      question: z.string().min(1).describe('The question, as you would have asked it.'),
+      answer: z.string().min(1).describe('The answer you went with.'),
+      reason: z.string().optional().describe('Why it is the most reasonable answer, in a sentence.'),
+    },
+    async ({ question, answer, reason }) => {
+      sink.report({ type: 'answerAssumed', runId, question, answer, ...(reason !== undefined && { reason }) });
+      return { content: [{ type: 'text', text: 'The factory recorded the answer you assumed. Carry on with it.' }] };
+    },
+  );
   const tools = [
     ...(reports.includes('findings') ? [reportFindings] : []),
+    ...(assumes ? [recordAssumption] : []),
     ...(reports.includes('pr-body') ? [writePrBody] : []),
     ...delegationTools(runId, sink, child, spawns),
   ];

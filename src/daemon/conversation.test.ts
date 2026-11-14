@@ -66,6 +66,7 @@ describe('launching a HITL task', () => {
         child: false,
         // It spawns fire-and-forget children (ADR 0009).
         spawns: true,
+        assumes: false,
       },
     ]);
   });
