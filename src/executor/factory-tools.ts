@@ -3,14 +3,15 @@
 // decides what it means. A HITL run gets `propose_advance`, `propose_handoff`
 // and `write_handoff_brief`, and an AFK run `report_findings` or
 // `write_pr_body` when its stage reports through them, and a full-auto run
-// `record_assumed_answer`. Both get the delegation tools (ADR 0009):
+// `record_assumed_answer`. A semi-auto root's judging run gets
+// `report_verdict` alone. The others get the delegation tools (ADR 0009):
 // `spawn_child`, `list_children` and `cancel_child`, a HITL run spawning
 // fire-and-forget children only; an AFK run also `report_progress`, and
 // `report_result` on a child's run.
 import { randomUUID } from 'node:crypto';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { Report } from '../lifecycle/lifecycle.ts';
+import { GATE_VERDICTS, type Report } from '../lifecycle/lifecycle.ts';
 import { TIERS } from '../models/routing.ts';
 import type { Delegation, DelegationReply, RunSink } from './executor.ts';
 
@@ -113,6 +114,23 @@ export function afkFactoryTools(
       return { content: [{ type: 'text', text: 'The factory recorded the answer you assumed. Carry on with it.' }] };
     },
   );
+  // A judging run is given its verdict to report, and nothing else (ADR 0014).
+  if (reports.includes('verdict')) {
+    const reportVerdict = tool(
+      'report_verdict',
+      'Report the gate check’s verdict on this PR to the factory: `merge` to have the factory merge it, or `ask` to send it to the operator for review. ' +
+        'Give the reason in a sentence or two: the operator reads it on the task, or as a judgement call once the factory merged. Report once, before you end.',
+      {
+        verdict: z.enum(GATE_VERDICTS).describe('merge, or ask to send the PR to the operator.'),
+        reason: z.string().min(1).describe('Why, in a sentence or two, naming the rubric line it turns on when you ask.'),
+      },
+      async ({ verdict, reason }) => {
+        sink.report({ type: 'verdictReported', runId, verdict, reason });
+        return { content: [{ type: 'text', text: 'The factory has your verdict. End your run now.' }] };
+      },
+    );
+    return factoryTools([reportVerdict]);
+  }
   const tools = [
     ...(reports.includes('findings') ? [reportFindings] : []),
     ...(assumes ? [recordAssumption] : []),

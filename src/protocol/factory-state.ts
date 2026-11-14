@@ -3,6 +3,7 @@
 // daemon's current state.
 import {
   atMergeGate,
+  sentToOperator,
   attentionQueue,
   heldSlots,
   keepsAwake,
@@ -73,6 +74,9 @@ export type TaskView = {
   // head as last read (null until read), the factory's step merging it, and
   // why that step last failed.
   gate: GateView | null;
+  // Why a semi-auto root's gate sent it to the operator, while it waits In
+  // review for them (ADR 0014).
+  sentToOperator: string | null;
   // While the factory still owes a merged ticket task's ticket its closing,
   // and why it last couldn't.
   resolving: TicketResolution | null;
@@ -200,6 +204,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       ticket: task.ticket ?? null,
       mergePolicy: task.mergePolicy ?? null,
       judgementCalls: structuredClone(task.judgementCalls ?? []),
+      sentToOperator: task.state === 'in-review' ? sentToOperator(task) : null,
       gate: atMergeGate(task) ? { checks: task.gate?.checks ?? null, step: task.gate?.step ?? null, problem: task.gate?.problem ?? null } : null,
       resolving: task.resolving ? { ...task.resolving } : null,
       specTask: task.specTask ?? null,

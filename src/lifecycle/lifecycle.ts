@@ -10,7 +10,7 @@ import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../m
 import { issueRef } from '../artifacts/capture.ts';
 import type { Checks, ChecksState, FailedCheck, Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
-import type { MergeGateConfig } from '../merge-gate/merge-gate.ts';
+import { DEFAULT_MERGE_GATE, type MergeGateConfig } from '../merge-gate/merge-gate.ts';
 import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { cutToFit, oneLineOf } from '../text/lines.ts';
@@ -262,7 +262,9 @@ export type Findings = { found: string[]; fixPass: boolean; leftOver: string[] }
 // and whose spec or ticket the factory comments them on once it merged.
 export type JudgementCall =
   | { kind: 'assumed-answer'; taskId: string; question: string; answer: string; reason: string | null }
-  | { kind: 'merged-with-findings'; taskId: string; findings: string[] };
+  | { kind: 'merged-with-findings'; taskId: string; findings: string[] }
+  // The factory merged a semi-auto PR on its gate check's merge verdict, for `reason`.
+  | { kind: 'judged-merge'; taskId: string; reason: string };
 
 // The issue a root's judgement calls are commented on once the factory
 // merged its PR (ADR 0014), and why the factory last couldn't. It is tried
@@ -281,9 +283,8 @@ export type TaskKind = 'plain' | 'spec' | 'ticket';
 export type MergePolicy = 'operator' | 'judged' | 'unattended';
 // Every merge policy, as a refusal names them.
 export const MERGE_POLICIES: readonly MergePolicy[] = ['operator', 'judged', 'unattended'];
-// Those the handoff sheet and the launch card offer: `judged` waits on its
-// gate check, which the factory can't run yet.
-export const OFFERED_POLICIES: readonly MergePolicy[] = ['operator', 'unattended'];
+// Those the handoff sheet and the launch card offer, in the order they cycle through.
+export const OFFERED_POLICIES: readonly MergePolicy[] = ['operator', 'judged', 'unattended'];
 // Each policy as the TUI names it: never `auto` alone, which is Claude
 // Code's permission mode.
 export const POLICY_NAMES: Record<MergePolicy, string> = { operator: 'operator', judged: 'semi-auto', unattended: 'full-auto' };
@@ -313,6 +314,22 @@ export const MERGE_STEP_DONE = { ready: 'prMarkedReady', merge: 'prMerged' } as 
 // ended, if it has. A read still giving `redHead` after a push of something
 // newer is GitHub not caught up yet, and waits for the next read.
 export type FixRun = { redHead: string; pushed: string | null };
+
+// A semi-auto root's gate check (ADR 0014): the judging run on the head
+// `head` of its PR, once its checks there are green, which starts the
+// session `sessionId`, and the verdict it reported, once it did. The run
+// is `runId` once it started. A new commit on the PR voids it.
+export type GateCheck = { head: string; sessionId: string; runId: string | null; verdict: GateVerdict | null };
+// A judging run's verdict: merge the PR, or send it to the operator, and why.
+export type GateVerdict = { merge: boolean; reason: string };
+export const GATE_VERDICTS = ['merge', 'ask'] as const;
+export type GateVerdictName = (typeof GATE_VERDICTS)[number];
+
+// Why a semi-auto root waits In review for the operator rather than at its
+// merge gate (ADR 0014): its gate check asked, or its checks were still red
+// after its fix run, on the head `head` of its PR. A new commit on the PR
+// sends it back to its gate.
+export type SentToOperator = { head: string; reason: string };
 
 // A wayfinder task's maps the factory owes their closing (ADR 0013), as
 // its App, and why it last couldn't. `spec` is the spec written from them,
@@ -532,6 +549,12 @@ export type Task = {
   // a failure request instead. Like conflicted, each of its runs that
   // completes puts it back at its gate.
   fixRun?: FixRun | null;
+  // Its gate check on its PR's head under semi-auto (ADR 0014), from the
+  // moment green checks queued its judging run until a new commit voids it.
+  gateCheck?: GateCheck | null;
+  // Why the semi-auto root is In review for the operator rather than at its
+  // merge gate, until a new commit on its PR (ADR 0014).
+  sentToOperator?: SentToOperator | null;
   // Its Push & open draft PR while under way, and the draft PR it opened.
   publishing?: Publishing | null;
   pr?: PullRequest | null;
@@ -607,6 +630,9 @@ export type Run = {
   // `record_assumed_answer`, and its questions never reach the operator. Runs
   // stored before full-auto have none.
   assumes?: boolean;
+  // Whether it is a semi-auto root's judging run (ADR 0014), which reports
+  // its gate check's verdict through `report_verdict` and nothing else.
+  judges?: boolean;
   // The hosts its container's egress proxy denied it, for an L2 run that
   // ended (ADR 0007). Runs stored before them have none.
   deniedHosts?: string[];
@@ -893,6 +919,8 @@ export type RunEvent =
   | { type: 'attentionRaised'; runId: string; kind: 'question'; question: Question }
   // A full-auto run recorded the answer it assumed through `record_assumed_answer`.
   | { type: 'answerAssumed'; runId: string; question: string; answer: string; reason?: string }
+  // A judging run reported its gate check's verdict through `report_verdict` (ADR 0014).
+  | { type: 'verdictReported'; runId: string; verdict: GateVerdictName; reason: string }
   // An AFK run's tool call that neither the factory's allow list nor the
   // operator's rules cover (the daemon checks those): `parts` is the parts
   // of it they leave uncovered, the whole call if absent. `rulesProblem`
@@ -1156,8 +1184,18 @@ export type NoteEvent = { type: 'notesDelivered'; taskId: string };
 // What the daemon read of an In review root's PR on GitHub (ADR 0011):
 // where it stands, and whether GitHub finds it mergeable (ADR 0013); its
 // head commit, and for a root at an agent policy's merge gate the checks
-// on it (ADR 0014).
-export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; mergeable: Mergeability; head?: string; draft?: boolean; checks?: Checks | null };
+// on it (ADR 0014), with the session a semi-auto root's judging run would
+// start, should those checks queue one.
+export type PrReadEvent = {
+  type: 'prRead';
+  taskId: string;
+  state: PrState;
+  mergeable: Mergeability;
+  head?: string;
+  draft?: boolean;
+  checks?: Checks | null;
+  sessionId?: string;
+};
 
 // What the daemon did on GitHub for a root its merge gate let through (ADR
 // 0014): it marked the draft PR ready, merged it, or failed a step, saying why.
@@ -1343,9 +1381,16 @@ function levelAtGate(task: Task): AutonomyLevel {
 
 // Whether the root waits at its merge gate for the factory to merge it
 // (ADR 0014): past its last stage with its PR open and published, under an
-// agent policy, rather than In review for the operator.
+// agent policy, rather than In review for the operator, as a semi-auto
+// root its gate sent to the operator is until a new commit on its PR.
 export function atMergeGate(task: Task): boolean {
-  return waitsOnPr(task) && !task.publishing && factoryMerges(task);
+  return waitsOnPr(task) && !task.publishing && factoryMerges(task) && !sentToOperator(task);
+}
+
+// Why the semi-auto root is In review for the operator rather than at its
+// merge gate (ADR 0014), or null.
+export function sentToOperator(task: Task): string | null {
+  return policyOf(task) === 'judged' && task.sentToOperator ? task.sentToOperator.reason : null;
 }
 
 // Why the operator can't act on the root while the factory merges its PR,
@@ -1359,6 +1404,11 @@ function mergingRefusal(task: Task): string | null {
 // open handoff sheet, or its saved draft, at L3 takes it too.
 function setPolicy(task: Task, policy: MergePolicy): void {
   task.mergePolicy = policy;
+  // A gate check, and what it decided, are semi-auto's alone.
+  if (policy !== 'judged') {
+    dropGateCheck(task);
+    task.sentToOperator = null;
+  }
   if (!atMergeGate(task)) task.gate = null;
   for (const sheet of [task.handoff, task.handoffDraft]) {
     if (sheet?.autonomy === 'L3') sheet.mergePolicy = policy;
@@ -1382,9 +1432,6 @@ export function policyRefusal(policy: MergePolicy, level: AutonomyLevel | null):
   // As the TUI names it, with its value: `Full-auto (unattended)`.
   const name = POLICY_NAMES[policy];
   const named = `${name[0]!.toUpperCase()}${name.slice(1)} (${policy})`;
-  if (!OFFERED_POLICIES.includes(policy)) {
-    return `${named} isn’t available yet: the factory can’t run its gate check. Pick ${OFFERED_POLICIES.map((offered) => POLICY_NAMES[offered]).join(' or ')}.`;
-  }
   if (level === null) return `A task starting at a HITL stage picks its merge policy at its handoff.`;
   return level === 'L3' ? null : `${named} merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.`;
 }
@@ -1720,7 +1767,8 @@ function advanceFrom(state: Lifecycle, task: Task, from: Stage, run: Run | undef
 // What a stage's runs report to the factory through its tools: a
 // `fix-once` review its findings, and a PR body stage the body. A run is
 // given only the tools its stage reports through (ADR 0009).
-export type Report = 'findings' | 'pr-body';
+// A judging run reports its verdict, and nothing else (ADR 0014).
+export type Report = 'findings' | 'pr-body' | 'verdict';
 
 export function stageReports(stage: Stage | undefined): Report[] {
   return [...(stage?.on_findings === 'fix-once' ? ['findings' as const] : []), ...(stage?.exit === 'artifact:pr-body' ? ['pr-body' as const] : [])];
@@ -1728,6 +1776,7 @@ export function stageReports(stage: Stage | undefined): Report[] {
 
 // What the AFK run reports through the factory's tools, by its stage.
 export function runReports(task: Task, run: Run): Report[] {
+  if (run.judges) return ['verdict'];
   return run.mode === 'AFK' ? stageReports(stageOf(task, run.stage)) : [];
 }
 
@@ -1823,6 +1872,7 @@ export function withJudgementCalls(body: string, calls: JudgementCall[]): string
 // lists it: a merge with findings left over points at the PR body's own
 // list of them, while the comment names them.
 export function judgementCallLine(call: JudgementCall, where: 'pr-body' | 'issue'): string {
+  if (call.kind === 'judged-merge') return `Merged on the gate check’s judgement: ${oneLineOf(call.reason)}`;
   if (call.kind === 'merged-with-findings') {
     const left = call.findings.length === 1 ? 'a review finding' : `${call.findings.length} review findings`;
     return where === 'pr-body' ? `Merged with ${left} left over, listed above.` : `Merged with ${left} left over: ${call.findings.map(oneLineOf).join('; ')}`;
@@ -1831,9 +1881,12 @@ export function judgementCallLine(call: JudgementCall, where: 'pr-body' | 'issue
 }
 
 // The root's judgement calls once the factory merges its PR: those made so
-// far, and the merge itself when it leaves review findings over.
+// far, the merge itself when its gate check judged it should, and when it
+// leaves review findings over.
 export function judgementCallsAtMerge(task: Task): JudgementCall[] {
-  const calls = task.judgementCalls ?? [];
+  let calls = task.judgementCalls ?? [];
+  const verdict = task.gateCheck?.verdict;
+  if (verdict?.merge && !calls.some((call) => call.kind === 'judged-merge')) calls = [...calls, { kind: 'judged-merge', taskId: task.id, reason: verdict.reason }];
   const leftOver = task.findings?.leftOver ?? [];
   if (!leftOver.length || calls.some((call) => call.kind === 'merged-with-findings')) return calls;
   return [...calls, { kind: 'merged-with-findings', taskId: task.id, findings: [...leftOver] }];
@@ -2272,7 +2325,8 @@ export type AttentionQueueItem =
       skipped: string[] | null;
     }
   | { kind: 'ready'; taskId: string }
-  | { kind: 'review'; taskId: string };
+  // `reason` is why a semi-auto root's gate sent it to the operator (ADR 0014).
+  | { kind: 'review'; taskId: string; reason?: string };
 
 const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null, recovery = null, deniedHosts = null, skipped = null }: AttentionRequest): AttentionQueueItem => ({
   kind: 'attention',
@@ -2314,7 +2368,10 @@ export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = 
     if (showsRequest(task) && request) requests.push(request);
     if (readyForYou(state, task, watched)) ready.push({ kind: 'ready', taskId: task.id });
     // A root at an agent policy's merge gate is the factory's to merge.
-    if (task.state === 'in-review' && !atMergeGate(task)) reviews.push({ kind: 'review', taskId: task.id });
+    if (task.state === 'in-review' && !atMergeGate(task)) {
+      const reason = sentToOperator(task);
+      reviews.push({ kind: 'review', taskId: task.id, ...(reason && { reason }) });
+    }
   }
   const failure = (request: AttentionRequest) => Number(request.kind === 'failure');
   requests.sort((a, b) => failure(b) - failure(a) || a.raisedAt - b.raisedAt);
@@ -2583,6 +2640,10 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     }
     case 'attentionRaised':
       return task.mode === 'HITL' ? 'In a HITL run the agent asks in the conversation, not with an attention request.' : null;
+    case 'verdictReported':
+      if (!state.runs[action.runId]!.judges) return 'Only a judging run reports a gate check’s verdict.';
+      if (!GATE_VERDICTS.includes(action.verdict)) return `${action.verdict} is no verdict: report merge or ask.`;
+      return action.reason.trim() ? null : 'A verdict needs its reason.';
     case 'answerAssumed':
       if (!state.runs[action.runId]!.assumes) return 'Only a full-auto run records the answers it assumed.';
       return action.question.trim() && action.answer.trim() ? null : 'An assumed answer needs its question and its answer.';
@@ -2682,6 +2743,8 @@ function finishRoot(task: Task, request: AttentionRequest | undefined, { merged 
 function finishMerged(state: Lifecycle, task: Task, request: AttentionRequest | undefined): void {
   finishRoot(task, request, { merged: true });
   task.gate = null;
+  task.gateCheck = null;
+  task.sentToOperator = null;
   if (task.kind === 'ticket' && task.ticket) task.resolving = { problem: null };
   oweTicketSetRead(state, task);
 }
@@ -2724,16 +2787,110 @@ function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: Atte
   }
   const { state: checks, failed } = read.checks;
   const noneTwice = checks === 'none' && task.gate?.checks === 'none' && task.gate.head === read.head;
-  const passes = (checks === 'green' || noneTwice) && read.mergeable === 'mergeable' && !request;
+  const green = (checks === 'green' || noneTwice) && read.mergeable === 'mergeable' && !request;
+  // Under semi-auto, only once its gate check on this head judged it should.
+  const judging = green && policyOf(task) === 'judged' && !task.gateCheck?.verdict?.merge;
+  const passes = green && !judging;
   if (read.draft !== undefined) task.pr!.draft = read.draft;
   const problem = request ? (task.gate?.problem ?? null) : null;
   task.gate = { checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem };
+  if (judging) queueGateCheck(task, read.head, read.sessionId);
   // Journaled before the first step on GitHub, in the state that takes it.
   if (passes) {
     const id = mergeId(task.id);
     state.intents[id] = { id, verb: 'merge', taskId: task.id, pr: task.pr!.number, marksReady: task.gate.step === 'ready' };
   }
   if (checks === 'red' && !request) fixRedChecks(state, task, read.head, failed, at);
+}
+
+// The semi-auto root's PR is green on `head` (ADR 0014): its gate check's
+// judging run is queued, starting the session `sessionId`, to merge it or
+// send it to the operator. It holds a slot like any AFK run.
+function queueGateCheck(task: Task, head: string, sessionId: string | undefined): void {
+  task.gateCheck = { head, sessionId: sessionId ?? `G${task.id.slice(1)}-${head.slice(0, 12)}`, runId: null, verdict: null };
+  task.state = 'queued';
+}
+
+// A gate check not yet judged goes, and a task queued for its judging run
+// alone is back In review, to be read afresh: its policy or its PR moved on
+// under it. A judging run under way ends as it would, its verdict unheard.
+function dropGateCheck(task: Task): void {
+  if (!task.gateCheck) return;
+  if (!task.gateCheck.runId && task.state === 'queued') {
+    task.state = 'in-review';
+    task.gate = null;
+  }
+  task.gateCheck = null;
+}
+
+// A new commit `head` on the root's PR (ADR 0014) voids its gate check on
+// an older one, and sends a root its gate sent to the operator back to it.
+function voidGateCheck(task: Task, head: string): void {
+  if (task.gateCheck && task.gateCheck.head !== head) dropGateCheck(task);
+  if (task.sentToOperator && task.sentToOperator.head !== head) task.sentToOperator = null;
+}
+
+// Whether the task's next run is its gate check's judging run: queued,
+// AFK, with a gate check that has no verdict yet.
+function judgesNext(task: Task): boolean {
+  return task.mode === 'AFK' && !!task.gateCheck && !task.gateCheck.verdict;
+}
+
+// The judging run ended, `failure` if it failed (ADR 0014): its root is
+// back In review, its gate read afresh. A merge verdict lets the next green
+// read of the same head merge it; an ask, a run that ended without a
+// verdict, or one that failed, sends it to the operator with the reason.
+function endJudging(task: Task, failure: string | null): void {
+  task.state = 'in-review';
+  task.gate = null;
+  const check = task.gateCheck;
+  // Its policy moved on meanwhile: the verdict goes unheard.
+  if (!check) return;
+  if (failure) check.verdict = { merge: false, reason: `The judging run failed without a verdict: ${failure}` };
+  else check.verdict ??= { merge: false, reason: NO_VERDICT };
+  if (!check.verdict.merge) task.sentToOperator = { head: check.head, reason: check.verdict.reason };
+}
+
+// The reason a judging run that reported nothing sends its PR to the operator.
+export const NO_VERDICT = 'The judging run ended without a verdict.';
+
+// What the judging run on the root's PR, green on `head`, opens on (ADR
+// 0014): the factory's gate-check skill, and everything it judges by: the
+// PR and how to read its diff, the ticket and spec or else the brief, the
+// findings fix-once left over, and the task's frozen rubric.
+function judgingOpening(state: Lifecycle, task: Task, head: string): string {
+  const pr = task.pr!.number;
+  const base = state.repositories[task.repo]?.baseBranch;
+  const spec = specOf(state, task);
+  const asked = task.kind === 'ticket' && task.ticket
+    ? [`- Ticket: ${task.ticket}${spec ? `, under the spec ${spec}` : ', under no spec'}. Read ${spec ? 'them' : 'it'} with \`gh issue view\`.`]
+    : [`- What the task was asked to do, with no ticket:\n\n${indented(task.brief?.trim() || task.launchSummary?.trim() || task.title)}`];
+  const leftOver = task.findings?.leftOver ?? [];
+  const rubric = (task.mergeGate ?? DEFAULT_MERGE_GATE).rubric;
+  return [
+    '/factory:gate-check',
+    '',
+    '## Gate check',
+    `The checks on PR #${pr} of ${task.id} in ${task.repo} are green on its head ${head}. Under semi-auto the factory merges it into its base branch` +
+      `${base ? ` ${base}` : ''} only if you judge it should, and otherwise sends it to the operator with your reason.`,
+    '',
+    `- The diff: \`gh pr diff ${pr} --repo ${task.repo}\`${base ? `, or \`git diff origin/${base}...${head}\` in this worktree` : ''}.`,
+    ...asked,
+    `- Review findings left over after the review’s fix pass: ${leftOver.length ? `\n\n${bulleted(leftOver)}` : 'none.'}`,
+    '',
+    'The operator’s rubric: send the PR to them when any of these holds.',
+    '',
+    bulleted(rubric),
+    '',
+    'Report your verdict through the factory’s report_verdict tool before you end: `merge`, or `ask` to send it to the operator, with your reason in a sentence or two. ' +
+      'The operator reads it on the task’s Needs you item, or as a judgement call once it merged. A run that ends without a verdict sends the PR to the operator. ' +
+      'Change nothing: don’t edit, commit or push.',
+  ].join('\n');
+}
+
+// Text indented as a Markdown block under a list item.
+function indented(text: string): string {
+  return text.split('\n').map((line) => (line ? `  ${line}` : line)).join('\n');
 }
 
 // The id of the intent merging the root's PR.
@@ -2765,6 +2922,12 @@ function fixRedChecks(state: Lifecycle, task: Task, head: string, failed: Failed
   }
   if (head === fixRun.redHead && fixRun.pushed && fixRun.pushed !== head) return;
   const named = failed.length ? `: ${failedChecksText(failed)}` : '';
+  // Under semi-auto, the task goes In review for the operator instead (ADR 0014).
+  if (policyOf(task) === 'judged') {
+    task.sentToOperator = { head, reason: `The checks on PR #${task.pr!.number} of ${task.id} are still failing after its fix run${named}.` };
+    task.gate = null;
+    return;
+  }
   const reason = `The checks on PR #${task.pr!.number} of ${task.id} are still failing after its fix run${named}. Fix them and push to the task branch, then answer to send the task back to its merge gate.`;
   addRequest(state, task, lastRun(state, task), 'failure', false, reason, at);
 }
@@ -3299,10 +3462,19 @@ function startRun(
     opening = [...task.factoryNotes, opening].filter(Boolean).join('\n\n');
     task.factoryNotes = [];
   }
+  // A semi-auto root's judging run starts its own session, at the sonnet
+  // tier (ADR 0014): the task's own session is left for its next run. One
+  // the daemon before cut off resumes the session it started.
+  const check = judgesNext(task) ? task.gateCheck! : null;
+  if (check) {
+    const begun = Object.values(state.runs).some((other) => other.sessionId === check.sessionId);
+    opening = begun ? (task.resumeWith ?? AFK_RESUME) : judgingOpening(state, task, check.head);
+    resumesSession = begun;
+  }
   task.resumeWith = null;
-  task.newSession = false;
+  if (!check) task.newSession = false;
   task.pushed = false;
-  const tier = nextTier(task);
+  const tier = check ? 'sonnet' : nextTier(task);
   const allowOnce = task.allowOnce ?? [];
   task.allowOnce = [];
   task.sessionId ??= `S${task.id.slice(1)}`;
@@ -3315,7 +3487,7 @@ function startRun(
     outcome: null,
     interruption: null,
     resumesSession,
-    sessionId: task.sessionId,
+    sessionId: check ? check.sessionId : task.sessionId,
     turn: opening ? 'agent' : 'operator',
     queued: [],
     question: null,
@@ -3327,7 +3499,7 @@ function startRun(
     tier,
     // Routed by `reduce`, once it knows every run the action starts.
     model: '',
-    maxTurns: task.mode === 'AFK' ? (task.maxTurns ?? stageOf(task, task.stage)?.max_turns ?? DEFAULT_MAX_TURNS) : null,
+    maxTurns: check ? DEFAULT_MAX_TURNS : task.mode === 'AFK' ? (task.maxTurns ?? stageOf(task, task.stage)?.max_turns ?? DEFAULT_MAX_TURNS) : null,
     cli: null,
     parksAt: null,
     allowOnce,
@@ -3337,6 +3509,10 @@ function startRun(
     endedAt: null,
   };
   run.assumes = assumesAnswers(state, task, run);
+  if (check) {
+    run.judges = true;
+    check.runId = run.id;
+  }
   state.runs[run.id] = run;
   task.runIds.push(run.id);
   task.state = 'running';
@@ -3903,8 +4079,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.autonomy = null;
       task.loop = null;
       // Its work is the operator's now: handed back AFK, its stages carry on,
-      // and a red check at its gate gets a fix run again.
+      // and a red check at its gate gets a fix run again, and a gate check afresh.
       task.fixRun = null;
+      task.gateCheck = null;
+      task.sentToOperator = null;
       // What an AFK run was to open on is the operator's to say now.
       task.resumeWith = null;
       // A fresh session no run has started yet gives way to the one the
@@ -4002,6 +4180,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         stopPublishing(task, request);
         addRequest(state, task, lastRun(state, task), 'pr-closed-unmerged', false, prClosedReason(task), at);
       } else if (action.state === 'open') {
+        if (action.head) voidGateCheck(task, action.head);
         // Reopened on GitHub: nothing is left to ask.
         if (asked) request!.status = 'closed';
         else if (action.mergeable === 'mergeable') task.conflicted = false;
@@ -4349,6 +4528,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         break;
       }
       endRun(run!, 'completed', at);
+      if (run!.judges) {
+        endJudging(task, null);
+        break;
+      }
       // A child ends Done and reports up: only the root is reviewed.
       if (task.child) {
         finishChild(state, task, run!, action);
@@ -4415,6 +4598,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       root.judgementCalls = [...(root.judgementCalls ?? []), { kind: 'assumed-answer', taskId: task.id, question: action.question.trim(), answer: action.answer.trim(), reason }];
       break;
     }
+    case 'verdictReported':
+      // The last verdict reported stands. One reported once its gate check went is unheard.
+      if (task.gateCheck?.runId === action.runId) task.gateCheck.verdict = { merge: action.verdict === 'merge', reason: action.reason.trim() };
+      break;
     case 'prBodyWritten':
       task.prBody = prBody(task, action.body);
       task.prTitle = prTitleOf(action.title);
@@ -4427,6 +4614,11 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const weekly = task.mode === 'AFK' ? weeklySpentUntil(state.snapshots, run!.model, at) : null;
       endRun(run!, 'failed', at);
       logDenials(run!, action.deniedHosts);
+      // A judging run's failure sends the PR to the operator, as no verdict does.
+      if (run!.judges) {
+        endJudging(task, withDenials(action.reason, action.deniedHosts));
+        break;
+      }
       const reason = weekly === null ? action.reason : weeklyLimitReason(weekly, action.reason);
       raise(state, task, run!, 'failure', false, withWakeHint(withDenials(reason, action.deniedHosts), action.afterWake), at, {
         deniedHosts: action.deniedHosts,
@@ -4573,6 +4765,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.branchOnGitHub = true;
       // What the fix run left is on GitHub: the PR's head is that commit now.
       if (task.fixRun) task.fixRun.pushed = action.commit;
+      // A new commit voids a semi-auto root's gate check at once (ADR 0014).
+      voidGateCheck(task, action.commit);
       if (!task.publishing) actionStagePublished(state, task, at);
       break;
     case 'prOpened':
