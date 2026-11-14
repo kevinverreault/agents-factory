@@ -10,7 +10,8 @@
 // turns off or on keeping the machine awake while AFK runs are active;
 // `slots` sets the slot cap, how many AFK runs may be active at once; `gc`
 // lists the leftovers that belong to no live task and deletes only those
-// the operator ticks (ADR 0011). `hook`
+// the operator ticks (ADR 0011); `merge-gate [repo]` prints the merge gate
+// config resolved for a repository (ADR 0014). `hook`
 // is run by Claude Code, not the operator: it relays a run's hook events
 // to the daemon.
 import { userInfo } from 'node:os';
@@ -20,8 +21,10 @@ import { createElement as h } from 'react';
 import { render } from 'ink';
 import { connectOrStart, restartDaemon, VersionSkew } from './daemon/auto-start.ts';
 import { factoryPaths, type FactoryPaths } from './daemon/paths.ts';
+import { gitCli } from './git/git.ts';
 import { setUpGitHub } from './github/setup-command.ts';
 import { relayHook } from './hooks/relay.ts';
+import { mergeGateCommand } from './merge-gate/merge-gate-command.ts';
 import { modelsCommand } from './models/models-command.ts';
 import { openUrl } from './os/open-url.ts';
 import { connect, HandshakeRefused, isNoDaemon, type FactoryConnection } from './protocol/client.ts';
@@ -46,6 +49,7 @@ const USAGE = [
   '       agents-factory keep-awake on | keep-awake off',
   '       agents-factory slots <n>',
   '       agents-factory gc',
+  '       agents-factory merge-gate [owner/name]',
 ].join('\n');
 
 // The manifest flow's code is valid for an hour.
@@ -145,6 +149,10 @@ async function main(args: string[]): Promise<number> {
     }
   }
   if (args[0] === 'gc' && args.length === 1) return gc(paths);
+  if (args[0] === 'merge-gate' && args.length <= 2) {
+    // Read where the daemon reads it, with no daemon needed.
+    return mergeGateCommand({ path: paths.mergeGatePath, repo: args[1], cwd: process.cwd(), git: gitCli, print: (text) => console.log(text), printError: (text) => console.error(text) });
+  }
   if (args[0] === 'setup' && args[1] === 'token' && args.length === 2) {
     const token = await readToken();
     const connection = await connectOrStart(paths);
