@@ -322,6 +322,7 @@ export type FixRun = { redHead: string; pushed: string | null };
 export type GateCheck = { head: string; sessionId: string; runId: string | null; verdict: GateVerdict | null };
 // A judging run's verdict: merge the PR, or send it to the operator, and why.
 export type GateVerdict = { merge: boolean; reason: string };
+// The verdicts a judging run reports through `report_verdict`, by name.
 export const GATE_VERDICTS = ['merge', 'ask'] as const;
 export type GateVerdictName = (typeof GATE_VERDICTS)[number];
 
@@ -1384,12 +1385,12 @@ function levelAtGate(task: Task): AutonomyLevel {
 // agent policy, rather than In review for the operator, as a semi-auto
 // root its gate sent to the operator is until a new commit on its PR.
 export function atMergeGate(task: Task): boolean {
-  return waitsOnPr(task) && !task.publishing && factoryMerges(task) && !sentToOperator(task);
+  return waitsOnPr(task) && !task.publishing && factoryMerges(task) && !sentToOperatorReason(task);
 }
 
 // Why the semi-auto root is In review for the operator rather than at its
 // merge gate (ADR 0014), or null.
-export function sentToOperator(task: Task): string | null {
+export function sentToOperatorReason(task: Task): string | null {
   return policyOf(task) === 'judged' && task.sentToOperator ? task.sentToOperator.reason : null;
 }
 
@@ -2369,7 +2370,7 @@ export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = 
     if (readyForYou(state, task, watched)) ready.push({ kind: 'ready', taskId: task.id });
     // A root at an agent policy's merge gate is the factory's to merge.
     if (task.state === 'in-review' && !atMergeGate(task)) {
-      const reason = sentToOperator(task);
+      const reason = sentToOperatorReason(task);
       reviews.push({ kind: 'review', taskId: task.id, ...(reason && { reason }) });
     }
   }
@@ -2787,9 +2788,11 @@ function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: Atte
   }
   const { state: checks, failed } = read.checks;
   const noneTwice = checks === 'none' && task.gate?.checks === 'none' && task.gate.head === read.head;
-  const green = (checks === 'green' || noneTwice) && read.mergeable === 'mergeable' && !request;
-  // Under semi-auto, only once its gate check on this head judged it should.
-  const judging = green && policyOf(task) === 'judged' && !task.gateCheck?.verdict?.merge;
+  // Under semi-auto, only once its gate check on this head judged it should;
+  // a head found with no checks twice before its judging run needs no third read.
+  const judgedMerge = policyOf(task) === 'judged' && task.gateCheck?.head === read.head && !!task.gateCheck.verdict?.merge;
+  const green = (checks === 'green' || noneTwice || (checks === 'none' && judgedMerge)) && read.mergeable === 'mergeable' && !request;
+  const judging = green && policyOf(task) === 'judged' && !judgedMerge;
   const passes = green && !judging;
   if (read.draft !== undefined) task.pr!.draft = read.draft;
   const problem = request ? (task.gate?.problem ?? null) : null;
@@ -2830,10 +2833,14 @@ function voidGateCheck(task: Task, head: string): void {
   if (task.sentToOperator && task.sentToOperator.head !== head) task.sentToOperator = null;
 }
 
-// Whether the task's next run is its gate check's judging run: queued,
-// AFK, with a gate check that has no verdict yet.
-function judgesNext(task: Task): boolean {
-  return task.mode === 'AFK' && !!task.gateCheck && !task.gateCheck.verdict;
+// Whether the task's next run is its gate check's judging run: AFK, with a
+// gate check whose run hasn't started yet, or was cut off by the daemon
+// stopping, even once it reported its verdict.
+function judgesNext(state: Lifecycle, task: Task): boolean {
+  const check = task.gateCheck;
+  if (task.mode !== 'AFK' || !check) return false;
+  const run = check.runId ? state.runs[check.runId] : undefined;
+  return !run || run.status !== 'ended' || run.outcome === 'interrupted';
 }
 
 // The judging run ended, `failure` if it failed (ADR 0014): its root is
@@ -2922,13 +2929,14 @@ function fixRedChecks(state: Lifecycle, task: Task, head: string, failed: Failed
   }
   if (head === fixRun.redHead && fixRun.pushed && fixRun.pushed !== head) return;
   const named = failed.length ? `: ${failedChecksText(failed)}` : '';
+  const stillRed = `The checks on PR #${task.pr!.number} of ${task.id} are still failing after its fix run${named}.`;
   // Under semi-auto, the task goes In review for the operator instead (ADR 0014).
   if (policyOf(task) === 'judged') {
-    task.sentToOperator = { head, reason: `The checks on PR #${task.pr!.number} of ${task.id} are still failing after its fix run${named}.` };
+    task.sentToOperator = { head, reason: stillRed };
     task.gate = null;
     return;
   }
-  const reason = `The checks on PR #${task.pr!.number} of ${task.id} are still failing after its fix run${named}. Fix them and push to the task branch, then answer to send the task back to its merge gate.`;
+  const reason = `${stillRed} Fix them and push to the task branch, then answer to send the task back to its merge gate.`;
   addRequest(state, task, lastRun(state, task), 'failure', false, reason, at);
 }
 
@@ -3455,17 +3463,18 @@ function startRun(
   // A task back from waiting on children opens on their reports first: they
   // count as handed over once the run started, so a run that never did hands
   // them to the next.
-  const reported = awaitedChildren(state, task).filter(isTerminal);
+  // A semi-auto root's judging run starts its own session, at the sonnet
+  // tier (ADR 0014): the task's own session, and the factory notes held for
+  // it, are left for its next run. One the daemon before cut off resumes the
+  // session it started.
+  const check = judgesNext(state, task) ? task.gateCheck! : null;
+  const reported = check ? [] : awaitedChildren(state, task).filter(isTerminal);
   if (reported.length) opening = [reportsOpening(task, reported), opening].filter(Boolean).join('\n\n');
   // So do the factory notes a parked conversation held.
-  if (task.factoryNotes?.length) {
+  if (task.factoryNotes?.length && !check) {
     opening = [...task.factoryNotes, opening].filter(Boolean).join('\n\n');
     task.factoryNotes = [];
   }
-  // A semi-auto root's judging run starts its own session, at the sonnet
-  // tier (ADR 0014): the task's own session is left for its next run. One
-  // the daemon before cut off resumes the session it started.
-  const check = judgesNext(task) ? task.gateCheck! : null;
   if (check) {
     const begun = Object.values(state.runs).some((other) => other.sessionId === check.sessionId);
     opening = begun ? (task.resumeWith ?? AFK_RESUME) : judgingOpening(state, task, check.head);
@@ -3592,7 +3601,10 @@ function reconcile(state: Lifecycle, interruption: Interruption, replayed: Repla
       if (interruption === 'unclean') task.uncleanStarts = (task.uncleanStarts ?? 0) + 1;
       if ((task.uncleanStarts ?? 0) >= CRASH_LOOP_STARTS) {
         endRun(run, 'failed', at);
-        raise(state, task, run, 'failure', false, `${run.id} was active when the factory stopped uncleanly twice in a row, so the factory didn’t requeue it again: it may be what crashes the factory.`, at);
+        const crashes = `${run.id} was active when the factory stopped uncleanly twice in a row, so the factory didn’t requeue it again: it may be what crashes the factory.`;
+        // A judging run's sends its PR to the operator, as any failure of it does.
+        if (run.judges) endJudging(task, crashes);
+        else raise(state, task, run, 'failure', false, crashes, at);
         recovery.failed.push(ref);
         continue;
       }

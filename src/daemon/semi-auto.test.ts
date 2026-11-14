@@ -317,6 +317,49 @@ describe('semi-auto’s gate check', () => {
     expect(factory.github.prState(101).state).toBe('merged');
   });
 
+  test('a judging run cut off after its ask verdict is requeued as the judging run, and its ending still sends the task to the operator', async () => {
+    const launched = await attached();
+    const { factory, operator } = launched;
+    await operator.send(semiAuto());
+    const judging = await greenToJudging(launched, 'T1', await throughPr(launched, 'T1'));
+    factory.executor.report(judging, { type: 'verdictReported', verdict: 'ask', reason: 'Unsure about the cookie.' });
+    await vi.waitFor(async () => {
+      await operator.send({ type: 'daemon.status' });
+      expect(factory.executor.started).toHaveLength(4);
+    });
+
+    await factory.crash();
+    await factory.startDaemon();
+    const tui = watch(await factory.attach());
+    const resumed = await nextRun({ ...launched, tui }, 'T1', judging);
+
+    expect(startOf(factory, resumed)).toMatchObject({ sessionId: startOf(factory, judging).sessionId, resumesSession: true, reports: ['verdict'] });
+    factory.executor.report(resumed, { type: 'runCompleted' });
+    const asked = await tui.until((state) => state.tasks.T1?.label === 'In review');
+    expect(asked.tasks.T1!.sentToOperator).toBe('Unsure about the cookie.');
+    expect(factory.github.prState(101).state).toBe('open');
+  });
+
+  test('in a repo with no checks, a merge verdict merges on the next read', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    await operator.send(semiAuto());
+    const last = await throughPr(launched, 'T1');
+    // CI runs nothing: two reads of the head finding none let the gate check through.
+    factory.github.runChecks('acme/widgets', null);
+    factory.clock.advance(2 * MINUTE);
+    await tui.until((state) => state.tasks.T1?.gate?.checks === 'none');
+    factory.clock.advance(2 * MINUTE);
+    const judging = await nextRun(launched, 'T1', last);
+    const reads = factory.github.checkReads.length;
+
+    factory.executor.report(judging, { type: 'verdictReported', verdict: 'merge', reason: 'Small and as asked.' });
+    factory.executor.report(judging, { type: 'runCompleted' });
+
+    await tui.until((state) => state.tasks.T1?.label === 'Done');
+    expect(factory.github.checkReads.length - reads).toBe(1);
+  });
+
   test('switched to full-auto while sent to the operator, the task goes back to its gate and merges', async () => {
     const launched = await attached();
     const { factory, operator, tui } = launched;

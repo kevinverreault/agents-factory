@@ -3,7 +3,7 @@
 // daemon's current state.
 import {
   atMergeGate,
-  sentToOperator,
+  sentToOperatorReason,
   attentionQueue,
   heldSlots,
   keepsAwake,
@@ -204,7 +204,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       ticket: task.ticket ?? null,
       mergePolicy: task.mergePolicy ?? null,
       judgementCalls: structuredClone(task.judgementCalls ?? []),
-      sentToOperator: task.state === 'in-review' ? sentToOperator(task) : null,
+      sentToOperator: task.state === 'in-review' ? sentToOperatorReason(task) : null,
       gate: atMergeGate(task) ? { checks: task.gate?.checks ?? null, step: task.gate?.step ?? null, problem: task.gate?.problem ?? null } : null,
       resolving: task.resolving ? { ...task.resolving } : null,
       specTask: task.specTask ?? null,
