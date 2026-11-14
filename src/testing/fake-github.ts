@@ -81,7 +81,8 @@ type FakeIssue = { title: string; open: boolean; stateReason: StateReason; label
 // can make it unreachable, or hold its writes mid-call.
 export class FakeGitHub implements GitHub {
   readonly minted: Minted[] = [];
-  readonly writes: { action: 'close'; ref: string; comment: string; token: Minted }[] = [];
+  // Each issue closed, or commented on alone, with its comment and token.
+  readonly writes: { action: 'close' | 'comment'; ref: string; comment: string; token: Minted }[] = [];
   // Each push that reached GitHub, with the tip it sent and its token.
   readonly pushes: { repo: string; branch: string; tip: string; token: Minted }[] = [];
   // Every PR opened, in order.
@@ -91,9 +92,9 @@ export class FakeGitHub implements GitHub {
   readonly prReads: string[] = [];
   // Every call to merge a PR, by ref, even one GitHub took as a no-op on a PR merged already.
   readonly mergeCalls: string[] = [];
-  // Each PR closed, reopened, marked ready or merged (with its method)
-  // through the port, with its token.
-  readonly prWrites: { action: 'close' | 'reopen' | 'ready' | 'merge'; repo: string; number: number; method?: PrMerge['method']; token: Minted }[] = [];
+  // Each PR closed, reopened, marked ready, its body edited, or merged (with
+  // its method) through the port, with its token.
+  readonly prWrites: { action: 'close' | 'reopen' | 'ready' | 'edit' | 'merge'; repo: string; number: number; method?: PrMerge['method']; token: Minted }[] = [];
   // Each read of a commit's checks that reached GitHub, with its token.
   readonly checkReads: { repo: string; head: string; token: Minted }[] = [];
   // Each branch deleted through the port, with its token.
@@ -178,7 +179,7 @@ export class FakeGitHub implements GitHub {
     else this.reportedHeads.delete(number);
   }
 
-  // Closing issues fails with `reason` from now on, or works again with null.
+  // Closing or commenting on issues fails with `reason` from now on, or works again with null.
   failIssueWrites(reason: string | null): void {
     this.issueWriteFailure = reason;
   }
@@ -291,6 +292,14 @@ export class FakeGitHub implements GitHub {
     this.writes.push({ action: 'close', ref, comment, token: snapshot(minted) });
   }
 
+  async commentIssue(token: string, ref: string, comment: string): Promise<void> {
+    await this.held();
+    if (this.issueWriteFailure) throw new GitHubError(this.issueWriteFailure);
+    const minted = this.scoped(token, ref, 'issues', 'write');
+    this.found(ref).comments.push(comment);
+    this.writes.push({ action: 'comment', ref, comment, token: snapshot(minted) });
+  }
+
   // Someone reopens the issue on GitHub.
   reopenIssue(ref: string): void {
     const issue = this.found(ref);
@@ -399,6 +408,14 @@ export class FakeGitHub implements GitHub {
     if (!pr.draft) return;
     pr.draft = false;
     this.prWrites.push({ action: 'ready', repo: pr.repo, number: pr.number, token: snapshot(minted) });
+  }
+
+  async editPrBody(token: string, ref: string, body: string): Promise<void> {
+    await this.held();
+    const minted = this.scoped(token, ref, 'pull_requests', 'write');
+    const pr = this.foundPr(ref);
+    pr.body = body;
+    this.prWrites.push({ action: 'edit', repo: pr.repo, number: pr.number, token: snapshot(minted) });
   }
 
   async mergePr(token: string, ref: string, { method, head }: PrMerge): Promise<void> {

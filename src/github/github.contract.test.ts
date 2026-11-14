@@ -139,6 +139,10 @@ if (!repo) {
       async setStatus(commit, context, state) {
         await execFileAsync('gh', ['api', '--method', 'POST', `repos/${repo}/statuses/${commit}`, '-f', `state=${state}`, '-f', `context=${context}`]);
       },
+      async issueComments(ref) {
+        const comments = JSON.parse((await execFileAsync('gh', ['api', '--paginate', '--slurp', `repos/${repo}/issues/${ref.split('#')[1]}/comments`])).stdout) as { body: string }[][];
+        return comments.flat().map(({ body }) => body);
+      },
       async pullRequest(number) {
         const pr = JSON.parse((await execFileAsync('gh', ['api', `repos/${repo}/pulls/${number}`])).stdout);
         return {

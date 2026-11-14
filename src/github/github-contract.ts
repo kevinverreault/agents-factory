@@ -28,6 +28,8 @@ export type GitHubFixture = {
   // Someone's CI sets a commit status named `context` on `commit` of the
   // installed repository, as the operator's own credentials can.
   setStatus(commit: string, context: string, state: 'pending' | 'success' | 'failure'): Promise<void>;
+  // The comments on an issue of the installed repository, oldest first.
+  issueComments(ref: string): Promise<string[]>;
   // A PR of the installed repository as GitHub has it.
   pullRequest(number: number): Promise<{ draft: boolean; head: string; base: string; title: string; body: string; assignees: string[] }>;
 };
@@ -116,6 +118,18 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       expect(await github.readIssue(token, openIssue)).toMatchObject({ open: false });
       await reopenByHand(openIssue);
       expect(await github.readIssue(token, openIssue)).toMatchObject({ open: true });
+    });
+
+    test('a ticket-writing token comments on an issue, leaving it open, while a read-only token can’t', async () => {
+      const { github, app, installedRepo, openIssue, issueComments } = await makeFixture();
+      const comment = `Commented by the contract test, ${unique()}.`;
+
+      await expect(github.commentIssue((await github.mintToken(app, installedRepo, READ_ONLY)).token, openIssue, comment)).rejects.toThrow(GitHubError);
+      const write = (await github.mintToken(app, installedRepo, TICKET_WRITE)).token;
+      await github.commentIssue(write, openIssue, comment);
+
+      expect((await issueComments(openIssue)).filter((each) => each === comment)).toHaveLength(1);
+      expect(await github.readIssue(write, openIssue)).toMatchObject({ open: true });
     });
 
     test('a push token pushes the task branch to the same branch on GitHub', async () => {
@@ -356,6 +370,23 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       expect((await github.readPr(read, ref)).state).toBe('merged');
       // Merged already, it is no error.
       await github.mergePr(merge, ref, { method: 'merge', head: tip });
+    });
+
+    test('a PR-writing token replaces a PR’s body, while a read-only token can’t', async () => {
+      const { github, app, installedRepo, clone, operator, baseBranch, pullRequest } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Edited by the contract test.\n' });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test edit', body: 'As opened.', assignee: operator };
+      const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
+      const ref = `${installedRepo}#${number}`;
+
+      await expect(github.editPrBody((await github.mintToken(app, installedRepo, READ_ONLY)).token, ref, 'Not this.')).rejects.toThrow(GitHubError);
+      const write = (await github.mintToken(app, installedRepo, PR_WRITE)).token;
+      await github.editPrBody(write, ref, 'As edited.\n\n## Judgement calls\n\n- One.');
+
+      expect((await pullRequest(number)).body).toBe('As edited.\n\n## Judgement calls\n\n- One.');
+      await github.closePr(write, ref, 'Closed by the contract test.');
     });
 
     test('a PR whose head branch GitHub no longer has can’t be reopened, and says why', async () => {

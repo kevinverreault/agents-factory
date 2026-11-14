@@ -55,6 +55,8 @@ import {
   openRequest,
   overdueRuns,
   pullRequestOf,
+  callsUnlisted,
+  judgementCallLine,
   pushedBranch,
   runsContained,
   l3RefusalText,
@@ -92,6 +94,7 @@ import {
   type PublishEvent,
   type ResearchEvent,
   type ResolutionEvent,
+  type CallsCommentEvent,
   type SpecClosingEvent,
   mapsOf,
   inRepo,
@@ -1040,10 +1043,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Takes the step of the factory's merge on GitHub as the App, with a
-  // token minted for that write alone (ADR 0004).
+  // token minted for that write alone (ADR 0004). Before merging, the PR
+  // body's judgement calls are brought up to date (ADR 0014), with a token
+  // of their own, should any have been made since it was opened.
   async function takeMergeStep(task: Task, step: MergeStep): Promise<MergeEvent> {
     const { permissions, take } = MERGE_WRITES[step];
     try {
+      if (step === 'merge' && callsUnlisted(task)) {
+        const { token } = await appToken(task.repo, PR_WRITE);
+        await github.editPrBody(token, prRef(task.repo, task.pr!.number), pullRequestOf(lifecycle, task, { merging: true }).body);
+      }
       const { token } = await appToken(task.repo, permissions);
       await take(token, prRef(task.repo, task.pr!.number), task);
       return { type: MERGE_STEP_DONE[step], taskId: task.id };
@@ -1783,17 +1792,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // and again at every PR poll while it fails. Its outcome goes through the
   // Lifecycle like any other event.
   // A spec task's spec, once none of its tickets is open, is closed alike,
-  // and a wayfinder task's maps once they are owed their closing.
+  // and a wayfinder task's maps once they are owed their closing. A ticket
+  // task the factory merged has its judgement calls commented first (ADR 0014).
   function driveResolutions(): void {
     for (const task of Object.values(lifecycle.tasks)) {
       const closing = !!task.ticketSet?.closing && !isTerminal(task);
-      if (stopping || !(task.resolving || closing || task.mapClosing) || resolutionsInFlight.has(task.id)) continue;
+      if (stopping || !(task.callsComment || task.resolving || closing || task.mapClosing) || resolutionsInFlight.has(task.id)) continue;
       // The maps close right after the spec: each closing is tried once per poll.
-      const tried = !closing && task.mapClosing ? `${task.id}:maps` : task.id;
+      const tried = task.callsComment ? `${task.id}:calls` : !closing && task.mapClosing ? `${task.id}:maps` : task.id;
       if (resolutionsTried.has(tried)) continue;
       resolutionsTried.add(tried);
       resolutionsInFlight.add(task.id);
-      void (closing ? closeSpec(task) : task.mapClosing ? closeMaps(task) : resolveTicket(task)).then(
+      const resolution = task.callsComment ? commentCalls(task) : closing ? closeSpec(task) : task.mapClosing ? closeMaps(task) : resolveTicket(task);
+      void resolution.then(
         (event) =>
           serially(async () => {
             resolutionsInFlight.delete(task.id);
@@ -1945,6 +1956,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await drop();
     await settle({ type: 'ticketTaskUnlaunched', taskId: intent.taskId, ticket: action.ticket, reason: problem }, new Set());
     return 'rolled back';
+  }
+
+  // Comments the judgement calls of the ticket task the factory merged on
+  // its spec, or its ticket (ADR 0014), as the App, with a token minted for
+  // that write alone (ADR 0004).
+  async function commentCalls(task: Task): Promise<CallsCommentEvent> {
+    try {
+      const { token } = await appToken(task.repo, TICKET_WRITE);
+      await github.commentIssue(token, task.callsComment!.on, callsComment(task));
+      return { type: 'callsCommented', taskId: task.id };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'callsUncommented', taskId: task.id, reason: error.message };
+    }
   }
 
   // Closes the merged ticket task's ticket as completed if GitHub left it
@@ -3201,6 +3226,14 @@ function mapComment(task: Task): string {
   return spec
     ? `The spec written from this map, ${spec}, is closed, so ${by} closes it.`
     : `This map cleared, and the operator ended ${by} there, so it closes it.`;
+}
+
+// The comment listing the judgement calls of the ticket task the factory
+// merged (ADR 0014): on its spec it names the ticket, and either way the PR.
+function callsComment(task: Task): string {
+  const what = task.callsComment!.on === task.ticket ? task.pr!.url : `${task.pr!.url}, for ${task.ticket}`;
+  const calls = (task.judgementCalls ?? []).map((call) => `- ${judgementCallLine(call)}`);
+  return [`The agents factory’s task ${task.id} (${task.title}) merged ${what}, making these judgement calls without the operator:`, '', ...calls].join('\n');
 }
 
 // What closing a merged ticket task's ticket says on it (ADR 0013): the PR

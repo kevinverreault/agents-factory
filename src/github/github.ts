@@ -5,7 +5,8 @@
 // the permissions asked for. With such a token it reads specs, maps and
 // their tickets, closes them (ADR 0013), pushes task branches, and opens
 // their draft PRs, reads those PRs and the checks on their heads, closes or
-// reopens them, marks them ready and merges them (ADR 0014), and deletes the
+// reopens them, marks them ready, edits their bodies and merges them, and
+// comments its judgement calls on issues (ADR 0014), and deletes the
 // task branches it pushed (ADR 0011). The REST adapter (`gitHubApi`) is the real one.
 import { execFile } from 'node:child_process';
 import { sign } from 'node:crypto';
@@ -124,6 +125,9 @@ export interface GitHub {
   // Comments `comment` on the issue, then closes it as completed, with
   // `token`, which needs Issues write.
   closeIssue(token: string, ref: string, comment: string): Promise<void>;
+  // Comments `comment` on the issue, open or closed, leaving its state as it
+  // is, with `token`, which needs Issues write.
+  commentIssue(token: string, ref: string, comment: string): Promise<void>;
   // Pushes the task branch with `token`, which needs Contents write, under a
   // fixed refspec: the branch's tip to the same branch on GitHub, never
   // forced, and with no hooks run. A branch GitHub already has at that tip,
@@ -145,6 +149,9 @@ export interface GitHub {
   // Marks the draft PR `ref` ready for review, with `token`, which needs
   // Pull requests write. A PR already ready is left as it is.
   markReady(token: string, ref: string): Promise<void>;
+  // Replaces the body of the PR `ref` with `body`, with `token`, which needs
+  // Pull requests write.
+  editPrBody(token: string, ref: string, body: string): Promise<void>;
   // Merges the open PR `ref` into its base, with `token`, which needs
   // Contents and Pull requests write. A PR already merged is merged already.
   // Throws a `GitHubError` when GitHub refuses it: a draft, a conflict, or
@@ -327,6 +334,10 @@ export function gitHubApi(): GitHub {
       const closed = await call('PATCH', issuePath(ref), token, { state: 'closed', state_reason: 'completed' });
       if (closed.status !== 200) throw refused(`close ${ref}`, closed);
     },
+    async commentIssue(token, ref, comment) {
+      const commented = await call('POST', `${issuePath(ref)}/comments`, token, { body: comment });
+      if (commented.status !== 201) throw refused(`comment on ${ref}`, commented);
+    },
     async push(token, { clonePath, repo, branch }) {
       const refusal = pushRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
@@ -394,6 +405,10 @@ export function gitHubApi(): GitHub {
       if (reply.status !== 200 || errors.length) {
         throw new GitHubError(`GitHub refused to mark ${ref} ready (HTTP ${reply.status}${errors.length ? `: ${errors.map(({ message }) => message).join(': ')}` : ''}).`);
       }
+    },
+    async editPrBody(token, ref, body) {
+      const edited = await call('PATCH', pullPath(ref), token, { body });
+      if (edited.status !== 200) throw refused(`edit the body of ${ref}`, edited);
     },
     async mergePr(token, ref, { method, head }) {
       if (stateOf(await pullRequest(token, ref)) === 'merged') return;
