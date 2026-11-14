@@ -193,7 +193,7 @@ describe('semi-auto’s gate check', () => {
     expect(factory.github.prState(101).state).toBe('open');
   });
 
-  test('a judging run that fails sends the task In review with the failure, rather than a failure request', async () => {
+  test('a judging run that fails raises a failure request, as any AFK run’s does, and retrying it runs the judging run again in its session', async () => {
     const launched = await attached();
     const { factory, operator, tui } = launched;
     await operator.send(semiAuto());
@@ -202,8 +202,84 @@ describe('semi-auto’s gate check', () => {
     factory.executor.report(judging, { type: 'runFailed', reason: 'The run hit its turn limit.' });
 
     const asked = await tui.until((state) => state.attentionQueue.length === 1);
-    expect(asked.attentionQueue).toEqual([{ kind: 'review', taskId: 'T1', reason: 'The judging run failed without a verdict: The run hit its turn limit.' }]);
+    expect(asked.attentionQueue).toEqual([expect.objectContaining({ kind: 'attention', taskId: 'T1', attention: 'failure', reason: expect.stringContaining('The run hit its turn limit.') })]);
     expect(factory.github.prState(101).state).toBe('open');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1' })).toEqual({ ok: true });
+    const retried = await nextRun(launched, 'T1', judging);
+    expect(startOf(factory, retried)).toMatchObject({ sessionId: startOf(factory, judging).sessionId, resumesSession: true, reports: ['verdict'], model: 'claude-sonnet-5-5' });
+    factory.executor.report(retried, { type: 'verdictReported', verdict: 'merge', reason: 'Fine.' });
+    factory.executor.report(retried, { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'Done');
+    expect(factory.github.prState(101).state).toBe('merged');
+  });
+
+  test('switched to full-auto while its failed judging run waits on the operator, the task goes back to its gate and merges, with no stray run', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    await operator.send(semiAuto());
+    const judging = await greenToJudging(launched, 'T1', await throughPr(launched, 'T1'));
+    factory.executor.report(judging, { type: 'runFailed', reason: 'The run hit its turn limit.' });
+    await tui.until((state) => state.attentionQueue.length === 1);
+    const runs = factory.executor.started.length;
+
+    expect(await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' })).toEqual({ ok: true });
+
+    const done = await tui.until((state) => state.tasks.T1?.label === 'Done');
+    expect(done.attentionQueue).toEqual([]);
+    expect(factory.executor.started).toHaveLength(runs);
+    expect(factory.github.prState(101).state).toBe('merged');
+  });
+
+  test('a judging run parked on its question comes back as the judging run once the operator answers', async () => {
+    const launched = await attached();
+    const { factory, operator } = launched;
+    await operator.send(semiAuto());
+    const judging = await greenToJudging(launched, 'T1', await throughPr(launched, 'T1'));
+    const question: Question = {
+      id: 'toolu_9',
+      questions: [{ question: 'Is the cookie change intended?', header: 'Cookie', options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }], multiSelect: false }],
+    };
+    factory.executor.report(judging, { type: 'attentionRaised', kind: 'question', question });
+    await launched.tui.until((state) => state.attentionQueue.length === 1);
+
+    // A restart parks the suspended run.
+    await factory.restart();
+    const answering = await factory.attach();
+    const tui = watch(answering);
+    await tui.until((state) => state.runs[judging]?.outcome === 'parked');
+    expect(await answering.send({ type: 'answer', taskId: 'T1', answers: { 'Is the cookie change intended?': 'Yes' } })).toEqual({ ok: true });
+
+    const resumed = await nextRun({ ...launched, tui }, 'T1', judging);
+    expect(startOf(factory, resumed)).toMatchObject({ sessionId: startOf(factory, judging).sessionId, resumesSession: true, reports: ['verdict'] });
+    expect(startOf(factory, resumed).firstMessage).toContain('Yes');
+    factory.executor.report(resumed, { type: 'verdictReported', verdict: 'ask', reason: 'The operator should see the cookie change.' });
+    factory.executor.report(resumed, { type: 'runCompleted' });
+    const asked = await tui.until((state) => state.tasks.T1?.label === 'In review');
+    expect(asked.tasks.T1!.sentToOperator).toBe('The operator should see the cookie change.');
+  });
+
+  test('changes requested after a merge verdict void it, even when the changes run commits nothing', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    await operator.send(semiAuto());
+    const judging = await greenToJudging(launched, 'T1', await throughPr(launched, 'T1'));
+    // The merge waits on GitHub finding the PR mergeable.
+    factory.github.setMergeable(101, 'unknown');
+    factory.executor.report(judging, { type: 'verdictReported', verdict: 'merge', reason: 'Fine.' });
+    factory.executor.report(judging, { type: 'runCompleted' });
+    await tui.until((state) => state.tasks.T1?.label === 'At merge gate' && !state.tasks.T1.liveRunId);
+
+    expect(await operator.send({ type: 'requestChanges', taskId: 'T1', comments: 'Rename the button.' })).toEqual({ ok: true });
+    const changes = await nextRun(launched, 'T1', judging);
+    factory.executor.report(changes, { type: 'runCompleted' });
+    factory.github.setMergeable(101, 'mergeable');
+    factory.clock.advance(2 * MINUTE);
+
+    // The same head is judged afresh before anything merges.
+    const again = await nextRun(launched, 'T1', changes);
+    expect(startOf(factory, again)).toMatchObject({ reports: ['verdict'], resumesSession: false });
+    expect(factory.github.prWrites).toEqual([]);
   });
 
   test('a new commit after the gate check voids it, and the check runs again once the checks are green', async () => {
