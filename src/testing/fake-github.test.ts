@@ -18,6 +18,7 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
   github.install('acme/widgets');
   github.addIssue('acme/widgets#1');
   if (!draftsOffered) github.offerNoDrafts('acme/widgets');
+  const statuses = new Map<string, Map<string, string>>();
   return {
     github,
     app,
@@ -40,6 +41,13 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
     },
     operator: github.operator,
     baseBranch: 'main',
+    // Each context's latest status counts, as on GitHub.
+    async setStatus(commit, context, state) {
+      const set = (statuses.get(commit) ?? new Map<string, string>()).set(context, state);
+      statuses.set(commit, set);
+      const states = [...set.values()];
+      github.setCommitChecks(commit, states.includes('failure') ? 'red' : states.includes('pending') ? 'pending' : 'green');
+    },
     draftsOffered,
     async pullRequest(number) {
       const { draft, head, base, title, body, assignees } = github.pullRequests.find((pr) => pr.number === number)!;

@@ -38,7 +38,7 @@ async function spinsWhileLaunching(app: { lastFrame(): string | undefined; stdin
 }
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, resolving: null, specTask: null, ticketSet: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, loop: null, launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, gate: null, resolving: null, specTask: null, ticketSet: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, loop: null, launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -213,6 +213,20 @@ describe('task rows', () => {
     await eventually(() => expect(rowOf(app, 'T1')).toMatch(/Implement the store\s+AFK L3\s+Running/));
     await press(app, '\r');
     await eventually(() => expect(app.lastFrame()).toMatch(/^AFK L3 · /m));
+  });
+
+  test('a task at its merge gate shows it on its row, and its detail shows the policy and where the gate stands', async () => {
+    const gated = { ...task('T1', 'Implement the store', 'in-review', 'At merge gate'), autonomy: 'L3' as const, mergePolicy: 'unattended' as const, gate: { checks: 'pending' as const, step: null, problem: null } };
+    const { app, connection } = await started(factoryState([gated]));
+
+    await eventually(() => expect(rowOf(app, 'T1')).toMatch(/^.\s+⧗\s+T1\s+Implement the store\s+AFK L3\s+At merge gate/));
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('merge policy full-auto: at its merge gate · checks pending'));
+
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'gate'], value: { checks: 'green', step: 'merge', problem: null } }]);
+    await eventually(() => expect(app.lastFrame()).toContain('merge policy full-auto: at its merge gate · checks green · merging its PR'));
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1'], value: { ...gated, state: 'in-review', label: 'In review', mergePolicy: 'operator', gate: null } }]);
+    await eventually(() => expect(app.lastFrame()).toMatch(/^merge policy operator$/m));
   });
 
   test('on a narrower terminal a row drops its groups first, then its extras', async () => {
@@ -1315,6 +1329,39 @@ describe('launching and conversing', () => {
     );
   });
 
+  test('the merge policy is offered only at L3, labelled operator or full-auto, defaulting to operator, and goes back to operator below L3', async () => {
+    const connection = inWidgets();
+    connection.replyTo('listPresets', { ok: true, value: presetsView });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/Start stage\s+grill · HITL · opus/));
+    await press(app, UP, RIGHT, RIGHT, DOWN, DOWN);
+    await type(app, '#12');
+    await press(app, DOWN, DOWN, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Autonomy\s+‹ L2 \(in its own container\) ›/));
+    expect(app.lastFrame()).not.toContain('Merge policy');
+    await press(app, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Merge policy\s+operator \(you merge its PR\)/));
+
+    await press(app, DOWN, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Merge policy\s+‹ full-auto \(the factory merges its PR once its checks pass\) ›/));
+    // Down to L2 and back: the policy is the operator's again.
+    await press(app, UP, LEFT);
+    await eventually(() => expect(app.lastFrame()).not.toContain('Merge policy'));
+    await press(app, RIGHT, DOWN);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Merge policy\s+‹ operator \(you merge its PR\) ›/));
+    await press(app, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('‹ full-auto'));
+    app.stdin.write('\r');
+
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', prompt: '', issues: ['#12'], autonomy: 'L3', mergePolicy: 'unattended' }),
+    );
+  });
+
   test('a preset that doesn’t resolve shows why, and a dangling default preset warns that main-flow is picked instead', async () => {
     const connection = inWidgets();
     const warning = 'The default preset of acme/widgets, nightly, no longer resolves (There is no preset nightly.), so main-flow is picked instead.';
@@ -2041,6 +2088,25 @@ describe('launching and conversing', () => {
     // The refusal is the note already shown, not said twice.
     await settle();
     expect(unwrapped(app.lastFrame()!).split(reason)).toHaveLength(2);
+  });
+
+  test('the sheet offers the merge policy at L3 alone, defaulting to operator, and sends the one picked', async () => {
+    const connection = new FakeConnection();
+    const state = { ...factoryState([{ ...onLean, handoff: { ...sheet, brief } }]), runs: { R1: run } };
+    const { app } = await started(state, { connection });
+    widen(app, 400);
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('HAND OFF T1 TO IMPLEMENT (AFK)'));
+    expect(unwrapped(app.lastFrame()!)).not.toContain('Merge policy');
+
+    // Down to the autonomy field, past the brief's lines and continue-as.
+    await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, RIGHT, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Merge policy ‹ operator (you merge its PR) ›'));
+    await press(app, DOWN, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› Merge policy ‹ full-auto (the factory merges its PR once its checks pass) ›'));
+
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toContainEqual(expect.objectContaining({ type: 'handoff', taskId: 'T1', autonomy: 'L3', mergePolicy: 'unattended' })));
   });
 
   test('ctrl+h on a HITL task in the list hands it off from its conversation, a parked one included', async () => {

@@ -8,7 +8,7 @@
 // loop (ADR 0012); child tasks arrive with their own slice.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
-import type { Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
+import type { ChecksState, Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
@@ -127,6 +127,8 @@ export type HandoffSheet = {
   stage: string | null;
   continueAs: ContinueAs;
   autonomy: AutonomyLevel;
+  // Sheets stored before merge policies have none: `operator`.
+  mergePolicy?: MergePolicy;
   tier: Tier;
   maxTurns: number;
   // The share of the context window the conversation fills, when known.
@@ -255,9 +257,26 @@ export type Findings = { found: string[]; fixPass: boolean; leftOver: string[] }
 // ticket tasks over its spec's tickets, or a ticket task working one ticket
 // into its own PR. Tasks stored before kinds are plain roots.
 export type TaskKind = 'plain' | 'spec' | 'ticket';
-// Who passes a ticket task's merge gate. v1 has one policy, the operator's:
-// the ticket task goes In review, and the operator merges its PR.
-export type MergePolicy = 'operator';
+// Who passes an AFK root task's merge gate (ADR 0013, ADR 0014): under
+// `operator` the task goes In review and the operator merges its PR; under
+// `judged` (semi-auto) the factory merges unless its gate check sends the PR
+// to the operator; under `unattended` (full-auto) the factory merges every PR
+// whose checks pass. The two agent policies need L3.
+export type MergePolicy = 'operator' | 'judged' | 'unattended';
+export const MERGE_POLICIES: readonly MergePolicy[] = ['operator', 'judged', 'unattended'];
+// Those the handoff sheet and the launch card offer: `judged` waits on its
+// gate check, which the factory can't run yet.
+export const OFFERED_POLICIES: readonly MergePolicy[] = ['operator', 'unattended'];
+// Each policy as the TUI names it: never `auto` alone, which is Claude
+// Code's permission mode.
+export const POLICY_NAMES: Record<MergePolicy, string> = { operator: 'operator', judged: 'semi-auto', unattended: 'full-auto' };
+
+// Where an agent policy's merge gate stands (ADR 0014), as the PR poll last
+// read it: the combined checks on the PR's `head`, and, once they let it
+// through, the factory's step on GitHub: marking the draft ready, then
+// merging it. `problem` is why the step last failed, until the operator
+// answers the github-write request it raised.
+export type MergeGate = { checks: ChecksState; head: string; step: 'ready' | 'merge' | null; problem: string | null };
 
 // A wayfinder task's maps the factory owes their closing (ADR 0013), as
 // its App, and why it last couldn't. `spec` is the spec written from them,
@@ -353,7 +372,11 @@ export type Task = {
   // before kinds, are plain.
   kind?: TaskKind;
   ticket?: string | null;
+  // Frozen at launch for a task starting AFK, or at its handoff (ADR 0014),
+  // and inherited by a spec task's ticket tasks.
   mergePolicy?: MergePolicy | null;
+  // Its merge gate, while it waits there under an agent policy.
+  gate?: MergeGate | null;
   // While the factory still owes the ticket of a ticket task whose PR merged
   // its closing, once GitHub left it open.
   resolving?: TicketResolution | null;
@@ -619,7 +642,7 @@ export type IntentVerb = Intent['verb'] | 'cleanup';
 export type ReplayedIntent = { taskId: string; verb: IntentVerb; outcome: 'finished' | 'rolled back' | 'resumed' };
 // A task's handoff sheet as the factory last held it, saved when a stop
 // found it unconfirmed: reopening the sheet starts from it.
-export type HandoffDraft = Pick<HandoffSheet, 'brief' | 'continueAs' | 'autonomy' | 'tier' | 'maxTurns'>;
+export type HandoffDraft = Pick<HandoffSheet, 'brief' | 'continueAs' | 'autonomy' | 'mergePolicy' | 'tier' | 'maxTurns'>;
 
 // A GitHub repository the operator registered through their own clone
 // (ADR 0010). Its settings live only here, never in the repo.
@@ -907,6 +930,8 @@ export type TaskLaunched = {
   opening: string;
   // The handoff fields, which an AFK start stage's runs take.
   autonomy: AutonomyLevel;
+  // Launches made before merge policies have none: `operator`.
+  mergePolicy?: MergePolicy;
   maxTurns: number | null;
   priority: Priority;
   // Whether it is a quick launch (`n`), whose HITL start stage is a short grill.
@@ -968,7 +993,7 @@ export type ReadinessRead = { type: 'readinessRead'; taskId: string; readiness: 
 // the spec candidates they kept selected: the one confirmed makes the task
 // a spec task over its tickets (ADR 0013), and with none it is one AFK run
 // on the brief.
-export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: number; specs?: string[] };
+export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: AutonomyLevel; mergePolicy?: MergePolicy; tier: Tier; maxTurns: number; specs?: string[] };
 
 // The operator confirmed the handoff sheet, and the daemon committed the
 // task's uncommitted files of `committed`. The daemon names a session, for
@@ -1052,8 +1077,17 @@ export type MapClosingEvent = { type: 'mapClosed'; taskId: string } | { type: 'm
 export type NoteEvent = { type: 'notesDelivered'; taskId: string };
 
 // What the daemon read of an In review root's PR on GitHub (ADR 0011):
-// where it stands, and whether GitHub finds it mergeable (ADR 0013).
-export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; mergeable: Mergeability };
+// where it stands, and whether GitHub finds it mergeable (ADR 0013); its
+// head commit, and for a root at an agent policy's merge gate the checks
+// on it (ADR 0014).
+export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; mergeable: Mergeability; head?: string; draft?: boolean; checks?: ChecksState | null };
+
+// What the daemon did on GitHub for a root its merge gate let through (ADR
+// 0014): it marked the draft PR ready, merged it, or failed a step, saying why.
+export type MergeEvent =
+  | { type: 'prMarkedReady'; taskId: string }
+  | { type: 'prMerged'; taskId: string }
+  | { type: 'mergeFailed'; taskId: string; step: NonNullable<MergeGate['step']>; reason: string };
 
 export type LifecycleAction =
   | OperatorCommand
@@ -1071,6 +1105,7 @@ export type LifecycleAction =
   | LoopEvent
   | PublishEvent
   | PrReadEvent
+  | MergeEvent
   | NoteEvent
   | ResearchEvent
   | ResolutionEvent
@@ -1195,6 +1230,41 @@ export function openRepoRequest(state: Lifecycle, repo: string): AttentionReques
 // reads (ADR 0011).
 export function waitsOnPr(task: Task): boolean {
   return task.state === 'in-review' && !!task.pr;
+}
+
+// Whether the policy is one the factory merges by: semi-auto or full-auto.
+export function agentPolicy(policy: MergePolicy | null | undefined): boolean {
+  return policy === 'judged' || policy === 'unattended';
+}
+
+// Whether the factory may merge the AFK root's PR (ADR 0014): its merge
+// policy is an agent one and it is at L3, held to the ceiling of the stage
+// it ended at, so a stage capped at L2 still forbids merging.
+export function factoryMerges(task: Task): boolean {
+  return !task.child && task.mode === 'AFK' && agentPolicy(task.mergePolicy) && atLeast(clampAutonomy(task.autonomy ?? 'L1', stageOf(task, task.stage)), 'L3');
+}
+
+// Whether the root waits at its merge gate for the factory to merge it
+// (ADR 0014): past its last stage with its PR open and published, under an
+// agent policy, rather than In review for the operator.
+export function atMergeGate(task: Task): boolean {
+  return waitsOnPr(task) && !task.publishing && factoryMerges(task);
+}
+
+// Why the operator can't act on the root while the factory merges its PR,
+// or null: a step that failed waits on them, so it isn't.
+function mergingRefusal(task: Task): string | null {
+  return task.gate?.step && !task.gate.problem && atMergeGate(task) ? `${task.id} is merging its PR: wait for it to finish.` : null;
+}
+
+// Why the merge policy can't be picked for a task at `level` (null for a
+// task starting HITL, whose policy is picked at its handoff), or null.
+export function policyRefusal(policy: MergePolicy, level: AutonomyLevel | null): string | null {
+  if (!MERGE_POLICIES.includes(policy)) return `${policy} is not a merge policy (operator, judged or unattended).`;
+  if (policy === 'operator') return null;
+  if (!OFFERED_POLICIES.includes(policy)) return `Semi-auto (${policy}) isn’t available yet: the factory can’t run its gate check. Pick operator or full-auto.`;
+  if (level === null) return `A task starting at a HITL stage picks its merge policy at its handoff.`;
+  return level === 'L3' ? null : `${POLICY_NAMES[policy]} (${policy}) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.`;
 }
 
 // The root's task branch, if the factory pushed it to GitHub: it has its
@@ -1494,8 +1564,10 @@ function advanceFrom(state: Lifecycle, task: Task, from: Stage, run: Run | undef
   // whose open-pr stage just opened or updated its PR has nothing to publish.
   const to = nextAfkStage(task, from);
   if (!to) {
-    if (from.kind === 'action' && task.pr) task.state = 'in-review';
-    else reachReview(task);
+    if (from.kind === 'action' && task.pr) {
+      task.state = 'in-review';
+      task.gate = null;
+    } else reachReview(task);
     return;
   }
   if (to.mode === 'HITL') return blocked(`The next stage, ${to.id}, is HITL: take ${task.id} over to start it.`);
@@ -2011,7 +2083,7 @@ export function label(task: Task, ready = false): string {
     case 'awaiting-children':
       return 'Waiting on children';
     case 'in-review':
-      return 'In review';
+      return atMergeGate(task) ? 'At merge gate' : 'In review';
     case 'done':
       return 'Done';
     case 'cancelled':
@@ -2076,7 +2148,8 @@ export function attentionQueue(state: Lifecycle, watched: ReadonlySet<string> = 
     const request = openRequest(state, task);
     if (showsRequest(task) && request) requests.push(request);
     if (readyForYou(state, task, watched)) ready.push({ kind: 'ready', taskId: task.id });
-    if (task.state === 'in-review') reviews.push({ kind: 'review', taskId: task.id });
+    // A root at an agent policy's merge gate is the factory's to merge.
+    if (task.state === 'in-review' && !atMergeGate(task)) reviews.push({ kind: 'review', taskId: task.id });
   }
   const failure = (request: AttentionRequest) => Number(request.kind === 'failure');
   requests.sort((a, b) => failure(b) - failure(a) || a.raisedAt - b.raisedAt);
@@ -2128,8 +2201,14 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
       if (state.repositories[action.repo]!.missing) return `${action.repo} is missing, so its runs can’t start.`;
       // The level counts only for a task starting AFK, at a stage its preset names once resolved.
-      if (action.preset?.stages.find(({ id }) => id === action.stage)?.mode === 'AFK') {
+      const startsAfk = action.preset?.stages.find(({ id }) => id === action.stage)?.mode === 'AFK';
+      if (startsAfk) {
         const refused = levelRefused(state, action.repo, action.autonomy);
+        if (refused) return refused;
+      }
+      // Frozen only on a task starting AFK; one starting HITL picks it at its handoff.
+      if (action.mergePolicy !== undefined) {
+        const refused = policyRefusal(action.mergePolicy, startsAfk || !action.preset ? action.autonomy : null);
         if (refused) return refused;
       }
       if (action.quick && action.preset && action.preset.stages.find(({ id }) => id === action.stage)?.mode !== 'HITL') {
@@ -2179,7 +2258,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!tidyBrief(action.brief).goal) return 'The brief needs a goal.';
       if (!CONTINUE_AS.includes(action.continueAs)) return 'Continue as resume, or fresh from the brief.';
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
-      const refused = levelRefused(state, task.repo, action.autonomy);
+      const refused = levelRefused(state, task.repo, action.autonomy) ?? policyRefusal(action.mergePolicy ?? 'operator', action.autonomy);
       if (refused) return refused;
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       if (!(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) return 'Max turns must be a whole number of at least 1.';
@@ -2222,10 +2301,11 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
       return (
         publishingRefusal(task) ??
+        mergingRefusal(task) ??
         (typeof action.comments === 'string' && action.comments.trim() ? null : 'Request changes needs your review comments: say what to change.')
       );
     case 'markDone':
-      return task.state === 'in-review' ? publishingRefusal(task) : `${task.id} is not in review.`;
+      return task.state === 'in-review' ? (publishingRefusal(task) ?? mergingRefusal(task)) : `${task.id} is not in review.`;
     case 'pushAndOpenPr':
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
       if (publishesCode(task.autonomy)) return `${task.id} is at ${task.autonomy}, where the factory opens its draft PR itself.`;
@@ -2239,10 +2319,17 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return openRequest(state, task)?.kind === 'pr-closed-unmerged' ? null : `${task.id}’s PR isn’t closed unmerged.`;
     case 'prRead':
       if (!waitsOnPr(task)) return `${task.id} isn’t in review with a PR.`;
-      return publishingRefusal(task);
+      return publishingRefusal(task) ?? mergingRefusal(task);
+    case 'prMarkedReady':
+    case 'prMerged':
+    case 'mergeFailed': {
+      const step = action.type === 'mergeFailed' ? action.step : action.type === 'prMarkedReady' ? 'ready' : 'merge';
+      return atMergeGate(task) && task.gate?.step === step ? null : `${task.id} isn’t at its merge gate’s ${step} step.`;
+    }
     case 'cancel':
       if (action.branch !== undefined && !BRANCH_CHOICES.includes(action.branch)) return 'Keep the branch, or discard the work.';
-      return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
+      if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
+      return mergingRefusal(task);
     case 'retier':
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
@@ -2412,6 +2499,32 @@ function finishRoot(task: Task, request: AttentionRequest | undefined, { merged 
   if (task.worktree) task.cleanup = { problem: null, remote: merged && pushed ? { branch: pushed, prToClose: null } : null };
 }
 
+// The root's PR merged, by the operator or the factory: the root is Done
+// (ADR 0011), whatever was left to ask. A ticket task's ticket closes with
+// it: the factory closes it if GitHub left it open (ADR 0013).
+function prMerged(state: Lifecycle, task: Task, request: AttentionRequest | undefined): void {
+  finishRoot(task, request, { merged: true });
+  task.gate = null;
+  if (task.kind === 'ticket' && task.ticket) task.resolving = { problem: null };
+  oweTicketSetRead(state, task);
+}
+
+// The PR poll read the open PR of a root at its merge gate (ADR 0014): its
+// gate takes the checks on its head, and once they are green, or the repo
+// runs none, and GitHub finds it mergeable, the factory merges it, marking
+// the draft ready first. Pending checks wait for the next read, and so do
+// red ones. A merge already under way is left to finish.
+function readGate(task: Task, read: PrReadEvent, request: AttentionRequest | undefined): void {
+  if (!atMergeGate(task) || task.gate?.step) return;
+  if (!read.checks || !read.head) {
+    task.gate = null;
+    return;
+  }
+  const passes = (read.checks === 'green' || read.checks === 'none') && read.mergeable === 'mergeable' && !request;
+  if (read.draft !== undefined) task.pr!.draft = read.draft;
+  task.gate = { checks: read.checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem: null };
+}
+
 // What a pr-closed-unmerged request tells the operator.
 function prClosedReason(task: Task): string {
   return `PR #${task.pr!.number} of ${task.id} was closed without merging. Cancel the task, or reopen the PR.`;
@@ -2434,8 +2547,11 @@ function failPublishing(state: Lifecycle, task: Task, request: AttentionRequest 
 // task publishes at any level, HITL included (ADR 0010): it first commits
 // the setup files its runs left, and opens no PR when its branch then has
 // nothing the base branch lacks.
+// A root whose merge policy is an agent one waits at its merge gate instead,
+// once its PR is published (ADR 0014): its gate is read afresh.
 function reachReview(task: Task): void {
   task.state = 'in-review';
+  task.gate = null;
   if (task.child || !task.worktree) return;
   if (isSetupTask(task)) task.publishing = { step: 'commit', problem: null };
   else if (publishesCode(task.autonomy) && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
@@ -2840,6 +2956,7 @@ function newHandoffSheet(state: Lifecycle, task: Task, readiness: Readiness): Ha
     continueAs: share !== null && share > FRESH_AT ? 'fresh' : 'resume',
     // A ticket task's handoff starts at the level its spec task was handed off at.
     autonomy: (task.kind === 'ticket' && task.specTask && state.tasks[task.specTask]?.autonomy) || 'L1',
+    mergePolicy: 'operator',
     tier: task.operatorTier ?? task.inputs?.tier ?? stage?.model ?? DEFAULT_TIER,
     maxTurns: task.maxTurns ?? stage?.max_turns ?? DEFAULT_MAX_TURNS,
     contextShare: share,
@@ -3014,8 +3131,8 @@ function reconcile(state: Lifecycle, interruption: Interruption, replayed: Repla
   // intent has just been replayed. It is saved as a draft the next opens from.
   for (const task of Object.values(state.tasks)) {
     if (!task.handoff) continue;
-    const { brief, continueAs, autonomy, tier, maxTurns } = task.handoff;
-    task.handoffDraft = structuredClone({ brief, continueAs, autonomy, tier, maxTurns });
+    const { brief, continueAs, autonomy, mergePolicy, tier, maxTurns } = task.handoff;
+    task.handoffDraft = structuredClone({ brief, continueAs, autonomy, mergePolicy, tier, maxTurns });
     task.handoff = null;
   }
   // An unclean start that finds a task with no active run ends its crash loop.
@@ -3111,8 +3228,10 @@ function foundText({ containers, worktrees }: Found): string {
 // Whether a conflicting PR queues an update run on the root: an AFK ticket
 // task's, unless one was queued since its PR was last found mergeable. A
 // HITL one's work stays the operator's (ADR 0004).
+// So does a root the factory merges at its gate (ADR 0014), which can't
+// merge while it conflicts.
 export function updatesOnConflict(task: Task): boolean {
-  return task.kind === 'ticket' && task.mode === 'AFK' && !task.conflicted;
+  return (task.kind === 'ticket' || factoryMerges(task)) && task.mode === 'AFK' && !task.conflicted;
 }
 
 // What the update run on a ticket task's conflicting PR opens on.
@@ -3122,7 +3241,7 @@ function updateOpening(state: Lifecycle, task: Task): string {
     `GitHub finds PR #${task.pr!.number} of ${task.id} conflicting with ${base}, which moved on since its branch was cut. ` +
     `Unattended, merge \`origin/${base}\` into the task branch ${task.worktree!.branch} (merge, never rebase: the factory fetched it for you), ` +
     'resolve the conflicts, check the merged work still builds and passes its tests, and commit the merge. ' +
-    'The task goes back to the operator’s review once your run ends. If you can’t resolve them, leave the merge unfinished and end your run: ' +
+    `The task goes back to ${factoryMerges(task) ? 'its merge gate' : 'the operator’s review'} once your run ends. If you can’t resolve them, leave the merge unfinished and end your run: ` +
     'the factory fails it and asks the operator.'
   );
 }
@@ -3337,11 +3456,12 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const launched: Task = {
         id: nextId(state, 'task'),
         title: action.title,
-        ...(ticket && { kind: 'ticket' as const, ticket, mergePolicy: 'operator' as const }),
+        // Frozen for a task starting AFK (ADR 0014); one starting HITL picks it at its handoff.
+        ...(mode === 'AFK' && { mergePolicy: action.mergePolicy ?? 'operator' }),
+        ...(ticket && { kind: 'ticket' as const, ticket }),
         // A spec task reads its tickets from GitHub first (ADR 0013).
         ...(specSet && {
           kind: 'spec' as const,
-          mergePolicy: 'operator' as const,
           ticketSet: { spec: specSet.spec, tickets: [...specSet.tickets], reading: true, issues: [], toLaunch: [], launched: {}, problem: null },
         }),
         launchSummary: action.launchSummary?.trim() || null,
@@ -3454,6 +3574,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.handoffDraft = null;
       task.mode = 'AFK';
       task.autonomy = action.autonomy;
+      task.mergePolicy = action.mergePolicy ?? 'operator';
       // What the operator changed on the sheet holds for every later stage too.
       if (action.tier !== sheet.tier) task.operatorTier = action.tier;
       if (action.maxTurns !== sheet.maxTurns) task.maxTurns = action.maxTurns;
@@ -3470,7 +3591,6 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (to && confirmed) {
         task.stage = to.id;
         task.kind = 'spec';
-        task.mergePolicy = 'operator';
         task.ticketSet = { spec: confirmed.spec, tickets: confirmed.tickets.map(({ ref }) => ref), reading: true, issues: [], toLaunch: [], launched: {}, problem: null };
         task.loop = null;
         task.resumeWith = null;
@@ -3534,9 +3654,11 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         if (task.child?.research) task.child.research.problem = null;
         break;
       }
-      // The daemon tries the failed step of its Push & open draft PR again; the root stays In review.
+      // The daemon tries the failed step of its Push & open draft PR, or of
+      // its merge, again; the root stays In review, or at its merge gate.
       if (task.state === 'in-review') {
         if (task.publishing) task.publishing.problem = null;
+        if (task.gate?.problem) task.gate.problem = null;
         break;
       }
       // A spec task left with skipped tickets goes as the operator chose.
@@ -3601,12 +3723,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'prRead': {
       const asked = request?.kind === 'pr-closed-unmerged';
       if (action.state === 'merged') {
-        // Merged, the root is Done (ADR 0011), whatever was left to ask.
-        // A ticket task's ticket closes with it: the factory closes it if
-        // GitHub left it open (ADR 0013).
-        finishRoot(task, request, { merged: true });
-        if (task.kind === 'ticket' && task.ticket) task.resolving = { problem: null };
-        oweTicketSetRead(state, task);
+        prMerged(state, task, request);
       } else if (action.state === 'closed' && !asked) {
         // A failed push to the closed PR has nothing left to update: the
         // closed PR asks instead. Never cancelled on the factory's own say.
@@ -3624,7 +3741,22 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
           task.resumeWith = updateOpening(state, task);
           task.state = 'queued';
         }
+        if (task.state === 'in-review') readGate(task, action, request);
       }
+      break;
+    }
+    case 'prMarkedReady':
+      task.pr!.draft = false;
+      task.gate!.step = 'merge';
+      break;
+    case 'prMerged':
+      prMerged(state, task, request);
+      break;
+    case 'mergeFailed': {
+      // Retried once the operator answers, as a failed publishing step is.
+      const what = action.step === 'ready' ? `mark ${task.id}’s PR #${task.pr!.number} ready` : `merge ${task.id}’s PR #${task.pr!.number}`;
+      task.gate!.problem = `The factory couldn’t ${what} on GitHub as its App: ${action.reason} Fix it, then answer to try again.`;
+      if (!request) addRequest(state, task, lastRun(state, task), 'github-write', false, task.gate!.problem, at);
       break;
     }
     case 'reopenPr':
@@ -4113,8 +4245,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // A handoff rolled back keeps what the operator confirmed on its
       // sheet, which a stop saves as the draft.
       if (intent.verb === 'handoff' && task.handoff) {
-        const { brief, continueAs, autonomy, tier, maxTurns } = intent.handoff;
-        Object.assign(task.handoff, structuredClone({ brief, continueAs, autonomy, tier, maxTurns }));
+        const { brief, continueAs, autonomy, mergePolicy = 'operator', tier, maxTurns } = intent.handoff;
+        Object.assign(task.handoff, structuredClone({ brief, continueAs, autonomy, mergePolicy, tier, maxTurns }));
       }
       delete state.intents[action.intentId];
       break;

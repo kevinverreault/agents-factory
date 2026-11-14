@@ -2,6 +2,7 @@
 // subscriber gets one snapshot, then patches that turn its copy into the
 // daemon's current state.
 import {
+  atMergeGate,
   attentionQueue,
   heldSlots,
   keepsAwake,
@@ -23,6 +24,7 @@ import {
   type HandoffSheet,
   type HandoffTicketSets,
   type Lifecycle,
+  type MergeGate,
   type MergePolicy,
   type Mode,
   type Priority,
@@ -58,11 +60,16 @@ export type TaskView = {
   // Its descendants' counts, and their failures waiting on the operator.
   rollup: Rollup | null;
   // What kind of task it is (ADR 0013), plain for children and roots that
-  // are neither a spec task nor a ticket task: for a ticket task, its
-  // ticket and the merge policy its merge gate goes by.
+  // are neither a spec task nor a ticket task, and for a ticket task its
+  // ticket. The merge policy its merge gate goes by, frozen once it went
+  // AFK (ADR 0014).
   kind: TaskKind;
   ticket: string | null;
   mergePolicy: MergePolicy | null;
+  // While it waits at an agent policy's merge gate: the checks on its PR's
+  // head as last read (null until read), the factory's step merging it, and
+  // why that step last failed.
+  gate: GateView | null;
   // While the factory still owes a merged ticket task's ticket its closing,
   // and why it last couldn't.
   resolving: TicketResolution | null;
@@ -120,6 +127,8 @@ export type TaskView = {
   // Where its transcripts were archived once it ended.
   transcripts: string | null;
 };
+
+export type GateView = { checks: MergeGate['checks'] | null; step: MergeGate['step']; problem: string | null };
 
 export type HandoffView = Omit<HandoffSheet, 'asked' | 'ticketSets'> & { ticketSets: HandoffTicketSets | null };
 
@@ -186,6 +195,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       kind: task.kind ?? 'plain',
       ticket: task.ticket ?? null,
       mergePolicy: task.mergePolicy ?? null,
+      gate: atMergeGate(task) ? { checks: task.gate?.checks ?? null, step: task.gate?.step ?? null, problem: task.gate?.problem ?? null } : null,
       resolving: task.resolving ? { ...task.resolving } : null,
       specTask: task.specTask ?? null,
       ticketSet: task.ticketSet ? ticketSetView(lifecycle, task.ticketSet) : null,

@@ -1,7 +1,7 @@
 // The GitHub port's contract, shared by the fake and the REST adapter so the
 // two can't drift apart.
 import { describe, expect, test } from 'vitest';
-import { GitHubError, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub, type Permissions, type PrStatus } from './github.ts';
+import { CHECKS_READ, GitHubError, MERGE, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub, type Permissions, type PrStatus } from './github.ts';
 
 export type GitHubFixture = {
   github: GitHub;
@@ -25,6 +25,9 @@ export type GitHubFixture = {
   // Whether GitHub offers draft PRs on the installed repository: not on a
   // private one under GitHub Free.
   draftsOffered: boolean;
+  // Someone's CI sets a commit status named `context` on `commit` of the
+  // installed repository, as the operator's own credentials can.
+  setStatus(commit: string, context: string, state: 'pending' | 'success' | 'failure'): Promise<void>;
   // A PR of the installed repository as GitHub has it.
   pullRequest(number: number): Promise<{ draft: boolean; head: string; base: string; title: string; body: string; assignees: string[] }>;
 };
@@ -290,10 +293,69 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const conflicting = await github.openDraftPr(open, pr(second, first));
       const read = (await github.mintToken(app, installedRepo, READ_ONLY)).token;
 
-      expect(await workedOut(() => github.readPr(read, `${installedRepo}#${clean.number}`))).toEqual({ state: 'open', mergeable: 'mergeable' });
-      expect(await workedOut(() => github.readPr(read, `${installedRepo}#${conflicting.number}`))).toEqual({ state: 'open', mergeable: 'conflicting' });
+      expect(await workedOut(() => github.readPr(read, `${installedRepo}#${clean.number}`))).toMatchObject({ state: 'open', mergeable: 'mergeable' });
+      expect(await workedOut(() => github.readPr(read, `${installedRepo}#${conflicting.number}`))).toMatchObject({ state: 'open', mergeable: 'conflicting' });
       const write = (await github.mintToken(app, installedRepo, PR_WRITE)).token;
       for (const { number } of [conflicting, clean]) await github.closePr(write, `${installedRepo}#${number}`, 'Closed by the contract test.');
+    });
+
+    test('a read-only token reads a PR’s head commit and whether it is a draft', async () => {
+      const { github, app, installedRepo, clone, operator, baseBranch, draftsOffered } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Read by the contract test.\n' });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test PR', body: '', assignee: operator };
+      const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
+
+      expect(await github.readPr((await github.mintToken(app, installedRepo, READ_ONLY)).token, `${installedRepo}#${number}`)).toMatchObject({ head: tip, draft: draftsOffered });
+      await github.closePr((await github.mintToken(app, installedRepo, PR_WRITE)).token, `${installedRepo}#${number}`, 'Closed by the contract test.');
+    });
+
+    test('a checks token reads the combined checks of a commit: none, then pending, red or green as its statuses go, while a read-only token can’t', async () => {
+      const { github, app, installedRepo, clone, setStatus } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Checked by the contract test.\n' });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      const { token } = await github.mintToken(app, installedRepo, CHECKS_READ);
+
+      // The throwaway repository runs no workflow on a contract branch.
+      expect(await github.readChecks(token, installedRepo, tip)).toBe('none');
+      await setStatus(tip, 'contract/build', 'pending');
+      expect(await github.readChecks(token, installedRepo, tip)).toBe('pending');
+      await setStatus(tip, 'contract/build', 'success');
+      expect(await github.readChecks(token, installedRepo, tip)).toBe('green');
+      await setStatus(tip, 'contract/lint', 'failure');
+      expect(await github.readChecks(token, installedRepo, tip)).toBe('red');
+      await expect(github.readChecks((await github.mintToken(app, installedRepo, READ_ONLY)).token, installedRepo, tip)).rejects.toThrow(GitHubError);
+    });
+
+    test('a PR-writing token marks a draft ready, and marking it again is no error; a merge token merges it with a merge commit, but not while a draft, nor once its head moved', async () => {
+      const { github, app, installedRepo, clone, operator, baseBranch, draftsOffered } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Merged by the contract test.\n' });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test merge', body: 'Merged by the contract test.', assignee: operator };
+      const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
+      const ref = `${installedRepo}#${number}`;
+      const read = (await github.mintToken(app, installedRepo, READ_ONLY)).token;
+      const merge = (await github.mintToken(app, installedRepo, MERGE)).token;
+      await workedOut(() => github.readPr(read, ref));
+
+      if (draftsOffered) await expect(github.mergePr(merge, ref, { method: 'merge', head: tip })).rejects.toThrow(GitHubError);
+      await expect(github.markReady(read, ref)).rejects.toThrow(GitHubError);
+      const write = (await github.mintToken(app, installedRepo, PR_WRITE)).token;
+      await github.markReady(write, ref);
+      await github.markReady(write, ref);
+      expect((await github.readPr(read, ref)).draft).toBe(false);
+
+      await expect(github.mergePr(write, ref, { method: 'merge', head: tip })).rejects.toThrow(GitHubError);
+      await expect(github.mergePr(merge, ref, { method: 'merge', head: 'f'.repeat(40) })).rejects.toThrow(GitHubError);
+      expect((await github.readPr(read, ref)).state).toBe('open');
+
+      await github.mergePr(merge, ref, { method: 'merge', head: tip });
+      expect((await github.readPr(read, ref)).state).toBe('merged');
+      // Merged already, it is no error.
+      await github.mergePr(merge, ref, { method: 'merge', head: tip });
     });
 
     test('a PR whose head branch GitHub no longer has can’t be reopened, and says why', async () => {

@@ -4,7 +4,8 @@
 // permissions, and mints installation tokens narrowed to one repository and
 // the permissions asked for. With such a token it reads specs, maps and
 // their tickets, closes them (ADR 0013), pushes task branches, and opens
-// their draft PRs, reads those PRs, closes or reopens them, and deletes the
+// their draft PRs, reads those PRs and the checks on their heads, closes or
+// reopens them, marks them ready and merges them (ADR 0014), and deletes the
 // task branches it pushed (ADR 0011). The REST adapter (`gitHubApi`) is the real one.
 import { execFile } from 'node:child_process';
 import { sign } from 'node:crypto';
@@ -32,6 +33,14 @@ export const PUSH: Permissions = { contents: 'write', metadata: 'read' };
 // Contents read, without which GitHub can't read the branches ("not all refs
 // are readable").
 export const OPEN_PR: Permissions = { contents: 'read', pull_requests: 'write', metadata: 'read' };
+
+// What reading a PR's checks reads with: its head's check runs and commit
+// statuses alone (ADR 0014).
+export const CHECKS_READ: Permissions = { checks: 'read', statuses: 'read', metadata: 'read' };
+
+// What merging a PR writes with: GitHub writes the merge commit to the base
+// branch, so it needs Contents write besides Pull requests write.
+export const MERGE: Permissions = { contents: 'write', pull_requests: 'write', metadata: 'read' };
 
 export type InstallationToken = { token: string; expiresAt: number };
 
@@ -61,8 +70,21 @@ export type PrState = 'open' | 'merged' | 'closed';
 // it, or unknown while it is still working that out after a push (ADR 0013),
 // as it may stay for a PR that isn't open.
 export type Mergeability = 'mergeable' | 'conflicting' | 'unknown';
-// What a read of a PR says of it.
-export type PrStatus = { state: PrState; mergeable: Mergeability };
+// What a read of a PR says of it: also its head commit, which its checks
+// ran on, and whether it is a draft.
+export type PrStatus = { state: PrState; mergeable: Mergeability; head: string; draft: boolean };
+
+// The combined state of the check runs and commit statuses on a commit
+// (ADR 0014): green once every one passed, red once any failed, pending
+// while any hasn't finished, and none when the repository runs none.
+export type ChecksState = 'green' | 'red' | 'pending' | 'none';
+
+// How the factory merges a PR: with a merge commit by default, which keeps
+// the bot's commits and the operator's HITL commits apart (ADR 0004).
+export type MergeMethod = 'merge' | 'squash' | 'rebase';
+// The merge of a PR: by `method`, and only while its head is still `head`,
+// the commit whose checks let it through.
+export type PrMerge = { method: MergeMethod; head: string };
 
 // A draft PR the factory opens (ADR 0004): of the pushed task branch `head`
 // into `base`, assigned to `assignee`, the operator.
@@ -111,6 +133,17 @@ export interface GitHub {
   // Where the PR `ref` (`owner/name#n`) stands, and whether it is
   // mergeable, read with `token`, which needs Pull requests read (ADR 0011).
   readPr(token: string, ref: string): Promise<PrStatus>;
+  // The combined state of the checks on the commit `head` of the repository
+  // `repo`, read with `token`, which needs Checks and Statuses read.
+  readChecks(token: string, repo: string, head: string): Promise<ChecksState>;
+  // Marks the draft PR `ref` ready for review, with `token`, which needs
+  // Pull requests write. A PR already ready is left as it is.
+  markReady(token: string, ref: string): Promise<void>;
+  // Merges the open PR `ref` into its base, with `token`, which needs
+  // Contents and Pull requests write. A PR already merged is merged already.
+  // Throws a `GitHubError` when GitHub refuses it: a draft, a conflict, or
+  // a head that moved past `merge.head`.
+  mergePr(token: string, ref: string, merge: PrMerge): Promise<void>;
   // Comments `comment` on the open PR, then closes it, with `token`, which
   // needs Pull requests write. A PR already closed or merged is left as it is.
   closePr(token: string, ref: string, comment: string): Promise<void>;
@@ -329,7 +362,40 @@ export function gitHubApi(): GitHub {
     },
     async readPr(token, ref) {
       const pr = await pullRequest(token, ref);
-      return { state: stateOf(pr), mergeable: mergeabilityOf(pr) };
+      return { state: stateOf(pr), mergeable: mergeabilityOf(pr), head: String(pr.head.sha), draft: pr.draft === true };
+    },
+    async readChecks(token, repo, head) {
+      const runs: any[] = [];
+      for (let page = 1; ; page++) {
+        const reply = await call('GET', `/repos/${repo}/commits/${head}/check-runs?per_page=100&page=${page}`, token);
+        if (reply.status !== 200) throw refused(`read the check runs of ${head} in ${repo}`, reply);
+        runs.push(...reply.json.check_runs);
+        if (reply.json.check_runs.length < 100) break;
+      }
+      const status = await call('GET', `/repos/${repo}/commits/${head}/status?per_page=100`, token);
+      if (status.status !== 200) throw refused(`read the commit statuses of ${head} in ${repo}`, status);
+      return combinedChecks(
+        runs.map((run) => (run.status === 'completed' ? (PASSED.includes(run.conclusion) ? 'green' : 'red') : 'pending')),
+        (status.json.statuses as { state: string }[]).map(({ state }) => (state === 'success' ? 'green' : state === 'pending' ? 'pending' : 'red')),
+      );
+    },
+    async markReady(token, ref) {
+      const pr = await pullRequest(token, ref);
+      if (pr.draft !== true) return;
+      // REST has no way to leave draft: GraphQL's mutation does.
+      const reply = await call('POST', '/graphql', token, {
+        query: 'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }',
+        variables: { id: pr.node_id },
+      });
+      const errors = (reply.json?.errors as { message: string }[] | undefined) ?? [];
+      if (reply.status !== 200 || errors.length) {
+        throw new GitHubError(`GitHub refused to mark ${ref} ready (HTTP ${reply.status}${errors.length ? `: ${errors.map(({ message }) => message).join(': ')}` : ''}).`);
+      }
+    },
+    async mergePr(token, ref, { method, head }) {
+      if (stateOf(await pullRequest(token, ref)) === 'merged') return;
+      const reply = await call('PUT', `${pullPath(ref)}/merge`, token, { merge_method: method, sha: head });
+      if (reply.status !== 200) throw refused(`merge ${ref}`, reply);
     },
     async closePr(token, ref, comment) {
       if (stateOf(await pullRequest(token, ref)) !== 'open') return;
@@ -421,6 +487,20 @@ function stateOf(pr: { merged: boolean; state: string }): PrState {
 // null until it has.
 function mergeabilityOf(pr: { mergeable?: boolean | null }): Mergeability {
   return pr.mergeable === true ? 'mergeable' : pr.mergeable === false ? 'conflicting' : 'unknown';
+}
+
+// The conclusions of a finished check run that let a PR through: skipped
+// and neutral ones count as passing, as GitHub's own merge box counts them.
+const PASSED = ['success', 'neutral', 'skipped'];
+
+// The combined state of a commit's check runs and commit statuses, each
+// already read as green, red or pending: any red is red, else any pending
+// is pending, else green, and with none at all, none.
+export function combinedChecks(...each: ChecksState[][]): ChecksState {
+  const all = each.flat();
+  if (all.length === 0) return 'none';
+  if (all.includes('red')) return 'red';
+  return all.includes('pending') ? 'pending' : 'green';
 }
 
 // The REST path of a PR `owner/name#n`.

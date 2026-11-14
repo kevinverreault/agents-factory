@@ -74,6 +74,8 @@ const LOOKS: Record<string, [string, Role]> = {
   Running: ['●', 'ok'],
   'Needs you': ['!', 'warn'],
   'In review': ['◎', 'review'],
+  // A root the factory merges once its checks pass (ADR 0014).
+  'At merge gate': ['⧗', 'review'],
   'Ready for you': ['◆', 'accent'],
   'In conversation': ['◇', 'accent'],
   Queued: ['⋯', 'dim'],

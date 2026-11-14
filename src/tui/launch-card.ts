@@ -1,7 +1,7 @@
 // The launch card (`N`): the repository, workflow preset, start stage, launch
 // inputs, groups and model tier a task launches with, and for an AFK start
 // stage the handoff fields: autonomy level (L2 runs in the task's own
-// container), max turns and priority. The
+// container), at L3 the merge policy (ADR 0014), max turns and priority. The
 // daemon resolves and freezes the preset; the card offers what it lists for
 // the repository. Where the factory's App isn't installed, a preset with
 // AFK stages shows why its launch is blocked, and `ctrl+o` opens the
@@ -9,7 +9,7 @@
 // and `ctrl+e` opens it in the operator's own editor.
 import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useApp, useInput, usePaste, type Key } from 'ink';
-import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, l3Refusal, PRIORITIES, type AutonomyLevel, type Priority } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, l3Refusal, OFFERED_POLICIES, POLICY_NAMES, PRIORITIES, type AutonomyLevel, type MergePolicy, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
 import type { Edited } from '../os/edit-externally.ts';
 import { appBlock, lackingInputs, type PresetChoice, type StartStage } from '../presets/presets.ts';
@@ -35,13 +35,13 @@ type Props = {
   editText(text: string): Promise<Edited>;
 };
 
-type Field = 'repo' | 'preset' | 'stage' | 'prompt' | 'issues' | 'groups' | 'autonomy' | 'tier' | 'maxTurns' | 'priority';
+type Field = 'repo' | 'preset' | 'stage' | 'prompt' | 'issues' | 'groups' | 'autonomy' | 'mergePolicy' | 'tier' | 'maxTurns' | 'priority';
 // The fields typed in, rather than chosen from.
 type TypedField = 'prompt' | 'issues' | 'groups' | 'maxTurns';
 const isTyped = (field: Field): field is TypedField => field === 'prompt' || field === 'issues' || field === 'groups' || field === 'maxTurns';
 // What the operator picked and typed. A null choice is the default: the
 // repository's preset, the preset's first start stage, the stage's tier,
-// L1, normal priority. Empty max turns are the stage's. The caret is in the
+// L1, the operator policy, normal priority. Empty max turns are the stage's. The caret is in the
 // field typed into, back at its end on another.
 type Draft = {
   field: Field;
@@ -51,6 +51,7 @@ type Draft = {
   stage: string | null;
   tier: Tier | null;
   autonomy: AutonomyLevel | null;
+  mergePolicy: MergePolicy | null;
   priority: Priority | null;
   prompt: string;
   issues: string;
@@ -88,6 +89,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     stage: null,
     tier: null,
     autonomy: null,
+    mergePolicy: null,
     priority: null,
     prompt: '',
     issues: '',
@@ -237,6 +239,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     row('groups', 'Groups', draft.groups, false),
     afk ? row('autonomy', 'Autonomy', autonomyText(draft.autonomy ?? 'L1')) : null,
     refusedL3 ? note('l3', refusedL3.reason, 'bad') : null,
+    card.fields.includes('mergePolicy') ? row('mergePolicy', 'Merge policy', policyText(draft.mergePolicy ?? 'operator')) : null,
     row('tier', 'Model tier', draft.tier ?? `stage default${start ? ` (${start.model ?? DEFAULT_TIER})` : ''}`),
     afk
       ? row(
@@ -276,6 +279,8 @@ function cardOf(draft: Draft, listing: Listing | undefined): Card {
   if (start?.needs.includes('issues')) fields.push('issues');
   fields.push('groups');
   if (start?.mode === 'AFK') fields.push('autonomy');
+  // Only L3 lets the factory merge, so only L3 offers a policy that does.
+  if (start?.mode === 'AFK' && draft.autonomy === 'L3') fields.push('mergePolicy');
   fields.push('tier');
   if (start?.mode === 'AFK') fields.push('maxTurns', 'priority');
   return { listing, choice, start, presets, starts, fields };
@@ -328,8 +333,13 @@ function step(draft: Draft, card: Card, repositories: string[], input: string, k
         return { ...draft, stage: cycle(card.starts.map(({ id }) => id), card.start?.id ?? null, by) };
       case 'tier':
         return { ...draft, tier: cycle([null, ...TIERS], draft.tier, by) };
-      case 'autonomy':
-        return { ...draft, autonomy: cycle(AUTONOMY_LEVELS, draft.autonomy ?? 'L1', by) };
+      case 'autonomy': {
+        // Below L3 the policy is the operator's again.
+        const autonomy = cycle(AUTONOMY_LEVELS, draft.autonomy ?? 'L1', by);
+        return { ...draft, autonomy, mergePolicy: autonomy === 'L3' ? draft.mergePolicy : null };
+      }
+      case 'mergePolicy':
+        return { ...draft, mergePolicy: cycle(OFFERED_POLICIES, draft.mergePolicy ?? 'operator', by) };
       case 'priority':
         return { ...draft, priority: cycle(PRIORITIES, draft.priority ?? 'normal', by) };
       default:
@@ -367,6 +377,7 @@ function launchCommand(draft: Draft, card: Card): LaunchCommand | null {
     ...(groups.length > 0 && { groups }),
     ...(draft.tier && { tier: draft.tier }),
     ...(afk && draft.autonomy && { autonomy: draft.autonomy }),
+    ...(card.fields.includes('mergePolicy') && draft.mergePolicy && { mergePolicy: draft.mergePolicy }),
     ...(afk && draft.maxTurns && { maxTurns: Number(draft.maxTurns) }),
     ...(afk && draft.priority && { priority: draft.priority }),
   };
@@ -383,6 +394,18 @@ const AUTONOMY_TEXT: Record<AutonomyLevel, string> = {
   L1: 'L1 (on this machine)',
   L2: 'L2 (in its own container)',
   L3: 'L3 (in its own container; the factory may merge)',
+};
+
+// A merge policy as the card, the handoff sheet and task detail show it:
+// its TUI name, and who merges the task's PR (ADR 0014).
+export function policyText(policy: MergePolicy): string {
+  return `${POLICY_NAMES[policy]} (${POLICY_TEXT[policy]})`;
+}
+
+const POLICY_TEXT: Record<MergePolicy, string> = {
+  operator: 'you merge its PR',
+  judged: 'the factory merges unless it judges the PR worth your review',
+  unattended: 'the factory merges its PR once its checks pass',
 };
 
 function words(text: string): string[] {

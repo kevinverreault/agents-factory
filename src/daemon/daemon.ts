@@ -11,8 +11,10 @@ import { ArchiveError, type ConversationEvent, type Delegation, type DelegationR
 import { DELETION_ORDER, listedLeftovers, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
 import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
+  CHECKS_READ,
   GitHubError,
   installationSettings,
+  MERGE,
   OPEN_PR,
   PR_WRITE,
   PUSH,
@@ -55,6 +57,8 @@ import {
   pushedBranch,
   runsContained,
   l3RefusalText,
+  atMergeGate,
+  policyRefusal,
   reduce,
   rootOf,
   runReports,
@@ -77,6 +81,7 @@ import {
   type Intent,
   type LoopEvent,
   type PermissionAnswer,
+  type MergeEvent,
   type PrReadEvent,
   type PublishEvent,
   type ResearchEvent,
@@ -282,6 +287,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // tried again once the operator answers, or by the next daemon.
   const publishesStarted = new Set<string>();
   const publishesInFlight = new Set<string>();
+  // The merge gates' steps on GitHub (ADR 0014), as `<task> <step>`, this
+  // daemon has started, and those still under way. One that failed is tried
+  // again once the operator answers.
+  const mergesStarted = new Set<string>();
+  const mergesInFlight = new Set<string>();
   // The research children's steps on GitHub this daemon has started, and
   // those still under way, as `<task> <step>`. One that failed is tried
   // again once the operator answers, or by the next daemon.
@@ -759,6 +769,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         stage: '',
         opening: '',
         autonomy: command.autonomy ?? 'L1',
+        ...(command.mergePolicy !== undefined && { mergePolicy: command.mergePolicy }),
         maxTurns: command.maxTurns ?? null,
         priority: command.priority ?? 'normal',
         quick: command.quick === true,
@@ -787,6 +798,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if ('error' in resolved) return { ok: false, reason: resolved.error };
       const start = planStart(resolved.preset, command.stage, action);
       if ('error' in start) return { ok: false, reason: start.error };
+      // A merge policy is frozen on a task starting AFK alone (ADR 0014).
+      const refusedPolicy = policyRefusal(action.mergePolicy ?? 'operator', start.stage.mode === 'AFK' ? action.autonomy : null);
+      if (refusedPolicy) return { ok: false, reason: refusedPolicy };
       // No fallback to the operator's account (ADR 0004): a task whose
       // preset has AFK stages launches only where the App can work.
       const stages = appStages(resolved.preset);
@@ -942,39 +956,116 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     ticketReadsTried.clear();
     launchesTried.clear();
     driveSpecTasks();
-    for (const task of Object.values(lifecycle.tasks)) {
-      if (stopping || !waitsOnPr(task) || prReadsInFlight.has(task.id)) continue;
-      prReadsInFlight.add(task.id);
-      void readPr(task)
-        .then((event) =>
-          serially(async () => {
-            prReadsInFlight.delete(task.id);
-            // A root that moved on meanwhile refuses what was read: the next poll reads it again.
-            if (stopping || !event || (await settle(event, new Set()))) return;
-            // A setup task's work, say, has just landed on the base branch.
-            if (event.state === 'merged') await checkSkills(task.repo, { fetch: true });
-          }),
-        )
-        .catch(() => {})
-        .finally(() => prReadsInFlight.delete(task.id));
-    }
+    for (const task of Object.values(lifecycle.tasks)) pollPr(task);
+  }
+
+  // Reads the root's PR on GitHub, unless it isn't In review with one or
+  // its read is under way.
+  function pollPr(task: Task): void {
+    if (stopping || !waitsOnPr(task) || prReadsInFlight.has(task.id)) return;
+    prReadsInFlight.add(task.id);
+    void readPr(task)
+      .then((event) =>
+        serially(async () => {
+          prReadsInFlight.delete(task.id);
+          // A root that moved on meanwhile refuses what was read: the next poll reads it again.
+          if (stopping || !event || (await settle(event, new Set()))) return;
+          // A setup task's work, say, has just landed on the base branch.
+          if (event.state === 'merged') await checkSkills(task.repo, { fetch: true });
+        }),
+      )
+      .catch(() => {})
+      .finally(() => prReadsInFlight.delete(task.id));
   }
 
   // How long after the last PR poll the next one is due: sooner while a
-  // ticket task waits In review on its PR (ADR 0013).
+  // ticket task waits In review on its PR (ADR 0013), or a root waits at an
+  // agent policy's merge gate (ADR 0014).
   function prPollMs(): number {
-    return Object.values(lifecycle.tasks).some((task) => task.kind === 'ticket' && waitsOnPr(task)) ? TICKET_PR_POLL_MS : PR_POLL_MS;
+    const sooner = (task: Task) => (task.kind === 'ticket' && waitsOnPr(task)) || atMergeGate(task);
+    return Object.values(lifecycle.tasks).some(sooner) ? TICKET_PR_POLL_MS : PR_POLL_MS;
+  }
+
+  // Reads the PR of each root that has just reached its merge gate (ADR
+  // 0014) at once, rather than at the next poll: a repo with no checks
+  // merges straight away.
+  function driveGates(before: Lifecycle): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      const was = before.tasks[task.id];
+      if (atMergeGate(task) && !task.gate && !(was && atMergeGate(was))) pollPr(task);
+    }
+  }
+
+  // Takes the factory's next step merging each root its merge gate let
+  // through (ADR 0014): marking its draft PR ready, then merging it, each
+  // with a token minted for that write alone. A step that failed is tried
+  // again once the operator answers. What it did goes through the Lifecycle
+  // like any other event.
+  function driveMerges(): void {
+    for (const task of Object.values(lifecycle.tasks)) {
+      const step = task.gate?.step;
+      if (!step || !atMergeGate(task)) continue;
+      const key = `${task.id} ${step}`;
+      if (stopping || mergesInFlight.has(key) || (mergesStarted.has(key) && task.gate!.problem)) continue;
+      mergesStarted.add(key);
+      mergesInFlight.add(key);
+      void (step === 'ready' ? markReady(task) : mergePr(task)).then(
+        (event) =>
+          serially(async () => {
+            mergesInFlight.delete(key);
+            if (stopping || (await settle(event, new Set()))) return;
+            if (event.type === 'prMerged') await checkSkills(task.repo, { fetch: true });
+          }),
+        (error) => {
+          mergesInFlight.delete(key);
+          throw error;
+        },
+      );
+    }
+  }
+
+  // Marks the root's draft PR ready as the App, with a token narrowed to
+  // Pull requests write: GitHub merges no draft.
+  async function markReady(task: Task): Promise<MergeEvent> {
+    try {
+      const { token } = await appToken(task.repo, PR_WRITE);
+      await github.markReady(token, prRef(task.repo, task.pr!.number));
+      return { type: 'prMarkedReady', taskId: task.id };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'mergeFailed', taskId: task.id, step: 'ready', reason: error.message };
+    }
+  }
+
+  // Merges the root's PR into the base branch as the App, with a merge
+  // commit and a token narrowed to Contents and Pull requests write, only
+  // while its head is still the commit whose checks let it through.
+  async function mergePr(task: Task): Promise<MergeEvent> {
+    try {
+      const { token } = await appToken(task.repo, MERGE);
+      await github.mergePr(token, prRef(task.repo, task.pr!.number), { method: 'merge', head: task.gate!.head });
+      return { type: 'prMerged', taskId: task.id };
+    } catch (error) {
+      if (!isGitHubFailure(error)) throw error;
+      return { type: 'mergeFailed', taskId: task.id, step: 'merge', reason: error.message };
+    }
   }
 
   // Where the root's PR stands, read as the App with a read-only token, or
   // null when GitHub couldn't say: the next poll asks again. A PR found
   // conflicting that queues an update run has its base fetched first, for
   // the run to merge in; one that can't be fetched leaves the run to try.
+  // A root at an agent policy's merge gate has the checks on its PR's head
+  // read too, with a token of their own (ADR 0014).
   async function readPr(task: Task): Promise<PrReadEvent | null> {
     let event: PrReadEvent;
     try {
       const { token } = await appToken(task.repo, READ_ONLY);
       event = { type: 'prRead', taskId: task.id, ...(await github.readPr(token, prRef(task.repo, task.pr!.number))) };
+      if (event.state === 'open' && atMergeGate(task)) {
+        const checks = await appToken(task.repo, CHECKS_READ);
+        event.checks = await github.readChecks(checks.token, task.repo, event.head!);
+      }
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
       return null;
@@ -1057,7 +1148,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // its AFK run's guards accept it (ADR 0007), checked afresh. The task's
   // uncommitted files are then committed to the task branch, as the HITL
   // work they are, and the task goes AFK.
-  function handOff({ taskId, brief, continueAs, autonomy, tier, maxTurns, specs }: Extract<HandoffCommand, { type: 'handoff' }>): Promise<Reply> {
+  function handOff({ taskId, brief, continueAs, autonomy, mergePolicy, tier, maxTurns, specs }: Extract<HandoffCommand, { type: 'handoff' }>): Promise<Reply> {
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
       const action: LifecycleAction = {
@@ -1066,6 +1157,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         brief,
         continueAs,
         autonomy,
+        ...(mergePolicy !== undefined && { mergePolicy }),
         tier,
         maxTurns,
         ...(specs !== undefined && { specs }),
@@ -1425,6 +1517,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveLoops();
     driveCleanups();
     drivePublishes();
+    driveMerges();
     driveResearch();
     driveResolutions();
     driveSpecTasks();
@@ -1554,6 +1647,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     driveLoops();
     driveCleanups();
     drivePublishes();
+    driveGates(before);
+    driveMerges();
     driveResearch();
     driveResolutions();
     driveSpecTasks();

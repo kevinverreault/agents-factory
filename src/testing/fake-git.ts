@@ -182,12 +182,17 @@ export class FakeGit implements Git {
     for (const worktree of clone.worktrees) if (worktree.branch === branch) worktree.head = tip;
   }
 
-  // The clones whose origin is the repository on GitHub.
   // Whether GitHub has the repository's `branch`.
   onOrigin(repo: string, branch: string): boolean {
     return this.clonesOf(repo).some((clone) => clone.origin.has(branch));
   }
 
+  // The tip GitHub has of the repository's `branch`, or null when it has no such branch.
+  tipOnOrigin(repo: string, branch: string): string | null {
+    return this.clonesOf(repo).find((clone) => clone.origin.has(branch))?.origin.get(branch) ?? null;
+  }
+
+  // The clones whose origin is the repository on GitHub.
   private clonesOf(repo: string): FakeClone[] {
     return [...this.clones.values()].filter(({ originUrl }) => originUrl === `https://github.com/${repo}.git`);
   }
