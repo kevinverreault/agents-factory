@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import type { ChangedFile } from '../merge-gate/tripwires.ts';
 
 export type Clone = {
   // The clone's top level, absolute: its main worktree, even when the path
@@ -83,6 +84,12 @@ export interface Git {
   // The commits on the worktree's HEAD since `base`, which is in its
   // history, oldest first.
   commitsSince(worktreePath: string, base: string): Promise<string[]>;
+  // The files each commit authored by `author` (an email) changed, of those
+  // in `base..head` (such as `origin/main..<sha>`), oldest commit first and
+  // each commit's files in path order, with the lines it added and removed.
+  // Merge commits are left out: the tripwires read the factory's own
+  // changes (ADR 0014). Throws a `GitError` when either names no commit.
+  authoredChanges(clonePath: string, base: string, head: string, author: string): Promise<ChangedFile[]>;
   // How the worktree breaks the invariants of its snapshot from before the
   // run, one reason each, or none: the branch is still checked out, its old
   // tip is in its history, the tree is clean, no ref, remote, config or hook
@@ -384,9 +391,54 @@ export const gitCli: Git = {
     return lines(await run(worktreePath, 'rev-list', '--reverse', `${base}..HEAD`));
   },
 
+  async authoredChanges(clonePath, base, head, author) {
+    // Each commit's hash and author email, NUL-separated.
+    const fields = (await output(clonePath, 'log', '--no-merges', '--reverse', '-z', '--format=%H%x00%ae', '--end-of-options', `${base}..${head}`, '--')).split('\0');
+    const changes: ChangedFile[] = [];
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      if (fields[i + 1]!.trim().toLowerCase() !== author.toLowerCase()) continue;
+      changes.push(...(await commitChanges(clonePath, fields[i]!.trim())));
+    }
+    return changes;
+  },
+
   snapshot: (worktreePath) => hostChecks.snapshot(worktreePath),
   violations: (...args) => hostChecks.violations(...args),
 };
+
+// The files `commit` changed against its parent, renames found, in path
+// order: their status from a NUL-separated listing, so unquoted, and their
+// lines from the patch, whose files come in the same order.
+async function commitChanges(clonePath: string, commit: string): Promise<ChangedFile[]> {
+  const diff = ['diff-tree', '-r', '-M', '--root', '--no-commit-id', '--no-ext-diff', '--no-textconv'];
+  const [listing, patch] = await Promise.all([
+    output(clonePath, ...diff, '--name-status', '-z', commit),
+    output(clonePath, '-c', 'core.quotePath=false', ...diff, '-p', '--unified=0', '--no-color', commit),
+  ]);
+  const fields = listing.split('\0');
+  const files: ChangedFile[] = [];
+  for (let i = 0; i < fields.length; i++) {
+    const status = fields[i]!;
+    if (!status) continue;
+    if (status[0] === 'R' || status[0] === 'C') {
+      const from = fields[++i]!;
+      files.push({ path: fields[++i]!, ...(status[0] === 'R' ? { from, status: 'renamed' as const } : { status: 'added' as const }), added: [], removed: [] });
+    } else files.push({ path: fields[++i]!, status: status[0] === 'A' ? 'added' : status[0] === 'D' ? 'deleted' : 'modified', added: [], removed: [] });
+  }
+  // Each file's patch starts `diff --git`; its lines follow its first hunk header.
+  const patches = patch.split(/^diff --git .*$/m).slice(1);
+  patches.forEach((text, at) => {
+    const file = files[at];
+    if (!file) return;
+    const start = text.search(/^@@ /m);
+    if (start === -1) return;
+    for (const line of text.slice(start).split('\n')) {
+      if (line.startsWith('+')) file.added.push(line.slice(1));
+      else if (line.startsWith('-')) file.removed.push(line.slice(1));
+    }
+  });
+  return files;
+}
 
 // The paths a `status --porcelain=v1 -z` listing names: NUL-separated, so
 // unquoted, as `XY path`, and after a rename's or a copy's entry, its old
@@ -463,10 +515,13 @@ function run(cwd: string, ...args: string[]): Promise<string> {
   return output(cwd, ...args).then((stdout) => stdout.trim());
 }
 
+// The most output a command may write: a patch can be large.
+const MAX_OUTPUT = 256 * 1024 * 1024;
+
 // The command's output as git wrote it.
 function output(cwd: string, ...args: string[]): Promise<string> {
   return new Promise((done, fail) =>
-    execFile('git', ['-C', cwd, ...args], { windowsHide: true }, (error, stdout, stderr) =>
+    execFile('git', ['-C', cwd, ...args], { windowsHide: true, maxBuffer: MAX_OUTPUT }, (error, stdout, stderr) =>
       error ? fail(new GitError(stderr.trim() || error.message)) : done(stdout),
     ),
   );

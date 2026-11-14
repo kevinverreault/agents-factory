@@ -8,6 +8,8 @@
 // review with the reason. A new commit voids the verdict, and the check runs
 // again once the checks are green. Red after the fix run sends the task In
 // review naming the checks, and questions reach the operator as at L2.
+// Its tripwires, which go first, are tripwires.test.ts's.
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { DEFAULT_MERGE_GATE } from '../merge-gate/merge-gate.ts';
 import { NO_VERDICT, type Question } from '../lifecycle/lifecycle.ts';
@@ -321,14 +323,15 @@ describe('semi-auto’s gate check', () => {
     const judging = await greenToJudging(launched, 'T1', await throughPr(launched, 'T1'));
     // The operator pushes to the PR while it is judged: its head moves on, still green.
     const judged = factory.github.headOf(factory.github.pullRequests[0]!);
-    factory.github.reportHead(101, 'f'.repeat(40));
-    factory.github.setCommitChecks('f'.repeat(40), 'green');
+    const pushed = factory.git.advanceOrigin(resolve('/clones/widgets'), tui.state().tasks.T1!.branch!, { 'src/T1.ts': 'export const theirs = 1;\n' });
+    factory.github.reportHead(101, pushed);
+    factory.github.setCommitChecks(pushed, 'green');
 
     factory.executor.report(judging, { type: 'verdictReported', verdict: 'merge', reason: 'Fine.' });
     factory.executor.report(judging, { type: 'runCompleted' });
 
     const again = await nextRun(launched, 'T1', judging);
-    expect(startOf(factory, again).firstMessage).toContain('f'.repeat(40));
+    expect(startOf(factory, again).firstMessage).toContain(pushed);
     expect(startOf(factory, again).firstMessage).not.toContain(judged);
     expect(factory.github.prWrites).toEqual([]);
     expect(tui.state().tasks.T1!.label).toBe('Running');

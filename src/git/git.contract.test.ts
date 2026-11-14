@@ -77,6 +77,16 @@ async function fixture(): Promise<CloneFixture> {
       git(worktreePath, 'add', '--all');
       git(worktreePath, 'commit', '--quiet', '-m', 'Commit it all');
     },
+    async writeFile(worktreePath, path, content) {
+      const file = join(worktreePath, path);
+      if (content === null) return rmSync(file);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, content);
+    },
+    async commitAs(worktreePath, email) {
+      git(worktreePath, 'add', '--all');
+      git(worktreePath, 'commit', '--quiet', `--author=Someone <${email}>`, '-m', `Commit it all as ${email}`);
+    },
     async checkout(worktreePath, branch) {
       git(worktreePath, 'checkout', '--quiet', '-b', branch);
     },

@@ -211,7 +211,7 @@ The gate check's run on a semi-auto PR whose checks are green: a sonnet-tier run
 _Avoid_: Gate review, merge judge
 
 **Tripwire**:
-A rule of the gate check, evaluated without a model, that sends a PR to the operator whatever the judging run would say, such as one touching database migrations.
+A rule of the gate check, evaluated without a model on the commits the factory's AFK runs authored, that sends a PR to the operator before any judging run, such as one touching database migrations. The operator's own commits never trip one.
 _Avoid_: Guard, blocker (a blocker is a ticket's)
 
 **Merge gate config**:

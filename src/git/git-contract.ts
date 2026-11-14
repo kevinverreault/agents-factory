@@ -22,6 +22,11 @@ export type CloneFixture = {
   editFile(worktreePath: string, path: string): Promise<void>;
   // Commits everything changed in the worktree.
   commitAll(worktreePath: string): Promise<void>;
+  // Writes `content` to `path` (relative, with `/`) in the worktree, or
+  // deletes it when `content` is null, without committing it.
+  writeFile(worktreePath: string, path: string, content: string | null): Promise<void>;
+  // Commits everything changed in the worktree, authored by `email`.
+  commitAs(worktreePath: string, email: string): Promise<void>;
   // Cuts `branch` and checks it out in the worktree instead of its own.
   checkout(worktreePath: string, branch: string): Promise<void>;
   // Sets the remote's `pushurl`, as seen from the worktree.
@@ -182,6 +187,38 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
         const [head] = await git.worktrees(clone);
         expect(await git.commitsSince(path, base)).toEqual([first, head!.head]);
         expect(await git.commitsSince(path, first)).toEqual([head!.head]);
+      }));
+
+    test('the changes authored by one identity since a base are each of its commits’ files, oldest first, with the lines added and removed', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, writeFile, commitAs }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+        const bot = 'agents-factory[bot]@users.noreply.github.com';
+        expect(await git.authoredChanges(clone, 'origin/main', (await git.worktrees(clone))[0]!.head, bot)).toEqual([]);
+
+        await writeFile(path, 'src/login.test.ts', "test('logs in');\ntest('logs out');\n");
+        await writeFile(path, 'package.json', '{}\n');
+        await commitAs(path, bot);
+        // The operator's own commit, such as a handoff's ADR, is left out.
+        await writeFile(path, 'docs/adr/0001-cookies.md', '# Cookies\n');
+        await commitAs(path, 'operator@example.com');
+        await writeFile(path, 'src/login.test.ts', "test('logs in');\ntest.skip('signs up');\n");
+        await writeFile(path, 'package.json', null);
+        await commitAs(path, bot);
+        const head = (await git.worktrees(clone))[0]!.head;
+
+        expect(await git.authoredChanges(clone, 'origin/main', head, bot)).toEqual([
+          { path: 'package.json', status: 'added', added: ['{}'], removed: [] },
+          { path: 'src/login.test.ts', status: 'added', added: ["test('logs in');", "test('logs out');"], removed: [] },
+          { path: 'package.json', status: 'deleted', added: [], removed: ['{}'] },
+          { path: 'src/login.test.ts', status: 'modified', added: ["test.skip('signs up');"], removed: ["test('logs out');"] },
+        ]);
+        expect(await git.authoredChanges(clone, 'origin/main', head, 'operator@example.com')).toEqual([
+          { path: 'docs/adr/0001-cookies.md', status: 'added', added: ['# Cookies'], removed: [] },
+        ]);
+        await expect(git.authoredChanges(clone, 'origin/main', 'f'.repeat(40), bot)).rejects.toBeInstanceOf(GitError);
       }));
 
     test('merging a ref into a worktree brings its commits beside the branch’s own, fast-forwards a branch with none, and does nothing once merged', () =>

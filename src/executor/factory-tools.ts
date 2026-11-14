@@ -17,6 +17,10 @@ import type { Delegation, DelegationReply, RunSink } from './executor.ts';
 
 const SERVER = 'factory';
 
+// How severe a review finding is: a high-severity one left over after the
+// fix pass trips a semi-auto gate's tripwire (ADR 0014).
+const FINDING_SEVERITIES = ['high', 'medium', 'low'] as const;
+
 export type FactoryTools = {
   server: McpSdkServerConfigWithInstance;
   // Their full names, allowed without a permission prompt.
@@ -78,12 +82,22 @@ export function afkFactoryTools(
 ): FactoryTools {
   const reportFindings = tool(
     'report_findings',
-    'Report the findings of this code review to the factory, one finding per item, each a sentence saying what is wrong and where. ' +
+    'Report the findings of this code review to the factory, one finding per item, each a sentence saying what is wrong and where, with its severity. ' +
       'On the review’s fix pass, report the findings you left unfixed instead, with none if you fixed them all. ' +
       'Calling it again replaces what you reported.',
-    { findings: z.array(z.string()).describe('Each finding, in a sentence.') },
+    {
+      findings: z
+        .array(
+          z.object({
+            finding: z.string().describe('The finding, in a sentence.'),
+            severity: z.enum(FINDING_SEVERITIES).describe('high for a bug, data loss or security hole that should block the merge; medium or low otherwise.'),
+          }),
+        )
+        .describe('Each finding, with its severity.'),
+    },
     async ({ findings }) => {
-      sink.report({ type: 'findingsReported', runId, findings });
+      const highSeverity = findings.filter(({ severity }) => severity === 'high').map(({ finding }) => finding);
+      sink.report({ type: 'findingsReported', runId, findings: findings.map(({ finding }) => finding), ...(highSeverity.length && { highSeverity }) });
       return { content: [{ type: 'text', text: 'The factory has your findings.' }] };
     },
   );

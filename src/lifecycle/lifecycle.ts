@@ -251,8 +251,10 @@ export type Publishing = { step: 'commit' | 'push' | 'open-pr'; problem: string 
 
 // What a `fix-once` review stage's runs found, whether its one fix pass
 // has begun, and what is left over: everything found, until the fix pass
-// reports what it left unfixed.
-export type Findings = { found: string[]; fixPass: boolean; leftOver: string[] };
+// reports what it left unfixed. `highLeftOver` are those left over that
+// the review rated high-severity, which trip a semi-auto gate's tripwire
+// (ADR 0014); tasks stored before severities have none.
+export type Findings = { found: string[]; fixPass: boolean; leftOver: string[]; highLeftOver?: string[] };
 
 // A decision the factory made where an attended task would have asked the
 // operator (ADR 0014): the answer a full-auto run assumed to a question it
@@ -936,7 +938,8 @@ export type RunEvent =
   | { type: 'briefWritten'; runId: string; brief: Brief }
   // A review stage's AFK run reported its findings through
   // `report_findings`; its fix pass reports those it left unfixed.
-  | { type: 'findingsReported'; runId: string; findings: string[] }
+  // `highSeverity` are those of them it rated high-severity (ADR 0014).
+  | { type: 'findingsReported'; runId: string; findings: string[]; highSeverity?: string[] }
   // A PR body stage's AFK run wrote the body through `write_pr_body`.
   | { type: 'prBodyWritten'; runId: string; body: string; title?: string }
   // An AFK run set its task's one-line status through `report_progress`.
@@ -1197,6 +1200,10 @@ export type PrReadEvent = {
   draft?: boolean;
   checks?: Checks | null;
   sessionId?: string;
+  // Under semi-auto, what its tripwires said once its checks let it through
+  // (ADR 0014): why the one that fired sends the PR to the operator, or
+  // null when none fired. A read that evaluated none queues no judging run.
+  tripwire?: string | null;
 };
 
 // What the daemon did on GitHub for a root its merge gate let through (ADR
@@ -1787,7 +1794,7 @@ function stageOpening(task: Task, stage: Stage, opening: string): string {
   const context = reports.includes('findings')
     ? task.findings?.fixPass
       ? fixContext(task)
-      : 'Report every finding of this review to the factory through its report_findings tool before you end, one finding per item; ' +
+      : 'Report every finding of this review to the factory through its report_findings tool before you end, one finding per item with its severity; ' +
         'with none, don’t call it. Don’t fix them yourself: the factory runs one fix pass on what you report.'
     : reports.includes('pr-body')
       ? 'Write the PR body through the factory’s write_pr_body tool before you end: the factory opens the PR with it. ' +
@@ -2794,14 +2801,24 @@ function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: Atte
   if (read.draft !== undefined) task.pr!.draft = read.draft;
   const problem = request ? (task.gate?.problem ?? null) : null;
   task.gate = { checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem };
-  // A read without the session a judging run would start queues none: the next one does.
-  if (judging && read.sessionId) queueGateCheck(task, read.head, read.sessionId);
+  // Its tripwires come first: one that fired sends the PR to the operator
+  // unjudged. A read without them, or without the session a judging run
+  // would start, queues none: the next one does.
+  if (judging && read.tripwire) sendToOperator(task, read.head, read.tripwire);
+  else if (judging && read.tripwire === null && read.sessionId) queueGateCheck(task, read.head, read.sessionId);
   // Journaled before the first step on GitHub, in the state that takes it.
   if (passes) {
     const id = mergeId(task.id);
     state.intents[id] = { id, verb: 'merge', taskId: task.id, pr: task.pr!.number, marksReady: task.gate.step === 'ready' };
   }
   if (checks === 'red' && !request) fixRedChecks(state, task, read.head, failed, at);
+}
+
+// The semi-auto root's PR on `head` goes In review for the operator, for
+// `reason`, until a new commit sends it back to its gate (ADR 0014).
+function sendToOperator(task: Task, head: string, reason: string): void {
+  task.sentToOperator = { head, reason };
+  task.gate = null;
 }
 
 // The semi-auto root's PR is green on `head` (ADR 0014): its gate check's
@@ -2944,8 +2961,7 @@ function fixRedChecks(state: Lifecycle, task: Task, head: string, failed: Failed
   const stillRed = `The checks on PR #${task.pr!.number} of ${task.id} are still failing after its fix run${named}.`;
   // Under semi-auto, the task goes In review for the operator instead (ADR 0014).
   if (policyOf(task) === 'judged') {
-    task.sentToOperator = { head, reason: stillRed };
-    task.gate = null;
+    sendToOperator(task, head, stillRed);
     return;
   }
   const reason = `${stillRed} Fix them and push to the task branch, then answer to send the task back to its merge gate.`;
@@ -4585,8 +4601,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // The review's report replaces what it reported before; the fix
       // pass's says what is left over.
       const findings = action.findings.map((finding) => finding.trim()).filter(Boolean);
-      if (task.findings?.fixPass) task.findings.leftOver = findings;
-      else task.findings = { found: findings, fixPass: false, leftOver: findings };
+      // Those rated high-severity, as a semi-auto gate's tripwire reads them (ADR 0014).
+      const high = (action.highSeverity ?? []).map((finding) => finding.trim()).filter((finding) => findings.includes(finding));
+      if (task.findings?.fixPass) Object.assign(task.findings, { leftOver: findings, highLeftOver: high });
+      else task.findings = { found: findings, fixPass: false, leftOver: findings, highLeftOver: high };
       break;
     }
     // Metered on the run that used it, live or not.
