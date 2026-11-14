@@ -167,7 +167,7 @@ Where the operator reviews and edits the handoff brief and confirms a handoff, w
 _Avoid_: Handoff dialog, handover form
 
 **Intent**:
-An operator or agent verb with steps outside the store, journaled before its first such step. After a crash, the next daemon finishes it or rolls it back before it reconciles runs. A handoff's commit, a spawn's worktree, a ticket task's launch (its worktree cut from its spec task's branch) and a takeover's container restart each get an intent row. A cleanup waits on its task instead.
+An operator or agent verb with steps outside the store, journaled before its first such step. After a crash, the next daemon finishes it or rolls it back before it reconciles runs. A handoff's commit, a spawn's worktree, a ticket task's launch (its worktree cut from its spec task's branch), a takeover's container restart and a factory merge (marking the PR ready, then merging it) each get an intent row. A cleanup waits on its task instead.
 _Avoid_: Transaction, pending operation
 
 **Advance sheet**:
