@@ -4,7 +4,6 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { ChangedFile } from '../merge-gate/tripwires.ts';
 
 export type Clone = {
   // The clone's top level, absolute: its main worktree, even when the path
@@ -107,6 +106,17 @@ export interface Git {
 }
 
 export type DirectoryFile = { path: string; content: string };
+
+// A file a commit changed, by its path from the top (with `/`), and the
+// path it was renamed from, if it was: the lines the commit added to it
+// and removed from it.
+export type ChangedFile = {
+  path: string;
+  from?: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  added: string[];
+  removed: string[];
+};
 
 export type WorktreeState = {
   // The branch checked out, or null when HEAD is detached.

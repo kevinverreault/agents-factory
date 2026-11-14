@@ -1,6 +1,6 @@
 // Seam 3: the real git adapter on throwaway clones in a temp directory.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -117,6 +117,42 @@ test('git: a task worktree sets core.longpaths, and its branch tracks nothing', 
 
     expect(git(path, 'config', 'core.longpaths')).toBe('true');
     expect(() => git(path, 'rev-parse', '--abbrev-ref', '@{upstream}')).toThrow();
+  } finally {
+    await dispose();
+  }
+});
+
+test('git: a commit’s renames, binary files and mode changes keep each file’s lines with its own, and merge commits are left out', async () => {
+  const { root, cloneWithOrigin, advanceOrigin, writeFile, commitAs, dispose } = await fixture();
+  try {
+    const clone = await cloneWithOrigin('widgets', 'main');
+    const path = join(root, 'worktrees', 'T1');
+    await gitCli.fetch(clone, 'main');
+    await gitCli.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+    const bot = FACTORY_IDENTITY.email;
+    await writeFile(path, 'db/migrations/1.sql', 'create table users;\n');
+    await writeFile(path, 'run.sh', 'echo hi\n');
+    await commitAs(path, bot);
+    // A rename with no change, a binary file, a mode change, and a change after them all.
+    git(path, 'mv', 'db/migrations/1.sql', 'db/schema.sql');
+    writeFileSync(join(path, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]));
+    chmodSync(join(path, 'run.sh'), 0o755);
+    await writeFile(path, 'src/z.ts', 'export {};\n');
+    await commitAs(path, bot);
+    // The base moves on and is merged in: the merge is left out, and so are the base's commits.
+    await advanceOrigin(clone, 'main', { 'src/base.ts': 'export const base = 1;\n' });
+    await gitCli.fetch(clone, 'main');
+    git(path, '-c', `user.email=${bot}`, 'merge', '--quiet', '--no-edit', 'origin/main');
+    const head = git(path, 'rev-parse', 'HEAD');
+
+    const changes = await gitCli.authoredChanges(clone, 'origin/main', head, bot);
+    expect(changes.slice(2)).toEqual([
+      { path: 'db/schema.sql', from: 'db/migrations/1.sql', status: 'renamed', added: [], removed: [] },
+      { path: 'logo.png', status: 'added', added: [], removed: [] },
+      { path: 'run.sh', status: 'modified', added: [], removed: [] },
+      { path: 'src/z.ts', status: 'added', added: ['export {};'], removed: [] },
+    ]);
+    expect(changes.map(({ path }) => path)).not.toContain('src/base.ts');
   } finally {
     await dispose();
   }

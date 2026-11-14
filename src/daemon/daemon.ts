@@ -9,7 +9,7 @@ import { capture } from '../artifacts/capture.ts';
 import { DependenciesError, type Dependencies } from '../dependencies/dependencies.ts';
 import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart, type Verdict } from '../executor/executor.ts';
 import { DELETION_ORDER, listedLeftovers, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
-import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
+import { GitError, type ChangedFile, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   CHECKS_READ,
   GitHubError,
@@ -63,6 +63,7 @@ import {
   l3RefusalText,
   DECLINED_QUESTION,
   atMergeGate,
+  gateJudges,
   MERGE_STEP_DONE,
   mergeId,
   policyOf,
@@ -167,7 +168,7 @@ import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, 
 import { NAMING_INSTRUCTIONS, nameTask, namingRequest, type Namer } from '../naming/task-naming.ts';
 import type { Clock } from './clock.ts';
 import { DEFAULT_MERGE_GATE, readMergeGateConfig, type MergeGateConfig } from '../merge-gate/merge-gate.ts';
-import { evaluateTripwires, tripwireReason, type ChangedFile } from '../merge-gate/tripwires.ts';
+import { evaluateTripwires, readsChanges, tripwireReason } from '../merge-gate/tripwires.ts';
 
 export type DaemonOptions = {
   pipePath: string;
@@ -1156,8 +1157,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         // checks queue one, and what its tripwires say first (ADR 0014).
         if (policyOf(task) === 'judged') {
           event.sessionId = randomUUID();
-          const through = ['green', 'none'].includes(event.checks.state) && event.mergeable === 'mergeable';
-          if (through && task.gateCheck?.head !== event.head) event.tripwire = await tripwiresOn(task, event.head!);
+          if (gateJudges(lifecycle, task, event)) event.tripwire = await tripwiresOn(task, event.head!);
         }
       }
     } catch (error) {
@@ -1179,7 +1179,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const { tripwires } = task.mergeGate ?? DEFAULT_MERGE_GATE;
     const repository = lifecycle.repositories[task.repo];
     let files: ChangedFile[] = [];
-    if (tripwires.paths.length || tripwires.predicates.some((predicate) => predicate !== 'high-severity-finding')) {
+    if (readsChanges(tripwires)) {
       const unread = `The tripwires couldn’t be checked on ${head.slice(0, 7)}`;
       if (!repository) return `${unread}: ${task.repo} isn’t registered.`;
       await fetchBase(git, repository);

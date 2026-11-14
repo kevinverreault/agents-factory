@@ -2,19 +2,11 @@
 // before any judging run, over what the factory's own AFK commits changed
 // since the base and the review findings left over after fix-once. One that
 // fires sends the PR to the operator, naming it and what tripped it.
-import { matchesGlob } from 'node:path';
+import { posix } from 'node:path';
+import type { ChangedFile } from '../git/git.ts';
 import type { MergeGateConfig, TripwirePredicate } from './merge-gate.ts';
 
-// A file a commit changed, by its path from the top (with `/`), and the
-// path it was renamed from, if it was: the lines the commit added to it
-// and removed from it.
-export type ChangedFile = {
-  path: string;
-  from?: string;
-  status: 'added' | 'modified' | 'deleted' | 'renamed';
-  added: string[];
-  removed: string[];
-};
+export type { ChangedFile };
 
 // What the tripwires look at: the files the factory's commits changed, one
 // entry per commit that changed one, and the findings the review left over
@@ -29,37 +21,53 @@ export type FiredTripwire = { tripwire: string; detail: string };
 // order, then the predicates in theirs.
 export function evaluateTripwires(tripwires: MergeGateConfig['tripwires'], input: TripwireInput): FiredTripwire | null {
   for (const glob of tripwires.paths) {
-    const path = input.files.flatMap(pathsOf).find((path) => matchesGlob(path, glob));
+    const path = input.files.flatMap(pathsOf).find((path) => posix.matchesGlob(path, glob));
     if (path) return { tripwire: glob, detail: path };
   }
   for (const predicate of tripwires.predicates) {
-    const detail = PREDICATES[predicate](input);
+    const detail = PREDICATES[predicate].fires(input);
     if (detail) return { tripwire: predicate, detail };
   }
   return null;
 }
 
+// Whether `tripwires` read the files the factory's commits changed: all
+// but a high-severity finding do.
+export function readsChanges(tripwires: MergeGateConfig['tripwires']): boolean {
+  return tripwires.paths.length > 0 || tripwires.predicates.some((predicate) => PREDICATES[predicate].readsChanges);
+}
+
 // Why the PR went to the operator, for its Needs you item.
 export function tripwireReason({ tripwire, detail }: FiredTripwire): string {
-  const what =
-    tripwire === 'dependency-change'
-      ? `the factory’s commits change the dependency manifest ${detail}`
-      : tripwire === 'tests-removed-or-skipped'
-        ? `in the factory’s commits, ${detail}`
-        : tripwire === 'high-severity-finding'
-          ? `the review left a high-severity finding over: ${detail}`
-          : `the factory’s commits touch ${detail}`;
+  const predicate = PREDICATES[tripwire as TripwirePredicate];
+  const what = predicate ? predicate.says(detail) : `the factory’s commits touch ${detail}`;
   return `The tripwire ${tripwire} fired: ${what}${/[.!?]$/.test(what) ? '' : '.'}`;
 }
 
+// The paths a changed file was at: a renamed one's old path too.
 function pathsOf(file: ChangedFile): string[] {
   return file.from ? [file.from, file.path] : [file.path];
 }
 
-const PREDICATES: Record<TripwirePredicate, (input: TripwireInput) => string | null> = {
-  'dependency-change': ({ files }) => files.flatMap(pathsOf).find(isManifest) ?? null,
-  'tests-removed-or-skipped': ({ files }) => files.map(testsRemovedOrSkipped).find(Boolean) ?? null,
-  'high-severity-finding': ({ highFindings }) => highFindings[0] ?? null,
+// Each predicate: what it fired on, if it did, whether that needs the
+// changed files, and how its reason says what tripped it.
+type Predicate = { fires: (input: TripwireInput) => string | null; readsChanges: boolean; says: (detail: string) => string };
+const PREDICATES: Record<TripwirePredicate, Predicate> = {
+  'dependency-change': {
+    fires: ({ files }) => files.flatMap(pathsOf).find(isManifest) ?? null,
+    readsChanges: true,
+    says: (manifest) => `the factory’s commits change the dependency manifest ${manifest}`,
+  },
+  'tests-removed-or-skipped': {
+    fires: ({ files }) => files.map(testsRemovedOrSkipped).find(Boolean) ?? null,
+    readsChanges: true,
+    says: (what) => `in the factory’s commits, ${what}`,
+  },
+  'high-severity-finding': {
+    fires: ({ highFindings }) => highFindings[0] ?? null,
+    readsChanges: false,
+    says: (finding) => `the review left a high-severity finding over: ${finding}`,
+  },
 };
 
 // The files that declare a project's dependencies. Their lockfiles aren't
@@ -85,14 +93,15 @@ const MANIFESTS = [
   'packages.config',
 ];
 
+// Whether the file at `path` declares dependencies.
 function isManifest(path: string): boolean {
-  const name = path.slice(path.lastIndexOf('/') + 1);
-  return /^requirements.*\.(txt|in)$/.test(name) || MANIFESTS.some((manifest) => matchesGlob(name, manifest));
+  const name = posix.basename(path);
+  return /^requirements.*\.(txt|in)$/.test(name) || MANIFESTS.some((manifest) => posix.matchesGlob(name, manifest));
 }
 
 // Test files, by the conventions of the common test runners.
 function isTestFile(path: string): boolean {
-  const name = path.slice(path.lastIndexOf('/') + 1);
+  const name = posix.basename(path);
   return (
     /\.(test|spec)\.[cm]?[jt]sx?$/.test(name) ||
     /^test_.*\.py$/.test(name) ||

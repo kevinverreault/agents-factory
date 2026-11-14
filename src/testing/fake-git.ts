@@ -1,7 +1,6 @@
 import { relative, isAbsolute } from 'node:path';
 import { FACTORY_IDENTITY } from '../guards/run-git.ts';
-import type { ChangedFile } from '../merge-gate/tripwires.ts';
-import { GitError, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree, type WorktreeState } from '../git/git.ts';
+import { GitError, type ChangedFile, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree, type WorktreeState } from '../git/git.ts';
 
 type CloneSetup = { originUrl?: string | null; defaultBranch?: string | null };
 
@@ -546,6 +545,7 @@ function isWithin(top: string, path: string): boolean {
 // The email the fake's worktrees commit under, as the operator's own.
 export const FAKE_OPERATOR_EMAIL = 'operator@example.com';
 
+// The lines of a file's content, none for a file that isn't there.
 function linesOf(content: string | undefined): string[] {
   if (!content) return [];
   const lines = content.split('\n');

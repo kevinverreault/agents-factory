@@ -2791,13 +2791,7 @@ function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: Atte
     return;
   }
   const { state: checks, failed } = read.checks;
-  const noneTwice = checks === 'none' && task.gate?.checks === 'none' && task.gate.head === read.head;
-  // Under semi-auto, only once its gate check on this head judged it should;
-  // a head found with no checks twice before its judging run needs no third read.
-  const judgedMerge = policyOf(task) === 'judged' && task.gateCheck?.head === read.head && task.gateCheck.verdict?.kind === 'merge';
-  const passesChecks = (checks === 'green' || noneTwice || (checks === 'none' && judgedMerge)) && read.mergeable === 'mergeable' && !request;
-  const judging = passesChecks && policyOf(task) === 'judged' && !judgedMerge;
-  const passes = passesChecks && !judging;
+  const { passes, judging } = gateLets(task, read.head, read.checks.state, read.mergeable, request);
   if (read.draft !== undefined) task.pr!.draft = read.draft;
   const problem = request ? (task.gate?.problem ?? null) : null;
   task.gate = { checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem };
@@ -2812,6 +2806,31 @@ function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: Atte
     state.intents[id] = { id, verb: 'merge', taskId: task.id, pr: task.pr!.number, marksReady: task.gate.step === 'ready' };
   }
   if (checks === 'red' && !request) fixRedChecks(state, task, read.head, failed, at);
+}
+
+// What the root's gate makes of its PR read on `head`: whether its checks
+// let it through and it merges, or, under semi-auto, it is judged first.
+// No checks counts once two reads of the same head found none. Under
+// semi-auto it merges only once its gate check on this head judged it
+// should; a head found with no checks twice before its judging run needs
+// no third read.
+function gateLets(task: Task, head: string, checks: ChecksState, mergeable: Mergeability, request: AttentionRequest | undefined): { passes: boolean; judging: boolean } {
+  const noneTwice = checks === 'none' && task.gate?.checks === 'none' && task.gate.head === head;
+  const judgedMerge = policyOf(task) === 'judged' && task.gateCheck?.head === head && task.gateCheck.verdict?.kind === 'merge';
+  const passesChecks = (checks === 'green' || noneTwice || (checks === 'none' && judgedMerge)) && mergeable === 'mergeable' && !request;
+  const judging = passesChecks && policyOf(task) === 'judged' && !judgedMerge;
+  return { passes: passesChecks && !judging, judging };
+}
+
+// Whether the PR poll's read of the root's open PR, its checks read, would
+// have its gate judge it, as the daemon asks before it evaluates the
+// tripwires that go first (ADR 0014).
+export function gateJudges(state: Lifecycle, task: Task, read: { head?: string; checks?: Checks | null; mergeable: Mergeability }): boolean {
+  if (!read.head || !read.checks || task.gate?.step) return false;
+  // A new head sends a root its gate sent to the operator back to it, as the read voids what it was sent for.
+  const sent = task.sentToOperator?.head === read.head ? task.sentToOperator : null;
+  if (!atMergeGate({ ...task, sentToOperator: sent })) return false;
+  return gateLets(task, read.head, read.checks.state, read.mergeable, openRequest(state, task)).judging;
 }
 
 // The semi-auto root's PR on `head` goes In review for the operator, for
