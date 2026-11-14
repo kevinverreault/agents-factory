@@ -11,7 +11,8 @@ import { parse } from 'yaml';
 import { z } from 'zod';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { AppCheck } from '../lifecycle/lifecycle.ts';
-import { DEFAULT_PRESET } from '../repositories/registry.ts';
+import { DEFAULT_PRESET, OWNER_NAME } from '../repositories/registry.ts';
+import { orList } from '../text/lines.ts';
 
 export type PresetScope = 'built-in' | 'user' | 'repo';
 // Higher wins a name clash.
@@ -222,7 +223,7 @@ export function planStart(
     return {
       error:
         `${preset.name} can’t start at ${stage.id}: its args can’t be filled from a prompt or issue refs. ` +
-        `It can start at ${or(starts.map(({ id }) => id))}.`,
+        `It can start at ${orList(starts.map(({ id }) => id))}.`,
     };
   }
   const lacking = lackingInputs(start, inputs);
@@ -281,7 +282,7 @@ export function issueRefs(refs: string[], repo: string): { issues: string[] } | 
   const issues: string[] = [];
   for (const ref of refs) {
     const match =
-      /^(?:([\w.-]+\/[\w.-]+))?#(\d+)$/.exec(ref) ?? /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/?$/i.exec(ref);
+      new RegExp(`^(?:(${OWNER_NAME}))?#(\\d+)$`).exec(ref) ?? new RegExp(`^https://github\\.com/(${OWNER_NAME})/issues/(\\d+)/?$`, 'i').exec(ref);
     if (!match) return { error: `${ref} is not an issue ref (#12, owner/name#12 or an issue URL).` };
     issues.push(`${match[1] ?? repo}#${match[2]}`);
   }
@@ -349,13 +350,9 @@ function describeIssue(issue: z.core.$ZodIssue, of: 'stage' | 'preset'): string 
   if (issue.code === 'unrecognized_keys') return `${issue.keys.join(', ')} ${issue.keys.length === 1 ? `is not a ${of} field` : `are not ${of} fields`}.`;
   if (issue.input === undefined) return `${field} is missing.`;
   if (field === 'max_turns') return 'max_turns must be a whole number of at least 1.';
-  if (issue.code === 'invalid_value') return `${field} must be ${or(issue.values.map(String))}.`;
+  if (issue.code === 'invalid_value') return `${field} must be ${orList(issue.values.map(String))}.`;
   if (issue.code === 'invalid_type') return `${field} must be a ${issue.expected}.`;
   return field === undefined ? `${issue.message}.` : `${field}: ${issue.message}.`;
-}
-
-function or(values: string[]): string {
-  return values.length > 1 ? `${values.slice(0, -1).join(', ')} or ${values.at(-1)}` : (values[0] ?? '');
 }
 
 // The preset named `name` that wins its clash, among those in scopes below

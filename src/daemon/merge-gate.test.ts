@@ -6,7 +6,9 @@
 // invalid file refuses the launch or handoff with the reason. The frozen
 // merge method is the one the factory merges with.
 import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { relayHook } from '../hooks/relay.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
@@ -134,6 +136,40 @@ describe('freezing the config', () => {
     writeGate(launched, 'merge_method: rebase\n');
     await throughMerge(launched, 2);
     expect(mergeMethods(launched)).toEqual(['squash']);
+  });
+});
+
+describe('a handoff a crash cut short', () => {
+  test('keeps the config it froze when the next daemon finishes it, whatever the file says by then', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    writeGate(launched, 'merge_method: squash\n');
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'quick', prompt: 'Add a logout button.', quick: true });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
+    // The HITL run writes a file for the handoff to commit, which journals it first.
+    const { sessionId, cwd } = factory.executor.started[0]!;
+    factory.git.editFile(cwd!, 'GLOSSARY.md');
+    const write = { session_id: sessionId, cwd, hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: join(cwd!, 'GLOSSARY.md') } };
+    await relayHook(JSON.stringify({ ...write, tool_response: '' }), factory.paths);
+    await tui.until((state) => Object.keys(state.artifacts).length > 0);
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await tui.until((state) => state.tasks.T1?.handoff !== null);
+    factory.executor.report('R1', { type: 'briefWritten', brief: { goal: 'Add a logout button.', decided: [], doneWhen: [], outOfScope: [], links: [] } });
+    factory.executor.report('R1', { type: 'turnEnded' });
+    const { brief, tier, maxTurns } = (await tui.until((state) => !!state.tasks.T1?.handoff?.brief)).tasks.T1!.handoff!;
+
+    const crashed = factory.crashAt('git', 'commit', 'before');
+    void operator.send({ type: 'handoff', taskId: 'T1', brief: brief!, continueAs: 'resume', autonomy: 'L3', mergePolicy: 'unattended', tier, maxTurns });
+    await crashed;
+    await factory.crash();
+    writeGate(launched, 'merge_method: rebase\n');
+    await factory.startDaemon();
+    const again = await factory.attach();
+    const restarted: Factory = { factory, operator: again, tui: watch(again) };
+    await restarted.tui.until((state) => state.tasks.T1?.mode === 'AFK');
+
+    await throughMerge(restarted, 2);
+    expect(mergeMethods(restarted)).toEqual(['squash']);
   });
 });
 

@@ -7,6 +7,8 @@
 import { readFileSync } from 'node:fs';
 import { parse, stringify } from 'yaml';
 import { z } from 'zod';
+import { isOwnerName } from '../repositories/registry.ts';
+import { orList } from '../text/lines.ts';
 
 // How the factory merges a PR on GitHub.
 export const MERGE_METHODS = ['merge', 'squash', 'rebase'] as const;
@@ -55,23 +57,21 @@ const layerFields = {
   merge_method: z.enum(MERGE_METHODS).optional(),
 };
 const layerSchema = z.strictObject(layerFields);
-// One layer as the file writes it: the user file's own fields, or a repository's section.
+// One layer as the file writes it: the operator's file's own fields, or a repository's section.
 type Layer = z.infer<typeof layerSchema>;
-// A repository section is named owner/name.
-export const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const fileSchema = z.strictObject({
   ...layerFields,
-  repositories: z.record(z.string().regex(REPOSITORY), layerSchema).optional(),
+  repositories: z.record(z.string().refine(isOwnerName), layerSchema).optional(),
 });
 
 // The operator's file as read, `path` saying where, for refusals.
 export type MergeGateFile = { path: string; content: string };
 
 // The config resolved, and the name of the repository section laid over the
-// user file, if one was.
+// operator's file's own fields, if one was.
 export type ResolvedMergeGateConfig = { config: MergeGateConfig; section: string | null };
 
-// The config for `repo` (none: the user file alone), from the operator's
+// The config for `repo` (none: the operator's file's own fields alone), from the operator's
 // file, if there is one. An invalid file is refused whole, even when only
 // another repository's section is wrong. Sections are matched whatever
 // their names' case, as GitHub names repositories, so two that differ only
@@ -88,12 +88,12 @@ export function resolveMergeGateConfig(file: MergeGateFile | null, repo: string 
   raw ??= {};
   const checked = fileSchema.safeParse(raw, { reportInput: true });
   if (!checked.success) return { error: `The merge gate config at ${file.path} is invalid: ${describeIssue(checked.error.issues[0]!)}` };
-  const { repositories = {}, ...user } = checked.data;
+  const { repositories = {}, ...operatorLayer } = checked.data;
   const names = Object.keys(repositories);
   const clash = names.find((name, at) => names.findIndex((other) => other.toLowerCase() === name.toLowerCase()) !== at);
   if (clash) return { error: `The merge gate config at ${file.path} is invalid: repositories.${clash} names the same repository as another section, in another case.` };
   const section = repo === null ? undefined : names.find((name) => name.toLowerCase() === repo.toLowerCase());
-  return { config: [user, section ? repositories[section]! : {}].reduce(overlay, structuredClone(DEFAULT_MERGE_GATE)), section: section ?? null };
+  return { config: [operatorLayer, section ? repositories[section]! : {}].reduce(overlay, structuredClone(DEFAULT_MERGE_GATE)), section: section ?? null };
 }
 
 // Reads the operator's file at `path` (none there: the defaults) and
@@ -124,8 +124,6 @@ function overlay(config: MergeGateConfig, layer: Layer): MergeGateConfig {
   };
 }
 
-// Words as a list ending in `or`.
-const or = (words: readonly string[]) => `${words.slice(0, -1).join(', ')} or ${words.at(-1)}`;
 
 // A schema issue as a sentence about the field it is on.
 function describeIssue(issue: z.core.$ZodIssue): string {
@@ -139,7 +137,7 @@ function describeIssue(issue: z.core.$ZodIssue): string {
     return `${at} is not a merge gate field (${FIELDS.join(', ')}).`;
   }
   if (issue.code === 'invalid_key') return `${[...path].join('.')} is not a repository: name it owner/name.`;
-  if (issue.code === 'invalid_value') return `${field} must be ${or(issue.values.map(String))}, not ${String(issue.input)}.`;
+  if (issue.code === 'invalid_value') return `${field} must be ${orList(issue.values.map(String))}, not ${String(issue.input)}.`;
   if (issue.code === 'too_small') return `${field} must not be empty.`;
   if (issue.code === 'invalid_type' && path.length === 0) return 'it must be a mapping of merge gate fields.';
   if (issue.code === 'invalid_type' && issue.expected === 'array') return `${field} must be a list of strings.`;

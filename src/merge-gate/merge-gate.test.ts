@@ -22,7 +22,7 @@ describe('resolving the merge gate config', () => {
     expect(resolveMergeGateConfig(file('# nothing yet\n'), 'acme/widgets')).toEqual({ config: DEFAULT_MERGE_GATE, section: null });
   });
 
-  test('the user file overrides the defaults field by field, keeping those it leaves out', () => {
+  test('the operator’s file overrides the defaults field by field, keeping those it leaves out', () => {
     const resolved = resolveMergeGateConfig(file('merge_method: rebase\ntripwires:\n  paths: [infra/**]\n'), 'acme/widgets');
     expect(resolved).toEqual({
       config: { ...DEFAULT_MERGE_GATE, mergeMethod: 'rebase', tripwires: { paths: ['infra/**'], predicates: DEFAULT_MERGE_GATE.tripwires.predicates } },
@@ -30,7 +30,7 @@ describe('resolving the merge gate config', () => {
     });
   });
 
-  test('a repository’s section overrides the user file field by field, and only for that repository', () => {
+  test('a repository’s section overrides the operator’s file field by field, and only for that repository', () => {
     const content = [
       'merge_method: rebase',
       'rubric: [It touches billing.]',
@@ -53,7 +53,7 @@ describe('resolving the merge gate config', () => {
     expect(resolveMergeGateConfig(file(content), 'acme/other')).toEqual({ config: { ...DEFAULT_MERGE_GATE, mergeMethod: 'rebase', rubric: ['It touches billing.'] }, section: null });
     // A repository's name matches whatever its case, as on GitHub.
     expect(resolveMergeGateConfig(file(content), 'Acme/Widgets')).toMatchObject({ config: { mergeMethod: 'squash' }, section: 'acme/widgets' });
-    // With no repository, the user file alone.
+    // With no repository, the operator’s file’s own fields alone.
     expect(resolveMergeGateConfig(file(content), null)).toMatchObject({ config: { mergeMethod: 'rebase' } });
   });
 
