@@ -6,6 +6,15 @@ import type { Repository } from '../lifecycle/lifecycle.ts';
 
 export const DEFAULT_PRESET = 'main-flow';
 
+// A repository's `owner/name` on GitHub, as a pattern to build others from.
+export const OWNER_NAME = String.raw`[\w.-]+/[\w.-]+`;
+const WHOLE_OWNER_NAME = new RegExp(`^${OWNER_NAME}$`);
+
+// Whether `text` is a repository's `owner/name`.
+export function isOwnerName(text: string): boolean {
+  return WHOLE_OWNER_NAME.test(text);
+}
+
 export type CloneOfRepo = {
   // `owner/name` on GitHub.
   repo: string;

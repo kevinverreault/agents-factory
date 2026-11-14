@@ -24,6 +24,11 @@ export function wrapped(line: string, width: number): string[] {
   return rows;
 }
 
+// Words as a list ending in `or`: `a, b or c`, or the one word alone.
+export function orList(words: readonly string[]): string {
+  return words.length > 1 ? `${words.slice(0, -1).join(', ')} or ${words.at(-1)}` : (words[0] ?? '');
+}
+
 // The text on one line: its runs of whitespace one space, its ends trimmed.
 export function oneLineOf(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
