@@ -2,6 +2,9 @@ import { relative, isAbsolute } from 'node:path';
 import { FACTORY_IDENTITY } from '../guards/run-git.ts';
 import { GitError, type ChangedFile, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree, type WorktreeState } from '../git/git.ts';
 
+// The email the fake's worktrees commit under, as the operator's own.
+export const FAKE_OPERATOR_EMAIL = 'operator@example.com';
+
 type CloneSetup = { originUrl?: string | null; defaultBranch?: string | null };
 
 // A worktree, with the clone path it was last linked to: moving the clone
@@ -462,15 +465,18 @@ export class FakeGit implements Git {
     const excluded = this.ancestry(from);
     const wanted = this.ancestry(to);
     // The fake's commits are kept as they are made, so in order, oldest first.
-    const commits = [...this.trees.keys()].filter((commit) => wanted.has(commit) && !excluded.has(commit) && !this.mergedParents.has(commit));
+    const commits = [...this.trees.keys()].filter((commit) => wanted.has(commit) && !excluded.has(commit));
     return commits.filter((commit) => this.authors.get(commit)?.toLowerCase() === author.toLowerCase()).flatMap((commit) => this.changesOf(commit));
   }
 
-  // The files `commit` changed against its parent, in path order. The fake
-  // finds no renames: a moved file is deleted, and added.
+  // The files `commit` changed against its parent, in path order, or for a
+  // merge, against the merge of its parents, as git would have made it. The
+  // fake finds no renames: a moved file is deleted, and added.
   private changesOf(commit: string): ChangedFile[] {
     const tree = this.trees.get(commit)!;
-    const parent = this.trees.get(this.parents.get(commit) ?? '') ?? new Map<string, string>();
+    const [first, second] = [this.parents.get(commit), this.mergedParents.get(commit)];
+    const merged = first && second ? this.mergedTree(first, second) : null;
+    const parent = merged instanceof Map ? merged : (this.trees.get(first ?? '') ?? new Map<string, string>());
     const paths = [...new Set([...tree.keys(), ...parent.keys()])].filter((path) => tree.get(path) !== parent.get(path)).sort();
     return paths.map((path) => {
       const [was, now] = [parent.get(path), tree.get(path)];
@@ -541,9 +547,6 @@ function isWithin(top: string, path: string): boolean {
   const rest = relative(top, path);
   return !rest.startsWith('..') && !isAbsolute(rest);
 }
-
-// The email the fake's worktrees commit under, as the operator's own.
-export const FAKE_OPERATOR_EMAIL = 'operator@example.com';
 
 // The lines of a file's content, none for a file that isn't there.
 function linesOf(content: string | undefined): string[] {

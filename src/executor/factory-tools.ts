@@ -11,15 +11,11 @@
 import { randomUUID } from 'node:crypto';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { GATE_VERDICTS, type Report } from '../lifecycle/lifecycle.ts';
+import { FINDING_SEVERITIES, GATE_VERDICTS, type Report } from '../lifecycle/lifecycle.ts';
 import { TIERS } from '../models/routing.ts';
 import type { Delegation, DelegationReply, RunSink } from './executor.ts';
 
 const SERVER = 'factory';
-
-// How severe a review finding is: a high-severity one left over after the
-// fix pass trips a semi-auto gate's tripwire (ADR 0014).
-const FINDING_SEVERITIES = ['high', 'medium', 'low'] as const;
 
 export type FactoryTools = {
   server: McpSdkServerConfigWithInstance;
@@ -96,8 +92,7 @@ export function afkFactoryTools(
         .describe('Each finding, with its severity.'),
     },
     async ({ findings }) => {
-      const highSeverity = findings.filter(({ severity }) => severity === 'high').map(({ finding }) => finding);
-      sink.report({ type: 'findingsReported', runId, findings: findings.map(({ finding }) => finding), ...(highSeverity.length && { highSeverity }) });
+      sink.report({ type: 'findingsReported', runId, findings });
       return { content: [{ type: 'text', text: 'The factory has your findings.' }] };
     },
   );

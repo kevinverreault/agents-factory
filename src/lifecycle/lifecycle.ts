@@ -254,6 +254,14 @@ export type Publishing = { step: 'commit' | 'push' | 'open-pr'; problem: string 
 // reports what it left unfixed. `highLeftOver` are those left over that
 // the review rated high-severity, which trip a semi-auto gate's tripwire
 // (ADR 0014); tasks stored before severities have none.
+// How severe a review finding is: a high-severity one left over after the
+// fix pass trips a semi-auto gate's tripwire (ADR 0014).
+export const FINDING_SEVERITIES = ['high', 'medium', 'low'] as const;
+export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
+// A finding as a review reports it: with its severity, or as text alone,
+// its severity unsaid.
+export type ReportedFinding = string | { finding: string; severity: FindingSeverity };
+
 export type Findings = { found: string[]; fixPass: boolean; leftOver: string[]; highLeftOver?: string[] };
 
 // A decision the factory made where an attended task would have asked the
@@ -938,8 +946,7 @@ export type RunEvent =
   | { type: 'briefWritten'; runId: string; brief: Brief }
   // A review stage's AFK run reported its findings through
   // `report_findings`; its fix pass reports those it left unfixed.
-  // `highSeverity` are those of them it rated high-severity (ADR 0014).
-  | { type: 'findingsReported'; runId: string; findings: string[]; highSeverity?: string[] }
+  | { type: 'findingsReported'; runId: string; findings: ReportedFinding[] }
   // A PR body stage's AFK run wrote the body through `write_pr_body`.
   | { type: 'prBodyWritten'; runId: string; body: string; title?: string }
   // An AFK run set its task's one-line status through `report_progress`.
@@ -1201,10 +1208,13 @@ export type PrReadEvent = {
   checks?: Checks | null;
   sessionId?: string;
   // Under semi-auto, what its tripwires said once its checks let it through
-  // (ADR 0014): why the one that fired sends the PR to the operator, or
-  // null when none fired. A read that evaluated none queues no judging run.
-  tripwire?: string | null;
+  // (ADR 0014). A read that evaluated none has none, and queues no judging run.
+  tripwires?: TripwireRead;
 };
+
+// What a semi-auto root's tripwires said on its PR's head: none fired, or
+// one did, sending the PR to the operator for `reason` (ADR 0014).
+export type TripwireRead = { fired: false } | { fired: true; reason: string };
 
 // What the daemon did on GitHub for a root its merge gate let through (ADR
 // 0014): it marked the draft PR ready, merged it, or failed a step, saying why.
@@ -2798,8 +2808,8 @@ function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: Atte
   // Its tripwires come first: one that fired sends the PR to the operator
   // unjudged. A read without them, or without the session a judging run
   // would start, queues none: the next one does.
-  if (judging && read.tripwire) sendToOperator(task, read.head, read.tripwire);
-  else if (judging && read.tripwire === null && read.sessionId) queueGateCheck(task, read.head, read.sessionId);
+  if (judging && read.tripwires?.fired) sendToOperator(task, read.head, read.tripwires.reason);
+  else if (judging && read.tripwires && read.sessionId) queueGateCheck(task, read.head, read.sessionId);
   // Journaled before the first step on GitHub, in the state that takes it.
   if (passes) {
     const id = mergeId(task.id);
@@ -4619,9 +4629,13 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'findingsReported': {
       // The review's report replaces what it reported before; the fix
       // pass's says what is left over.
-      const findings = action.findings.map((finding) => finding.trim()).filter(Boolean);
-      // Those rated high-severity, as a semi-auto gate's tripwire reads them (ADR 0014).
-      const high = (action.highSeverity ?? []).map((finding) => finding.trim()).filter((finding) => findings.includes(finding));
+      // Each with its severity: those rated high-severity are what a semi-auto gate's tripwire reads (ADR 0014).
+      const reported = action.findings
+        .map((finding) => (typeof finding === 'string' ? { finding, severity: null } : finding))
+        .map(({ finding, severity }) => ({ text: finding.trim(), severity }))
+        .filter(({ text }) => text);
+      const findings = reported.map(({ text }) => text);
+      const high = reported.filter(({ severity }) => severity === 'high').map(({ text }) => text);
       if (task.findings?.fixPass) Object.assign(task.findings, { leftOver: findings, highLeftOver: high });
       else task.findings = { found: findings, fixPass: false, leftOver: findings, highLeftOver: high };
       break;

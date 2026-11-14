@@ -64,6 +64,7 @@ import {
   DECLINED_QUESTION,
   atMergeGate,
   gateJudges,
+  type TripwireRead,
   MERGE_STEP_DONE,
   mergeId,
   policyOf,
@@ -1157,7 +1158,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         // checks queue one, and what its tripwires say first (ADR 0014).
         if (policyOf(task) === 'judged') {
           event.sessionId = randomUUID();
-          if (gateJudges(lifecycle, task, event)) event.tripwire = await tripwiresOn(task, event.head!);
+          if (gateJudges(lifecycle, task, event)) event.tripwires = await tripwiresOn(task, event.head!);
         }
       }
     } catch (error) {
@@ -1169,20 +1170,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return event;
   }
 
-  // Why the semi-auto root's tripwires send its PR, on `head`, to the
-  // operator, or null when none fires (ADR 0014). They read only the
-  // commits the factory's AFK runs authored since the base, as the clone
-  // has them once it fetched the base and the task branch: the operator's
-  // own, such as a handoff's glossary and ADR, never trip them. Fetching is
-  // best-effort; changes that can't be read send the PR to the operator.
-  async function tripwiresOn(task: Task, head: string): Promise<string | null> {
+  // What the semi-auto root's tripwires say on its PR's `head` (ADR 0014).
+  // They read only the commits the factory's AFK runs authored since the
+  // base, as the clone has them once it fetched the base and the task
+  // branch: the operator's own, such as a handoff's glossary and ADR, never
+  // trip them. A base that can't be fetched, which would leave commits
+  // already on it in the range, or changes that can't be read, send the PR
+  // to the operator saying so. The task branch is fetched in case someone
+  // pushed to it; failing that, the clone's own copy of it is read.
+  async function tripwiresOn(task: Task, head: string): Promise<TripwireRead> {
     const { tripwires } = task.mergeGate ?? DEFAULT_MERGE_GATE;
     const repository = lifecycle.repositories[task.repo];
     let files: ChangedFile[] = [];
     if (readsChanges(tripwires)) {
-      const unread = `The tripwires couldn’t be checked on ${head.slice(0, 7)}`;
-      if (!repository) return `${unread}: ${task.repo} isn’t registered.`;
-      await fetchBase(git, repository);
+      const unread = (why: string): TripwireRead => ({ fired: true, reason: `The tripwires couldn’t be checked on ${head.slice(0, 7)}: ${why}` });
+      if (!repository) return unread(`${task.repo} isn’t registered.`);
+      const unfetched = await fetchBase(git, repository);
+      if (unfetched) return unread(unfetched);
       const branch = pushedBranch(task);
       if (branch) await git.fetch(repository.path, branch).catch((error) => {
         if (!(error instanceof GitError)) throw error;
@@ -1191,11 +1195,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         files = await git.authoredChanges(repository.path, `origin/${repository.baseBranch}`, head, FACTORY_IDENTITY.email);
       } catch (error) {
         if (!(error instanceof GitError)) throw error;
-        return `${unread}: ${error.message}`;
+        return unread(error.message);
       }
     }
     const fired = evaluateTripwires(tripwires, { files, highFindings: task.findings?.highLeftOver ?? [] });
-    return fired ? tripwireReason(fired) : null;
+    return fired ? { fired: true, reason: tripwireReason(fired) } : { fired: false };
   }
 
   // What deleting the root task's branch would lose, or null when nothing

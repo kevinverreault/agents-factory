@@ -7,6 +7,7 @@
 // gate config, so the operator's file can drop one for a repository, and
 // under `unattended` none is evaluated.
 import { writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { LaunchCommand } from '../protocol/protocol.ts';
@@ -73,11 +74,11 @@ async function throughPr(launched: Factory, commits: Commit[], { highSeverity = 
   factory.executor.report(run, { type: 'runCompleted' });
   run = await nextRun(launched, 'T1', run);
   if (highSeverity.length) {
-    const findings = [...highSeverity, 'The button has no label.'];
-    factory.executor.report(run, { type: 'findingsReported', findings, highSeverity });
+    const findings = [...highSeverity.map((finding) => ({ finding, severity: 'high' as const })), { finding: 'The button has no label.', severity: 'low' as const }];
+    factory.executor.report(run, { type: 'findingsReported', findings });
     factory.executor.report(run, { type: 'runCompleted' });
     run = await nextRun(launched, 'T1', run);
-    factory.executor.report(run, { type: 'findingsReported', findings, highSeverity });
+    factory.executor.report(run, { type: 'findingsReported', findings });
   }
   factory.executor.report(run, { type: 'runCompleted' });
   run = await nextRun(launched, 'T1', run);
@@ -216,6 +217,19 @@ describe('semi-auto’s tripwires', () => {
 
     const asked = await launched.tui.until((state) => state.tasks.T1?.label === 'In review');
     expect(asked.tasks.T1!.sentToOperator).toMatch(/^The tripwires couldn’t be checked on fffffff: /);
+    expect(launched.factory.executor.started.some((started) => started.reports?.includes('verdict'))).toBe(false);
+  });
+
+  test('a base that can’t be fetched sends the task to the operator unjudged, saying so', async () => {
+    const launched = await attached();
+    await launched.operator.send(launch('judged'));
+    await throughPr(launched, [{ files: { 'src/logout.ts': 'export {};\n' } }]);
+    launched.factory.git.cutOffOrigin(resolve('/clones/widgets'), 'fatal: unable to access origin');
+
+    green(launched);
+
+    const asked = await launched.tui.until((state) => state.tasks.T1?.label === 'In review');
+    expect(asked.tasks.T1!.sentToOperator).toMatch(/^The tripwires couldn’t be checked on \w{7}: Couldn't fetch main from the origin of acme\/widgets: fatal: unable to access origin$/);
     expect(launched.factory.executor.started.some((started) => started.reports?.includes('verdict'))).toBe(false);
   });
 

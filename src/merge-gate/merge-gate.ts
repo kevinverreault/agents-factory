@@ -15,9 +15,9 @@ export const MERGE_METHODS = ['merge', 'squash', 'rebase'] as const;
 export type MergeMethod = (typeof MERGE_METHODS)[number];
 
 // The tripwires that aren't path globs, a fixed vocabulary evaluated without
-// a model: a dependency added or upgraded (a manifest change beyond the
-// lockfile), tests deleted or skipped, and a high-severity finding left
-// after fix-once.
+// a model: a dependency manifest changed beyond its lockfile (any change to
+// one, as adding or upgrading a dependency makes, its scripts' included),
+// tests deleted or skipped, and a high-severity finding left after fix-once.
 export const TRIPWIRE_PREDICATES = ['dependency-change', 'tests-removed-or-skipped', 'high-severity-finding'] as const;
 export type TripwirePredicate = (typeof TRIPWIRE_PREDICATES)[number];
 
