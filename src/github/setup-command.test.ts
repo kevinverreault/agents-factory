@@ -35,7 +35,7 @@ async function formOf(page: URL): Promise<{ action: URL; manifest: Record<string
 }
 
 describe('setup github', () => {
-  test('the local page posts a manifest of the App’s permissions to GitHub, protected by a state', async () => {
+  test('the local page posts a manifest of the App’s permissions to GitHub, Checks and Statuses read included, protected by a state', async () => {
     const { page } = await started(new FakeConnection());
 
     expect(page.hostname).toBe('127.0.0.1');
@@ -46,7 +46,7 @@ describe('setup github', () => {
       name: 'agents-factory-kevin',
       public: false,
       redirect_url: `${page.origin}/created`,
-      default_permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' },
+      default_permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read' },
       default_events: [],
       hook_attributes: { active: false },
     });

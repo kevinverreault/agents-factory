@@ -1,3 +1,5 @@
+import { describe, expect, test } from 'vitest';
+import { APP_PERMISSIONS } from '../github/github.ts';
 import { describeGitHubContract, type GitHubFixture } from '../github/github-contract.ts';
 import { FakeClock } from './fake-clock.ts';
 import { FakeGit } from './fake-git.ts';
@@ -45,3 +47,19 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
     },
   };
 }
+
+describe('the fake GitHub’s installations', () => {
+  test('grant all the App asks for by default, or fewer until the operator approves the rest, and mint tokens only within the grant', async () => {
+    const github = new FakeGitHub(new FakeClock(), new FakeGit());
+    const app = await github.createApp(github.manifestCode());
+    github.install('acme/widgets', { contents: 'write', metadata: 'read' });
+
+    expect(await github.installation(app, 'acme/widgets')).toEqual({ permissions: { contents: 'write', metadata: 'read' } });
+    await expect(github.mintToken(app, 'acme/widgets', { checks: 'read' })).rejects.toThrow(/not granted to this installation/);
+    await expect(github.mintToken(app, 'acme/widgets', { contents: 'read' })).resolves.toMatchObject({ token: expect.stringMatching(/^ghs_/) });
+
+    github.approvePermissions('acme/widgets');
+    expect(await github.installation(app, 'acme/widgets')).toEqual({ permissions: APP_PERMISSIONS });
+    expect(APP_PERMISSIONS).toMatchObject({ checks: 'read', statuses: 'read' });
+  });
+});

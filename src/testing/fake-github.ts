@@ -1,5 +1,7 @@
 import {
+  APP_PERMISSIONS,
   GitHubError,
+  missingPermissions,
   deleteRefusal,
   goneHead,
   pushRefusal,
@@ -7,6 +9,7 @@ import {
   type BranchPush,
   type FactoryApp,
   type GitHub,
+  type Installation,
   type InstallationToken,
   type Issue,
   type Permissions,
@@ -74,7 +77,8 @@ export class FakeGitHub implements GitHub {
   readonly operator = 'octo-operator';
   private readonly codes = new Map<string, string>();
   private readonly apps = new Map<number, FactoryApp>();
-  private readonly installed = new Set<string>();
+  // Each repository the App is installed on, with the permissions granted there.
+  private readonly installed = new Map<string, Permissions>();
   private readonly issues = new Map<string, FakeIssue>();
   private readonly noDrafts = new Set<string>();
   private failure: string | null = null;
@@ -96,9 +100,16 @@ export class FakeGitHub implements GitHub {
     return code;
   }
 
-  // The operator installs the App on `repo`.
-  install(repo: string): void {
-    this.installed.add(repo);
+  // The operator installs the App on `repo`, granting it `permissions`: by
+  // default all the App asks for, or fewer, as an installation made before
+  // the App asked for more grants until the operator approves them.
+  install(repo: string, permissions: Permissions = APP_PERMISSIONS): void {
+    this.installed.set(repo, { ...permissions });
+  }
+
+  // The operator approves the App's current permissions on `repo`'s installation.
+  approvePermissions(repo: string): void {
+    if (this.installed.has(repo)) this.installed.set(repo, { ...APP_PERMISSIONS });
   }
 
   // The operator removes `repo` from the App's installation.
@@ -194,14 +205,19 @@ export class FakeGitHub implements GitHub {
     return this.operator;
   }
 
-  async isInstalled(app: FactoryApp, repo: string): Promise<boolean> {
+  async installation(app: FactoryApp, repo: string): Promise<Installation | null> {
     this.authenticate(app);
-    return this.installed.has(repo);
+    const permissions = this.installed.get(repo);
+    return permissions ? { permissions: { ...permissions } } : null;
   }
 
   async mintToken(app: FactoryApp, repo: string, permissions: Permissions): Promise<InstallationToken> {
     this.authenticate(app);
-    if (!this.installed.has(repo)) throw new GitHubError(`The factory’s App isn’t installed on ${repo}.`);
+    const granted = this.installed.get(repo);
+    if (!granted) throw new GitHubError(`The factory’s App isn’t installed on ${repo}.`);
+    if (missingPermissions(granted, permissions).length) {
+      throw new GitHubError(`GitHub refused to mint a token for ${repo} (HTTP 422: The permissions requested are not granted to this installation.).`);
+    }
     const token = { token: `ghs_fake${this.minted.length + 1}`, expiresAt: this.clock.now() + TOKEN_LIFETIME_MS };
     this.minted.push({ repo, permissions: { ...permissions }, ...token });
     return { ...token };

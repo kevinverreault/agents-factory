@@ -1,6 +1,7 @@
 // Seam 1: registering repositories through the client protocol (ADR 0010).
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
+import { APP_PERMISSIONS } from '../github/github.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
@@ -43,7 +44,7 @@ describe('repo add', () => {
 
     expect(await operator.send({ type: 'registerRepo', path: widgets })).toEqual({
       ok: true,
-      value: { id: 'acme/widgets', path: widgets, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now() }, skills: expect.objectContaining({ present: false }) },
+      value: { id: 'acme/widgets', path: widgets, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now(), permissions: APP_PERMISSIONS, settingsUrl: expect.any(String) }, skills: expect.objectContaining({ present: false }) },
     });
 
     const state = await tui.until((state) => 'acme/widgets' in state.repositories);
@@ -53,7 +54,7 @@ describe('repo add', () => {
       baseBranch: 'main',
       defaultPreset: 'main-flow',
       missing: false,
-      app: { installed: true, checkedAt: factory.clock.now() },
+      app: { installed: true, checkedAt: factory.clock.now(), permissions: APP_PERMISSIONS, settingsUrl: expect.any(String) },
       skills: expect.objectContaining({ present: false }),
     });
   });
@@ -133,7 +134,7 @@ describe('repo add', () => {
       baseBranch: 'release',
       defaultPreset: 'quick',
       missing: false,
-      app: { installed: true, checkedAt: factory.clock.now() },
+      app: { installed: true, checkedAt: factory.clock.now(), permissions: APP_PERMISSIONS, settingsUrl: expect.any(String) },
       skills: expect.objectContaining({ present: false }),
     });
   });
@@ -218,7 +219,7 @@ describe('repo move', () => {
 
     expect(await operator.send({ type: 'moveRepo', path: resolve(moved, 'src') })).toEqual({
       ok: true,
-      value: { id: 'acme/widgets', path: moved, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now() }, skills: expect.objectContaining({ present: false }) },
+      value: { id: 'acme/widgets', path: moved, baseBranch: 'main', defaultPreset: 'main-flow', missing: false, app: { installed: true, checkedAt: factory.clock.now(), permissions: APP_PERMISSIONS, settingsUrl: expect.any(String) }, skills: expect.objectContaining({ present: false }) },
     });
 
     expect((await tui.until((state) => state.repositories['acme/widgets']?.path === moved)).attentionQueue).toEqual([]);

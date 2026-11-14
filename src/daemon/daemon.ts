@@ -20,6 +20,7 @@ import {
   TICKET_WRITE,
   type FactoryApp,
   type GitHub,
+  type Installation,
   type InstallationToken,
   type Issue,
   type Permissions,
@@ -53,6 +54,8 @@ import {
   overdueRuns,
   pullRequestOf,
   pushedBranch,
+  atLeast,
+  l3Refused,
   reduce,
   rootOf,
   runReports,
@@ -645,12 +648,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function checkApp(repo: string): Promise<AppCheck> {
     const checkedAt = clock.now();
     let check: AppCheck;
+    let installation: Installation | null;
     try {
       const found = await factoryApp();
       if (!found) {
         check = { installed: false, checkedAt, reason: NO_APP, fixUrl: null };
-      } else if (await github.isInstalled(found, repo)) {
-        check = { installed: true, checkedAt };
+      } else if ((installation = await github.installation(found, repo))) {
+        check = { installed: true, checkedAt, permissions: installation.permissions, settingsUrl: installationSettings(found.slug) };
       } else {
         const reason = `The factory’s GitHub App, ${found.slug}, isn’t installed on ${repo}.`;
         check = { installed: false, checkedAt, reason, fixUrl: installationSettings(found.slug) };
@@ -782,6 +786,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const check = await checkApp(repo);
         const blocked = appBlock(resolved.preset.name, stages, check);
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
+        // L3 reads the PR's checks as the App (ADR 0014): refused, never
+        // lowered to L2, where its installation doesn't grant that.
+        const l3 = action.autonomy === 'L3' && start.stage.mode === 'AFK' ? l3Refused(repo, check) : null;
+        if (l3) return { ok: false, reason: l3 };
       }
       // At an AFK stage launching ticket tasks, one issue ref with no
       // sub-issues is a ticket task's ticket, and a spec ref or several refs
@@ -1056,6 +1064,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         committed: [],
         sessionId: randomUUID(),
       };
+      // L3 is checked against the App's installation as it is now (ADR 0014).
+      const repo = lifecycle.tasks[taskId]?.repo;
+      if (autonomy === 'L3' && repo && lifecycle.repositories[repo]) await checkApp(repo);
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
@@ -2337,13 +2348,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // 0010); an L2 run's container installs its own. One that failed holds
     // the run back no more than a missing lockfile would.
     let uninstalled: string | null = null;
-    if (cwd && run.autonomy !== 'L2') {
+    if (cwd && !atLeast(run.autonomy, 'L2')) {
       uninstalled = await installDependencies(cwd);
       if (lifecycle.runs[run.id]?.status !== 'active') return;
     }
     if (run.mode === 'AFK' && cwd) {
       const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
-      const l2 = run.autonomy === 'L2';
+      const l2 = atLeast(run.autonomy, 'L2');
       if (l2) {
         try {
           token = await secrets.read(SUBSCRIPTION_TOKEN_SECRET);
@@ -2916,9 +2927,10 @@ const NO_APP = 'The factory has no GitHub App yet: run `agents-factory setup git
 const NO_SUBSCRIPTION_TOKEN =
   'The factory has no subscription token for L2 runs yet: run `claude setup-token`, then `agents-factory setup token` to store what it prints.';
 
-// Whether the run executes in its task's container: an L2 AFK run (ADR 0007).
+// Whether the run executes in its task's container: an L2 AFK run (ADR
+// 0007), or an L3 one, contained alike (ADR 0014).
 function runsInContainer(run: Run): boolean {
-  return run.mode === 'AFK' && run.autonomy === 'L2';
+  return run.mode === 'AFK' && atLeast(run.autonomy, 'L2');
 }
 
 // What the factory holds about a guarded AFK run while it runs (ADR 0007):

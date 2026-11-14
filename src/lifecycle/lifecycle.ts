@@ -8,7 +8,7 @@
 // loop (ADR 0012); child tasks arrive with their own slice.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
-import type { Issue, Mergeability, PrState, PullRequest } from '../github/github.ts';
+import type { Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
@@ -33,7 +33,10 @@ import {
 } from '../usage/usage.ts';
 
 export type Mode = 'HITL' | 'AFK';
-export type AutonomyLevel = 'L1' | 'L2';
+// An autonomy level (ADR 0007): L1 runs on the operator's machine, L2 in the
+// task's own container and publishes its code, and L3 runs as L2 does and
+// may also merge the task's PR into the base branch (ADR 0014).
+export type AutonomyLevel = 'L1' | 'L2' | 'L3';
 // The operator's priority for an AFK task: urgent ones take a free slot first.
 export type Priority = 'normal' | 'urgent';
 
@@ -638,9 +641,41 @@ export type Repository = {
 };
 
 // Whether the factory identity's App is installed on a repository (ADR 0004),
-// and when the daemon last asked GitHub. Where it isn't, `reason` says why
-// and `fixUrl` opens the installation settings, unless the fix is elsewhere.
-export type AppCheck = { installed: true; checkedAt: number } | { installed: false; checkedAt: number; reason: string; fixUrl: string | null };
+// and when the daemon last asked GitHub. Where it is, `permissions` are those
+// its installation grants, and `settingsUrl` is where the operator approves
+// more. Where it isn't, `reason` says why and `fixUrl` opens the installation
+// settings, unless the fix is elsewhere.
+export type AppCheck =
+  | { installed: true; checkedAt: number; permissions: Permissions; settingsUrl: string }
+  | { installed: false; checkedAt: number; reason: string; fixUrl: string | null };
+
+// The permissions L3 needs the App's installation to grant beyond L2's
+// (ADR 0014): reading a PR's check runs and commit statuses before a merge.
+const L3_NEEDS: readonly AppPermission[] = ['checks', 'statuses'];
+
+// Why an L3 task can't run on `repo` as its App was checked, with the link
+// that fixes it, or null when it can or the App is unchecked yet. There is no
+// fallback to L2 (ADR 0004): the operator approves the permissions, or picks
+// a lower level themselves.
+export function l3Refusal(repo: string, check: AppCheck | null | undefined): { reason: string; fixUrl: string | null } | null {
+  if (!check) return null;
+  if (!check.installed) return { reason: `L3 works as the factory’s App on ${repo}. ${check.reason}`, fixUrl: check.fixUrl };
+  const missing = L3_NEEDS.filter((name) => !check.permissions?.[name]);
+  if (!missing.length) return null;
+  const named = missing.map((name) => `${name === 'checks' ? 'Checks' : 'Statuses'} read`).join(' and ');
+  return {
+    reason: `L3 merges a PR only once its checks pass, so the factory’s GitHub App needs ${named} on ${repo}, which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick L2.`,
+    fixUrl: check.settingsUrl,
+  };
+}
+
+// `l3Refusal` as a refusal's text: its reason, and the link to follow.
+export function l3Refused(repo: string, check: AppCheck | null | undefined): string | null {
+  const refusal = l3Refusal(repo, check);
+  if (!refusal) return null;
+  const fix = check?.installed ? 'Approve them at' : 'Install it from';
+  return `${refusal.reason}${refusal.fixUrl ? ` ${fix} ${refusal.fixUrl}, then try again.` : ''}`;
+}
 
 // Whether the skill set's per-repo setup (ADR 0010) is on a repository's
 // base branch on origin, and when the daemon last looked. Where it isn't,
@@ -1053,7 +1088,15 @@ export const RECOVERY_NOTE =
 // fails instead of being requeued (ADR 0003).
 const CRASH_LOOP_STARTS = 2;
 export const PRIORITIES: readonly Priority[] = ['normal', 'urgent'];
-export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ['L1', 'L2'];
+export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ['L1', 'L2', 'L3'];
+// The levels as a refusal names them: `L1, L2 or L3`.
+const LEVELS_TEXT = `${AUTONOMY_LEVELS.slice(0, -1).join(', ')} or ${AUTONOMY_LEVELS.at(-1)}`;
+
+// Whether `level` is `floor` or above: `requires: L2` means L2 or L3, and a
+// level at least L2 runs in the task's container and publishes (ADR 0014).
+export function atLeast(level: AutonomyLevel | null | undefined, floor: AutonomyLevel): boolean {
+  return !!level && AUTONOMY_LEVELS.indexOf(level) >= AUTONOMY_LEVELS.indexOf(floor);
+}
 // Past this share of the context window, the handoff sheet pre-selects
 // continuing fresh from the brief.
 export const FRESH_AT = 0.6;
@@ -1327,7 +1370,7 @@ export function treeRollup(state: Lifecycle, task: Task): Rollup | null {
 
 // The level an AFK stage's runs take: the asked one, held to its ceiling.
 function clampAutonomy(level: AutonomyLevel, stage: Stage | undefined): AutonomyLevel {
-  return stage?.autonomy === 'L1' ? 'L1' : level;
+  return stage?.autonomy && !atLeast(stage.autonomy, level) ? stage.autonomy : level;
 }
 
 function stageOf(task: Task, id: string | null | undefined): Stage | undefined {
@@ -1437,9 +1480,9 @@ function advanceFrom(state: Lifecycle, task: Task, from: Stage, run: Run | undef
   if (to.mode === 'HITL') return blocked(`The next stage, ${to.id}, is HITL: take ${task.id} over to start it.`);
   if (to.kind === 'action') {
     if (to.id !== 'open-pr') return blocked(`The next stage, ${to.id}, is a factory action, which the factory can’t run yet.`);
-    // Only L2 publishes code unattended (ADR 0007): below it, the operator's
-    // Push & open draft PR does.
-    if (task.autonomy !== 'L2') return blocked(`The next stage, open-pr, publishes ${task.id}’s code, which the factory does unattended only at L2. Give the stage \`requires: L2\` in its preset, so that L1 skips it.`);
+    // Only L2 and above publish code unattended (ADR 0007): below it, the
+    // operator's Push & open draft PR does.
+    if (!atLeast(task.autonomy, 'L2')) return blocked(`The next stage, open-pr, publishes ${task.id}’s code, which the factory does unattended only at L2 or above. Give the stage \`requires: L2\` in its preset, so that L1 skips it.`);
     // The factory's own step, holding no slot: it pushes the task branch,
     // then opens the draft PR, and the stage moves on once the PR is open.
     enterStage(task, to, sessionId);
@@ -1842,7 +1885,7 @@ function short(commit: string): string {
 // requires L2 (such as open-pr) is skipped below it.
 function nextAfkStage(task: Task, from: Stage): Stage | null {
   const { stages } = task.preset!;
-  return stages.slice(stages.indexOf(from) + 1).find((stage) => stage.requires !== 'L2' || task.autonomy === 'L2') ?? null;
+  return stages.slice(stages.indexOf(from) + 1).find((stage) => !stage.requires || atLeast(task.autonomy, stage.requires)) ?? null;
 }
 
 // Where the advance sheet's confirm takes the task: past its stage and the
@@ -2061,8 +2104,13 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (action.maxTurns !== null && !(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) {
         return 'Max turns must be a whole number of at least 1.';
       }
-      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
+      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
       if (state.repositories[action.repo]!.missing) return `${action.repo} is missing, so its runs can’t start.`;
+      // The level counts only for a task starting AFK, at a stage its preset names once resolved.
+      if (action.autonomy === 'L3' && action.preset?.stages.find(({ id }) => id === action.stage)?.mode === 'AFK') {
+        const refused = l3Refused(action.repo, state.repositories[action.repo]!.app);
+        if (refused) return refused;
+      }
       if (action.quick && action.preset && action.preset.stages.find(({ id }) => id === action.stage)?.mode !== 'HITL') {
         return `A quick launch grills you first, but ${action.preset.name} starts at an AFK stage (${action.stage}).`;
       }
@@ -2109,7 +2157,11 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!task.handoff.brief) return 'The agent hasn’t written the brief yet: you confirm the brief you have read.';
       if (!tidyBrief(action.brief).goal) return 'The brief needs a goal.';
       if (!CONTINUE_AS.includes(action.continueAs)) return 'Continue as resume, or fresh from the brief.';
-      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
+      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
+      if (action.autonomy === 'L3') {
+        const refused = l3Refused(task.repo, state.repositories[task.repo]?.app);
+        if (refused) return refused;
+      }
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       if (!(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) return 'Max turns must be a whole number of at least 1.';
       return specsRefusal(task.handoff, action.specs ?? []);
@@ -2157,7 +2209,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.state === 'in-review' ? publishingRefusal(task) : `${task.id} is not in review.`;
     case 'pushAndOpenPr':
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
-      if (task.autonomy === 'L2') return `${task.id} is at L2, where the factory opens its draft PR itself.`;
+      if (atLeast(task.autonomy, 'L2')) return `${task.id} is at ${task.autonomy}, where the factory opens its draft PR itself.`;
       // HITL work acts as the operator (ADR 0004): the App publishes only L1
       // work here. A setup task is published unasked when it reaches review
       // (ADR 0010), never through this button.
@@ -2176,9 +2228,13 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       return isTerminal(task) ? `${task.id} is already ${label(task)}.` : null;
     case 'setAutonomy': {
-      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
+      if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
       if (task.mode !== 'AFK') return `${task.id} is HITL, so it has no autonomy level.`;
       if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
+      if (action.autonomy === 'L3') {
+        const refused = l3Refused(task.repo, state.repositories[task.repo]?.app);
+        if (refused) return refused;
+      }
       // A run's containment never shifts under it.
       const run = liveRun(state, task);
       return run ? `${task.id}’s autonomy level changes only between runs, and its run ${run.id} is live.` : null;
@@ -2354,7 +2410,7 @@ function failPublishing(state: Lifecycle, task: Task, request: AttentionRequest 
   else addRequest(state, task, lastRun(state, task), 'github-write', false, problem, at);
 }
 
-// A root reaching In review after a run. At L2 the factory publishes what
+// A root reaching In review after a run. At L2 and above the factory publishes what
 // the run did unattended (ADR 0007): it pushes the task branch to the root's
 // PR, or, with no PR yet, pushes and opens one if the preset has an open-pr
 // stage, as when the operator took the root over before it opened. A setup
@@ -2365,7 +2421,7 @@ function reachReview(task: Task): void {
   task.state = 'in-review';
   if (task.child || !task.worktree) return;
   if (isSetupTask(task)) task.publishing = { step: 'commit', problem: null };
-  else if (task.autonomy === 'L2' && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
+  else if (atLeast(task.autonomy, 'L2') && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
 }
 
 // Whether the task runs the skill set's per-repo setup: its preset is the
@@ -2420,7 +2476,7 @@ function spawnRefusal(state: Lifecycle, task: Task, run: Run, spawn: ChildSpawne
   if (!task.worktree) return `${task.id} has no task branch to cut a child’s from.`;
   if (!spawn.goal.trim()) return 'A child needs a goal that stands on its own: it doesn’t see this conversation.';
   if (spawn.tier !== null && !isTier(spawn.tier)) return tierRefusal(spawn.tier);
-  if (spawn.autonomy !== null && !AUTONOMY_LEVELS.includes(spawn.autonomy)) return `${spawn.autonomy} is not an autonomy level (${AUTONOMY_LEVELS.join(' or ')}).`;
+  if (spawn.autonomy !== null && !AUTONOMY_LEVELS.includes(spawn.autonomy)) return `${spawn.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
   return spawnLimit(state, task);
 }
 
@@ -3429,9 +3485,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'takeOver':
       if (request) request.status = 'superseded';
-      // An L2 run's turn may still run in the task's container: ending it,
-      // and bringing its commits out, is the daemon's step outside the store.
-      if (run?.mode === 'AFK' && run.autonomy === 'L2') {
+      // An L2 or L3 run's turn may still run in the task's container: ending
+      // it, and bringing its commits out, is the daemon's step outside the store.
+      if (run?.mode === 'AFK' && atLeast(run.autonomy, 'L2')) {
         const id = `takeover:${task.id}`;
         state.intents[id] = { id, verb: 'takeover', taskId: task.id };
       }
@@ -3686,7 +3742,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         progress: null,
         mode: 'AFK',
         // Lowered, never raised: the parent's level (L1 under HITL) is its
-        // ceiling. A research child stays L1, for its open web (ADR 0007).
+        // ceiling, and L2 at most, since a child never merges (ADR 0014). A
+        // research child stays L1, for its open web (ADR 0007).
         autonomy: action.research || action.autonomy === 'L1' || (task.autonomy ?? 'L1') === 'L1' ? 'L1' : 'L2',
         priority: task.priority ?? 'normal',
         maxTurns: null,

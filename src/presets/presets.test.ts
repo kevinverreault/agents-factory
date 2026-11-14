@@ -213,6 +213,14 @@ describe('the schema', () => {
     );
   });
 
+  test('an AFK stage’s autonomy ceiling is L1, L2 or L3, and requires is L2 alone', () => {
+    for (const level of ['L1', 'L2', 'L3']) {
+      expect(resolved(nightly(`{ id: implement, kind: run, skill: implement, mode: AFK, autonomy: ${level} }`), 'nightly').stages[0]).toMatchObject({ autonomy: level });
+    }
+    expect(refusal(nightly('{ id: implement, kind: run, skill: implement, mode: AFK, autonomy: L4 }'), 'nightly')).toMatch(/^.*stage implement: autonomy must be/);
+    expect(refusal(nightly('{ id: open-pr, kind: action, mode: AFK, requires: L3 }'), 'nightly')).toMatch(/stage open-pr: requires/);
+  });
+
   test('the Ralph loop’s exit, tickets-closed, is refused: the loop was retired', () => {
     expect(refusal(nightly('{ id: implement, kind: loop, skill: implement, mode: AFK, exit: tickets-closed }'), 'nightly')).toBe(
       `${at}: stage implement: exit tickets-closed was the Ralph loop’s, which is retired: work a spec’s tickets with kind: tickets and exit spec-closed instead (ADR 0013).`,

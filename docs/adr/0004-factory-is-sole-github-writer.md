@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (App permissions amended by ADR 0014)
 ---
 
 # The factory is the only GitHub writer for AFK work, as a GitHub App
@@ -10,6 +10,7 @@ AFK agents commit locally and never write to GitHub. The daemon writes for them 
 
 - **Commits leave runs, credentials never enter them.** At L2 the container clones from a read-only mount of the host repo. Its commits come out through `docker exec … git bundle`, are fetched into the host repo, and the daemon pushes the task branch with a refspec it chooses. Host-worktree runs commit in place and the same actions push.
 - **The App's scope:** installed only on the operator's account and on the repos they select. Contents RW, Pull requests RW, Issues RW, Metadata R. No Workflows, Actions, Checks or Administration.
+  - *Amended by ADR 0014:* the App also has Checks R and Statuses R, so that an L3 task's PR merges only once its checks pass. An installation made before asks the operator to approve them on GitHub. Until they do, the launch card and the handoff sheet refuse L3 on that repository, saying why with a link to the installation settings, and never fall back to L2.
   - Workflows still trigger: pushes and PRs made with an installation token start `push` / `pull_request` runs, drafts included.
   - Without Workflows write the bot can't push `.github/workflows/` changes. The `push` action checks for them first and raises an **attention request** asking the operator to push the branch by hand.
 - **One token per action.** The daemon mints an installation token for each action, narrowed through the token API's `repositories` and `permissions` parameters to the task's repo and to what that action needs. Nothing is cached.
@@ -29,5 +30,5 @@ AFK agents commit locally and never write to GitHub. The daemon writes for them 
 
 - The walking skeleton (ADR 0001) gains a check that `gh` re-reads `hosts.yml` on every call, so a refreshed token takes effect mid-run.
 - An agent can't push its own fixes for workflow files. Those branches always need a hand push from the operator.
-- If the factory comes to watch CI on its PRs, the App gains Checks or Actions read, and the operator approves the change on the installation.
+- If the factory comes to watch CI on its PRs, the App gains Checks or Actions read, and the operator approves the change on the installation. ADR 0014 does so for L3: Checks and Statuses read.
 - Which repos the App is installed on is part of repository registration, which is still undecided.

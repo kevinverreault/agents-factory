@@ -96,7 +96,12 @@ describe('whether the App is installed on a repository', () => {
 
     expect(await operator.send({ type: 'checkApp', repo: 'acme/widgets' })).toEqual({
       ok: true,
-      value: { installed: true, checkedAt: factory.clock.now() },
+      value: {
+        installed: true,
+        checkedAt: factory.clock.now(),
+        permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read' },
+        settingsUrl: 'https://github.com/apps/agents-factory-operator/installations/new',
+      },
     });
     await tui.until((state) => state.repositories['acme/widgets']?.app?.installed === true);
   });

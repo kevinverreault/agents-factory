@@ -207,6 +207,14 @@ describe('task rows', () => {
     expect(rowOf(app, 'T1')).not.toContain('sonnet');
   });
 
+  test('an L3 task shows its level on its row and in its detail', async () => {
+    const { app } = await started(factoryState([{ ...task('T1', 'Implement the store', 'running', 'Running'), autonomy: 'L3' }]));
+
+    await eventually(() => expect(rowOf(app, 'T1')).toMatch(/Implement the store\s+AFK L3\s+Running/));
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toMatch(/^AFK L3 · /m));
+  });
+
   test('on a narrower terminal a row drops its groups first, then its extras', async () => {
     const { app } = await started(looping());
     widen(app, 95);
@@ -1264,6 +1272,49 @@ describe('launching and conversing', () => {
     );
   });
 
+  test('L3 is offered at an AFK start stage, and where the App’s installation lacks Checks and Statuses read the card says why, ctrl+o opens the settings to approve them, and the fresh check lifts it', async () => {
+    const connection = inWidgets();
+    connection.replyTo('listPresets', { ok: true, value: presetsView });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const settingsUrl = 'https://github.com/apps/agents-factory-kevin/installations/new';
+    const granted = { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' } as const;
+    const lacking = { ...widgets, app: { installed: true as const, checkedAt: 1, permissions: granted, settingsUrl } };
+    const opened: string[] = [];
+    connection.serveSnapshot({ ...factoryState([]), repositories: { ...repositories, 'acme/widgets': lacking } });
+    const app = render(<App connection={connection} cwd="/clones/widgets/src" openUrl={(url) => opened.push(url)} prefs={memoryPrefs()} />);
+    apps.push(app);
+    await settle();
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/Start stage\s+grill · HITL · opus/));
+    await press(app, UP, RIGHT, RIGHT, DOWN, DOWN);
+    await type(app, '#12');
+    await press(app, DOWN, DOWN, RIGHT);
+    await eventually(() => expect(app.lastFrame()).toMatch(/Autonomy\s+‹ L2 \(in its own container\) ›/));
+    expect(unwrapped(app.lastFrame()!)).not.toContain('Checks read');
+    await press(app, RIGHT);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toMatch(/Autonomy\s+‹ L3 \(in its own container; the factory may merge\) ›/);
+      expect(frame).toContain('the factory’s GitHub App needs Checks read and Statuses read on acme/widgets, which its installation doesn’t grant yet.');
+      expect(frame).toContain('ctrl+o opens its installation settings, to approve them');
+    });
+    // The cached check may be stale: the card asks for a fresh one.
+    await eventually(() => expect(connection.sent).toContainEqual({ type: 'checkApp', repo: 'acme/widgets' }));
+    app.stdin.write('\x0f');
+    await eventually(() => expect(opened).toEqual([settingsUrl]));
+
+    connection.servePatch([
+      { op: 'set', path: ['repositories', 'acme/widgets'], value: { ...lacking, app: { ...lacking.app, checkedAt: 2, permissions: { ...granted, checks: 'read', statuses: 'read' } } } },
+    ]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).not.toContain('Checks read'));
+    app.stdin.write('\r');
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', prompt: '', issues: ['#12'], autonomy: 'L3' }),
+    );
+  });
+
   test('a preset that doesn’t resolve shows why, and a dangling default preset warns that main-flow is picked instead', async () => {
     const connection = inWidgets();
     const warning = 'The default preset of acme/widgets, nightly, no longer resolves (There is no preset nightly.), so main-flow is picked instead.';
@@ -1962,6 +2013,34 @@ describe('launching and conversing', () => {
         },
       ]),
     );
+  });
+
+  test('L3 on the sheet, where the App’s installation lacks Checks and Statuses read, shows why with the link that approves them, and enter sends the refused handoff no differently', async () => {
+    const connection = new FakeConnection();
+    const settingsUrl = 'https://github.com/apps/agents-factory-kevin/installations/new';
+    const lacking = { ...widgets, app: { installed: true as const, checkedAt: 1, permissions: { contents: 'write', metadata: 'read' } as const, settingsUrl } };
+    const reason = `L3 merges a PR only once its checks pass, so the factory’s GitHub App needs Checks read and Statuses read on acme/widgets, which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick L2. Approve them at ${settingsUrl}, then try again.`;
+    connection.replyTo('handoff', { ok: false, reason });
+    const state = { ...factoryState([{ ...onLean, handoff: { ...sheet, brief } }]), runs: { R1: run }, repositories: { 'acme/widgets': lacking } };
+    const { app } = await started(state, { connection });
+    widen(app, 400);
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('HAND OFF T1 TO IMPLEMENT (AFK)'));
+
+    // Down to the autonomy field, past the brief's lines and continue-as.
+    await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, RIGHT, RIGHT);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('Autonomy ‹ L3 (in its own container; the factory may merge) ›');
+      expect(frame).toContain(reason);
+    });
+    await eventually(() => expect(connection.sent).toContainEqual({ type: 'checkApp', repo: 'acme/widgets' }));
+
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toContainEqual(expect.objectContaining({ type: 'handoff', taskId: 'T1', autonomy: 'L3' })));
+    // The refusal is the note already shown, not said twice.
+    await settle();
+    expect(unwrapped(app.lastFrame()!).split(reason)).toHaveLength(2);
   });
 
   test('ctrl+h on a HITL task in the list hands it off from its conversation, a parked one included', async () => {
