@@ -311,7 +311,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       await github.closePr((await github.mintToken(app, installedRepo, PR_WRITE)).token, `${installedRepo}#${number}`, 'Closed by the contract test.');
     });
 
-    test('a checks token reads the combined checks of a commit: none, then pending, red or green as its statuses go, while a read-only token can’t', async () => {
+    test('a checks token reads the combined checks of a commit: none, then pending, red or green as its statuses go, naming those that failed, while a read-only token can’t', async () => {
       const { github, app, installedRepo, clone, setStatus } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Checked by the contract test.\n' });
@@ -319,13 +319,13 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { token } = await github.mintToken(app, installedRepo, CHECKS_READ);
 
       // The throwaway repository runs no workflow on a contract branch.
-      expect(await github.readChecks(token, installedRepo, tip)).toBe('none');
+      expect(await github.readChecks(token, installedRepo, tip)).toEqual({ state: 'none', failed: [] });
       await setStatus(tip, 'contract/build', 'pending');
-      expect(await github.readChecks(token, installedRepo, tip)).toBe('pending');
+      expect(await github.readChecks(token, installedRepo, tip)).toEqual({ state: 'pending', failed: [] });
       await setStatus(tip, 'contract/build', 'success');
-      expect(await github.readChecks(token, installedRepo, tip)).toBe('green');
+      expect(await github.readChecks(token, installedRepo, tip)).toEqual({ state: 'green', failed: [] });
       await setStatus(tip, 'contract/lint', 'failure');
-      expect(await github.readChecks(token, installedRepo, tip)).toBe('red');
+      expect(await github.readChecks(token, installedRepo, tip)).toEqual({ state: 'red', failed: [{ name: 'contract/lint', url: null }] });
       await expect(github.readChecks((await github.mintToken(app, installedRepo, READ_ONLY)).token, installedRepo, tip)).rejects.toThrow(GitHubError);
     });
 
