@@ -345,7 +345,7 @@ test('an L1 AFK run reports findings and writes the PR body through the factory 
   const asked: ToolCall[] = [];
   const run = afkRun(
     cwd,
-    'Call the report_findings tool with findings ["The button has no label."], then call the write_pr_body tool with body ' +
+    'Call the report_findings tool with findings [{"finding": "The button has no label.", "severity": "high"}], then call the write_pr_body tool with body ' +
       '"Adds a logout button.". Then reply with only OK.',
     10,
     FACTORY_ALLOW_LIST,
@@ -356,7 +356,7 @@ test('an L1 AFK run reports findings and writes the PR body through the factory 
   await waitFor(() => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed'), 120_000);
 
   expect(asked).toEqual([]);
-  expect(reported).toContainEqual({ type: 'findingsReported', runId: 'R1', findings: ['The button has no label.'] });
+  expect(reported).toContainEqual({ type: 'findingsReported', runId: 'R1', findings: [{ finding: 'The button has no label.', severity: 'high' }] });
   expect(reported).toContainEqual({ type: 'prBodyWritten', runId: 'R1', body: 'Adds a logout button.' });
   expect(reported.at(-1)?.type).toBe('runCompleted');
 });

@@ -83,6 +83,14 @@ export interface Git {
   // The commits on the worktree's HEAD since `base`, which is in its
   // history, oldest first.
   commitsSince(worktreePath: string, base: string): Promise<string[]>;
+  // The files each commit authored by `author` (an email) changed, of those
+  // in `base..head` (such as `origin/main..<sha>`), oldest commit first and
+  // each commit's files in path order, with the lines it added and removed.
+  // A merge commit's are only those its author made beyond the merge git
+  // would have made: its conflict resolutions and edits by hand, without
+  // the conflict markers. The tripwires read the factory's own changes
+  // (ADR 0014). Throws a `GitError` when either names no commit.
+  authoredChanges(clonePath: string, base: string, head: string, author: string): Promise<ChangedFile[]>;
   // How the worktree breaks the invariants of its snapshot from before the
   // run, one reason each, or none: the branch is still checked out, its old
   // tip is in its history, the tree is clean, no ref, remote, config or hook
@@ -100,6 +108,17 @@ export interface Git {
 }
 
 export type DirectoryFile = { path: string; content: string };
+
+// A file a commit changed, by its path from the top (with `/`), and the
+// path it was renamed from, if it was: the lines the commit added to it
+// and removed from it.
+export type ChangedFile = {
+  path: string;
+  from?: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  added: string[];
+  removed: string[];
+};
 
 export type WorktreeState = {
   // The branch checked out, or null when HEAD is detached.
@@ -384,9 +403,102 @@ export const gitCli: Git = {
     return lines(await run(worktreePath, 'rev-list', '--reverse', `${base}..HEAD`));
   },
 
+  async authoredChanges(clonePath, base, head, author) {
+    // Each commit's hash, author email and parents, NUL-separated.
+    const fields = (await output(clonePath, 'log', '--reverse', '-z', '--format=%H%x00%ae%x00%P', '--end-of-options', `${base}..${head}`, '--')).split('\0');
+    const changes: ChangedFile[] = [];
+    for (let i = 0; i + 2 < fields.length; i += 3) {
+      if (fields[i + 1]!.trim().toLowerCase() !== author.toLowerCase()) continue;
+      const merge = fields[i + 2]!.trim().split(' ').length > 1;
+      changes.push(...(await commitChanges(clonePath, fields[i]!.trim(), merge)));
+    }
+    return changes;
+  },
+
   snapshot: (worktreePath) => hostChecks.snapshot(worktreePath),
   violations: (...args) => hostChecks.violations(...args),
 };
+
+// The files `commit` changed, renames found, in path order: against its
+// parent, or for a merge, against the merge git itself would have made, so
+// only what its author resolved or added by hand shows. Each file is read
+// from its own section of the patch, prefixes and colour pinned whatever
+// the operator's config says.
+async function commitChanges(clonePath: string, commit: string, merge: boolean): Promise<ChangedFile[]> {
+  const options = ['-r', '-M', '-p', '--unified=0', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--src-prefix=a/', '--dst-prefix=b/'];
+  const diff = merge ? ['show', '--format=', '--remerge-diff', ...options] : ['diff-tree', '--root', '--no-commit-id', ...options];
+  const files = patchFiles(await output(clonePath, '-c', 'core.quotePath=false', ...diff, '--end-of-options', commit));
+  // A merge's remerge diff removes the conflict markers it resolved: they are no line of either side.
+  if (merge) for (const file of files) file.removed = file.removed.filter((line) => !/^(<{7}|={7}|>{7}|\|{7})( |$)/.test(line));
+  return files;
+}
+
+// The files a `diff --git` patch changes, each from its own section: its
+// path from the header, or a rename's from its `rename from` and `rename
+// to` lines; added or deleted by its `new file mode` or `deleted file mode`
+// line; and its lines from its hunks. A type change, such as a file made a
+// symlink, comes as a deletion and an addition of the same path: one change.
+function patchFiles(patch: string): ChangedFile[] {
+  const files: ChangedFile[] = [];
+  for (const section of patch.split(/^(?=diff --git )/m)) {
+    if (!section.startsWith('diff --git ')) continue;
+    const lines = section.split('\n');
+    const firstHunk = lines.findIndex((line) => line.startsWith('@@'));
+    const header = firstHunk === -1 ? lines.slice(1) : lines.slice(1, firstHunk);
+    const named = (field: string) => {
+      const line = header.find((line) => line.startsWith(`${field} `));
+      return line === undefined ? null : unquoted(line.slice(field.length + 1));
+    };
+    const [from, to] = [named('rename from'), named('rename to')];
+    const status = from !== null ? 'renamed' : header.some((line) => line.startsWith('new file mode')) ? 'added' : header.some((line) => line.startsWith('deleted file mode')) ? 'deleted' : 'modified';
+    const file: ChangedFile = { path: to ?? headerPath(lines[0]!.slice('diff --git '.length)), ...(from !== null && { from }), status, added: [], removed: [] };
+    for (const line of firstHunk === -1 ? [] : lines.slice(firstHunk)) {
+      if (line.startsWith('+')) file.added.push(line.slice(1));
+      else if (line.startsWith('-')) file.removed.push(line.slice(1));
+    }
+    const last = files.at(-1);
+    if (last?.path === file.path && last.status === 'deleted' && file.status === 'added') {
+      last.status = 'modified';
+      last.added.push(...file.added);
+      continue;
+    }
+    files.push(file);
+  }
+  return files;
+}
+
+// The path a `diff --git` header names after `b/`, when the file isn't
+// renamed, so both sides name the same path: `a/<path> b/<path>`, or both
+// C-quoted when the path holds a character git quotes.
+function headerPath(sides: string): string {
+  if (sides.startsWith('"')) {
+    const second = sides.slice(sides.search(/(?<!\\)" "/) + 2);
+    return unquoted(second).slice('b/'.length);
+  }
+  return sides.slice('a/'.length, 'a/'.length + (sides.length - 'a/ b/'.length) / 2);
+}
+
+// A path as git writes it in a patch: as is, or C-quoted, its escapes
+// standing for bytes of UTF-8.
+function unquoted(text: string): string {
+  if (!text.startsWith('"') || !text.endsWith('"')) return text;
+  const escapes: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+  const bytes: number[] = [];
+  const body = text.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    const char = body[i]!;
+    if (char !== '\\') {
+      bytes.push(...Buffer.from(char));
+      continue;
+    }
+    const next = body[++i]!;
+    if (/[0-7]/.test(next)) {
+      bytes.push(Number.parseInt(body.slice(i, i + 3), 8));
+      i += 2;
+    } else bytes.push(escapes[next] ?? next.charCodeAt(0));
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
 
 // The paths a `status --porcelain=v1 -z` listing names: NUL-separated, so
 // unquoted, as `XY path`, and after a rename's or a copy's entry, its old
@@ -463,10 +575,13 @@ function run(cwd: string, ...args: string[]): Promise<string> {
   return output(cwd, ...args).then((stdout) => stdout.trim());
 }
 
+// The most output a command may write: a patch can be large.
+const MAX_OUTPUT = 256 * 1024 * 1024;
+
 // The command's output as git wrote it.
 function output(cwd: string, ...args: string[]): Promise<string> {
   return new Promise((done, fail) =>
-    execFile('git', ['-C', cwd, ...args], { windowsHide: true }, (error, stdout, stderr) =>
+    execFile('git', ['-C', cwd, ...args], { windowsHide: true, maxBuffer: MAX_OUTPUT }, (error, stdout, stderr) =>
       error ? fail(new GitError(stderr.trim() || error.message)) : done(stdout),
     ),
   );

@@ -9,7 +9,7 @@ import { capture } from '../artifacts/capture.ts';
 import { DependenciesError, type Dependencies } from '../dependencies/dependencies.ts';
 import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart, type Verdict } from '../executor/executor.ts';
 import { DELETION_ORDER, listedLeftovers, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
-import { GitError, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
+import { GitError, type ChangedFile, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   CHECKS_READ,
   GitHubError,
@@ -63,6 +63,8 @@ import {
   l3RefusalText,
   DECLINED_QUESTION,
   atMergeGate,
+  gateJudges,
+  type TripwireRead,
   MERGE_STEP_DONE,
   mergeId,
   policyOf,
@@ -167,6 +169,7 @@ import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, 
 import { NAMING_INSTRUCTIONS, nameTask, namingRequest, type Namer } from '../naming/task-naming.ts';
 import type { Clock } from './clock.ts';
 import { DEFAULT_MERGE_GATE, readMergeGateConfig, type MergeGateConfig } from '../merge-gate/merge-gate.ts';
+import { evaluateTripwires, readsChanges, tripwireReason } from '../merge-gate/tripwires.ts';
 
 export type DaemonOptions = {
   pipePath: string;
@@ -1151,8 +1154,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (event.state === 'open' && atMergeGate(task)) {
         const checks = await appToken(task.repo, CHECKS_READ);
         event.checks = await github.readChecks(checks.token, task.repo, event.head!);
-        // The session a semi-auto root's judging run starts, should these checks queue one.
-        if (policyOf(task) === 'judged') event.sessionId = randomUUID();
+        // The session a semi-auto root's judging run starts, should these
+        // checks queue one, and what its tripwires say first (ADR 0014).
+        if (policyOf(task) === 'judged') {
+          event.sessionId = randomUUID();
+          if (gateJudges(lifecycle, task, event)) event.tripwires = await tripwiresOn(task, event.head!);
+        }
       }
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
@@ -1161,6 +1168,38 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const repository = lifecycle.repositories[task.repo];
     if (event.mergeable === 'conflicting' && updatesOnConflict(task) && repository) await fetchBase(git, repository);
     return event;
+  }
+
+  // What the semi-auto root's tripwires say on its PR's `head` (ADR 0014).
+  // They read only the commits the factory's AFK runs authored since the
+  // base, as the clone has them once it fetched the base and the task
+  // branch: the operator's own, such as a handoff's glossary and ADR, never
+  // trip them. A base that can't be fetched, which would leave commits
+  // already on it in the range, or changes that can't be read, send the PR
+  // to the operator saying so. The task branch is fetched in case someone
+  // pushed to it; failing that, the clone's own copy of it is read.
+  async function tripwiresOn(task: Task, head: string): Promise<TripwireRead> {
+    const { tripwires } = task.mergeGate ?? DEFAULT_MERGE_GATE;
+    const repository = lifecycle.repositories[task.repo];
+    let files: ChangedFile[] = [];
+    if (readsChanges(tripwires)) {
+      const unread = (why: string): TripwireRead => ({ fired: true, reason: `The tripwires couldn’t be checked on ${head.slice(0, 7)}: ${why}` });
+      if (!repository) return unread(`${task.repo} isn’t registered.`);
+      const unfetched = await fetchBase(git, repository);
+      if (unfetched) return unread(unfetched);
+      const branch = pushedBranch(task);
+      if (branch) await git.fetch(repository.path, branch).catch((error) => {
+        if (!(error instanceof GitError)) throw error;
+      });
+      try {
+        files = await git.authoredChanges(repository.path, `origin/${repository.baseBranch}`, head, FACTORY_IDENTITY.email);
+      } catch (error) {
+        if (!(error instanceof GitError)) throw error;
+        return unread(error.message);
+      }
+    }
+    const fired = evaluateTripwires(tripwires, { files, highFindings: task.findings?.highLeftOver ?? [] });
+    return fired ? { fired: true, reason: tripwireReason(fired) } : { fired: false };
   }
 
   // What deleting the root task's branch would lose, or null when nothing

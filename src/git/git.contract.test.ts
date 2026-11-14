@@ -1,6 +1,6 @@
 // Seam 3: the real git adapter on throwaway clones in a temp directory.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, symlinkSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -77,6 +77,16 @@ async function fixture(): Promise<CloneFixture> {
       git(worktreePath, 'add', '--all');
       git(worktreePath, 'commit', '--quiet', '-m', 'Commit it all');
     },
+    async writeFile(worktreePath, path, content) {
+      const file = join(worktreePath, path);
+      if (content === null) return rmSync(file);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, content);
+    },
+    async commitAs(worktreePath, email) {
+      git(worktreePath, 'add', '--all');
+      git(worktreePath, 'commit', '--quiet', `--author=Someone <${email}>`, '-m', `Commit it all as ${email}`);
+    },
     async checkout(worktreePath, branch) {
       git(worktreePath, 'checkout', '--quiet', '-b', branch);
     },
@@ -107,6 +117,103 @@ test('git: a task worktree sets core.longpaths, and its branch tracks nothing', 
 
     expect(git(path, 'config', 'core.longpaths')).toBe('true');
     expect(() => git(path, 'rev-parse', '--abbrev-ref', '@{upstream}')).toThrow();
+  } finally {
+    await dispose();
+  }
+});
+
+test('git: a commit’s renames, binary files and mode changes keep each file’s lines with its own, and a clean merge adds nothing', async () => {
+  const { root, cloneWithOrigin, advanceOrigin, writeFile, commitAs, dispose } = await fixture();
+  try {
+    const clone = await cloneWithOrigin('widgets', 'main');
+    const path = join(root, 'worktrees', 'T1');
+    await gitCli.fetch(clone, 'main');
+    await gitCli.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+    const bot = FACTORY_IDENTITY.email;
+    await writeFile(path, 'db/migrations/1.sql', 'create table users;\n');
+    await writeFile(path, 'run.sh', 'echo hi\n');
+    await commitAs(path, bot);
+    // A rename with no change, a binary file, a mode change, and a change after them all.
+    git(path, 'mv', 'db/migrations/1.sql', 'db/schema.sql');
+    writeFileSync(join(path, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]));
+    chmodSync(join(path, 'run.sh'), 0o755);
+    await writeFile(path, 'src/z.ts', 'export {};\n');
+    await commitAs(path, bot);
+    // The base moves on and is merged in cleanly: the merge adds nothing, and the base's commits are left out.
+    await advanceOrigin(clone, 'main', { 'src/base.ts': 'export const base = 1;\n' });
+    await gitCli.fetch(clone, 'main');
+    git(path, '-c', `user.email=${bot}`, 'merge', '--quiet', '--no-edit', 'origin/main');
+    const head = git(path, 'rev-parse', 'HEAD');
+
+    const changes = await gitCli.authoredChanges(clone, 'origin/main', head, bot);
+    expect(changes.slice(2)).toEqual([
+      { path: 'db/schema.sql', from: 'db/migrations/1.sql', status: 'renamed', added: [], removed: [] },
+      { path: 'logo.png', status: 'added', added: [], removed: [] },
+      { path: 'run.sh', status: 'modified', added: [], removed: [] },
+      { path: 'src/z.ts', status: 'added', added: ['export {};'], removed: [] },
+    ]);
+    expect(changes.map(({ path }) => path)).not.toContain('src/base.ts');
+  } finally {
+    await dispose();
+  }
+});
+
+test('git: a type change is one change to its path, and a path git quotes is read unquoted', async () => {
+  const { root, cloneWithOrigin, writeFile, commitAs, dispose } = await fixture();
+  try {
+    const clone = await cloneWithOrigin('widgets', 'main');
+    const path = join(root, 'worktrees', 'T1');
+    await gitCli.fetch(clone, 'main');
+    await gitCli.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+    const bot = FACTORY_IDENTITY.email;
+    await writeFile(path, 'a.txt', 'old\n');
+    await writeFile(path, 'src/login.test.ts', "test('logs in');\n");
+    await commitAs(path, bot);
+    // `a.txt` becomes a symlink, which git writes as two sections of its patch.
+    rmSync(join(path, 'a.txt'));
+    symlinkSync('src/login.test.ts', join(path, 'a.txt'));
+    await writeFile(path, 'src/login.test.ts', "test.skip('logs in');\n");
+    await writeFile(path, 'src/tab\there "q" é.ts', 'export {};\n');
+    await commitAs(path, bot);
+    const head = git(path, 'rev-parse', 'HEAD');
+
+    expect((await gitCli.authoredChanges(clone, 'origin/main', head, bot)).slice(2)).toEqual([
+      { path: 'a.txt', status: 'modified', added: ['src/login.test.ts'], removed: ['old'] },
+      { path: 'src/login.test.ts', status: 'modified', added: ["test.skip('logs in');"], removed: ["test('logs in');"] },
+      { path: 'src/tab\there "q" é.ts', status: 'added', added: ['export {};'], removed: [] },
+    ]);
+  } finally {
+    await dispose();
+  }
+});
+
+test('git: a merge commit’s changes are its author’s resolution and edits by hand, without the conflict markers', async () => {
+  const { root, cloneWithOrigin, advanceOrigin, writeFile, commitAs, dispose } = await fixture();
+  try {
+    const clone = await cloneWithOrigin('widgets', 'main');
+    const path = join(root, 'worktrees', 'T1');
+    await advanceOrigin(clone, 'main', { 'db/migrations/1.sql': 'a\nb\n', 'src/login.test.ts': "test('x');\ntest('y');\n" });
+    await gitCli.fetch(clone, 'main');
+    await gitCli.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+    const bot = FACTORY_IDENTITY.email;
+    await writeFile(path, 'db/migrations/1.sql', 'a\nMINE\n');
+    await writeFile(path, 'src/login.test.ts', "test('x');\ntest('y');\ntest('mine');\n");
+    await commitAs(path, 'operator@example.com');
+    await advanceOrigin(clone, 'main', { 'db/migrations/1.sql': 'a\nTHEIRS\n', 'src/login.test.ts': "test('x');\ntest('y');\ntest('theirs');\n" });
+    await gitCli.fetch(clone, 'main');
+    // An update run's merge, conflicting: its resolution drops `test('y')` and adds a file by hand.
+    expect(() => git(path, 'merge', '--quiet', 'origin/main')).toThrow();
+    await writeFile(path, 'db/migrations/1.sql', 'a\nRESOLVED\n');
+    await writeFile(path, 'src/login.test.ts', "test('x');\ntest('mine');\ntest('theirs');\n");
+    await writeFile(path, 'src/extra.ts', 'export {};\n');
+    await commitAs(path, bot);
+    const head = git(path, 'rev-parse', 'HEAD');
+
+    expect(await gitCli.authoredChanges(clone, 'origin/main', head, bot)).toEqual([
+      { path: 'db/migrations/1.sql', status: 'modified', added: ['RESOLVED'], removed: ['MINE', 'THEIRS'] },
+      { path: 'src/extra.ts', status: 'added', added: ['export {};'], removed: [] },
+      { path: 'src/login.test.ts', status: 'modified', added: [], removed: ["test('y');"] },
+    ]);
   } finally {
     await dispose();
   }

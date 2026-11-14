@@ -30,6 +30,13 @@ describeGitContract('the fake git', async () => {
     async commitAll(worktreePath) {
       git.commitAll(worktreePath);
     },
+    async writeFile(worktreePath, path, content) {
+      if (content === null) git.deleteFile(worktreePath, path);
+      else git.editFile(worktreePath, path, content);
+    },
+    async commitAs(worktreePath, email) {
+      git.commitAll(worktreePath, { author: email });
+    },
     async checkout(worktreePath, branch) {
       git.checkout(worktreePath, branch);
     },

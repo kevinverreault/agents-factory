@@ -1,5 +1,9 @@
 import { relative, isAbsolute } from 'node:path';
-import { GitError, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree, type WorktreeState } from '../git/git.ts';
+import { FACTORY_IDENTITY } from '../guards/run-git.ts';
+import { GitError, type ChangedFile, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree, type WorktreeState } from '../git/git.ts';
+
+// The email the fake's worktrees commit under, as the operator's own.
+export const FAKE_OPERATOR_EMAIL = 'operator@example.com';
 
 type CloneSetup = { originUrl?: string | null; defaultBranch?: string | null };
 
@@ -23,8 +27,10 @@ export class FakeGit implements Git {
   private readonly clones = new Map<string, FakeClone>();
   // Each worktree's paths with changes not yet committed.
   private readonly changes = new Map<string, Set<string>>();
-  // What each worktree's uncommitted changes wrote, by path.
-  private readonly edits = new Map<string, Map<string, string>>();
+  // What each worktree's uncommitted changes wrote, by path: null deletes it.
+  private readonly edits = new Map<string, Map<string, string | null>>();
+  // Who authored each commit made in a worktree, by email.
+  private readonly authors = new Map<string, string>();
   // Each commit's files, by path from the top.
   private readonly trees = new Map<string, Map<string, string>>();
   // Each commit's parent, if it has one, and a merge commit's second parent.
@@ -291,15 +297,23 @@ export class FakeGit implements Git {
   editFile(worktreePath: string, path: string, content = ''): void {
     const changes = this.changes.get(worktreePath) ?? new Set();
     this.changes.set(worktreePath, changes.add(path));
-    const edits = this.edits.get(worktreePath) ?? new Map<string, string>();
+    const edits = this.edits.get(worktreePath) ?? new Map<string, string | null>();
     this.edits.set(worktreePath, edits.set(path, content));
   }
 
-  // Everything changed in the worktree is committed, if anything is.
-  commitAll(worktreePath: string): void {
+  // Something deletes `path` in the worktree, uncommitted.
+  deleteFile(worktreePath: string, path: string): void {
+    this.editFile(worktreePath, path);
+    this.edits.get(worktreePath)!.set(path, null);
+  }
+
+  // Everything changed in the worktree is committed, if anything is,
+  // authored by `author`: by default the factory's identity, as an AFK
+  // run's commits are.
+  commitAll(worktreePath: string, { author = FACTORY_IDENTITY.email }: { author?: string } = {}): void {
     const changed = this.changes.get(worktreePath);
     this.changes.delete(worktreePath);
-    if (changed?.size) this.advance(this.worktreeAt(worktreePath), [...changed]);
+    if (changed?.size) this.authors.set(this.advance(this.worktreeAt(worktreePath), [...changed]), author);
   }
 
   async uncommitted(worktreePath: string, paths: string[]): Promise<string[]> {
@@ -411,6 +425,8 @@ export class FakeGit implements Git {
     if (!paths.some((path) => this.changes.get(worktreePath)?.has(path))) throw new GitError('nothing to commit');
     for (const path of paths) this.changes.get(worktreePath)?.delete(path);
     const commit = this.advance(worktree, paths);
+    // Under the worktree's own identity: the operator's.
+    this.authors.set(commit, FAKE_OPERATOR_EMAIL);
     this.commits.push({ worktreePath, paths, message });
     return commit;
   }
@@ -420,7 +436,9 @@ export class FakeGit implements Git {
     const edits = this.edits.get(worktree.path);
     const tree = new Map(this.trees.get(worktree.head));
     for (const path of paths) {
-      tree.set(path, edits?.get(path) ?? '');
+      const content = edits?.has(path) ? edits.get(path)! : '';
+      if (content === null) tree.delete(path);
+      else tree.set(path, content);
       edits?.delete(path);
     }
     const commit = this.newCommit(tree);
@@ -436,6 +454,35 @@ export class FakeGit implements Git {
       since.unshift(commit);
     }
     return since;
+  }
+
+  async authoredChanges(clonePath: string, base: string, head: string, author: string): Promise<ChangedFile[]> {
+    const clone = this.cloneAt(clonePath);
+    const [from, to] = [base, head].map((ref) =>
+      ref.startsWith('origin/') ? clone.fetched.get(ref.slice('origin/'.length)) : (clone.branches.get(ref) ?? (this.trees.has(ref) ? ref : undefined)),
+    );
+    if (!from || !to) throw new GitError(`fatal: bad revision '${base}..${head}'`);
+    const excluded = this.ancestry(from);
+    const wanted = this.ancestry(to);
+    // The fake's commits are kept as they are made, so in order, oldest first.
+    const commits = [...this.trees.keys()].filter((commit) => wanted.has(commit) && !excluded.has(commit));
+    return commits.filter((commit) => this.authors.get(commit)?.toLowerCase() === author.toLowerCase()).flatMap((commit) => this.changesOf(commit));
+  }
+
+  // The files `commit` changed against its parent, in path order, or for a
+  // merge, against the merge of its parents, as git would have made it. The
+  // fake finds no renames: a moved file is deleted, and added.
+  private changesOf(commit: string): ChangedFile[] {
+    const tree = this.trees.get(commit)!;
+    const [first, second] = [this.parents.get(commit), this.mergedParents.get(commit)];
+    const merged = first && second ? this.mergedTree(first, second) : null;
+    const parent = merged instanceof Map ? merged : (this.trees.get(first ?? '') ?? new Map<string, string>());
+    const paths = [...new Set([...tree.keys(), ...parent.keys()])].filter((path) => tree.get(path) !== parent.get(path)).sort();
+    return paths.map((path) => {
+      const [was, now] = [parent.get(path), tree.get(path)];
+      const status = was === undefined ? 'added' : now === undefined ? 'deleted' : 'modified';
+      return { path, status, ...lineDiff(linesOf(was), linesOf(now)) };
+    });
   }
 
   // The run in the worktree breaks an invariant, which the check after it
@@ -499,4 +546,33 @@ export class FakeGit implements Git {
 function isWithin(top: string, path: string): boolean {
   const rest = relative(top, path);
   return !rest.startsWith('..') && !isAbsolute(rest);
+}
+
+// The lines of a file's content, none for a file that isn't there.
+function linesOf(content: string | undefined): string[] {
+  if (!content) return [];
+  const lines = content.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
+}
+
+// The lines going from `before` to `after` adds and removes, by their
+// longest common subsequence, as a diff finds them.
+function lineDiff(before: string[], after: string[]): { added: string[]; removed: string[] } {
+  const common = before.map(() => new Array<number>(after.length + 1).fill(0));
+  common.push(new Array<number>(after.length + 1).fill(0));
+  for (let i = before.length - 1; i >= 0; i--) {
+    for (let j = after.length - 1; j >= 0; j--) {
+      common[i]![j] = before[i] === after[j] ? common[i + 1]![j + 1]! + 1 : Math.max(common[i + 1]![j]!, common[i]![j + 1]!);
+    }
+  }
+  const added: string[] = [];
+  const removed: string[] = [];
+  let [i, j] = [0, 0];
+  while (i < before.length || j < after.length) {
+    if (i < before.length && j < after.length && before[i] === after[j]) [i, j] = [i + 1, j + 1];
+    else if (j < after.length && (i === before.length || common[i]![j + 1]! >= common[i + 1]![j]!)) added.push(after[j++]!);
+    else removed.push(before[i++]!);
+  }
+  return { added, removed };
 }

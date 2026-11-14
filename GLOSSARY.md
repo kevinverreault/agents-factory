@@ -210,8 +210,12 @@ _Avoid_: Merge review, approval
 The gate check's run on a semi-auto PR whose checks are green: a sonnet-tier run in a session of its own that reads the diff, the ticket and spec, the review findings left over and the rubric, and reports a verdict through `report_verdict`, merge or ask, with its reason. Ending without one counts as ask. A new commit on the PR voids its verdict.
 _Avoid_: Gate review, merge judge
 
+**Finding severity**:
+How bad a review finding is, as the review rates it when it reports the finding through `report_findings`: high, for a bug, data loss or security hole that should block the merge, or medium or low. A high-severity finding still left over after fix-once trips a semi-auto gate's tripwire.
+_Avoid_: Priority, criticality
+
 **Tripwire**:
-A rule of the gate check, evaluated without a model, that sends a PR to the operator whatever the judging run would say, such as one touching database migrations.
+A rule of the gate check, evaluated without a model on the commits the factory's AFK runs authored, that sends a PR to the operator before any judging run, such as one touching database migrations. The operator's own commits never trip one.
 _Avoid_: Guard, blocker (a blocker is a ticket's)
 
 **Merge gate config**:
