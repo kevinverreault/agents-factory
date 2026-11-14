@@ -1,7 +1,7 @@
 // Seam 1: under full-auto (ADR 0014), through the client protocol, a run
 // never puts a question to the operator. Its `AskUserQuestion` raises no
 // attention request: the factory declines it, telling the run to pick the
-// most reasonable answer and record it through `record_assumption`, and the
+// most reasonable answer and record it through `record_assumed_answer`, and the
 // run carries on. What it records is kept on the task as a judgement call,
 // across a restart, and the PR body lists it under a judgement-calls
 // heading. Under the operator policy questions reach the operator as before,
@@ -22,6 +22,7 @@ afterEach(async () => {
   for (const factory of factories.splice(0)) await factory.dispose();
 });
 
+// A factory, its operator's connection, and what that connection last saw.
 type Factory = { factory: TestFactory; operator: FactoryConnection; tui: Watched };
 
 // A factory with a subscription token for contained runs, and an operator attached.
@@ -84,7 +85,7 @@ describe('under full-auto (unattended)', () => {
     factory.executor.report('R1', { type: 'attentionRaised', kind: 'question', question });
 
     await vi.waitFor(() => expect(factory.executor.declined).toHaveLength(1));
-    expect(factory.executor.declined[0]).toEqual({ runId: 'R1', questionId: 'toolu_1', message: expect.stringContaining('record_assumption') });
+    expect(factory.executor.declined[0]).toEqual({ runId: 'R1', questionId: 'toolu_1', message: expect.stringContaining('record_assumed_answer') });
     expect(factory.executor.declined[0]!.message).toMatch(/most reasonable/);
     const state = await operator.send({ type: 'daemon.status' }).then(() => tui.state());
     expect(state.attentionQueue).toEqual([]);
@@ -192,6 +193,52 @@ describe('at a stage capped at L2', () => {
     await operator.send({ type: 'answer', taskId: 'T1', answers: { 'Where should the logout button go?': 'Menu' } });
     factory.executor.report('R1', { type: 'runCompleted' });
     expect(await started(factory, 2)).toMatchObject({ autonomy: 'L3', assumes: true });
+  });
+});
+
+describe('a parked run', () => {
+  test('the answer an earlier run assumed is still on the task after a later run parks, and the PR body lists it', async () => {
+    const { factory, operator, tui } = await attached();
+    // A review capped at L2, whose question reaches the operator and suspends its run.
+    mkdirSync(factory.paths.presetsDir, { recursive: true });
+    const stages = [
+      '{ id: build, kind: run, mode: AFK, skill: implement, args: "{{prompt}}" }',
+      '{ id: check, kind: run, mode: AFK, skill: code-review, autonomy: L2 }',
+      '{ id: pr-body, kind: run, mode: AFK, skill: pr, exit: "artifact:pr-body" }',
+      '{ id: open-pr, kind: action, mode: AFK, requires: L2 }',
+    ];
+    writeFileSync(join(factory.paths.presetsDir, 'parking.preset.yaml'), `stages:\n${stages.map((stage) => `  - ${stage}\n`).join('')}`);
+    expect(await operator.send({ ...fullAuto, preset: 'parking' })).toEqual({ ok: true, value: { taskId: 'T1' } });
+    await started(factory, 1);
+    factory.executor.report('R1', { type: 'answerAssumed', question: 'Where should the logout button go?', answer: 'Header, by the avatar.' });
+    const workdir = factory.sandbox.workdirOf('T1');
+    factory.git.editFile(workdir, 'src/logout.ts', 'export {};\n');
+    factory.git.commitAll(workdir);
+    factory.executor.report('R1', { type: 'runCompleted' });
+    expect(await started(factory, 2)).toMatchObject({ autonomy: 'L2', assumes: false });
+    factory.executor.report('R2', { type: 'attentionRaised', kind: 'question', question });
+    await tui.until((state) => state.runs.R2?.status === 'suspended');
+
+    // A graceful stop parks the suspended run.
+    expect(await operator.send({ type: 'daemon.stop' })).toEqual({ ok: true });
+    await factory.daemon().stopped;
+    await factory.startDaemon();
+    const operatorAgain = await factory.attach();
+    const after = watch(operatorAgain);
+    const parked = await after.until((state) => state.runs.R2?.outcome === 'parked');
+    expect(parked.tasks.T1!.judgementCalls).toEqual([
+      { kind: 'assumed-answer', taskId: 'T1', question: 'Where should the logout button go?', answer: 'Header, by the avatar.', reason: null },
+    ]);
+
+    expect(await operatorAgain.send({ type: 'answer', taskId: 'T1', answers: { 'Where should the logout button go?': 'Menu' } })).toEqual({ ok: true });
+    await started(factory, 3);
+    factory.executor.report('R3', { type: 'runCompleted' });
+    await started(factory, 4);
+    factory.executor.report('R4', { type: 'prBodyWritten', body: 'Adds a logout button.' });
+    factory.executor.report('R4', { type: 'runCompleted' });
+
+    await after.until((state) => !!state.tasks.T1?.pr);
+    expect(factory.github.pullRequests[0]!.body).toContain('## Judgement calls\n\n- Assumed, asked “Where should the logout button go?”: Header, by the avatar.');
   });
 });
 

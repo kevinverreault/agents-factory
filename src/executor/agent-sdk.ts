@@ -560,8 +560,9 @@ function gateCall(run: Omit<LiveRun, 'query'>): CanUseTool {
 
 // `AskUserQuestion` holds the turn until the operator answers it: a question
 // card in a HITL conversation, a question attention request that suspends an
-// AFK run. A full-auto run's is declined instead, with what it should do
-// (ADR 0014). Anything else that would prompt goes to `otherwise`.
+// AFK run, until the daemon either answers it with the operator's answers or,
+// for a full-auto run, declines it through `decline` with what the run should
+// do (ADR 0014). Anything else that would prompt goes to `otherwise`.
 function askTheOperator(runId: string, run: Omit<LiveRun, 'query'>, otherwise: CanUseTool): CanUseTool {
   return async (toolName, input, options) => {
     if (toolName !== 'AskUserQuestion') return otherwise(toolName, input, options);

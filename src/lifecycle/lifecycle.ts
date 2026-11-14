@@ -255,7 +255,7 @@ export type Findings = { found: string[]; fixPass: boolean; leftOver: string[] }
 
 // A decision the factory made where an attended task would have asked the
 // operator (ADR 0014): so far, the answer a full-auto run assumed to a
-// question it asked, recorded through `record_assumption` by a run of
+// question it asked, recorded through `record_assumed_answer` by a run of
 // `taskId`, the task or one of its children. Kept on the root, whose PR
 // lists them.
 export type JudgementCall = { kind: 'assumed-answer'; taskId: string; question: string; answer: string; reason: string | null };
@@ -577,7 +577,7 @@ export type Run = {
   allowOnce?: string[];
   // Whether it answers its own questions (ADR 0014): an AFK run whose tree
   // went by full-auto when it started records the answer it assumed through
-  // `record_assumption`, and its questions never reach the operator. Runs
+  // `record_assumed_answer`, and its questions never reach the operator. Runs
   // stored before full-auto have none.
   assumes?: boolean;
   // The hosts its container's egress proxy denied it, for an L2 run that
@@ -854,7 +854,7 @@ export type RunEvent =
   // An AFK run asked the operator through `AskUserQuestion`.
   // A run that assumes its answers raises none (ADR 0014): the daemon tells it to choose.
   | { type: 'attentionRaised'; runId: string; kind: 'question'; question: Question }
-  // A full-auto run recorded the answer it assumed through `record_assumption`.
+  // A full-auto run recorded the answer it assumed through `record_assumed_answer`.
   | { type: 'answerAssumed'; runId: string; question: string; answer: string; reason?: string }
   // An AFK run's tool call that neither the factory's allow list nor the
   // operator's rules cover (the daemon checks those): `parts` is the parts
@@ -1273,9 +1273,9 @@ function assumesAnswers(state: Lifecycle, task: Task, run: Run): boolean {
 }
 
 // What the daemon declines a full-auto run's question with: it chooses, records, and goes on.
-export const UNASKED_QUESTION =
+export const DECLINED_QUESTION =
   'Nobody answers questions under full-auto: the operator isn’t asked. Pick the most reasonable answer yourself, record it through the ' +
-  'factory’s record_assumption tool with the question, your answer and why, then carry on as if they had answered so.';
+  'factory’s record_assumed_answer tool with the question, your answer and why, then carry on as if they had answered so.';
 
 // Whether the policy is one the factory merges by: semi-auto or full-auto.
 export function agentPolicy(policy: MergePolicy | null | undefined): boolean {

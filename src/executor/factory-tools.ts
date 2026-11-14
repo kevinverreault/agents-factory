@@ -3,10 +3,10 @@
 // decides what it means. A HITL run gets `propose_advance`, `propose_handoff`
 // and `write_handoff_brief`, and an AFK run `report_findings` or
 // `write_pr_body` when its stage reports through them, and a full-auto run
-// `record_assumption`. Both get the
-// delegation tools (ADR 0009), HITL and AFK runs alike: `spawn_child`, `list_children` and
-// `cancel_child`, a HITL run spawning fire-and-forget children only; an AFK
-// run also `report_progress`, and `report_result` on a child's run.
+// `record_assumed_answer`. Both get the delegation tools (ADR 0009):
+// `spawn_child`, `list_children` and `cancel_child`, a HITL run spawning
+// fire-and-forget children only; an AFK run also `report_progress`, and
+// `report_result` on a child's run.
 import { randomUUID } from 'node:crypto';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
@@ -68,7 +68,7 @@ export function hitlFactoryTools(runId: string, sink: RunSink, { spawns }: { spa
 // The tools of what the AFK run reports, and the delegation tools: with
 // the one a child reports to its parent through, when `child`, and
 // `spawn_child` only while the run's tree `spawns` deeper.
-// `record_assumption` too when the run `assumes` its answers (ADR 0014).
+// `record_assumed_answer` too when the run `assumes` its answers (ADR 0014).
 export function afkFactoryTools(
   runId: string,
   sink: RunSink,
@@ -100,7 +100,7 @@ export function afkFactoryTools(
     },
   );
   const recordAssumption = tool(
-    'record_assumption',
+    'record_assumed_answer',
     'Record the answer you assumed to a question nobody is asked under full-auto: the question, the answer you picked as the most reasonable, and why. ' +
       'The factory lists it as a judgement call on the PR, for the operator to audit.',
     {

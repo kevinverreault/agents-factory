@@ -48,7 +48,7 @@ export type RunStart = {
   child: boolean;
   spawns: boolean;
   // Whether the run answers its own questions (ADR 0014), as a full-auto
-  // run does: it is given `record_assumption`, to record what it assumed.
+  // run does: it is given `record_assumed_answer`, to record what it assumed.
   assumes: boolean;
 };
 

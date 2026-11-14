@@ -57,7 +57,7 @@ import {
   pushedBranch,
   runsContained,
   l3RefusalText,
-  UNASKED_QUESTION,
+  DECLINED_QUESTION,
   atMergeGate,
   MERGE_STEP_DONE,
   policyOf,
@@ -2346,6 +2346,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         void startRun(run);
       }
     }
+    // Nobody answers a full-auto run's question: the daemon declines it, and
+    // the run chooses, records the answer it assumed and goes on (ADR 0014).
+    if (action.type === 'attentionRaised' && lifecycle.runs[action.runId]!.assumes) {
+      executor.decline(action.runId, action.question.id, DECLINED_QUESTION);
+    }
     // The conversation verbs act on the task's live run.
     const conversing = 'taskId' in action ? lifecycle.tasks[action.taskId] : undefined;
     const run = conversing && liveRun(lifecycle, conversing);
@@ -2359,9 +2364,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       executor.interrupt(run!.id);
     } else if (action.type === 'answerQuestion') {
       executor.answer(run!.id, action.questionId, action.answers);
-    } else if (action.type === 'attentionRaised' && lifecycle.runs[action.runId]!.assumes) {
-      // Nobody answers a full-auto run's question: it chooses, and records what it assumed (ADR 0014).
-      executor.decline(action.runId, action.question.id, UNASKED_QUESTION);
     } else if (action.type === 'answer' && openCard(before, before.tasks[action.taskId]!)) {
       // A HITL run's card: its call gets the operator's verdict, then the
       // calls it held go to the gate in turn.
