@@ -3,7 +3,8 @@
 // drilled into (`enter`) and popped back out of (`esc`); the task tree,
 // newest first, with the selected task's output under it, and its Done and
 // Cancelled tasks dimmed or hidden (`H`, remembered between sessions); the launch card (`N`), quick launch (`n`), the conversation view
-// (`enter` in a task's detail), re-tiering a task (`t`), conversing with or
+// (`enter` in a task's detail), re-tiering a task (`t`), changing its merge
+// policy from its detail (`p`), conversing with or
 // taking over one (`c`), handing one off (`ctrl+h`), cancelling one with its
 // subtree (`x`, with the cancel sheet when work would be lost), retrying a
 // failed task from the tree (`y`),
@@ -17,7 +18,7 @@
 // Plain .ts (no JSX) so Node runs it without a build step.
 import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, useStdin } from 'ink';
-import type { AttentionQueueItem } from '../lifecycle/lifecycle.ts';
+import { OFFERED_POLICIES, policyOf, type AttentionQueueItem } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import { editExternally, type Edited } from '../os/edit-externally.ts';
 import { openUrl as openInBrowser } from '../os/open-url.ts';
@@ -34,7 +35,7 @@ import { GcSheet } from './gc-sheet.ts';
 import { GroupPicker, pickerKey } from './group-picker.ts';
 import { Conversation, conversationRunOf } from './conversation.ts';
 import { Help } from './help.ts';
-import { LaunchCard } from './launch-card.ts';
+import { cycle, LaunchCard } from './launch-card.ts';
 import { Output } from './output.ts';
 import type { PrefsStore, TuiPrefs } from './prefs.ts';
 import { QuickLaunch } from './quick-launch.ts';
@@ -302,6 +303,13 @@ export function App({
       if (!reply.ok) retiers.current.delete(task.id);
     });
   };
+  // Moves the drilled-into task to the next merge policy offered (ADR 0014).
+  const repolicy = () => {
+    const task = drilled;
+    if (!task || !offersPolicyChange(task)) return;
+    const to = cycle(OFFERED_POLICIES, policyOf(task), 1);
+    void connection.send({ type: 'setMergePolicy', taskId: task.id, mergePolicy: to }).then((reply) => setRefusal(reply.ok ? null : reply.reason));
+  };
   // Sends the verb, then opens the task's conversation once the daemon took it.
   const sendThenOpen = (command: Command & { taskId: string }) =>
     void connection.send(command).then((reply) => {
@@ -428,6 +436,7 @@ export function App({
       if (key.return && opens) openConversation(opens);
       if (key.return && drills) setDetail(drills);
       if (input === 't') retier();
+      if (input === 'p') repolicy();
       if (input === 'c') converse();
       const cancels = selected ?? itemTask;
       if (input === 'x' && cancels) cancel({ type: 'cancel', taskId: cancels.id });
@@ -450,7 +459,15 @@ export function App({
     if (condensed) return [['tab', 'focus'], ['f', 'zoom'], ['g', 'group'], [':', 'command'], ['v', 'screens'], ['?', 'keys']];
     if (drilled) {
       const answers = queue.some((item) => item.taskId === drilled.id && answerable(item, drilled));
-      return [['enter', 'open conversation'], ['c', 'converse or take over'], ...(answers ? [['a', 'answer'] as Hint] : []), ['x', 'cancel'], ['esc', 'back'], ['?', 'keys']];
+      return [
+        ['enter', 'open conversation'],
+        ['c', 'converse or take over'],
+        ...(answers ? [['a', 'answer'] as Hint] : []),
+        ...(offersPolicyChange(drilled) ? [['p', 'merge policy'] as Hint] : []),
+        ['x', 'cancel'],
+        ['esc', 'back'],
+        ['?', 'keys'],
+      ];
     }
     if (tab === 'tasks') {
       return [
@@ -869,4 +886,11 @@ function NeedsYouList({ state, cursor }: { state: FactoryState; cursor: number }
 
 function column(children: ReactNode[]) {
   return h(Box, { flexDirection: 'column' }, ...children);
+}
+
+// Whether the task's detail offers `p` to change its merge policy: a live
+// AFK root at L3, the only level an agent policy runs at (ADR 0014). The
+// daemon's setMergePolicy guard has the last word, and says why it refuses.
+function offersPolicyChange(task: TaskView): boolean {
+  return task.mode === 'AFK' && !task.parent && task.autonomy === 'L3' && !finished(task);
 }
