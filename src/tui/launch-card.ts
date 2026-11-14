@@ -150,8 +150,8 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const blocked = card.choice && 'appStages' in card.choice ? appBlock(card.choice.name, card.choice.appStages, app) : null;
   // L3 is refused, never lowered to L2, where the App's installation lacks
   // what it needs (ADR 0014): the card says so before the launch does.
-  const l3 = !blocked && card.start?.mode === 'AFK' && draft.autonomy === 'L3' && draft.repo ? l3Refusal(draft.repo, app) : null;
-  const fixUrl = blocked && app && !app.installed ? app.fixUrl : (l3?.fixUrl ?? null);
+  const refusedL3 = !blocked && card.start?.mode === 'AFK' && draft.autonomy === 'L3' && draft.repo ? l3Refusal(draft.repo, app) : null;
+  const fixUrl = blocked && app && !app.installed ? app.fixUrl : (refusedL3?.fixUrl ?? null);
 
   useInput((input, key) => {
     if (key.escape) {
@@ -236,7 +236,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     card.fields.includes('issues') ? row('issues', 'Issues', draft.issues, false) : null,
     row('groups', 'Groups', draft.groups, false),
     afk ? row('autonomy', 'Autonomy', autonomyText(draft.autonomy ?? 'L1')) : null,
-    l3 ? note('l3', l3.reason, 'bad') : null,
+    refusedL3 ? note('l3', refusedL3.reason, 'bad') : null,
     row('tier', 'Model tier', draft.tier ?? `stage default${start ? ` (${start.model ?? DEFAULT_TIER})` : ''}`),
     afk
       ? row(
@@ -249,7 +249,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     afk ? row('priority', 'Priority', draft.priority ?? 'normal') : null,
     listing && 'warning' in listing && listing.warning ? h(Text, tone('warn'), listing.warning) : null,
     blocked ? h(Text, tone('bad'), blocked) : null,
-    fixUrl ? h(Text, tone('dim'), l3 ? 'ctrl+o opens its installation settings, to approve them' : 'ctrl+o opens its installation settings') : null,
+    fixUrl ? h(Text, tone('dim'), refusedL3 ? 'ctrl+o opens its installation settings, to approve them' : 'ctrl+o opens its installation settings') : null,
     launching.indicator,
     refusal ? h(Text, tone('bad'), refusal) : null,
   );

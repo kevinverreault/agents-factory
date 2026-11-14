@@ -655,23 +655,26 @@ export type AppCheck =
 const L3_NEEDS: Partial<Record<AppPermission, string>> = { checks: 'Checks read', statuses: 'Statuses read' };
 
 // Why an L3 task can't run on `repo` as its App was checked, with the link
-// that fixes it, or null when it can or the App is unchecked yet. There is no
-// fallback to L2 (ADR 0004): the operator approves the permissions, or picks
-// a lower level themselves.
+// that fixes it, or null when it can or the App is unchecked yet. A check
+// stored before the App asked for L3's permissions recorded none, so it
+// counts as unchecked: the daemon checks again before it decides. There is
+// no fallback to L2 (ADR 0004): the operator approves the permissions, or
+// picks a lower level themselves.
 export function l3Refusal(repo: string, check: AppCheck | null | undefined): { reason: string; fixUrl: string | null } | null {
   if (!check) return null;
   if (!check.installed) return { reason: `L3 works as the factory’s App on ${repo}. ${check.reason}`, fixUrl: check.fixUrl };
-  const missing = (Object.keys(L3_NEEDS) as AppPermission[]).filter((name) => !check.permissions?.[name]);
+  if (!check.permissions) return null;
+  const missing = (Object.keys(L3_NEEDS) as AppPermission[]).filter((name) => !check.permissions[name]);
   if (!missing.length) return null;
   const named = missing.map((name) => L3_NEEDS[name]).join(' and ');
   return {
     reason: `L3 merges a PR only once its checks pass, so the factory’s GitHub App needs ${named} on ${repo}, which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick L2.`,
-    fixUrl: check.settingsUrl,
+    fixUrl: check.settingsUrl ?? null,
   };
 }
 
 // `l3Refusal` as a refusal's text: its reason, and the link to follow.
-export function l3Refused(repo: string, check: AppCheck | null | undefined): string | null {
+export function l3RefusalText(repo: string, check: AppCheck | null | undefined): string | null {
   const refusal = l3Refusal(repo, check);
   if (!refusal) return null;
   const fix = check?.installed ? 'Approve them at' : 'Install it from';
@@ -681,7 +684,7 @@ export function l3Refused(repo: string, check: AppCheck | null | undefined): str
 // Why a task on `repo` can't be at `level`, as the guard says: only L3 is
 // refused, where the repository's App check refuses it.
 function levelRefused(state: Lifecycle, repo: string, level: AutonomyLevel): string | null {
-  return level === 'L3' ? l3Refused(repo, state.repositories[repo]?.app) : null;
+  return level === 'L3' ? l3RefusalText(repo, state.repositories[repo]?.app) : null;
 }
 
 // Whether the skill set's per-repo setup (ADR 0010) is on a repository's
@@ -1099,10 +1102,21 @@ export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ['L1', 'L2', 'L3'];
 // The levels as a refusal names them: `L1, L2 or L3`.
 const LEVELS_TEXT = `${AUTONOMY_LEVELS.slice(0, -1).join(', ')} or ${AUTONOMY_LEVELS.at(-1)}`;
 
-// Whether `level` is `floor` or above: `requires: L2` means L2 or L3, and a
-// level at least L2 runs in the task's container and publishes (ADR 0014).
+// Whether `level` is `floor` or above: `requires: L2` means L2 or L3 (ADR 0014).
 export function atLeast(level: AutonomyLevel | null | undefined, floor: AutonomyLevel): boolean {
   return !!level && AUTONOMY_LEVELS.indexOf(level) >= AUTONOMY_LEVELS.indexOf(floor);
+}
+
+// Whether a run at `level` executes in its task's own container (ADR 0007):
+// at L2, and at L3, contained alike (ADR 0014).
+export function runsContained(level: AutonomyLevel | null | undefined): boolean {
+  return atLeast(level, 'L2');
+}
+
+// Whether the factory publishes a task's code unattended at `level` (ADR
+// 0007), pushing its branch and opening its draft PR: at L2 and L3.
+export function publishesCode(level: AutonomyLevel | null | undefined): boolean {
+  return atLeast(level, 'L2');
 }
 // Past this share of the context window, the handoff sheet pre-selects
 // continuing fresh from the brief.
@@ -1489,7 +1503,7 @@ function advanceFrom(state: Lifecycle, task: Task, from: Stage, run: Run | undef
     if (to.id !== 'open-pr') return blocked(`The next stage, ${to.id}, is a factory action, which the factory can’t run yet.`);
     // Only L2 and above publish code unattended (ADR 0007): below it, the
     // operator's Push & open draft PR does.
-    if (!atLeast(task.autonomy, 'L2')) return blocked(`The next stage, open-pr, publishes ${task.id}’s code, which the factory does unattended only at L2 or above. Give the stage \`requires: L2\` in its preset, so that L1 skips it.`);
+    if (!publishesCode(task.autonomy)) return blocked(`The next stage, open-pr, publishes ${task.id}’s code, which the factory does unattended only at L2 or above. Give the stage \`requires: L2\` in its preset, so that L1 skips it.`);
     // The factory's own step, holding no slot: it pushes the task branch,
     // then opens the draft PR, and the stage moves on once the PR is open.
     enterStage(task, to, sessionId);
@@ -2214,7 +2228,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.state === 'in-review' ? publishingRefusal(task) : `${task.id} is not in review.`;
     case 'pushAndOpenPr':
       if (task.state !== 'in-review') return `${task.id} is not in review.`;
-      if (atLeast(task.autonomy, 'L2')) return `${task.id} is at ${task.autonomy}, where the factory opens its draft PR itself.`;
+      if (publishesCode(task.autonomy)) return `${task.id} is at ${task.autonomy}, where the factory opens its draft PR itself.`;
       // HITL work acts as the operator (ADR 0004): the App publishes only L1
       // work here. A setup task is published unasked when it reaches review
       // (ADR 0010), never through this button.
@@ -2424,7 +2438,7 @@ function reachReview(task: Task): void {
   task.state = 'in-review';
   if (task.child || !task.worktree) return;
   if (isSetupTask(task)) task.publishing = { step: 'commit', problem: null };
-  else if (atLeast(task.autonomy, 'L2') && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
+  else if (publishesCode(task.autonomy) && (task.pr || opensPr(task))) task.publishing = { step: 'push', problem: null };
 }
 
 // Whether the task runs the skill set's per-repo setup: its preset is the
@@ -3490,7 +3504,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       if (request) request.status = 'superseded';
       // An L2 or L3 run's turn may still run in the task's container: ending
       // it, and bringing its commits out, is the daemon's step outside the store.
-      if (run?.mode === 'AFK' && atLeast(run.autonomy, 'L2')) {
+      if (run?.mode === 'AFK' && runsContained(run.autonomy)) {
         const id = `takeover:${task.id}`;
         state.intents[id] = { id, verb: 'takeover', taskId: task.id };
       }

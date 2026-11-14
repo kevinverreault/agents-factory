@@ -1,9 +1,9 @@
 // The GitHub port (ADR 0004): what the factory asks GitHub as its factory
 // identity, a GitHub App. It turns the manifest flow's code into the App,
 // says whether the App is installed on a repository and with which
-// permissions, and mints installation tokens narrowed to one repository and the permissions asked for. With such
-// a token it reads specs, maps and their tickets, closes them (ADR 0013),
-// pushes task branches, and opens
+// permissions, and mints installation tokens narrowed to one repository and
+// the permissions asked for. With such a token it reads specs, maps and
+// their tickets, closes them (ADR 0013), pushes task branches, and opens
 // their draft PRs, reads those PRs, closes or reopens them, and deletes the
 // task branches it pushed (ADR 0011). The REST adapter (`gitHubApi`) is the real one.
 import { execFile } from 'node:child_process';
@@ -157,9 +157,12 @@ export function installationSettings(slug: string): string {
   return `https://github.com/apps/${slug}/installations/new`;
 }
 
+// The kind of account an installation is on, as GitHub says.
+export type AccountType = 'User' | 'Organization';
+
 // An installation's own settings page, on the account it is installed on:
 // where the operator approves the App's new permissions.
-export function installationPage(id: number, account: string, accountType: string): string {
+export function installationPage(id: number, account: string, accountType: AccountType): string {
   return accountType === 'Organization'
     ? `https://github.com/organizations/${account}/settings/installations/${id}`
     : `https://github.com/settings/installations/${id}`;
@@ -220,7 +223,7 @@ export function gitHubApi(): GitHub {
     if (reply.status === 404) return null;
     if (reply.status !== 200) throw refused(`say whether the App is installed on ${repo}`, reply);
     const id = reply.json.id as number;
-    const { login, type } = reply.json.account as { login: string; type: string };
+    const { login, type } = reply.json.account as { login: string; type: AccountType };
     return { id, permissions: { ...(reply.json.permissions as Permissions) }, settingsUrl: installationPage(id, login, type) };
   }
 

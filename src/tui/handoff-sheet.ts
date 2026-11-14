@@ -5,7 +5,7 @@
 // level, tier and max turns, and confirms. Esc backs out and the conversation carries on.
 import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
-import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, l3Refused, readyNow, type AppCheck, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, l3RefusalText, readyNow, type AppCheck, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
@@ -92,10 +92,10 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
   // L3 picked where the installation, as last checked, refuses it: the sheet
   // says why, with the link that approves it, and asks GitHub again, as the
   // operator may have approved it since.
-  const l3 = draft.current.autonomy === 'L3' ? l3Refused(task.repo, app) : null;
+  const refusedL3 = draft.current.autonomy === 'L3' ? l3RefusalText(task.repo, app) : null;
   useEffect(() => {
-    if (l3) void connection.send({ type: 'checkApp', repo: task.repo });
-  }, [connection, task.repo, !!l3]);
+    if (refusedL3) void connection.send({ type: 'checkApp', repo: task.repo });
+  }, [connection, task.repo, !!refusedL3]);
 
   const at = lines[draft.current.line];
   const to = handoff.stage ? `to ${handoff.stage} (AFK)` : 'to one AFK run on the brief';
@@ -118,12 +118,12 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
       ...(handoff.ticketSets ? ticketSetLines(handoff.ticketSets, draft.current.specs ?? [], task.repo, at?.kind === 'spec' ? at.index : null) : []),
       h(Field, { key: 'continueAs', label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, choosable(draft.current.continueAs), share && h(Text, tone('dim'), ` ${share}`)),
       h(Field, { key: 'autonomy', label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, choosable(autonomyText(draft.current.autonomy))),
-      l3 ? h(Text, { key: 'l3', ...tone('bad') }, l3) : null,
+      refusedL3 ? h(Text, { key: 'l3', ...tone('bad') }, refusedL3) : null,
       h(Field, { key: 'tier', label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, choosable(draft.current.tier)),
       h(Field, { key: 'maxTurns', label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, at?.kind === 'field' && at.field === 'maxTurns' ? withCaret(draft.current.maxTurns, draft.current.caret) : draft.current.maxTurns || ' '),
       h(Text, { key: 'commit', ...tone('dim') }, toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
       ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
-      refusal && refusal !== l3 ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
+      refusal && refusal !== refusedL3 ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
     ),
   );
 }

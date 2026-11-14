@@ -53,8 +53,8 @@ import {
   overdueRuns,
   pullRequestOf,
   pushedBranch,
-  atLeast,
-  l3Refused,
+  runsContained,
+  l3RefusalText,
   reduce,
   rootOf,
   runReports,
@@ -67,6 +67,7 @@ import {
   updatesOnConflict,
   waitsOnPr,
   type AppCheck,
+  type AutonomyLevel,
   type ChildSpawned,
   type CleanupEvent,
   type Found,
@@ -668,6 +669,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return check;
   }
 
+  // Before the task is put at `level`: L3 is checked against the App's
+  // installation as it is now, not as last cached (ADR 0014). Called only
+  // from inside `serially`.
+  async function checkAppForL3(taskId: string, level: AutonomyLevel): Promise<void> {
+    const repo = lifecycle.tasks[taskId]?.repo;
+    if (level === 'L3' && repo && lifecycle.repositories[repo]) await checkApp(repo);
+  }
+
   async function checkEveryApp(): Promise<void> {
     for (const repo of Object.keys(lifecycle.repositories)) await checkApp(repo);
   }
@@ -787,8 +796,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
         // L3 reads the PR's checks as the App (ADR 0014): refused, never
         // lowered to L2, where its installation doesn't grant that.
-        const l3 = action.autonomy === 'L3' && start.stage.mode === 'AFK' ? l3Refused(repo, check) : null;
-        if (l3) return { ok: false, reason: l3 };
+        const refusedL3 = action.autonomy === 'L3' && start.stage.mode === 'AFK' ? l3RefusalText(repo, check) : null;
+        if (refusedL3) return { ok: false, reason: refusedL3 };
       }
       // At an AFK stage launching ticket tasks, one issue ref with no
       // sub-issues is a ticket task's ticket, and a spec ref or several refs
@@ -1063,9 +1072,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         committed: [],
         sessionId: randomUUID(),
       };
-      // L3 is checked against the App's installation as it is now (ADR 0014).
-      const repo = lifecycle.tasks[taskId]?.repo;
-      if (autonomy === 'L3' && repo && lifecycle.repositories[repo]) await checkApp(repo);
+      await checkAppForL3(taskId, autonomy);
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
@@ -1441,9 +1448,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (action.type === 'answer' && allowsByRules(action.permission) && action.permission.allow === 'always') {
         return answerAlways(action.taskId, action.permission);
       }
-      // L3 is checked against the App's installation as it is now (ADR 0014).
-      const repo = action.type === 'setAutonomy' && action.autonomy === 'L3' ? lifecycle.tasks[action.taskId]?.repo : undefined;
-      if (repo && lifecycle.repositories[repo]) await checkApp(repo);
+      if (action.type === 'setAutonomy') await checkAppForL3(action.taskId, action.autonomy);
       const refusal = await settle(action, new Set());
       if (refusal) return { ok: false, reason: refusal };
       if (action.type === 'createTask') return { ok: true, value: { taskId: `T${lifecycle.counters.task}` } };
@@ -2350,13 +2355,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // 0010); an L2 run's container installs its own. One that failed holds
     // the run back no more than a missing lockfile would.
     let uninstalled: string | null = null;
-    if (cwd && !atLeast(run.autonomy, 'L2')) {
+    if (cwd && !runsContained(run.autonomy)) {
       uninstalled = await installDependencies(cwd);
       if (lifecycle.runs[run.id]?.status !== 'active') return;
     }
     if (run.mode === 'AFK' && cwd) {
       const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
-      const contained = atLeast(run.autonomy, 'L2');
+      const contained = runsContained(run.autonomy);
       if (contained) {
         try {
           token = await secrets.read(SUBSCRIPTION_TOKEN_SECRET);
@@ -2932,7 +2937,7 @@ const NO_SUBSCRIPTION_TOKEN =
 // Whether the run executes in its task's container: an L2 AFK run (ADR
 // 0007), or an L3 one, contained alike (ADR 0014).
 function runsInContainer(run: Run): boolean {
-  return run.mode === 'AFK' && atLeast(run.autonomy, 'L2');
+  return run.mode === 'AFK' && runsContained(run.autonomy);
 }
 
 // What the factory holds about a guarded AFK run while it runs (ADR 0007):

@@ -1,7 +1,7 @@
 // The GitHub port's contract, shared by the fake and the REST adapter so the
 // two can't drift apart.
 import { describe, expect, test } from 'vitest';
-import { GitHubError, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub, type PrStatus } from './github.ts';
+import { GitHubError, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub, type Permissions, type PrStatus } from './github.ts';
 
 export type GitHubFixture = {
   github: GitHub;
@@ -85,6 +85,14 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, uninstalledRepo } = await makeFixture();
 
       await expect(github.mintToken(app, uninstalledRepo, READ_ONLY)).rejects.toThrow(GitHubError);
+    });
+
+    test('refuses to mint a token for a permission the installation doesn’t grant', async () => {
+      const { github, app, installedRepo } = await makeFixture();
+
+      // The App never asks for Administration (ADR 0004), so no installation grants it.
+      const ungranted = { administration: 'read', metadata: 'read' } as unknown as Permissions;
+      await expect(github.mintToken(app, installedRepo, ungranted)).rejects.toThrow(GitHubError);
     });
 
     test('a read-only token reads an open issue, but can’t close it', async () => {
