@@ -7,7 +7,9 @@ import {
   pushRefusal,
   workflowFiles,
   type BranchPush,
+  type Checks,
   type ChecksState,
+  type FailedCheck,
   type FactoryApp,
   type GitHub,
   type Installation,
@@ -26,6 +28,12 @@ import {
 import { outsideResearch } from '../github/research-branch.ts';
 import type { FakeClock } from './fake-clock.ts';
 import type { FakeGit } from './fake-git.ts';
+
+// The checks that failed on a commit in `state` a test named none for: a
+// red commit's one check, `build`, with no page.
+function failedByDefault(state: ChecksState): FailedCheck[] {
+  return state === 'red' ? [{ name: 'build', url: null }] : [];
+}
 
 // Those of `needed` that `granted` lacks, by name: a write grant covers a read.
 function missingPermissions(granted: Permissions, needed: Permissions): Permission[] {
@@ -99,11 +107,13 @@ export class FakeGitHub implements GitHub {
   // The combined state of the checks on each commit, as a test set it, and
   // on every other commit of each repository whose CI a test set: a commit
   // with neither has no checks.
-  private readonly checks = new Map<string, ChecksState>();
+  private readonly checks = new Map<string, Checks>();
   private readonly repoChecks = new Map<string, ChecksState>();
   private failure: string | null = null;
   private prFailure: string | null = null;
   private mergeFailure: string | null = null;
+  // The head each PR's reads report, while a test holds an old one.
+  private readonly reportedHeads = new Map<number, string>();
   private issueWriteFailure: string | null = null;
   private hold: { arrived(): void; released: Promise<void> } | null = null;
 
@@ -157,6 +167,13 @@ export class FakeGitHub implements GitHub {
   // Merging PRs fails with `reason` from now on, or works again with null.
   failMerges(reason: string | null): void {
     this.mergeFailure = reason;
+  }
+
+  // Reads of the PR `number` report `head` as its head from now on, as
+  // GitHub may for a moment after a push, or its real head again with null.
+  reportHead(number: number, head: string | null): void {
+    if (head) this.reportedHeads.set(number, head);
+    else this.reportedHeads.delete(number);
   }
 
   // Closing issues fails with `reason` from now on, or works again with null.
@@ -336,18 +353,19 @@ export class FakeGitHub implements GitHub {
     this.scoped(token, ref, 'pull_requests', 'read');
     const pr = this.foundPr(ref);
     this.prReads.push(ref);
-    return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown', head: this.headOf(pr), draft: pr.draft };
+    return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown', head: this.reportedHeads.get(pr.number) ?? this.headOf(pr), draft: pr.draft };
   }
 
   // The checks on the PR's head commit as it is now are `state` (ADR
-  // 0014): a commit pushed after has none, until a test sets them.
-  setChecks(number: number, state: ChecksState): void {
-    this.setCommitChecks(this.headOf(this.prAt(number)), state);
+  // 0014), those of them `failed` failing: a commit pushed after has none,
+  // until a test sets them.
+  setChecks(number: number, state: ChecksState, failed?: FailedCheck[]): void {
+    this.setCommitChecks(this.headOf(this.prAt(number)), state, failed);
   }
 
-  // The checks on `commit` are `state`.
-  setCommitChecks(commit: string, state: ChecksState): void {
-    this.checks.set(commit, state);
+  // The checks on `commit` are `state`, those of them `failed` failing.
+  setCommitChecks(commit: string, state: ChecksState, failed: FailedCheck[] = failedByDefault(state)): void {
+    this.checks.set(commit, { state, failed });
   }
 
   // The repository's CI leaves every commit's checks `state` unless a test
@@ -362,11 +380,14 @@ export class FakeGitHub implements GitHub {
     return this.git.tipOnOrigin(pr.repo, pr.head) ?? '';
   }
 
-  async readChecks(token: string, repo: string, head: string): Promise<ChecksState> {
+  async readChecks(token: string, repo: string, head: string): Promise<Checks> {
     this.scoped(token, repo, 'checks', 'read');
     const minted = this.scoped(token, repo, 'statuses', 'read');
     this.checkReads.push({ repo, head, token: snapshot(minted) });
-    return this.checks.get(head) ?? this.repoChecks.get(repo) ?? 'none';
+    const set = this.checks.get(head);
+    if (set) return { state: set.state, failed: [...set.failed] };
+    const state = this.repoChecks.get(repo) ?? 'none';
+    return { state, failed: failedByDefault(state) };
   }
 
   async markReady(token: string, ref: string): Promise<void> {

@@ -8,7 +8,7 @@
 // loop (ADR 0012); child tasks arrive with their own slice.
 import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../models/routing.ts';
 import { issueRef } from '../artifacts/capture.ts';
-import type { ChecksState, Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
+import type { Checks, ChecksState, FailedCheck, Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
 import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
@@ -292,6 +292,12 @@ export const MERGE_STEPS: readonly MergeStep[] = ['ready', 'merge'];
 // The event that says each step is done.
 export const MERGE_STEP_DONE = { ready: 'prMarkedReady', merge: 'prMerged' } as const satisfies Record<MergeStep, string>;
 
+// A root's fix run on its PR's red checks (ADR 0014): `redHead` is the head
+// whose checks queued it, and `pushed` the commit the factory pushed once it
+// ended, if it has. A read still giving `redHead` after a push of something
+// newer is GitHub not caught up yet, and waits for the next read.
+export type FixRun = { redHead: string; pushed: string | null };
+
 // A wayfinder task's maps the factory owes their closing (ADR 0013), as
 // its App, and why it last couldn't. `spec` is the spec written from them,
 // which closed, or null once the task ended at its cleared map. It is tried
@@ -495,6 +501,12 @@ export type Task = {
   // no other update run is queued meanwhile. Like changes requested, each
   // of its runs that completes puts it back In review.
   conflicted?: boolean;
+  // Its one fix run (ADR 0014), once a PR poll found the checks on the PR
+  // of a root at its merge gate red and queued it, until a poll finds them
+  // green or the operator takes the task over: checks red again then raise
+  // a failure request instead. Like conflicted, each of its runs that
+  // completes puts it back at its gate.
+  fixRun?: FixRun | null;
   // Its Push & open draft PR while under way, and the draft PR it opened.
   publishing?: Publishing | null;
   pr?: PullRequest | null;
@@ -1094,7 +1106,7 @@ export type NoteEvent = { type: 'notesDelivered'; taskId: string };
 // where it stands, and whether GitHub finds it mergeable (ADR 0013); its
 // head commit, and for a root at an agent policy's merge gate the checks
 // on it (ADR 0014).
-export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; mergeable: Mergeability; head?: string; draft?: boolean; checks?: ChecksState | null };
+export type PrReadEvent = { type: 'prRead'; taskId: string; state: PrState; mergeable: Mergeability; head?: string; draft?: boolean; checks?: Checks | null };
 
 // What the daemon did on GitHub for a root its merge gate let through (ADR
 // 0014): it marked the draft PR ready, merged it, or failed a step, saying why.
@@ -2532,20 +2544,65 @@ function finishMerged(state: Lifecycle, task: Task, request: AttentionRequest | 
 // runs none, and GitHub finds it mergeable, the factory merges it, marking
 // the draft ready first. No checks counts only once two reads of the same
 // head both found none: right after a push, CI may not have registered its
-// checks yet. Pending checks wait for the next read, and so do red ones. A
-// merge already under way is left to finish, and a failed step's problem
-// stays while its request is open.
-function readGate(task: Task, read: PrReadEvent, request: AttentionRequest | undefined): void {
-  if (!atMergeGate(task) || task.gate?.step) return;
+// checks yet. Pending checks wait for the next read. Green ones spend its
+// fix run no longer, even while a merge they let through is under way. Red
+// ones, with nothing asked, get its one fix run, as a conflict gets an
+// update run; red again after it raise a failure request naming the checks,
+// and the root stays at its gate, unmerged, until the operator answers it
+// and its gate is read afresh. A merge already under way is left to finish,
+// and a failed step's problem stays while its request is open.
+function readGate(state: Lifecycle, task: Task, read: PrReadEvent, request: AttentionRequest | undefined, at: number): void {
+  if (!atMergeGate(task)) return;
+  if (read.checks?.state === 'green') task.fixRun = null;
+  if (task.gate?.step) return;
   if (!read.checks || !read.head) {
     task.gate = null;
     return;
   }
-  const noneTwice = read.checks === 'none' && task.gate?.checks === 'none' && task.gate.head === read.head;
-  const passes = (read.checks === 'green' || noneTwice) && read.mergeable === 'mergeable' && !request;
+  const { state: checks, failed } = read.checks;
+  const noneTwice = checks === 'none' && task.gate?.checks === 'none' && task.gate.head === read.head;
+  const passes = (checks === 'green' || noneTwice) && read.mergeable === 'mergeable' && !request;
   if (read.draft !== undefined) task.pr!.draft = read.draft;
   const problem = request ? (task.gate?.problem ?? null) : null;
-  task.gate = { checks: read.checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem };
+  task.gate = { checks, head: read.head, step: passes ? (task.pr!.draft ? 'ready' : 'merge') : null, problem };
+  if (checks === 'red' && !request) fixRedChecks(state, task, read.head, failed, at);
+}
+
+// The checks on the head `head` of a root's PR at its merge gate are red,
+// `failed` failing: its one fix run, resuming its session, or once that is
+// spent, a failure request. A read of the head that queued the fix run, once
+// the factory pushed something newer, is GitHub not caught up yet.
+function fixRedChecks(state: Lifecycle, task: Task, head: string, failed: FailedCheck[], at: number): void {
+  const { fixRun } = task;
+  if (!fixRun) {
+    task.fixRun = { redHead: head, pushed: null };
+    task.resumeWith = checksFixOpening(task, failed);
+    task.state = 'queued';
+    return;
+  }
+  if (head === fixRun.redHead && fixRun.pushed && fixRun.pushed !== head) return;
+  const named = failed.length ? `: ${failedChecksText(failed)}` : '';
+  const reason = `The checks on PR #${task.pr!.number} of ${task.id} are still failing after its fix run${named}. Fix them and push to the task branch, then answer to send the task back to its merge gate.`;
+  addRequest(state, task, lastRun(state, task), 'failure', false, reason, at);
+}
+
+// The failed checks, each with the page that says why, if any.
+function failedChecksText(failed: FailedCheck[]): string {
+  return failed.map(({ name, url }) => (url ? `${name} (${url})` : name)).join(', ');
+}
+
+// What the fix run on a root's PR whose checks went red opens on.
+function checksFixOpening(task: Task, failed: FailedCheck[]): string {
+  const which = failed.length
+    ? `These checks failed: ${failedChecksText(failed)}. Each link is GitHub’s page for its check, with its log; a check without one is named as GitHub lists it.`
+    : 'GitHub names no failed check.';
+  return (
+    `The checks on PR #${task.pr!.number} of ${task.id} failed on its head, so the factory can’t merge it. ${which} ` +
+    'Unattended, find why: read those pages if your run can reach them, and run the same builds, tests and linters in the task’s worktree. ' +
+    `Fix the cause, check the work still builds and passes its tests, and commit the fix to the task branch ${task.worktree!.branch}. ` +
+    'The factory pushes it once your run ends, and the task goes back to its merge gate to wait on the new head’s checks. ' +
+    'This is the task’s one fix run: if its checks fail again, the factory asks the operator. If you can’t fix them, end your run without committing.'
+  );
 }
 
 // What a pr-closed-unmerged request tells the operator.
@@ -3657,6 +3714,9 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.mode = 'HITL';
       task.autonomy = null;
       task.loop = null;
+      // Its work is the operator's now: handed back AFK, its stages carry on,
+      // and a red check at its gate gets a fix run again.
+      task.fixRun = null;
       // What an AFK run was to open on is the operator's to say now.
       task.resumeWith = null;
       // A fresh session no run has started yet gives way to the one the
@@ -3765,7 +3825,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
           task.resumeWith = updateOpening(state, task);
           task.state = 'queued';
         }
-        if (task.state === 'in-review') readGate(task, action, request);
+        if (task.state === 'in-review') readGate(state, task, action, request, at);
       }
       break;
     }
@@ -4093,7 +4153,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       // A run of an AFK stage moves the task on by itself. Any other (a task
       // with no preset, or one handed off with no AFK stage ahead) is its last.
       const from = stageOf(task, run!.stage);
-      if (from?.mode !== 'AFK' || task.changesRequested || task.conflicted) {
+      if (from?.mode !== 'AFK' || task.changesRequested || task.conflicted || task.fixRun) {
         reachReview(task);
         break;
       }
@@ -4297,6 +4357,8 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.publishing = task.pr ? null : { step: 'open-pr', problem: null };
       task.pushed = true;
       task.branchOnGitHub = true;
+      // What the fix run left is on GitHub: the PR's head is that commit now.
+      if (task.fixRun) task.fixRun.pushed = action.commit;
       if (!task.publishing) actionStagePublished(state, task, at);
       break;
     case 'prOpened':

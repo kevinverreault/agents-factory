@@ -5,7 +5,8 @@
 // green, or two reads of the same head found none, the factory marks the draft ready and merges
 // it with a merge commit, each GitHub call with a token of its own. The root
 // then follows the merged-PR path: its ticket closes, and it is Done and
-// cleaned up. A red check is left waiting. Under `operator`, nothing changes.
+// cleaned up. A red check gets a fix run, as check-fixes.test.ts covers.
+// Under `operator`, nothing changes.
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -140,22 +141,6 @@ describe('under full-auto (unattended)', () => {
 
     await tui.until((state) => state.tasks.T1?.label === 'Done');
     expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['merge']);
-  });
-
-  test('a red check is left waiting at the gate, unmerged', async () => {
-    const launched = await attached();
-    const { factory, operator, tui } = launched;
-    factory.github.runChecks('acme/widgets', 'red');
-    await operator.send(fullAuto);
-
-    await throughOpenPr(launched);
-
-    const red = await tui.until((state) => state.tasks.T1?.gate?.checks === 'red');
-    expect(red.tasks.T1?.label).toBe('At merge gate');
-    factory.clock.advance(2 * MINUTE);
-    await operator.send({ type: 'daemon.status' });
-    expect(factory.github.prState(101).state).toBe('open');
-    expect(factory.github.prWrites).toEqual([]);
   });
 
   test('a ticket task’s merge closes its ticket, and it is Done', async () => {

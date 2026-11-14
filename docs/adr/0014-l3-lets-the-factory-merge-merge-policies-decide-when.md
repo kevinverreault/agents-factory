@@ -22,7 +22,7 @@ The operator wants AFK work to reach the base branch without them: semi-auto, wh
   1. **Tripwires**, evaluated without a model on the commits the factory's AFK runs made (by the bot's authorship). The operator's HITL commits, such as a spec task's glossary and ADR edits, never trip them. One firing puts the task In review, naming it.
   2. Otherwise **a judging run** (sonnet tier) reads the diff, the ticket and spec, the findings fix-once left over, and the operator's rubric, then merges or puts the task In review with its reason in the attention queue.
 
-  A new commit (update run, CI fix run) voids the last gate check, and it runs again once the checks are green.
+  A new commit (update run, fix run) voids the last gate check, and it runs again once the checks are green.
 
 - **Unattended merges whatever the review left,** once checks are green: no tripwires, no judging run. A run's `AskUserQuestion` is not put to the operator. The run is told to take the most reasonable answer and record it. Failures and `stage-blocked` still raise attention requests: "no HITL" means the factory never chooses to stop for the operator, not that broken work merges. Under `judged`, questions reach the operator as at L2.
 
