@@ -21,6 +21,8 @@ export type FactoryPaths = {
   modelsTable: string;
   // The operator's own allow rules for L1 runs (ADR 0007).
   permissionsPath: string;
+  // The operator's merge gate config (ADR 0014), if they wrote one.
+  mergeGatePath: string;
   // The TUI's own settings, such as whether it hides finished tasks.
   tuiPrefsPath: string;
   // Each AFK run's own git config and hooks, while it runs (ADR 0007).
@@ -50,6 +52,7 @@ export function factoryPaths(env: NodeJS.ProcessEnv = process.env): FactoryPaths
     presetsDir: join(shortHome, 'presets'),
     modelsTable: join(shortHome, 'models.yaml'),
     permissionsPath: join(shortHome, 'permissions.yaml'),
+    mergeGatePath: join(shortHome, 'merge-gate.yaml'),
     tuiPrefsPath: join(shortHome, 'tui.json'),
     runsRoot: join(shortHome, 'runs'),
     transcriptsRoot: join(shortHome, 'transcripts'),

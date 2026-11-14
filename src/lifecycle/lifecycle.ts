@@ -10,6 +10,7 @@ import { DEFAULT_TIER, isTier, route, TIERS, type Routes, type Tier } from '../m
 import { issueRef } from '../artifacts/capture.ts';
 import type { ChecksState, Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
+import type { MergeGateConfig } from '../merge-gate/merge-gate.ts';
 import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { cutToFit, oneLineOf } from '../text/lines.ts';
@@ -389,6 +390,10 @@ export type Task = {
   // Frozen at launch for a task starting AFK, or at its handoff (ADR 0014),
   // and inherited by a spec task's ticket tasks.
   mergePolicy?: MergePolicy | null;
+  // The merge gate config, frozen with the policy (ADR 0014): editing the
+  // operator's file never changes the gate under it. Tasks stored before it
+  // have none, and merge with a merge commit.
+  mergeGate?: MergeGateConfig | null;
   // Its merge gate, while it waits there under an agent policy.
   gate?: MergeGate | null;
   // While the factory still owes the ticket of a ticket task whose PR merged
@@ -946,6 +951,8 @@ export type TaskLaunched = {
   autonomy: AutonomyLevel;
   // Launches made before merge policies have none: `operator`.
   mergePolicy?: MergePolicy;
+  // The merge gate config resolved for its repository, for a task starting AFK.
+  mergeGate?: MergeGateConfig;
   maxTurns: number | null;
   priority: Priority;
   // Whether it is a quick launch (`n`), whose HITL start stage is a short grill.
@@ -1013,7 +1020,7 @@ export type HandoffChoices = { brief: Brief; continueAs: ContinueAs; autonomy: A
 // task's uncommitted files of `committed`. The daemon names a session, for
 // continuing fresh.
 // `intent` is the intent it finishes, when the daemon journaled one.
-export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string; intent?: string } & HandoffChoices;
+export type HandedOff = { type: 'handedOff'; taskId: string; committed: string[]; sessionId: string; intent?: string; mergeGate?: MergeGateConfig } & HandoffChoices;
 
 // The daemon journaled an intent before its first step outside the store,
 // or dropped it: finished outside the store, or rolled back (ADR 0003).
@@ -1830,6 +1837,7 @@ function launchedTicketTask(spec: Task, { ticket, title, worktree, sessionId }: 
     ticket,
     specTask: spec.id,
     mergePolicy: policyOf(spec),
+    ...(spec.mergeGate && { mergeGate: structuredClone(spec.mergeGate) }),
     repo: spec.repo,
     mode,
     autonomy: mode === 'AFK' ? (spec.autonomy ?? 'L1') : null,
@@ -3481,6 +3489,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         title: action.title,
         // Frozen for a task starting AFK (ADR 0014); one starting HITL picks it at its handoff.
         ...(mode === 'AFK' && { mergePolicy: policyOf(action) }),
+        ...(mode === 'AFK' && action.mergeGate && { mergeGate: structuredClone(action.mergeGate) }),
         ...(ticket && { kind: 'ticket' as const, ticket }),
         // A spec task reads its tickets from GitHub first (ADR 0013).
         ...(specSet && {
@@ -3598,6 +3607,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.mode = 'AFK';
       task.autonomy = action.autonomy;
       task.mergePolicy = policyOf(action);
+      if (action.mergeGate) task.mergeGate = structuredClone(action.mergeGate);
       // What the operator changed on the sheet holds for every later stage too.
       if (action.tier !== sheet.tier) task.operatorTier = action.tier;
       if (action.maxTurns !== sheet.maxTurns) task.maxTurns = action.maxTurns;

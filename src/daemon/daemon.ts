@@ -159,6 +159,7 @@ import type { Store } from '../store/store.ts';
 import { childWorktree, cutWorktree, fetchBase, researchWorktree, taskWorktree, titleFrom } from '../worktree/task-worktree.ts';
 import { NAMING_INSTRUCTIONS, nameTask, namingRequest, type Namer } from '../naming/task-naming.ts';
 import type { Clock } from './clock.ts';
+import { readMergeGate } from '../merge-gate/merge-gate.ts';
 
 export type DaemonOptions = {
   pipePath: string;
@@ -186,6 +187,8 @@ export type DaemonOptions = {
   presetsDir: string;
   // The operator's allow rules for L1 runs (ADR 0007).
   permissionsPath: string;
+  // The operator's merge gate config (ADR 0014), read at each launch starting AFK and each handoff.
+  mergeGatePath: string;
   // Where each AFK run's own git config and hooks go while it runs.
   runsRoot: string;
   // Where each Done task's session transcripts are archived (ADR 0011).
@@ -801,6 +804,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // A merge policy is frozen on a task starting AFK alone (ADR 0014).
       const refusedPolicy = policyRefusal(policyOf(action), start.stage.mode === 'AFK' ? action.autonomy : null);
       if (refusedPolicy) return { ok: false, reason: refusedPolicy };
+      // Frozen with it, from the operator's file alone, never the repository's (ADR 0014).
+      if (start.stage.mode === 'AFK') {
+        const gate = readMergeGate(options.mergeGatePath, repo);
+        if ('error' in gate) return { ok: false, reason: gate.error };
+        action.mergeGate = gate.config;
+      }
       // No fallback to the operator's account (ADR 0004): a task whose
       // preset has AFK stages launches only where the App can work.
       const stages = appStages(resolved.preset);
@@ -1040,11 +1049,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // What each step writes with, and the write: marking the draft PR ready
   // takes Pull requests write, as GitHub merges no draft; merging takes
-  // Contents and Pull requests write, with a merge commit, and only while
+  // Contents and Pull requests write, with the method its frozen merge gate
+  // config names (a merge commit for tasks frozen before it), and only while
   // the PR's head is still the commit whose checks let it through.
   const MERGE_WRITES: Record<MergeStep, { permissions: Permissions; take(token: string, ref: string, task: Task): Promise<void> }> = {
     ready: { permissions: PR_WRITE, take: (token, ref) => github.markReady(token, ref) },
-    merge: { permissions: MERGE, take: (token, ref, task) => github.mergePr(token, ref, { method: 'merge', head: task.gate!.head }) },
+    merge: { permissions: MERGE, take: (token, ref, task) => github.mergePr(token, ref, { method: task.mergeGate?.mergeMethod ?? 'merge', head: task.gate!.head }) },
   };
 
   // Where the root's PR stands, read as the App with a read-only token, or
@@ -1164,6 +1174,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const refused = guard(lifecycle, action);
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
+      // The merge gate config is frozen with the merge policy (ADR 0014).
+      const gate = readMergeGate(options.mergeGatePath, task.repo);
+      if ('error' in gate) return { ok: false, reason: gate.error };
+      action.mergeGate = gate.config;
       const ready = await readiness(task);
       if (ready.blockers.length) {
         // The sheet shows what blocks it.

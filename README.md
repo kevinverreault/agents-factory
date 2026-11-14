@@ -99,6 +99,7 @@ The stills below show Needs you with its answer sheet. **Runs** (`3`) lists ever
 | `agents-factory keep-awake on \| keep-awake off` | Keep the machine awake, or not, while AFK runs are active |
 | `agents-factory slots <n>` | Set how many AFK runs may be active at once (8 by default) |
 | `agents-factory gc` | List the leftovers that belong to no live task, and delete only those you tick |
+| `agents-factory merge-gate [owner/name]` | Print the merge gate config resolved for a repository (ADR 0014) |
 
 ## Learn more
 

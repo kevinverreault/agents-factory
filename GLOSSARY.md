@@ -206,6 +206,10 @@ _Avoid_: Merge review, approval
 A rule of the gate check, evaluated without a model, that sends a PR to the operator whatever the judging run would say, such as one touching database migrations.
 _Avoid_: Guard, blocker (a blocker is a ticket's)
 
+**Merge gate config**:
+What an agent policy's merge gate goes by: its tripwires, its rubric and the merge method. It is the built-in defaults, overridden by the operator's `merge-gate.yaml` and then by that file's section for the task's repository, never by the repository itself, and frozen onto the task at its handoff, or at launch for a task starting AFK.
+_Avoid_: Gate settings, repo merge config
+
 **Judgement call**:
 A decision the factory made where an attended task would have asked the operator: an unattended run's assumed answer to a question, a judged merge and its reason, or a merge with review findings left over. Each is listed on the task's spec, or on its ticket when it has no spec.
 _Avoid_: Assumption, auto-decision
