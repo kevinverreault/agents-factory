@@ -47,7 +47,7 @@ async function turns(app: { lastFrame(): string | undefined }, label: string) {
 }
 
 function task(id: string, title: string, state: TaskView['state'], label: string, mode: TaskView['mode'] = 'AFK'): TaskView {
-  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, judgementCalls: [], gate: null, resolving: null, specTask: null, ticketSet: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, loop: null, launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
+  return { id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, judgementCalls: [], gate: null, sentToOperator: null, resolving: null, specTask: null, ticketSet: null, mode, autonomy: mode === 'AFK' ? 'L1' : null, priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null, tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, loop: null, launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null };
 }
 
 function factoryState(tasks: TaskView[], attentionQueue: FactoryState['attentionQueue'] = []): FactoryState {
@@ -238,6 +238,18 @@ describe('task rows', () => {
     await eventually(() => expect(app.lastFrame()).toMatch(/^merge policy operator$/m));
   });
 
+  test('a semi-auto root its gate sent to the operator shows why on its Needs you item and in its detail', async () => {
+    const reason = 'It changes the session cookie, which the spec says nothing about.';
+    const sent = { ...task('T1', 'Implement the store', 'in-review', 'In review'), autonomy: 'L3' as const, mergePolicy: 'judged' as const, sentToOperator: reason };
+    const { app } = await started({ ...factoryState([sent]), attentionQueue: [{ kind: 'review', taskId: 'T1', reason }] });
+
+    await press(app, '2');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(`In review: ${reason}`));
+    await press(app, '1', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(`Sent to you for review: ${reason}`));
+    expect(app.lastFrame()).toMatch(/^merge policy semi-auto$/m);
+  });
+
   test('p in an L3 root’s detail cycles its merge policy, and a refusal says why', async () => {
     const live = { ...task('T1', 'Implement the store', 'running', 'Running'), autonomy: 'L3' as const, mergePolicy: 'operator' as const };
     const { app, connection } = await started(factoryState([live, task('T2', 'Implement the cache', 'running', 'Running')]));
@@ -251,6 +263,10 @@ describe('task rows', () => {
     await press(app, '\x1b', '\x1b[B', '\r');
 
     await eventually(() => expect(app.lastFrame()).toContain('p merge policy'));
+    await press(app, 'p');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'judged' }));
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'mergePolicy'], value: 'judged' }]);
+    await eventually(() => expect(app.lastFrame()).toMatch(/^merge policy semi-auto$/m));
     await press(app, 'p');
     await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' }));
     connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'mergePolicy'], value: 'unattended' }]);
@@ -1362,7 +1378,7 @@ describe('launching and conversing', () => {
     );
   });
 
-  test('the merge policy is offered only at L3, labelled operator or full-auto, defaulting to operator, and goes back to operator below L3', async () => {
+  test('the merge policy is offered only at L3, labelled operator, semi-auto or full-auto, defaulting to operator, and goes back to operator below L3', async () => {
     const connection = inWidgets();
     connection.replyTo('listPresets', { ok: true, value: presetsView });
     connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
@@ -1380,6 +1396,8 @@ describe('launching and conversing', () => {
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Merge policy\s+operator \(you merge its PR\)/));
 
     await press(app, DOWN, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Merge policy\s+‹ semi-auto \(the factory merges unless it judges the PR worth your review\) ›/));
+    await press(app, RIGHT);
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Merge policy\s+‹ full-auto \(the factory merges its PR once its checks pass\) ›/));
     // Down to L2 and back: the policy is the operator's again.
     await press(app, UP, LEFT);
@@ -1387,11 +1405,11 @@ describe('launching and conversing', () => {
     await press(app, RIGHT, DOWN);
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Merge policy\s+‹ operator \(you merge its PR\) ›/));
     await press(app, RIGHT);
-    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('‹ full-auto'));
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('‹ semi-auto'));
     app.stdin.write('\r');
 
     await eventually(() =>
-      expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', prompt: '', issues: ['#12'], autonomy: 'L3', mergePolicy: 'unattended' }),
+      expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', prompt: '', issues: ['#12'], autonomy: 'L3', mergePolicy: 'judged' }),
     );
   });
 
@@ -2284,10 +2302,14 @@ describe('launching and conversing', () => {
     await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, RIGHT, RIGHT);
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Merge policy ‹ operator (you merge its PR) ›'));
     await press(app, DOWN, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› Merge policy ‹ semi-auto (the factory merges unless it judges the PR worth your review) ›'));
+    await press(app, RIGHT);
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› Merge policy ‹ full-auto (the factory merges its PR once its checks pass) ›'));
+    await press(app, LEFT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› Merge policy ‹ semi-auto'));
 
     app.stdin.write('\r');
-    await eventually(() => expect(connection.sent).toContainEqual(expect.objectContaining({ type: 'handoff', taskId: 'T1', autonomy: 'L3', mergePolicy: 'unattended' })));
+    await eventually(() => expect(connection.sent).toContainEqual(expect.objectContaining({ type: 'handoff', taskId: 'T1', autonomy: 'L3', mergePolicy: 'judged' })));
   });
 
   test('a ticket task’s sheet pre-filled with its full-auto spec’s policy shows it, and sends it as it is', async () => {

@@ -234,6 +234,8 @@ export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined)
 export function askedFor(item: AttentionQueueItem, task: TaskView | undefined): string {
   if (item.kind === 'attention') return item.reason ?? item.question?.questions[0]?.question ?? '';
   if (item.kind === 'ready' && task?.loop?.cleared) return `${task.label}: the map has cleared`;
+  // A semi-auto root its gate sent to the operator says why (ADR 0014).
+  if (item.kind === 'review' && item.reason) return `${task?.label ?? 'In review'}: ${item.reason}`;
   return task?.label ?? '';
 }
 

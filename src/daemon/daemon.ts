@@ -1151,6 +1151,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (event.state === 'open' && atMergeGate(task)) {
         const checks = await appToken(task.repo, CHECKS_READ);
         event.checks = await github.readChecks(checks.token, task.repo, event.head!);
+        // The session a semi-auto root's judging run starts, should these checks queue one.
+        if (policyOf(task) === 'judged') event.sessionId = randomUUID();
       }
     } catch (error) {
       if (!isGitHubFailure(error)) throw error;
@@ -2597,8 +2599,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // Commits that can't come out stay there: the next run's prepare, or the task's cleanup, says why.
     if (run.mode === 'HITL' && cwd && containers.has(task.id)) await bringOutOfContainer(task);
     // The CLI resumes a session only from its file (ADR 0011).
-    if (run.resumesSession && cwd && task.sessionId) {
-      await restoreTranscript(task, task.sessionId);
+    // A judging run's session is its own (ADR 0014).
+    const sessionId = run.sessionId ?? task.sessionId;
+    if (run.resumesSession && cwd && sessionId) {
+      await restoreTranscript(task, sessionId);
       if (lifecycle.runs[run.id]?.status !== 'active') return;
     }
     // A run on the host finds its worktree's dependencies installed (ADR
@@ -2666,7 +2670,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       taskId: task.id,
       mode: run.mode,
       autonomy: run.autonomy,
-      sessionId: task.sessionId!,
+      sessionId: sessionId!,
       resumesSession: run.resumesSession,
       cwd,
       firstMessage: withFactoryNotes(run.opening, [

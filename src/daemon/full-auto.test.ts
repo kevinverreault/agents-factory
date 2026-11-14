@@ -192,14 +192,17 @@ describe('under full-auto (unattended)', () => {
 });
 
 describe('the merge policy at launch and handoff', () => {
-  test('full-auto is refused below L3, semi-auto isn’t offered yet, and a task starting HITL picks it at its handoff', async () => {
+  test('full-auto and semi-auto are refused below L3, and a task starting HITL picks its policy at its handoff', async () => {
     const { operator, tui } = await attached();
 
     expect(await operator.send({ ...fullAuto, autonomy: 'L2' })).toEqual({
       ok: false,
       reason: 'Full-auto (unattended) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.',
     });
-    expect(await operator.send({ ...fullAuto, mergePolicy: 'judged' })).toMatchObject({ ok: false, reason: expect.stringMatching(/^Semi-auto \(judged\) isn’t available yet/) });
+    expect(await operator.send({ ...fullAuto, autonomy: 'L2', mergePolicy: 'judged' })).toEqual({
+      ok: false,
+      reason: 'Semi-auto (judged) merges the task’s PR, which the factory does only at L3: pick L3, or the operator policy.',
+    });
     expect(await operator.send({ ...fullAuto, mergePolicy: 'yolo' as never })).toEqual({ ok: false, reason: 'yolo is not a merge policy (operator, judged or unattended).' });
     expect(await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Grill me.', autonomy: 'L3', mergePolicy: 'unattended' })).toEqual({
       ok: false,

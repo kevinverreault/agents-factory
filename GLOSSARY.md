@@ -206,6 +206,10 @@ _Avoid_: Auto-merge setting, review mode, auto (that is Claude Code's permission
 The judged policy's look at a PR at its merge gate: its tripwires first, then a judging run against the operator's rubric, ending in a merge or in the task In review with the reason.
 _Avoid_: Merge review, approval
 
+**Judging run**:
+The gate check's run on a semi-auto PR whose checks are green: a sonnet-tier run in a session of its own that reads the diff, the ticket and spec, the review findings left over and the rubric, and reports a verdict through `report_verdict`, merge or ask, with its reason. Ending without one counts as ask. A new commit on the PR voids its verdict.
+_Avoid_: Gate review, merge judge
+
 **Tripwire**:
 A rule of the gate check, evaluated without a model, that sends a PR to the operator whatever the judging run would say, such as one touching database migrations.
 _Avoid_: Guard, blocker (a blocker is a ticket's)

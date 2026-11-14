@@ -55,6 +55,8 @@ export function TaskDetail({
       whereItIs ? h(Text, { ...tone('dim'), wrap: 'truncate' }, whereItIs) : null,
       task.progress ? h(Text, { ...tone('dim'), wrap: 'truncate' }, task.progress) : null,
       task.mergePolicy && !task.parent ? h(Text, { ...tone('dim'), wrap: 'truncate' }, gateText(task)) : null,
+      // Why a semi-auto gate sent the PR to the operator, in full (ADR 0014).
+      task.sentToOperator ? h(Text, tone('review'), `Sent to you for review: ${task.sentToOperator}`) : null,
       request?.kind === 'attention'
         ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: answerable(request, task) ? 'a answer' : undefined }, h(Text, null, askedFor(request, task)))
         : null,
