@@ -1,12 +1,13 @@
 // A task's detail, drilled into from a screen with `enter`: its title, what
-// it is on one line, its open request, a spec task's tickets, its runs, its
+// it is on one line, its merge policy and gate, its open request, a spec task's tickets, its runs, its
 // usage and artifacts, and its output whole. `compact`, as the condensed view's
 // detail pane shows it, leaves out the usage and artifacts, so the output
 // has their rows.
 import { createElement as h } from 'react';
 import { Box, Text } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
-import type { FactoryState, RunView, TaskView, TicketSetView, TicketView } from '../protocol/factory-state.ts';
+import type { FactoryState, GateView, RunView, TaskView, TicketSetView, TicketView } from '../protocol/factory-state.ts';
+import { POLICY_NAMES, type MergeStep } from '../lifecycle/lifecycle.ts';
 import { overall, tokensOf } from '../usage/usage.ts';
 import { answerable, askedFor } from './answer-sheet.ts';
 import { ArtifactRail } from './artifacts.ts';
@@ -53,6 +54,7 @@ export function TaskDetail({
       ),
       whereItIs ? h(Text, { ...tone('dim'), wrap: 'truncate' }, whereItIs) : null,
       task.progress ? h(Text, { ...tone('dim'), wrap: 'truncate' }, task.progress) : null,
+      task.mergePolicy && !task.parent ? h(Text, { ...tone('dim'), wrap: 'truncate' }, gateText(task)) : null,
       request?.kind === 'attention'
         ? h(Sheet, { title: kindLook(request).kind, role: kindLook(request).role, hint: answerable(request, task) ? 'a answer' : undefined }, h(Text, null, askedFor(request, task)))
         : null,
@@ -73,6 +75,27 @@ export function TaskDetail({
     h(Output, { connection, state, taskId: task.id }),
   );
 }
+
+// The merge policy a root's merge gate goes by, and while it waits there
+// under an agent policy (ADR 0014), the checks on its PR's head as last
+// read and the factory's step merging it.
+export function gateText({ mergePolicy, gate }: Pick<TaskView, 'mergePolicy' | 'gate'>): string {
+  const policy = `merge policy ${POLICY_NAMES[mergePolicy!]}`;
+  if (!gate) return policy;
+  const step = gate.problem ? 'merging failed' : gate.step && STEP_TEXT[gate.step];
+  return joined([`${policy}: at its merge gate`, gate.checks ? CHECKS_TEXT[gate.checks] : 'reading its checks', step]);
+}
+
+// The factory's step merging a gated PR as task detail says it.
+const STEP_TEXT: Record<MergeStep, string> = { ready: 'marking its PR ready', merge: 'merging its PR' };
+
+// The checks on a gated PR's head as task detail says them.
+const CHECKS_TEXT: Record<NonNullable<GateView['checks']>, string> = {
+  green: 'checks green',
+  pending: 'checks pending',
+  red: 'checks red: waiting',
+  none: 'no checks',
+};
 
 // A task's mode, with its autonomy when it has one: `AFK L2`, `HITL`.
 export function modeOf({ mode, autonomy }: Pick<TaskView, 'mode' | 'autonomy'>): string {

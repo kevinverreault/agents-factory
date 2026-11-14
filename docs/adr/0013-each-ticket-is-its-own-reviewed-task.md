@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (merge gate amended by ADR 0014)
 ---
 
 # Each ticket is its own reviewed task, launched once its blockers are merged
@@ -42,12 +42,13 @@ ADR 0006 worked a spec's tickets as iterations of one root task on one task bran
 
 - **Conflicts.** When the PR poll finds a ticket task's PR no longer mergeable, the factory queues a run on that task that merges `origin/<base>` into its branch and resolves the conflict. At L2 the factory pushes the result. A run that can't resolve it fails with the normal failure request.
 
-- **Faster polling.** While any ticket task is In review, ADR 0011's PR poll runs every 2 minutes instead of 15, still one read-only GET per PR.
+- **Faster polling.** While any ticket task is In review, ADR 0011's PR poll runs every 2 minutes instead of 15, still one read-only GET per PR. (*Amended by ADR 0014:* so it does while any root waits at an agent policy's merge gate, which also reads the checks on its PR's head.)
 
 - **Merge gate and merge policy.**
   - A ticket task's PR waits at a merge gate, and the spec's merge policy, frozen at handoff and inherited by its ticket tasks, decides who passes it.
   - v1 has one policy, the operator's: the ticket task goes In review and the operator merges. The handoff sheet shows no choice yet.
   - The planned next policy is "agent": several specialized reviews run in parallel on the ticket's PR, then the agent either merges it or puts the task In review for the operator when it judges that necessary.
+  - *Amended by ADR 0014:* the merge gate covers every AFK root task that opens a PR, not only ticket tasks: a single run on a brief, a quick launch, a ticket-less handoff. The policy is frozen onto any task at its handoff, or at launch when it starts AFK, and the handoff sheet and launch card offer it at L3. Beside `operator` come `unattended` (full-auto), under which the factory marks the PR ready and merges it with a merge commit once its checks are green (or two reads of its head, 2 minutes apart, find none), and `judged` (semi-auto), the "agent" policy above, with one judging run rather than several reviews. A conflicting PR at an agent policy's gate gets the same update run as a ticket task's, and the PR poll runs every 2 minutes while any root waits there.
 
 - **Cancelling.**
   - Cancelling a ticket task closes its draft PR (ADR 0011) and leaves its ticket open. The spec task marks the ticket skipped, so tickets it blocks stay blocked. Once nothing more can be launched, the spec task asks the operator to relaunch the skipped ticket, end leaving the spec open, or close the spec anyway.

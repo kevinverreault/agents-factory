@@ -4,7 +4,7 @@
 // directory, and only then may it subscribe or send commands.
 import type { Socket } from 'node:net';
 import type { ConversationEvent } from '../executor/executor.ts';
-import type { AutonomyLevel, HandoffChoices, OperatorCommand, Priority } from '../lifecycle/lifecycle.ts';
+import type { AutonomyLevel, HandoffChoices, MergePolicy, OperatorCommand, Priority } from '../lifecycle/lifecycle.ts';
 import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
@@ -58,8 +58,10 @@ export type LaunchCommand = {
   // The operator's tier, over the start stage's.
   tier?: Tier;
   // The handoff fields an AFK start stage takes: its autonomy level (L1 by
-  // default), max turns (over the stage's `max_turns`) and priority.
+  // default), merge policy (operator by default; the others need L3), max
+  // turns (over the stage's `max_turns`) and priority.
   autonomy?: AutonomyLevel;
+  mergePolicy?: MergePolicy;
   maxTurns?: number;
   priority?: Priority;
   // A quick launch (`n`): its HITL start stage asks at most three questions

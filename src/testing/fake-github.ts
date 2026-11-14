@@ -7,6 +7,7 @@ import {
   pushRefusal,
   workflowFiles,
   type BranchPush,
+  type ChecksState,
   type FactoryApp,
   type GitHub,
   type Installation,
@@ -17,6 +18,7 @@ import {
   type Pushed,
   type DraftPr,
   type Mergeability,
+  type PrMerge,
   type PrState,
   type PrStatus,
   type PullRequest,
@@ -79,7 +81,11 @@ export class FakeGitHub implements GitHub {
   // Each PR closed or reopened through the port, with its token.
   // Each PR read that reached GitHub, by its ref.
   readonly prReads: string[] = [];
-  readonly prWrites: { action: 'close' | 'reopen'; repo: string; number: number; token: Minted }[] = [];
+  // Each PR closed, reopened, marked ready or merged (with its method)
+  // through the port, with its token.
+  readonly prWrites: { action: 'close' | 'reopen' | 'ready' | 'merge'; repo: string; number: number; method?: PrMerge['method']; token: Minted }[] = [];
+  // Each read of a commit's checks that reached GitHub, with its token.
+  readonly checkReads: { repo: string; head: string; token: Minted }[] = [];
   // Each branch deleted through the port, with its token.
   readonly branchDeletes: { repo: string; branch: string; token: Minted }[] = [];
   // The login of the account that owns every App: the operator's.
@@ -90,8 +96,14 @@ export class FakeGitHub implements GitHub {
   private readonly installed = new Map<string, Permissions>();
   private readonly issues = new Map<string, FakeIssue>();
   private readonly noDrafts = new Set<string>();
+  // The combined state of the checks on each commit, as a test set it, and
+  // on every other commit of each repository whose CI a test set: a commit
+  // with neither has no checks.
+  private readonly checks = new Map<string, ChecksState>();
+  private readonly repoChecks = new Map<string, ChecksState>();
   private failure: string | null = null;
   private prFailure: string | null = null;
+  private mergeFailure: string | null = null;
   private issueWriteFailure: string | null = null;
   private hold: { arrived(): void; released: Promise<void> } | null = null;
 
@@ -140,6 +152,11 @@ export class FakeGitHub implements GitHub {
   // Opening PRs fails with `reason` from now on, or works again with null.
   failPullRequests(reason: string | null): void {
     this.prFailure = reason;
+  }
+
+  // Merging PRs fails with `reason` from now on, or works again with null.
+  failMerges(reason: string | null): void {
+    this.mergeFailure = reason;
   }
 
   // Closing issues fails with `reason` from now on, or works again with null.
@@ -319,7 +336,62 @@ export class FakeGitHub implements GitHub {
     this.scoped(token, ref, 'pull_requests', 'read');
     const pr = this.foundPr(ref);
     this.prReads.push(ref);
-    return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown' };
+    return { state: pr.state, mergeable: pr.state === 'open' ? this.mergeabilityOf(pr) : 'unknown', head: this.headOf(pr), draft: pr.draft };
+  }
+
+  // The checks on the PR's head commit as it is now are `state` (ADR
+  // 0014): a commit pushed after has none, until a test sets them.
+  setChecks(number: number, state: ChecksState): void {
+    this.setCommitChecks(this.headOf(this.prAt(number)), state);
+  }
+
+  // The checks on `commit` are `state`.
+  setCommitChecks(commit: string, state: ChecksState): void {
+    this.checks.set(commit, state);
+  }
+
+  // The repository's CI leaves every commit's checks `state` unless a test
+  // set its own, or runs none again with null.
+  runChecks(repo: string, state: ChecksState | null): void {
+    if (state) this.repoChecks.set(repo, state);
+    else this.repoChecks.delete(repo);
+  }
+
+  // The PR's head commit: its head branch's tip on GitHub, once pushed.
+  headOf(pr: Pick<FakePullRequest, 'repo' | 'head'>): string {
+    return this.git.tipOnOrigin(pr.repo, pr.head) ?? '';
+  }
+
+  async readChecks(token: string, repo: string, head: string): Promise<ChecksState> {
+    this.scoped(token, repo, 'checks', 'read');
+    const minted = this.scoped(token, repo, 'statuses', 'read');
+    this.checkReads.push({ repo, head, token: snapshot(minted) });
+    return this.checks.get(head) ?? this.repoChecks.get(repo) ?? 'none';
+  }
+
+  async markReady(token: string, ref: string): Promise<void> {
+    await this.held();
+    const minted = this.scoped(token, ref, 'pull_requests', 'write');
+    const pr = this.foundPr(ref);
+    if (!pr.draft) return;
+    pr.draft = false;
+    this.prWrites.push({ action: 'ready', repo: pr.repo, number: pr.number, token: snapshot(minted) });
+  }
+
+  async mergePr(token: string, ref: string, { method, head }: PrMerge): Promise<void> {
+    await this.held();
+    if (this.mergeFailure) throw new GitHubError(this.mergeFailure);
+    const minted = this.scoped(token, ref, 'pull_requests', 'write');
+    this.scoped(token, ref, 'contents', 'write');
+    const pr = this.foundPr(ref);
+    if (pr.state === 'merged') return;
+    if (pr.state !== 'open') throw new GitHubError(`GitHub refused to merge ${ref} (HTTP 422: Pull Request is not open).`);
+    if (pr.draft) throw new GitHubError(`GitHub refused to merge ${ref} (HTTP 405: Pull Request is still a draft).`);
+    if (this.headOf(pr) !== head) throw new GitHubError(`GitHub refused to merge ${ref} (HTTP 409: Head branch was modified. Review and try the merge again.).`);
+    if (this.mergeabilityOf(pr) === 'conflicting') throw new GitHubError(`GitHub refused to merge ${ref} (HTTP 405: Pull Request is not mergeable).`);
+    pr.state = 'merged';
+    this.git.mergeOnOrigin(pr.repo, pr.head, pr.base);
+    this.prWrites.push({ action: 'merge', repo: pr.repo, number: pr.number, method, token: snapshot(minted) });
   }
 
   // Whether GitHub finds the open PR mergeable: as a test set it, or as its

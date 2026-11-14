@@ -229,7 +229,7 @@ describe('the other implement launches', () => {
     await operator.send({ type: 'launchTask', repo: 'acme/widgets', preset: 'implement', prompt: 'Fix the login bug.' });
 
     await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
-    expect(tui.state().tasks.T1).toMatchObject({ kind: 'plain', ticket: null, mergePolicy: null, loop: null });
+    expect(tui.state().tasks.T1).toMatchObject({ kind: 'plain', ticket: null, mergePolicy: 'operator', loop: null });
     expect(factory.executor.started.map(({ firstMessage }) => firstMessage)).toEqual(['/factory:implement Fix the login bug.']);
   });
 

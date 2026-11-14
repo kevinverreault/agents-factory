@@ -2,16 +2,16 @@
 // the task's handoff is, so it is back on reattach. The HITL run writes the
 // brief; the operator edits it line by line, picks the ticket set from the
 // spec candidates the factory found (ADR 0013), sets continue-as, autonomy
-// level, tier and max turns, and confirms. Esc backs out and the conversation carries on.
+// level, at L3 the merge policy (ADR 0014), tier and max turns, and confirms. Esc backs out and the conversation carries on.
 import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
-import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, l3RefusalText, readyNow, type AppCheck, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type SpecCandidate } from '../lifecycle/lifecycle.ts';
+import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, l3RefusalText, OFFERED_POLICIES, policyOf, readyNow, type AppCheck, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type MergePolicy, type SpecCandidate } from '../lifecycle/lifecycle.ts';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { useInFlight } from './in-flight.ts';
-import { autonomyText, cycle } from './launch-card.ts';
+import { autonomyText, cycle, policyText } from './launch-card.ts';
 import { CursorWindow, fixed } from './screen.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
 import { choosable, Cursor, GLYPH, Sheet, Tick, tone } from './theme.ts';
@@ -39,7 +39,7 @@ type Line =
   | { kind: 'goal' }
   | { kind: 'item'; list: List; index: number }
   | { kind: 'spec'; index: number }
-  | { kind: 'field'; field: 'continueAs' | 'autonomy' | 'tier' | 'maxTurns' };
+  | { kind: 'field'; field: 'continueAs' | 'autonomy' | 'mergePolicy' | 'tier' | 'maxTurns' };
 const LABEL_WIDTH = 14;
 // What the sheet shows while the daemon hands the task off.
 const HANDING_OFF = 'Handing off…';
@@ -47,12 +47,22 @@ const HANDING_OFF = 'Handing off…';
 // What the operator has made of the sheet so far, and the caret in the line
 // being typed into, back at its end on another line. `specs` are the spec
 // candidates selected, null until the factory has read them.
-type Draft = { brief: Brief | null; specs: string[] | null; continueAs: ContinueAs; autonomy: AutonomyLevel; tier: Tier; maxTurns: string; line: number; caret: Caret };
+type Draft = { brief: Brief | null; specs: string[] | null; continueAs: ContinueAs; autonomy: AutonomyLevel; mergePolicy: MergePolicy; tier: Tier; maxTurns: string; line: number; caret: Caret };
 
 export function HandoffSheet({ connection, task, run, app = null }: Props) {
   const { handoff } = task;
   // Keys typed in one burst arrive before a re-render, so the draft is kept here.
-  const draft = useRef<Draft>({ brief: null, specs: null, continueAs: handoff.continueAs, autonomy: handoff.autonomy, tier: handoff.tier, maxTurns: String(handoff.maxTurns), line: 0, caret: null });
+  const draft = useRef<Draft>({
+    brief: null,
+    specs: null,
+    continueAs: handoff.continueAs,
+    autonomy: handoff.autonomy,
+    mergePolicy: policyOf(handoff),
+    tier: handoff.tier,
+    maxTurns: String(handoff.maxTurns),
+    line: 0,
+    caret: null,
+  });
   const [, rerender] = useReducer((renders: number) => renders + 1, 0);
   const [refusal, setRefusal] = useState<string | null>(null);
   // The brief is the operator's to edit once the agent has written it.
@@ -65,7 +75,7 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
     draft.current.specs = handoff.ticketSets.selected ? [handoff.ticketSets.selected] : [];
   }
   const { brief } = draft.current;
-  const lines = linesOf(brief, candidates.length);
+  const lines = linesOf(brief, candidates.length, draft.current.autonomy);
   const writing = !brief && run?.status === 'active' && run.turn === 'agent';
 
   const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
@@ -86,7 +96,9 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
       }
       const { continueAs, autonomy, tier, maxTurns } = current;
       const specs = current.specs && { specs: current.specs };
-      return void inFlight.send(HANDING_OFF, { type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, tier, maxTurns: Number(maxTurns), ...specs })?.then(tell);
+      // The policy goes at L3 alone: below it, the operator merges.
+      const policy = autonomy === 'L3' && { mergePolicy: current.mergePolicy };
+      return void inFlight.send(HANDING_OFF, { type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, ...policy, tier, maxTurns: Number(maxTurns), ...specs })?.then(tell);
     }
     if (key.upArrow || key.downArrow) {
       const line = Math.min(Math.max(current.line + (key.upArrow ? -1 : 1), 0), lines.length - 1);
@@ -127,6 +139,9 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
       h(Field, { key: 'continueAs', label: 'Continue as', selected: at?.kind === 'field' && at.field === 'continueAs' }, choosable(draft.current.continueAs), share && h(Text, tone('dim'), ` ${share}`)),
       h(Field, { key: 'autonomy', label: 'Autonomy', selected: at?.kind === 'field' && at.field === 'autonomy' }, choosable(autonomyText(draft.current.autonomy))),
       refusedL3 ? h(Text, { key: 'l3', ...tone('bad') }, refusedL3) : null,
+      draft.current.autonomy === 'L3'
+        ? h(Field, { key: 'mergePolicy', label: 'Merge policy', selected: at?.kind === 'field' && at.field === 'mergePolicy' }, choosable(policyText(draft.current.mergePolicy)))
+        : null,
       h(Field, { key: 'tier', label: 'Tier', selected: at?.kind === 'field' && at.field === 'tier' }, choosable(draft.current.tier)),
       h(Field, { key: 'maxTurns', label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, at?.kind === 'field' && at.field === 'maxTurns' ? withCaret(draft.current.maxTurns, draft.current.caret) : draft.current.maxTurns || ' '),
       h(Text, { key: 'commit', ...tone('dim') }, toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
@@ -138,13 +153,15 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
 }
 
 // The goal, each list's items with a line to add one, then the spec
-// candidates, then the fields.
-function linesOf(brief: Brief | null, candidates: number): Line[] {
+// candidates, then the fields: the merge policy only at L3, the one level
+// that lets the factory merge.
+function linesOf(brief: Brief | null, candidates: number, autonomy: AutonomyLevel): Line[] {
   const specs = Array.from({ length: candidates }, (_, index): Line => ({ kind: 'spec', index }));
   const fields: Line[] = [
     ...specs,
     { kind: 'field', field: 'continueAs' },
     { kind: 'field', field: 'autonomy' },
+    ...(autonomy === 'L3' ? [{ kind: 'field', field: 'mergePolicy' } as const] : []),
     { kind: 'field', field: 'tier' },
     { kind: 'field', field: 'maxTurns' },
   ];
@@ -177,7 +194,12 @@ function step(draft: Draft, line: Line, input: string, key: Key, candidates: Spe
   if (line.kind === 'field') {
     const by = key.leftArrow ? -1 : key.rightArrow ? 1 : 0;
     if (line.field === 'continueAs' && by) draft.continueAs = cycle(CONTINUE_AS, draft.continueAs, by);
-    if (line.field === 'autonomy' && by) draft.autonomy = cycle(AUTONOMY_LEVELS, draft.autonomy, by);
+    if (line.field === 'autonomy' && by) {
+      draft.autonomy = cycle(AUTONOMY_LEVELS, draft.autonomy, by);
+      // Below L3 the policy is the operator's again.
+      if (draft.autonomy !== 'L3') draft.mergePolicy = 'operator';
+    }
+    if (line.field === 'mergePolicy' && by) draft.mergePolicy = cycle(OFFERED_POLICIES, draft.mergePolicy, by);
     if (line.field === 'tier' && by) draft.tier = cycle(TIERS, draft.tier, by);
     // A whole number: other characters are dropped.
     if (line.field === 'maxTurns') draft.maxTurns = type(draft.maxTurns, key.meta ? input : input.replace(/\D/g, '')) ?? draft.maxTurns;

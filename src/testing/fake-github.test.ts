@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { APP_PERMISSIONS } from '../github/github.ts';
+import { APP_PERMISSIONS, combinedChecks, statusState } from '../github/github.ts';
 import { describeGitHubContract, type GitHubFixture } from '../github/github-contract.ts';
 import { FakeClock } from './fake-clock.ts';
 import { FakeGit } from './fake-git.ts';
@@ -18,6 +18,7 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
   github.install('acme/widgets');
   github.addIssue('acme/widgets#1');
   if (!draftsOffered) github.offerNoDrafts('acme/widgets');
+  const statuses = new Map<string, Map<string, string>>();
   return {
     github,
     app,
@@ -40,6 +41,12 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
     },
     operator: github.operator,
     baseBranch: 'main',
+    // Each context's latest status counts, as on GitHub.
+    async setStatus(commit, context, state) {
+      const set = (statuses.get(commit) ?? new Map<string, string>()).set(context, state);
+      statuses.set(commit, set);
+      github.setCommitChecks(commit, combinedChecks([...set.values()].map(statusState)));
+    },
     draftsOffered,
     async pullRequest(number) {
       const { draft, head, base, title, body, assignees } = github.pullRequests.find((pr) => pr.number === number)!;

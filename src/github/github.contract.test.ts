@@ -14,6 +14,9 @@
 // organization's, offers no draft PRs, so the factory's are regular ones
 // there: the tests read which from the repository and its owner's plan.
 //
+// The tests merge a PR of their own into the base branch, and set commit
+// statuses on the commits they push, with the operator's `gh`.
+//
 // Without them it is skipped. The App must not be installed on
 // octocat/Hello-World, which stands for a repository it isn't on.
 import { execFile } from 'node:child_process';
@@ -133,6 +136,9 @@ if (!repo) {
       baseBranch,
       operator: (await execFileAsync('gh', ['api', 'user', '--jq', '.login'])).stdout.trim(),
       draftsOffered: await (draftsOffered ??= draftsOfferedOn(repo)),
+      async setStatus(commit, context, state) {
+        await execFileAsync('gh', ['api', '--method', 'POST', `repos/${repo}/statuses/${commit}`, '-f', `state=${state}`, '-f', `context=${context}`]);
+      },
       async pullRequest(number) {
         const pr = JSON.parse((await execFileAsync('gh', ['api', `repos/${repo}/pulls/${number}`])).stdout);
         return {
