@@ -81,6 +81,8 @@ export class FakeGitHub implements GitHub {
   // Each PR closed or reopened through the port, with its token.
   // Each PR read that reached GitHub, by its ref.
   readonly prReads: string[] = [];
+  // Every call to merge a PR, by ref, even one GitHub took as a no-op on a PR merged already.
+  readonly mergeCalls: string[] = [];
   // Each PR closed, reopened, marked ready or merged (with its method)
   // through the port, with its token.
   readonly prWrites: { action: 'close' | 'reopen' | 'ready' | 'merge'; repo: string; number: number; method?: PrMerge['method']; token: Minted }[] = [];
@@ -380,6 +382,7 @@ export class FakeGitHub implements GitHub {
 
   async mergePr(token: string, ref: string, { method, head }: PrMerge): Promise<void> {
     await this.held();
+    this.mergeCalls.push(ref);
     if (this.mergeFailure) throw new GitHubError(this.mergeFailure);
     const minted = this.scoped(token, ref, 'pull_requests', 'write');
     this.scoped(token, ref, 'contents', 'write');
