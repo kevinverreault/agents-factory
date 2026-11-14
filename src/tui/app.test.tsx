@@ -238,6 +238,30 @@ describe('task rows', () => {
     await eventually(() => expect(app.lastFrame()).toMatch(/^merge policy operator$/m));
   });
 
+  test('p in an L3 root’s detail cycles its merge policy, and a refusal says why', async () => {
+    const live = { ...task('T1', 'Implement the store', 'running', 'Running'), autonomy: 'L3' as const, mergePolicy: 'operator' as const };
+    const { app, connection } = await started(factoryState([live, task('T2', 'Implement the cache', 'running', 'Running')]));
+    // T2, the newest, is selected first: below L3 its detail offers no policy.
+    await press(app, '\r');
+    await eventually(() => expect(app.lastFrame()).toContain('T2 Implement the cache'));
+    expect(app.lastFrame()).not.toContain('p merge policy');
+    await press(app, 'p');
+    await settle();
+    expect(connection.sent.filter(({ type }) => type === 'setMergePolicy')).toEqual([]);
+    await press(app, '\x1b', '\x1b[B', '\r');
+
+    await eventually(() => expect(app.lastFrame()).toContain('p merge policy'));
+    await press(app, 'p');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' }));
+    connection.servePatch([{ op: 'set', path: ['tasks', 'T1', 'mergePolicy'], value: 'unattended' }]);
+    await eventually(() => expect(app.lastFrame()).toMatch(/^merge policy full-auto$/m));
+
+    connection.replyTo('setMergePolicy', { ok: false, reason: 'T1 is merging its PR: wait for it to finish.' });
+    await press(app, 'p');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'operator' }));
+    await eventually(() => expect(app.lastFrame()).toContain('T1 is merging its PR: wait for it to finish.'));
+  });
+
   test('on a narrower terminal a row drops its groups first, then its extras', async () => {
     const { app } = await started(looping());
     widen(app, 95);
@@ -2262,6 +2286,19 @@ describe('launching and conversing', () => {
     await press(app, DOWN, RIGHT);
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› Merge policy ‹ full-auto (the factory merges its PR once its checks pass) ›'));
 
+    app.stdin.write('\r');
+    await eventually(() => expect(connection.sent).toContainEqual(expect.objectContaining({ type: 'handoff', taskId: 'T1', autonomy: 'L3', mergePolicy: 'unattended' })));
+  });
+
+  test('a ticket task’s sheet pre-filled with its full-auto spec’s policy shows it, and sends it as it is', async () => {
+    const connection = new FakeConnection();
+    const ticketTask = { ...onLean, kind: 'ticket' as const, ticket: 'acme/widgets#16', specTask: 'T9', mergePolicy: 'unattended' as const };
+    const state = { ...factoryState([{ ...ticketTask, handoff: { ...sheet, brief, autonomy: 'L3' as const, mergePolicy: 'unattended' as const } }]), runs: { R1: run } };
+    const { app } = await started(state, { connection });
+    widen(app, 400);
+    await press(app, '\r', '\r');
+
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('Merge policy ‹ full-auto (the factory merges its PR once its checks pass) ›'));
     app.stdin.write('\r');
     await eventually(() => expect(connection.sent).toContainEqual(expect.objectContaining({ type: 'handoff', taskId: 'T1', autonomy: 'L3', mergePolicy: 'unattended' })));
   });
