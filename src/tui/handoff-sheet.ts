@@ -9,7 +9,9 @@ import { AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, readyNow, type A
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
+import type { Reply } from '../protocol/protocol.ts';
 import { autonomyText, cycle } from './launch-card.ts';
+import { usePending } from './pending.ts';
 import { CursorWindow, fixed } from './screen.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
 import { choosable, Cursor, GLYPH, Sheet, Tick, tone } from './theme.ts';
@@ -61,21 +63,24 @@ export function HandoffSheet({ connection, task, run }: Props) {
   const lines = linesOf(brief, candidates.length);
   const writing = !brief && run?.status === 'active' && run.turn === 'agent';
 
-  const send = (command: Parameters<FactoryConnection['send']>[0]) =>
-    void connection.send(command).then((reply) => setRefusal(reply.ok ? null : reply.reason));
+  const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
+  const send = (command: Parameters<FactoryConnection['send']>[0]) => void connection.send(command).then(tell);
+  // The commands the daemon takes a while to answer, each spinning until it does.
+  const pending = usePending(connection);
 
   useInput((input, key) => {
     const current = draft.current;
-    if (key.escape) return send({ type: 'closeHandoff', taskId: task.id });
+    // A handoff under way isn't backed out of: its reply says how it ended.
+    if (key.escape) return pending.busy() ? undefined : send({ type: 'closeHandoff', taskId: task.id });
     if (key.return) {
       if (!current.brief) {
         // The agent ended its turn without the brief: ask it again.
-        if (!writing) send({ type: 'openHandoff', taskId: task.id });
+        if (!writing) void pending.send('Opening the handoff…', { type: 'openHandoff', taskId: task.id })?.then(tell);
         return;
       }
       const { continueAs, autonomy, tier, maxTurns } = current;
       const specs = current.specs && { specs: current.specs };
-      return send({ type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, tier, maxTurns: Number(maxTurns), ...specs });
+      return void pending.send('Handing off…', { type: 'handoff', taskId: task.id, brief: current.brief, continueAs, autonomy, tier, maxTurns: Number(maxTurns), ...specs })?.then(tell);
     }
     if (key.upArrow || key.downArrow) {
       const line = Math.min(Math.max(current.line + (key.upArrow ? -1 : 1), 0), lines.length - 1);
@@ -111,6 +116,7 @@ export function HandoffSheet({ connection, task, run }: Props) {
       h(Field, { key: 'maxTurns', label: 'Max turns', selected: at?.kind === 'field' && at.field === 'maxTurns' }, at?.kind === 'field' && at.field === 'maxTurns' ? withCaret(draft.current.maxTurns, draft.current.caret) : draft.current.maxTurns || ' '),
       h(Text, { key: 'commit', ...tone('dim') }, toCommit.length ? `The handoff commit takes ${toCommit.join(', ')}.` : 'Nothing to commit.'),
       ...blockers.map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`)),
+      pending.indicator ? h(Box, { key: 'pending' }, pending.indicator) : null,
       refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
     ),
   );

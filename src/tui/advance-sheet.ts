@@ -6,6 +6,7 @@ import { createElement as h, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
+import { usePending } from './pending.ts';
 import { Cursor, GLYPH, Sheet, tone } from './theme.ts';
 
 type Props = {
@@ -31,15 +32,18 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
   // Kept in one state: keys typed in one burst arrive before a re-render.
   const [sheet, setSheet] = useState({ cursor: 0, skipped: [] as string[] });
   const [refusal, setRefusal] = useState<string | null>(null);
+  // The advance spins until the daemon answers it.
+  const pending = usePending(connection);
   // Only stages before the one advanced to are skipped.
   const target = rows.findIndex(({ id }) => !sheet.skipped.includes(id));
   const to = target < 0 ? rows.length : target;
   const skip = rows.slice(0, to).map(({ id }) => id);
 
   useInput((input, key) => {
-    if (key.escape) return onCancel();
+    // An advance under way isn't backed out of: its reply says how it ended.
+    if (key.escape) return pending.busy() ? undefined : onCancel();
     if (key.return) {
-      void connection.send({ type: 'advanceStage', taskId: task.id, ...(skip.length > 0 && { skip }) }).then((reply) => {
+      void pending.send('Advancing…', { type: 'advanceStage', taskId: task.id, ...(skip.length > 0 && { skip }) })?.then((reply) => {
         if (reply.ok) onAdvanced();
         else setRefusal(reply.reason);
       });
@@ -64,6 +68,7 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
       Sheet,
       { title: `Advance ${task.id} from ${task.stage}`, hint: 'enter finish the ticket · esc back' },
       h(Text, null, `Finish ${ticket}: the factory reads the map again for its next frontier.`),
+      pending.indicator,
       refusal ? h(Text, tone('bad'), refusal) : null,
     );
   }
@@ -88,6 +93,7 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
       ),
     ),
     then,
+    pending.indicator,
     refusal ? h(Text, tone('bad'), refusal) : null,
   );
 }

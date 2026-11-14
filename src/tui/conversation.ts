@@ -16,11 +16,12 @@ import { AnswerSheet, answerable, cardItem, reopens, useAnswering } from './answ
 import { answeredLine, answersText, placed, type AnswerLog } from './answered.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
+import { usePending } from './pending.ts';
 import { Event, SystemLine } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { fixed, usePager, useRows } from './screen.ts';
 import { modeOf } from './task-detail.ts';
-import { GLYPH, joined, Keys, Rule, Section, stateLook, tone, type Hint } from './theme.ts';
+import { GLYPH, joined, Keys, Rule, Section, Spinner, stateLook, tone, type Hint } from './theme.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
 import { TaskUsage, UsageStrip } from './usage.ts';
 
@@ -69,13 +70,17 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
   const takesChat = (run?.mode ?? task?.mode) !== 'AFK';
   const live = takesChat && run?.status === 'active';
   const midTurn = live && run.turn === 'agent';
+  // A run under way that has shown nothing yet, as a task just launched.
+  const starting = run?.status === 'active' && run.turn === 'agent' && events.length === 0;
   // The open card, until the operator has answered it.
   const question = live && run.question && run.question.id !== typing.current.answeredQuestion ? run.question : null;
   // A card answers its own question: a new question starts a new card.
   const card = question && typing.current.cardFor === question.id ? typing.current.card : newCard();
   const tell = (reply: Reply) => setRefusal(reply.ok ? null : reply.reason);
+  // The commands the daemon takes a while to answer, each spinning until it does.
+  const pending = usePending(connection);
   // The handoff sheet opens once the daemon has opened the task's handoff.
-  const handOff = () => void connection.send({ type: 'openHandoff', taskId }).then(tell);
+  const handOff = () => void pending.send('Opening the handoff…', { type: 'openHandoff', taskId })?.then(tell);
   const sheet = takesChat && task?.handoff ? task.handoff : null;
   // The task's open request, while it needs the operator, or else its HITL
   // run's permission card: when its sheet takes digits, every key but ctrl+b
@@ -99,7 +104,7 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
   // here too, unless the answer sheet is taking what the operator types.
   const canTakeOver =
     task?.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state) && answers.form === null && answers.confirm === null;
-  const takeOver = () => void connection.send({ type: 'takeOver', taskId }).then(tell);
+  const takeOver = () => void pending.send('Taking over…', { type: 'takeOver', taskId })?.then(tell);
 
   // Paging through the conversation, whatever else takes the keys: a sheet over it too.
   useInput((_, key) => {
@@ -148,7 +153,9 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
     } else if (key.return && !live && reopens(task)) {
       // Parked while open: it reopens first, then takes the message, if any.
       const text = typed.draft.trim() ? typed.draft : null;
-      void connection.send({ type: 'open', taskId }).then((reply) => {
+      const opening = pending.send('Reopening the conversation…', { type: 'open', taskId });
+      if (!opening) return;
+      void opening.then((reply) => {
         tell(reply);
         if (reply.ok && text) void connection.send({ type: 'sendMessage', taskId, text }).then(tell);
         else if (!reply.ok && text && !typing.current.draft) Object.assign(typing.current, { draft: text, caret: null });
@@ -197,8 +204,6 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
         { ...tone('dim'), wrap: 'truncate' },
         what ? `${what} ${GLYPH.between} ` : '',
         h(Text, tone(stateLook(label).role), label),
-        // Before the branch, which a narrow screen cuts first.
-        midTurn ? h(Text, tone('ok'), ` ${GLYPH.between} agent working…`) : null,
         task?.branch ? ` ${GLYPH.between} ${task.branch}` : '',
       ),
       // The escape hatch: the same session in the operator's own terminal.
@@ -221,6 +226,9 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
             'event' in at ? h(Event, { key: at.event.id, event: at.event }) : h(Text, { key: at.answer.id, ...tone('ok') }, at.answer.line),
           ),
           ...(run?.queued ?? []).map((text, i) => h(SystemLine, { key: `queued-${i}`, text: `queued ${text}` })),
+          // Last, while the agent is under way: starting, before its first
+          // event, or else working through its turn.
+          starting ? h(Spinner, { key: 'starting', label: 'Starting the agent…' }) : midTurn ? h(Spinner, { key: 'working', label: 'agent working…' }) : null,
         ),
       ),
       // The rail: the task's usage and artifacts, each in its section.
@@ -252,6 +260,8 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
           : null,
         request ? h(AnswerSheet, { key: 'request', item: request, task, card: answers.card, answering, form: answers.form, confirm: answers.confirm, chosen: answers.chosen, escBack: false }) : null,
         live && (run.turn === 'operator' || question || run.permission) ? h(Text, { key: 'waiting', ...tone('warn') }, 'The agent is waiting on you.') : null,
+        // Once the handoff sheet is up, its own spinner tells what it waits on.
+        pending.indicator && !sheet ? h(Box, { key: 'pending' }, pending.indicator) : null,
         refusal ? h(Text, { key: 'refusal', ...tone('bad') }, refusal) : null,
         chat ? h(Text, { key: 'chat' }, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)) : null,
         h(Rule, { key: 'strip-rule' }),
