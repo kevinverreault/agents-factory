@@ -78,6 +78,12 @@ export type PrStatus = { state: PrState; mergeable: Mergeability; head: string; 
 // (ADR 0014): green once every one passed, red once any failed, pending
 // while any hasn't finished, and none when the repository runs none.
 export type ChecksState = 'green' | 'red' | 'pending' | 'none';
+// A check run or commit status that failed: its name, and the page that
+// says why, if GitHub has one.
+export type FailedCheck = { name: string; url: string | null };
+// A commit's checks as the gate reads them: their combined state, and those
+// that failed, for the fix run a red check gets (ADR 0014).
+export type Checks = { state: ChecksState; failed: FailedCheck[] };
 
 // How the factory merges a PR: with a merge commit by default, which keeps
 // the bot's commits and the operator's HITL commits apart (ADR 0004).
@@ -133,9 +139,9 @@ export interface GitHub {
   // Where the PR `ref` (`owner/name#n`) stands, and whether it is
   // mergeable, read with `token`, which needs Pull requests read (ADR 0011).
   readPr(token: string, ref: string): Promise<PrStatus>;
-  // The combined state of the checks on the commit `head` of the repository
-  // `repo`, read with `token`, which needs Checks and Statuses read.
-  readChecks(token: string, repo: string, head: string): Promise<ChecksState>;
+  // The checks on the commit `head` of the repository `repo`, combined, and
+  // those that failed, read with `token`, which needs Checks and Statuses read.
+  readChecks(token: string, repo: string, head: string): Promise<Checks>;
   // Marks the draft PR `ref` ready for review, with `token`, which needs
   // Pull requests write. A PR already ready is left as it is.
   markReady(token: string, ref: string): Promise<void>;
@@ -374,7 +380,7 @@ export function gitHubApi(): GitHub {
       }
       const status = await call('GET', `/repos/${repo}/commits/${head}/status?per_page=100`, token);
       if (status.status !== 200) throw refused(`read the commit statuses of ${head} in ${repo}`, status);
-      return combinedChecks(runs.map(checkRunState), (status.json.statuses as { state: string }[]).map(({ state }) => statusState(state)));
+      return commitChecks(runs, status.json.statuses);
     },
     async markReady(token, ref) {
       const pr = await pullRequest(token, ref);
@@ -511,6 +517,18 @@ export function combinedChecks(...lists: ChecksState[][]): ChecksState {
   if (all.length === 0) return 'none';
   if (all.includes('red')) return 'red';
   return all.includes('pending') ? 'pending' : 'green';
+}
+
+// A commit's check runs and commit statuses, as GitHub's REST API lists
+// them, read as the gate reads them: combined, with those that failed named,
+// each with the page that says why.
+export function commitChecks(
+  runs: { name: string; status: string; conclusion?: string | null; html_url?: string | null; details_url?: string | null }[],
+  statuses: { context: string; state: string; target_url?: string | null }[],
+): Checks {
+  const failedRuns = runs.filter((run) => checkRunState(run) === 'red').map((run) => ({ name: run.name, url: run.html_url ?? run.details_url ?? null }));
+  const failedStatuses = statuses.filter(({ state }) => statusState(state) === 'red').map((status) => ({ name: status.context, url: status.target_url ?? null }));
+  return { state: combinedChecks(runs.map(checkRunState), statuses.map(({ state }) => statusState(state))), failed: [...failedRuns, ...failedStatuses] };
 }
 
 // The REST path of a PR `owner/name#n`.
