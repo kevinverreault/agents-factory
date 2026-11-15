@@ -2120,7 +2120,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (unfetched) return failed(unfetched);
     try {
       const { token } = await appToken(task.repo, PUSH);
-      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch });
+      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch, base: repository.baseBranch });
       if ('outsideResearch' in pushed) return { type: 'researchPushRefused', taskId: task.id, paths: pushed.outsideResearch };
       // Workflow files are outside docs/research/, so the port refuses them as that first.
       if ('workflowFiles' in pushed) return failed(`${task.worktree!.branch} changes workflow files (${pushed.workflowFiles.join(', ')}), which the factory’s App may not push.`);
@@ -2356,7 +2356,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (unfetched) return failed(unfetched);
     try {
       const { token } = await appToken(task.repo, PUSH);
-      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch });
+      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch, base: repository.baseBranch });
       if ('workflowFiles' in pushed) return { type: 'pushRefused', taskId: task.id, workflowFiles: pushed.workflowFiles };
       // A task branch is never a research branch.
       if ('outsideResearch' in pushed) return failed(`${task.worktree!.branch} isn’t a task branch.`);

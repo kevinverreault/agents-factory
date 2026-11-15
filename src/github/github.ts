@@ -58,12 +58,12 @@ export type Installation = { permissions: Permissions; settingsUrl: string };
 
 // What the factory pushes (ADR 0004): the task branch, or a research
 // branch (ADR 0007), of the clone at `clonePath`, to the branch of the same
-// name in the repository `repo`.
-export type BranchPush = { clonePath: string; repo: string; branch: string };
+// name in the repository `repo`, whose base branch is `base`.
+export type BranchPush = { clonePath: string; repo: string; branch: string; base: string };
 // The tip GitHub has of the branch once pushed, or, unpushed, the workflow
-// files its commits change: the App has no Workflows permission, so the
-// operator pushes those by hand (ADR 0004); or, for a research branch, the
-// paths its commits change outside `docs/research/` (ADR 0007).
+// files GitHub would count as changed: the App has no Workflows permission,
+// so the operator pushes those by hand (ADR 0004); or, for a research
+// branch, the paths its commits change outside `docs/research/` (ADR 0007).
 export type Pushed = { pushed: string } | { workflowFiles: string[] } | { outsideResearch: string[] };
 
 // What closing a draft PR, with its comment, or reopening it, writes with:
@@ -141,7 +141,11 @@ export interface GitHub {
   // forced, and with no hooks run. A branch GitHub already has at that tip,
   // such as one the operator pushed by hand, is pushed already. Otherwise a
   // branch whose commits GitHub doesn't have change workflow files isn't
-  // pushed. Throws a `GitHubError` when the refspec guard or GitHub refuses it.
+  // pushed, and nor is a branch new to GitHub whose workflow files differ
+  // from the base branch's tip there: GitHub counts those as the push's
+  // changes, as when the base changed one after the branch was cut. Throws
+  // a `GitHubError` when the refspec guard or GitHub refuses it, with
+  // GitHub's reason for each ref it refused.
   push(token: string, push: BranchPush): Promise<Pushed>;
   // Opens the draft PR with `token`, which needs Pull requests write, and
   // assigns it; or finds the open PR of its head branch, as when the factory
@@ -356,21 +360,27 @@ export function gitHubApi(): GitHub {
       const comments = await list(`${issuePath(ref)}/comments`, token, `read the comments on ${ref}`);
       return comments.map((comment) => String(comment.body ?? ''));
     },
-    async push(token, { clonePath, repo, branch }) {
+    async push(token, { clonePath, repo, branch, base }) {
       const refusal = pushRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
       const url = `https://github.com/${repo}.git`;
       const git = (...args: string[]) => gitWithToken(clonePath, token, args);
       const tip = await git('rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`);
-      const remoteTip = (await git('ls-remote', '--heads', url, `refs/heads/${branch}`)).split(/\s/, 1)[0] || null;
+      const heads = await git('ls-remote', '--heads', url, `refs/heads/${branch}`, `refs/heads/${base}`);
+      const tipOf = (ref: string) => heads.split(/\r?\n/).find((line) => line.endsWith(`\t${ref}`))?.split('\t', 1)[0] ?? null;
+      const remoteTip = tipOf(`refs/heads/${branch}`);
       if (remoteTip === tip) return { pushed: tip };
+      const known = async (commit: string | null) => commit !== null && (await git('cat-file', '-t', commit).catch(() => null)) === 'commit';
       // What GitHub has already is no change of this push's, as far as the clone knows it.
-      const known = remoteTip && (await git('cat-file', '-t', remoteTip).catch(() => null)) === 'commit' ? [remoteTip] : [];
-      const changed = await git('log', '--format=', '--name-only', '--no-renames', tip, '--not', '--remotes=origin', ...known);
+      const changed = await git('log', '--format=', '--name-only', '--no-renames', tip, '--not', '--remotes=origin', ...((await known(remoteTip)) ? [remoteTip!] : []));
       const paths = [...new Set(changed.split(/\r?\n/).filter(Boolean))].sort();
       const outside = outsideResearch(branch, paths);
       if (outside.length) return { outsideResearch: outside };
-      const workflows = workflowFiles(paths);
+      // GitHub counts a new branch's workflow files against the base branch's
+      // tip there, which may have moved on since the branch was cut.
+      const baseTip = remoteTip === null ? tipOf(`refs/heads/${base}`) : null;
+      const drift = (await known(baseTip)) ? await git('diff', '--name-only', '--no-renames', baseTip!, tip, '--', '.github/workflows/') : '';
+      const workflows = workflowFiles([...new Set([...paths, ...drift.split(/\r?\n/).filter(Boolean)])].sort());
       if (workflows.length) return { workflowFiles: workflows };
       // The tip checked, not whatever the branch points at by now.
       await git('push', '--no-verify', '--porcelain', url, `${tip}:refs/heads/${branch}`);
@@ -467,11 +477,23 @@ export function gitHubApi(): GitHub {
   };
 }
 
+// The refs `git push --porcelain` says were refused, each with why, as
+// `refs/heads/x: [remote rejected] (reason)`.
+export function pushRejections(porcelain: string): string[] {
+  return porcelain
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('!\t'))
+    .map((line) => {
+      const [, refs = '', summary = ''] = line.split('\t');
+      return `${refs.slice(refs.lastIndexOf(':') + 1)}: ${summary.trim()}`;
+    });
+}
+
 // Runs git in the clone as the App, with `token` and nothing of the
 // operator's: no system or global config, so no credential helper, URL
 // rewrite or hook path of theirs applies, and no prompt. The token travels
 // in an environment-borne header, never in a command line or URL. Throws a
-// `GitHubError` with what git said.
+// `GitHubError` with what git said, and why GitHub refused each ref.
 function gitWithToken(cwd: string, token: string, args: string[]): Promise<string> {
   const { GIT_ASKPASS, SSH_ASKPASS, GIT_CONFIG_PARAMETERS, ...env } = process.env;
   const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
@@ -497,8 +519,9 @@ function gitWithToken(cwd: string, token: string, args: string[]): Promise<strin
       },
       (error, stdout, stderr) => {
         if (!error) return resolve(stdout.trim());
-        const said = [token, basic].reduce((text, secret) => text.split(secret).join('***'), `${stderr}`).trim() || error.message;
-        reject(new GitHubError(`git ${args[0]} failed: ${said}`));
+        // `push --porcelain` says why GitHub refused each ref on stdout alone.
+        const said = [`${stderr}`.trim(), ...pushRejections(`${stdout}`)].filter(Boolean).join(' ') || error.message;
+        reject(new GitHubError(`git ${args[0]} failed: ${[token, basic].reduce((text, secret) => text.split(secret).join('***'), said)}`));
       },
     );
   });

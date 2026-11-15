@@ -74,11 +74,16 @@ export class FakeGit implements Git {
   }
 
   // Adds a commit to `branch` on origin, which the clone hasn't fetched yet,
-  // writing `files` (by path, with `/`).
-  advanceOrigin(clonePath: string, branch: string, files: Record<string, string> = {}): string {
+  // writing `files` (by path, with `/`): null deletes one.
+  advanceOrigin(clonePath: string, branch: string, files: Record<string, string | null> = {}): string {
     const clone = this.cloneAt(clonePath);
     const before = clone.origin.get(branch);
-    const tip = this.newCommit(new Map([...(before ? this.trees.get(before)! : []), ...Object.entries(files)]));
+    const tree = new Map(before ? this.trees.get(before)! : []);
+    for (const [path, content] of Object.entries(files)) {
+      if (content === null) tree.delete(path);
+      else tree.set(path, content);
+    }
+    const tip = this.newCommit(tree);
     if (before) this.parents.set(tip, before);
     clone.origin.set(branch, tip);
     return tip;
@@ -117,6 +122,13 @@ export class FakeGit implements Git {
       for (const path of new Set([...tree.keys(), ...parent.keys()])) if (tree.get(path) !== parent.get(path)) changed.add(path);
     }
     return [...changed].sort();
+  }
+
+  // The paths whose files differ between the commits `from` and `to`, in path order.
+  changedBetween(from: string, to: string): string[] {
+    const before = this.trees.get(from)!;
+    const after = this.trees.get(to)!;
+    return [...new Set([...before.keys(), ...after.keys()])].filter((path) => before.get(path) !== after.get(path)).sort();
   }
 
   // Origin's `base` moves to the clone's `branch`, as merging its PR would.

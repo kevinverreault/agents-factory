@@ -44,6 +44,9 @@ export type GitHubClone = {
   remoteTip(branch: string): Promise<string | null>;
   // The operator pushes the branch by hand, with their own credentials.
   pushByHand(branch: string): Promise<void>;
+  // The operator commits `files` (by path, with `/`: null deletes one) onto
+  // the base branch on GitHub by hand, and the clone fetches it.
+  advanceBaseByHand(files: Record<string, string | null>): Promise<void>;
 };
 
 const HOUR = 60 * 60_000;
@@ -135,24 +138,24 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
     });
 
     test('a push token pushes the task branch to the same branch on GitHub', async () => {
-      const { github, app, installedRepo, clone } = await makeFixture();
+      const { github, app, installedRepo, clone, baseBranch } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Pushed by the contract test.\n' });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
-      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).toEqual({ pushed: tip });
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).toEqual({ pushed: tip });
 
       expect(await clone.remoteTip(branch)).toBe(tip);
     });
 
     test('a read-only token can’t push, and a push token can’t write issues', async () => {
-      const { github, app, installedRepo, openIssue, clone } = await makeFixture();
+      const { github, app, installedRepo, openIssue, clone, baseBranch } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Never pushed.\n' });
       const readOnly = await github.mintToken(app, installedRepo, READ_ONLY);
       const push = await github.mintToken(app, installedRepo, PUSH);
 
-      await expect(github.push(readOnly.token, { clonePath: clone.path, repo: installedRepo, branch })).rejects.toThrow(GitHubError);
+      await expect(github.push(readOnly.token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).rejects.toThrow(GitHubError);
       await expect(github.closeIssue(push.token, openIssue, 'A push token can’t close this.')).rejects.toThrow(GitHubError);
 
       expect(await clone.remoteTip(branch)).toBeNull();
@@ -160,12 +163,12 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
     });
 
     test('refuses to push a branch that isn’t a task or research branch, pushing nothing', async () => {
-      const { github, app, installedRepo, clone } = await makeFixture();
+      const { github, app, installedRepo, clone, baseBranch } = await makeFixture();
       const branch = `contract/not-a-task-branch-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Never pushed.\n' });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
-      await expect(github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).rejects.toThrow(
+      await expect(github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).rejects.toThrow(
         `The factory pushes only task branches (factory/…) and research branches (research/…), not ${branch}.`,
       );
 
@@ -173,48 +176,66 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
     });
 
     test('pushes a research branch whose commits touch only docs/research/**', async () => {
-      const { github, app, installedRepo, clone } = await makeFixture();
+      const { github, app, installedRepo, clone, baseBranch } = await makeFixture();
       const branch = `research/contract-${unique()}`;
       const tip = await clone.commitOn(branch, { [`docs/research/contract-${unique()}.md`]: 'Findings.\n' });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
-      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).toEqual({ pushed: tip });
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).toEqual({ pushed: tip });
 
       expect(await clone.remoteTip(branch)).toBe(tip);
     });
 
     test('refuses to push a research branch whose commits touch any other path, pushing nothing', async () => {
-      const { github, app, installedRepo, clone } = await makeFixture();
+      const { github, app, installedRepo, clone, baseBranch } = await makeFixture();
       const branch = `research/contract-${unique()}`;
       const other = `contract/${unique()}.txt`;
       await clone.commitOn(branch, { [`docs/research/contract-${unique()}.md`]: 'Findings.\n', [other]: 'Never pushed.\n' });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
-      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).toEqual({ outsideResearch: [other] });
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).toEqual({ outsideResearch: [other] });
 
       expect(await clone.remoteTip(branch)).toBeNull();
     });
 
     test('refuses to push a branch whose commits change workflow files, pushing nothing', async () => {
-      const { github, app, installedRepo, clone } = await makeFixture();
+      const { github, app, installedRepo, clone, baseBranch } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       const workflow = `.github/workflows/contract-${unique()}.yml`;
       await clone.commitOn(branch, { [workflow]: WORKFLOW, [`contract/${unique()}.txt`]: 'Never pushed.\n' });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
-      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).toEqual({ workflowFiles: [workflow] });
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).toEqual({ workflowFiles: [workflow] });
 
       expect(await clone.remoteTip(branch)).toBeNull();
     });
 
+    test('refuses to push a new branch whose workflow files differ from the base’s tip, as when the base changed one after it was cut, pushing nothing', async () => {
+      const { github, app, installedRepo, clone, baseBranch } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      const workflow = `.github/workflows/contract-${unique()}.yml`;
+      const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Cut before the base changed a workflow.\n' });
+      const { token } = await github.mintToken(app, installedRepo, PUSH);
+      await clone.advanceBaseByHand({ [workflow]: WORKFLOW });
+
+      try {
+        expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).toEqual({ workflowFiles: [workflow] });
+        expect(await clone.remoteTip(branch)).toBeNull();
+      } finally {
+        await clone.advanceBaseByHand({ [workflow]: null });
+      }
+
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).toEqual({ pushed: tip });
+    });
+
     test('a branch the operator pushed by hand counts as pushed, workflow files and all', async () => {
-      const { github, app, installedRepo, clone } = await makeFixture();
+      const { github, app, installedRepo, clone, baseBranch } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       const tip = await clone.commitOn(branch, { [`.github/workflows/contract-${unique()}.yml`]: WORKFLOW });
       await clone.pushByHand(branch);
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
-      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).toEqual({ pushed: tip });
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch })).toEqual({ pushed: tip });
     });
 
     test('names the App’s owner, the operator', async () => {
@@ -227,7 +248,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, installedRepo, clone, operator, baseBranch, draftsOffered, pullRequest } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Opened as a draft by the contract test.\n' });
-      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const { token } = await github.mintToken(app, installedRepo, OPEN_PR);
       const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test draft', body: 'Opened by the contract test.', assignee: operator };
 
@@ -250,7 +271,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Pushed, never opened.\n' });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
-      await github.push(token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
 
       await expect(
         github.openDraftPr(token, { repo: installedRepo, head: branch, base: baseBranch, title: 'Never opened', body: '', assignee: operator }),
@@ -261,7 +282,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, installedRepo, clone, operator, baseBranch } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Pushed, never opened.\n' });
-      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const { token } = await github.mintToken(app, installedRepo, { pull_requests: 'write', metadata: 'read' });
 
       await expect(
@@ -273,7 +294,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, installedRepo, clone, operator, baseBranch } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Closed and reopened by the contract test.\n' });
-      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test PR', body: '', assignee: operator };
       const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
       const ref = `${installedRepo}#${number}`;
@@ -302,7 +323,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       await clone.commitOn(first, { [path]: 'One side.\n' });
       await clone.commitOn(second, { [path]: 'The other side.\n' });
       const push = (await github.mintToken(app, installedRepo, PUSH)).token;
-      for (const branch of [first, second]) await github.push(push, { clonePath: clone.path, repo: installedRepo, branch });
+      for (const branch of [first, second]) await github.push(push, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const open = (await github.mintToken(app, installedRepo, OPEN_PR)).token;
       const pr = (head: string, base: string) => ({ repo: installedRepo, head, base, title: 'Contract test PR', body: '', assignee: operator });
       const clean = await github.openDraftPr(open, pr(first, baseBranch));
@@ -319,7 +340,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, installedRepo, clone, operator, baseBranch, draftsOffered } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Read by the contract test.\n' });
-      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test PR', body: '', assignee: operator };
       const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
 
@@ -328,10 +349,10 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
     });
 
     test('a checks token reads the combined checks of a commit: none, then pending, red or green as its statuses go, naming those that failed, while a read-only token can’t', async () => {
-      const { github, app, installedRepo, clone, setStatus } = await makeFixture();
+      const { github, app, installedRepo, clone, setStatus, baseBranch } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Checked by the contract test.\n' });
-      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const { token } = await github.mintToken(app, installedRepo, CHECKS_READ);
 
       // The throwaway repository runs no workflow on a contract branch.
@@ -349,7 +370,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, installedRepo, clone, operator, baseBranch, draftsOffered } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Merged by the contract test.\n' });
-      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test merge', body: 'Merged by the contract test.', assignee: operator };
       const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
       const ref = `${installedRepo}#${number}`;
@@ -381,7 +402,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { github, app, installedRepo, clone, operator, baseBranch, pullRequest } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Edited by the contract test.\n' });
-      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push((await github.mintToken(app, installedRepo, PUSH)).token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test edit', body: 'As opened.', assignee: operator };
       const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
       const ref = `${installedRepo}#${number}`;
@@ -400,7 +421,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Closed for good by the contract test.\n' });
       const push = (await github.mintToken(app, installedRepo, PUSH)).token;
-      await github.push(push, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push(push, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
       const draft = { repo: installedRepo, head: branch, base: baseBranch, title: 'Contract test PR', body: '', assignee: operator };
       const { number } = await github.openDraftPr((await github.mintToken(app, installedRepo, OPEN_PR)).token, draft);
       const ref = `${installedRepo}#${number}`;
@@ -413,11 +434,11 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
     });
 
     test('a push token deletes a pushed task branch, and deleting it again is no error, while a read-only token can’t', async () => {
-      const { github, app, installedRepo, clone } = await makeFixture();
+      const { github, app, installedRepo, clone, baseBranch } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Deleted by the contract test.\n' });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
-      await github.push(token, { clonePath: clone.path, repo: installedRepo, branch });
+      await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, base: baseBranch });
 
       await expect(github.deleteBranch((await github.mintToken(app, installedRepo, READ_ONLY)).token, installedRepo, branch)).rejects.toThrow(GitHubError);
       expect(await clone.remoteTip(branch)).not.toBeNull();

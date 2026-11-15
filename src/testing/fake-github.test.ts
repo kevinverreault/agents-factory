@@ -38,6 +38,9 @@ async function fixture({ draftsOffered }: { draftsOffered: boolean }): Promise<G
       },
       remoteTip: async (branch) => git.originTip(path, branch),
       pushByHand: async (branch) => git.push(path, branch),
+      advanceBaseByHand: async (files) => {
+        git.advanceOrigin(path, 'main', files);
+      },
     },
     operator: github.operator,
     baseBranch: 'main',
