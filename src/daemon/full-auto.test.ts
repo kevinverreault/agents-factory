@@ -99,7 +99,7 @@ describe('under full-auto (unattended)', () => {
     expect(factory.git.originTip(clone, 'main')).not.toBeNull();
     expect(factory.git.originTip(clone, branch)).toBeNull();
     expect(factory.github.prWrites).toEqual([
-      { action: 'ready', repo: 'acme/widgets', number: 101, token: expect.objectContaining({ repo: 'acme/widgets', permissions: { pull_requests: 'write', metadata: 'read' } }) },
+      { action: 'ready', repo: 'acme/widgets', number: 101, token: expect.objectContaining({ repo: 'acme/widgets', permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' } }) },
       {
         action: 'merge',
         repo: 'acme/widgets',

@@ -43,6 +43,11 @@ export const CHECKS_READ: Permissions = { checks: 'read', statuses: 'read', meta
 // branch, so it needs Contents write besides Pull requests write.
 export const MERGE: Permissions = { contents: 'write', pull_requests: 'write', metadata: 'read' };
 
+// What marking a draft PR ready writes with: GitHub's GraphQL mutation
+// refuses an App token without Contents write besides Pull requests write
+// ("Resource not accessible by integration"), though it writes no contents.
+export const READY: Permissions = { contents: 'write', pull_requests: 'write', metadata: 'read' };
+
 export type InstallationToken = { token: string; expiresAt: number };
 
 // The App's installation on a repository as GitHub has it: the permissions
@@ -150,7 +155,8 @@ export interface GitHub {
   // those that failed, read with `token`, which needs Checks and Statuses read.
   readChecks(token: string, repo: string, head: string): Promise<Checks>;
   // Marks the draft PR `ref` ready for review, with `token`, which needs
-  // Pull requests write. A PR already ready is left as it is.
+  // Contents and Pull requests write (READY). A PR already ready is left as
+  // it is.
   markReady(token: string, ref: string): Promise<void>;
   // The body of the PR `ref` as GitHub has it now, read with `token`, which
   // needs Pull requests read.
