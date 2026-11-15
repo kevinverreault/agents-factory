@@ -17,7 +17,7 @@ import { isResearchBranch, outsideResearch } from './research-branch.ts';
 // the credential store.
 export type FactoryApp = { id: number; slug: string; privateKey: string };
 
-export type Permission = 'contents' | 'issues' | 'pull_requests' | 'metadata' | 'checks' | 'statuses';
+export type Permission = 'contents' | 'issues' | 'pull_requests' | 'metadata' | 'checks' | 'statuses' | 'workflows';
 export type Permissions = Partial<Record<Permission, 'read' | 'write'>>;
 
 // What an AFK run reads GitHub with, and the daemon reads a root's PR with
@@ -29,6 +29,11 @@ export const TICKET_WRITE: Permissions = { issues: 'write', metadata: 'read' };
 
 // What pushing a task branch writes with: the repository's contents alone.
 export const PUSH: Permissions = { contents: 'write', metadata: 'read' };
+
+// What pushing a full-auto task's branch writes with (ADR 0004, as amended):
+// Workflows write besides, without which GitHub refuses a branch that
+// changes workflow files.
+export const PUSH_WORKFLOWS: Permissions = { ...PUSH, workflows: 'write' };
 
 // What opening a PR, and assigning it, writes with: pull requests alone, and
 // Contents read, without which GitHub can't read the branches ("not all refs
@@ -42,6 +47,10 @@ export const CHECKS_READ: Permissions = { checks: 'read', statuses: 'read', meta
 // What merging a PR writes with: GitHub writes the merge commit to the base
 // branch, so it needs Contents write besides Pull requests write.
 export const MERGE: Permissions = { contents: 'write', pull_requests: 'write', metadata: 'read' };
+
+// What merging a full-auto task's PR writes with: Workflows write besides,
+// without which GitHub refuses to merge changes to workflow files.
+export const MERGE_WORKFLOWS: Permissions = { ...MERGE, workflows: 'write' };
 
 // What marking a draft PR ready writes with: GitHub's GraphQL mutation
 // refuses an App token without Contents write besides Pull requests write
@@ -59,10 +68,13 @@ export type Installation = { permissions: Permissions; settingsUrl: string };
 // What the factory pushes (ADR 0004): the task branch, or a research
 // branch (ADR 0007), of the clone at `clonePath`, to the branch of the same
 // name in the repository `repo`, whose base branch is `base`.
-export type BranchPush = { clonePath: string; repo: string; branch: string; base: string };
+// `allowWorkflows` says whether it may change workflow files: only a
+// full-auto task's may, pushed with a token that has Workflows write (ADR
+// 0004, as amended).
+export type BranchPush = { clonePath: string; repo: string; branch: string; base: string; allowWorkflows?: boolean };
 // The tip GitHub has of the branch once pushed, or, unpushed, the workflow
-// files GitHub would count as changed: the App has no Workflows permission,
-// so the operator pushes those by hand (ADR 0004); or, for a research
+// files GitHub would count as changed where the push doesn't allow them,
+// which the operator then pushes by hand (ADR 0004); or, for a research
 // branch, the paths its commits change outside `docs/research/` (ADR 0007).
 export type Pushed = { pushed: string } | { workflowFiles: string[] } | { outsideResearch: string[] };
 
@@ -143,9 +155,11 @@ export interface GitHub {
   // branch whose commits GitHub doesn't have change workflow files isn't
   // pushed, and nor is a branch new to GitHub whose workflow files differ
   // from the base branch's tip there: GitHub counts those as the push's
-  // changes, as when the base changed one after the branch was cut. Throws
-  // a `GitHubError` when the refspec guard or GitHub refuses it, with
-  // GitHub's reason for each ref it refused.
+  // changes, as when the base changed one after the branch was cut. Either
+  // is pushed where the push allows them. Throws a `GitHubError` when the
+  // refspec guard or GitHub refuses it, with GitHub's reason for each ref it
+  // refused, as GitHub refuses workflow changes pushed with a token without
+  // Workflows write.
   push(token: string, push: BranchPush): Promise<Pushed>;
   // Opens the draft PR with `token`, which needs Pull requests write, and
   // assigns it; or finds the open PR of its head branch, as when the factory
@@ -230,8 +244,9 @@ export function installationPage(id: number, account: string, accountType: Accou
     : `https://github.com/settings/installations/${id}`;
 }
 
-// The App's permissions (ADR 0004): no Workflows, Actions or Administration,
-// and Checks and Statuses read alone, for L3's merges (ADR 0014).
+// The App's permissions (ADR 0004): no Actions or Administration, Checks
+// and Statuses read alone, for L3's merges (ADR 0014), and Workflows write,
+// which only full-auto tasks' pushes and merges use.
 export const APP_PERMISSIONS: Permissions = {
   contents: 'write',
   pull_requests: 'write',
@@ -239,6 +254,7 @@ export const APP_PERMISSIONS: Permissions = {
   metadata: 'read',
   checks: 'read',
   statuses: 'read',
+  workflows: 'write',
 };
 
 const API = 'https://api.github.com';
@@ -360,7 +376,7 @@ export function gitHubApi(): GitHub {
       const comments = await list(`${issuePath(ref)}/comments`, token, `read the comments on ${ref}`);
       return comments.map((comment) => String(comment.body ?? ''));
     },
-    async push(token, { clonePath, repo, branch, base }) {
+    async push(token, { clonePath, repo, branch, base, allowWorkflows }) {
       const refusal = pushRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
       const url = `https://github.com/${repo}.git`;
@@ -381,7 +397,7 @@ export function gitHubApi(): GitHub {
       const baseTip = remoteTip === null ? tipOf(`refs/heads/${base}`) : null;
       const drift = (await known(baseTip)) ? await git('diff', '--name-only', '--no-renames', baseTip!, tip, '--', '.github/workflows/') : '';
       const workflows = workflowFiles([...new Set([...paths, ...drift.split(/\r?\n/).filter(Boolean)])].sort());
-      if (workflows.length) return { workflowFiles: workflows };
+      if (workflows.length && !allowWorkflows) return { workflowFiles: workflows };
       // The tip checked, not whatever the branch points at by now.
       await git('push', '--no-verify', '--porcelain', url, `${tip}:refs/heads/${branch}`);
       return { pushed: tip };

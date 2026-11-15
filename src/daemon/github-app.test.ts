@@ -99,7 +99,7 @@ describe('whether the App is installed on a repository', () => {
       value: {
         installed: true,
         checkedAt: factory.clock.now(),
-        permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read' },
+        permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read', workflows: 'write' },
         settingsUrl: 'https://github.com/settings/installations/1',
       },
     });

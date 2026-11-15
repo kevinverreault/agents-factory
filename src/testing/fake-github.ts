@@ -316,7 +316,7 @@ export class FakeGitHub implements GitHub {
     issue.stateReason = 'reopened';
   }
 
-  async push(token: string, { clonePath, repo, branch, base }: BranchPush): Promise<Pushed> {
+  async push(token: string, { clonePath, repo, branch, base, allowWorkflows }: BranchPush): Promise<Pushed> {
     const refusal = pushRefusal(branch);
     if (refusal) throw new GitHubError(refusal);
     await this.held();
@@ -333,7 +333,9 @@ export class FakeGitHub implements GitHub {
     const baseTip = remoteTip === null ? git.originTip(clonePath, base) : null;
     const drift = baseTip ? git.changedBetween(baseTip, tip) : [];
     const workflows = workflowFiles([...new Set([...changed, ...drift])].sort());
-    if (workflows.length) return { workflowFiles: workflows };
+    if (workflows.length && !allowWorkflows) return { workflowFiles: workflows };
+    // GitHub refuses an App's workflow changes without Workflows write.
+    if (workflows.length) this.scoped(token, repo, 'workflows', 'write');
     git.push(clonePath, branch);
     this.pushes.push({ repo, branch, tip, token: snapshot(minted) });
     return { pushed: tip };

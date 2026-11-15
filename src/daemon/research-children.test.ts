@@ -220,7 +220,7 @@ describe('a research child that reports', () => {
 
     await tui.until(() => !factory.github.issueState(TICKET).open);
     expect(factory.git.originTip(clone, 'research/oauth-scopes')).toBe(tip);
-    expect(factory.github.pushes).toMatchObject([{ branch: 'research/oauth-scopes', token: { permissions: { contents: 'write' } } }]);
+    expect(factory.github.pushes).toMatchObject([{ branch: 'research/oauth-scopes', token: expect.objectContaining({ permissions: { contents: 'write', metadata: 'read' } }) }]);
     const { comments, stateReason } = factory.github.issueState(TICKET);
     expect(stateReason).toBe('completed');
     expect(comments[0]).toContain('https://github.com/acme/widgets/tree/research/oauth-scopes');

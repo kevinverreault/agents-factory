@@ -9,7 +9,7 @@
 // and `ctrl+e` opens it in the operator's own editor.
 import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useApp, useInput, usePaste, type Key } from 'ink';
-import { AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, l3Refusal, OFFERED_POLICIES, POLICY_NAMES, policyOf, PRIORITIES, type AutonomyLevel, type MergePolicy, type Priority } from '../lifecycle/lifecycle.ts';
+import { appRefusal, AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, OFFERED_POLICIES, POLICY_NAMES, policyOf, PRIORITIES, type AutonomyLevel, type MergePolicy, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
 import type { Edited } from '../os/edit-externally.ts';
 import { appBlock, lackingInputs, type PresetChoice, type StartStage } from '../presets/presets.ts';
@@ -138,12 +138,13 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   // A cached check that found the App missing may be stale, as when the
   // operator has just installed it: the card asks GitHub again, and the
   // repository's state shows the answer.
-  // So may one that found L3's permissions ungranted, once L3 is picked.
+  // So may one that found L3's permissions ungranted, once L3 is picked, or
+  // Workflows write ungranted, once full-auto is.
   useEffect(() => {
     const { repo } = draft;
     const app = repo ? state.repositories[repo]?.app : undefined;
-    if (repo && app && (!app.installed || (draft.autonomy === 'L3' && l3Refusal(repo, app)))) void connection.send({ type: 'checkApp', repo });
-  }, [connection, draft.repo, draft.autonomy === 'L3']);
+    if (repo && app && (!app.installed || (draft.autonomy === 'L3' && appRefusal(repo, app, policyOf(draft))))) void connection.send({ type: 'checkApp', repo });
+  }, [connection, draft.repo, draft.autonomy === 'L3', policyOf(draft) === 'unattended']);
 
   const cardFor = (draft: Draft) =>cardOf(draft, draft.repo ? listings[draft.repo] : undefined);
   const card = cardFor(draft);
@@ -151,9 +152,10 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const app = draft.repo ? (state.repositories[draft.repo]?.app ?? null) : null;
   const blocked = card.choice && 'appStages' in card.choice ? appBlock(card.choice.name, card.choice.appStages, app) : null;
   // L3 is refused, never lowered to L2, where the App's installation lacks
-  // what it needs (ADR 0014): the card says so before the launch does.
-  const refusedL3 = !blocked && card.start?.mode === 'AFK' && draft.autonomy === 'L3' && draft.repo ? l3Refusal(draft.repo, app) : null;
-  const fixUrl = blocked && app && !app.installed ? app.fixUrl : (refusedL3?.fixUrl ?? null);
+  // what it needs (ADR 0014), as full-auto is where it lacks Workflows
+  // write: the card says so before the launch does.
+  const refusedByApp = !blocked && card.start?.mode === 'AFK' && draft.autonomy === 'L3' && draft.repo ? appRefusal(draft.repo, app, policyOf(draft)) : null;
+  const fixUrl = blocked && app && !app.installed ? app.fixUrl : (refusedByApp?.fixUrl ?? null);
 
   useInput((input, key) => {
     if (key.escape) {
@@ -238,7 +240,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     card.fields.includes('issues') ? row('issues', 'Issues', draft.issues, false) : null,
     row('groups', 'Groups', draft.groups, false),
     afk ? row('autonomy', 'Autonomy', autonomyText(draft.autonomy ?? 'L1')) : null,
-    refusedL3 ? note('l3', refusedL3.reason, 'bad') : null,
+    refusedByApp ? note('l3', refusedByApp.reason, 'bad') : null,
     card.fields.includes('mergePolicy') ? row('mergePolicy', 'Merge policy', policyText(policyOf(draft))) : null,
     row('tier', 'Model tier', draft.tier ?? `stage default${start ? ` (${start.model ?? DEFAULT_TIER})` : ''}`),
     afk
@@ -252,7 +254,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     afk ? row('priority', 'Priority', draft.priority ?? 'normal') : null,
     listing && 'warning' in listing && listing.warning ? h(Text, tone('warn'), listing.warning) : null,
     blocked ? h(Text, tone('bad'), blocked) : null,
-    fixUrl ? h(Text, tone('dim'), refusedL3 ? 'ctrl+o opens its installation settings, to approve them' : 'ctrl+o opens its installation settings') : null,
+    fixUrl ? h(Text, tone('dim'), refusedByApp ? 'ctrl+o opens its installation settings, to approve them' : 'ctrl+o opens its installation settings') : null,
     launching.indicator,
     refusal ? h(Text, tone('bad'), refusal) : null,
   );
