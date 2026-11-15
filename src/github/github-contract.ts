@@ -213,7 +213,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const tip = await clone.commitOn(branch, { [`.github/workflows/contract-${unique()}.yml`]: WORKFLOW });
       const { token } = await github.mintToken(app, installedRepo, PUSH_WORKFLOWS);
 
-      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, workflows: true })).toEqual({ pushed: tip });
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, allowWorkflows: true })).toEqual({ pushed: tip });
 
       expect(await clone.remoteTip(branch)).toBe(tip);
     });
@@ -224,7 +224,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       await clone.commitOn(branch, { [`.github/workflows/contract-${unique()}.yml`]: WORKFLOW });
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
-      await expect(github.push(token, { clonePath: clone.path, repo: installedRepo, branch, workflows: true })).rejects.toThrow(GitHubError);
+      await expect(github.push(token, { clonePath: clone.path, repo: installedRepo, branch, allowWorkflows: true })).rejects.toThrow(GitHubError);
 
       expect(await clone.remoteTip(branch)).toBeNull();
     });

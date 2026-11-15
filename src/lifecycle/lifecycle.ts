@@ -576,6 +576,10 @@ export type Task = {
   // True once the factory pushed the task branch to GitHub at all: its
   // cleanup deletes the branch there.
   branchOnGitHub?: boolean;
+  // True once the factory pushed the task branch with Workflows write, as
+  // under full-auto: its merge has it too, whatever its policy since, as
+  // GitHub refuses to merge the workflow changes without it (ADR 0004, as amended).
+  pushedWithWorkflows?: boolean;
   // While its cleanup (ADR 0011), once it ended Done or Cancelled, hasn't
   // finished. It is tried again when the daemon next starts.
   cleanup?: Cleanup | null;
@@ -778,39 +782,41 @@ export type AppCheck =
 // Each by the name GitHub's settings give it.
 const L3_NEEDS: Partial<Record<AppPermission, string>> = { checks: 'Checks read', statuses: 'Statuses read' };
 
-// Why an L3 task can't run on `repo` as its App was checked, with the link
-// that fixes it, or null when it can or the App is unchecked yet. A check
-// stored before the App asked for L3's permissions recorded none, so it
-// counts as unchecked: the daemon checks again before it decides. Under
-// full-auto (`policy` unattended) the installation must also grant
-// Workflows write, with which the factory pushes and merges changes to
-// workflow files (ADR 0004, as amended). There is no fallback to L2 or to
-// another policy (ADR 0004): the operator approves the permissions, or picks
-// a lower level or policy themselves.
-export function l3Refusal(repo: string, check: AppCheck | null | undefined, policy: MergePolicy = 'operator'): { reason: string; fixUrl: string | null } | null {
+// Why an L3 task under `policy` can't run on `repo` as its App was checked,
+// with the link that fixes it, or null when it can or the App is unchecked
+// yet. A check stored before the App asked for L3's permissions recorded
+// none, so it counts as unchecked: the daemon checks again before it
+// decides. Under full-auto (`policy` unattended) the installation must also
+// grant Workflows write, with which the factory pushes and merges changes to
+// workflow files (ADR 0004, as amended). One refusal names all it lacks.
+// There is no fallback to L2 or to another policy (ADR 0004): the operator
+// approves the permissions, or picks a lower level or policy themselves.
+export function appRefusal(repo: string, check: AppCheck | null | undefined, policy: MergePolicy): { reason: string; fixUrl: string | null } | null {
   if (!check) return null;
   if (!check.installed) return { reason: `L3 works as the factory’s App on ${repo}. ${check.reason}`, fixUrl: check.fixUrl };
   if (!check.permissions) return null;
-  const missing = (Object.keys(L3_NEEDS) as AppPermission[]).filter((name) => !check.permissions[name]);
-  if (missing.length) {
-    const named = missing.map((name) => L3_NEEDS[name]).join(' and ');
-    return {
-      reason: `L3 merges a PR only once its checks pass, so the factory’s GitHub App needs ${named} on ${repo}, which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick L2.`,
-      fixUrl: check.settingsUrl ?? null,
-    };
-  }
-  if (policy === 'unattended' && check.permissions.workflows !== 'write') {
-    return {
-      reason: `Full-auto pushes and merges changes to workflow files, so the factory’s GitHub App needs Workflows write on ${repo}, which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick semi-auto or the operator policy.`,
-      fixUrl: check.settingsUrl ?? null,
-    };
-  }
-  return null;
+  const missing = (Object.keys(L3_NEEDS) as AppPermission[]).filter((name) => !check.permissions[name]).map((name) => L3_NEEDS[name]!);
+  const lacksWorkflows = policy === 'unattended' && check.permissions.workflows !== 'write';
+  if (!missing.length && !lacksWorkflows) return null;
+  const why = [
+    missing.length ? 'L3 merges a PR only once its checks pass' : null,
+    lacksWorkflows ? `${missing.length ? 'full-auto' : 'Full-auto'} pushes and merges changes to workflow files` : null,
+  ].filter(Boolean).join(', and ');
+  const instead = missing.length ? 'pick L2' : 'pick semi-auto or the operator policy';
+  return {
+    reason: `${why}, so the factory’s GitHub App needs ${namesList([...missing, ...(lacksWorkflows ? ['Workflows write'] : [])])} on ${repo}, which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or ${instead}.`,
+    fixUrl: check.settingsUrl ?? null,
+  };
 }
 
-// `l3Refusal` as a refusal's text: its reason, and the link to follow.
-export function l3RefusalText(repo: string, check: AppCheck | null | undefined, policy: MergePolicy = 'operator'): string | null {
-  const refusal = l3Refusal(repo, check, policy);
+// Names as a sentence lists them: `A`, `A and B`, `A, B and C`.
+function namesList(names: string[]): string {
+  return names.length < 2 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
+
+// `appRefusal` as a refusal's text: its reason, and the link to follow.
+export function appRefusalText(repo: string, check: AppCheck | null | undefined, policy: MergePolicy): string | null {
+  const refusal = appRefusal(repo, check, policy);
   if (!refusal) return null;
   const fix = check?.installed ? 'Approve them at' : 'Install it from';
   return `${refusal.reason}${refusal.fixUrl ? ` ${fix} ${refusal.fixUrl}, then try again.` : ''}`;
@@ -818,8 +824,8 @@ export function l3RefusalText(repo: string, check: AppCheck | null | undefined, 
 
 // Why a task on `repo` can't be at `level` under `policy`, as the guard
 // says: only L3 is refused, where the repository's App check refuses it.
-function levelRefused(state: Lifecycle, repo: string, level: AutonomyLevel, policy: MergePolicy): string | null {
-  return level === 'L3' ? l3RefusalText(repo, state.repositories[repo]?.app, policy) : null;
+function refusedByApp(state: Lifecycle, repo: string, level: AutonomyLevel, policy: MergePolicy): string | null {
+  return level === 'L3' ? appRefusalText(repo, state.repositories[repo]?.app, policy) : null;
 }
 
 // Whether the skill set's per-repo setup (ADR 0010) is on a repository's
@@ -1167,7 +1173,7 @@ export type LoopEvent =
 // a step, saying why.
 export type PublishEvent =
   | { type: 'setupCommitted'; taskId: string; publish: boolean }
-  | { type: 'branchPushed'; taskId: string; commit: string }
+  | { type: 'branchPushed'; taskId: string; commit: string; withWorkflows?: boolean }
   | { type: 'pushRefused'; taskId: string; workflowFiles: string[] }
   | { type: 'prOpened'; taskId: string; pr: PullRequest }
   | { type: 'publishFailed'; taskId: string; step: Publishing['step']; reason: string };
@@ -2459,7 +2465,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       // The level counts only for a task starting AFK, at a stage its preset names once resolved.
       const startsAfk = action.preset?.stages.find(({ id }) => id === action.stage)?.mode === 'AFK';
       if (startsAfk) {
-        const refused = levelRefused(state, action.repo, action.autonomy, policyOf(action));
+        const refused = refusedByApp(state, action.repo, action.autonomy, policyOf(action));
         if (refused) return refused;
       }
       // Frozen only on a task starting AFK; one starting HITL picks it at its handoff.
@@ -2514,7 +2520,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!tidyBrief(action.brief).goal) return 'The brief needs a goal.';
       if (!CONTINUE_AS.includes(action.continueAs)) return 'Continue as resume, or fresh from the brief.';
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
-      const refused = levelRefused(state, task.repo, action.autonomy, policyOf(action)) ?? policyRefusal(policyOf(action), action.autonomy);
+      const refused = refusedByApp(state, task.repo, action.autonomy, policyOf(action)) ?? policyRefusal(policyOf(action), action.autonomy);
       if (refused) return refused;
       if (!isTier(action.tier)) return tierRefusal(action.tier);
       if (!(Number.isInteger(action.maxTurns) && action.maxTurns >= 1)) return 'Max turns must be a whole number of at least 1.';
@@ -2593,7 +2599,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (!AUTONOMY_LEVELS.includes(action.autonomy)) return `${action.autonomy} is not an autonomy level (${LEVELS_TEXT}).`;
       if (task.mode !== 'AFK') return `${task.id} is HITL, so it has no autonomy level.`;
       if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
-      const refused = levelRefused(state, task.repo, action.autonomy, policyOf(task)) ?? mergingRefusal(task);
+      const refused = refusedByApp(state, task.repo, action.autonomy, policyOf(task)) ?? mergingRefusal(task);
       if (refused) return refused;
       // A run's containment never shifts under it.
       const run = liveRun(state, task);
@@ -2605,7 +2611,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       if (isTerminal(task)) return `${task.id} is already ${label(task)}.`;
       const refused = mergingRefusal(task) ?? policyRefusal(action.mergePolicy, levelAtGate(task));
       // Full-auto needs Workflows write; a lower policy is never refused for the App's sake.
-      return refused ?? (action.mergePolicy === 'unattended' ? levelRefused(state, task.repo, levelAtGate(task), action.mergePolicy) : null);
+      return refused ?? (action.mergePolicy === 'unattended' ? refusedByApp(state, task.repo, levelAtGate(task), action.mergePolicy) : null);
     }
     case 'setSlotCap':
       return Number.isInteger(action.cap) && action.cap >= 1 ? null : 'The slot cap must be a whole number of at least 1.';
@@ -4852,6 +4858,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.publishing = task.pr ? null : { step: 'open-pr', problem: null };
       task.pushed = true;
       task.branchOnGitHub = true;
+      if (action.withWorkflows) task.pushedWithWorkflows = true;
       // What the fix run left is on GitHub: the PR's head is that commit now.
       if (task.fixRun) task.fixRun.pushed = action.commit;
       // A new commit voids a semi-auto root's gate check at once (ADR 0014).

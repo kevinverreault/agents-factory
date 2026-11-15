@@ -316,7 +316,7 @@ export class FakeGitHub implements GitHub {
     issue.stateReason = 'reopened';
   }
 
-  async push(token: string, { clonePath, repo, branch, workflows: allowWorkflows }: BranchPush): Promise<Pushed> {
+  async push(token: string, { clonePath, repo, branch, allowWorkflows }: BranchPush): Promise<Pushed> {
     const refusal = pushRefusal(branch);
     if (refusal) throw new GitHubError(refusal);
     await this.held();

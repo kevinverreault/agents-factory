@@ -90,6 +90,12 @@ function resize(app: { stdout: NodeJS.EventEmitter }, rows: number) {
 // The frame's lines.
 const lines = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.split('\n');
 
+// Why full-auto is refused where the installation lacks Workflows write, as
+// the card and the sheet say it.
+const FULL_AUTO_REFUSED =
+  'Full-auto pushes and merges changes to workflow files, so the factory’s GitHub App needs Workflows write on acme/widgets, which its installation doesn’t grant yet. ' +
+  'Approve the App’s new permissions on GitHub, or pick semi-auto or the operator policy.';
+
 describe('the frame', () => {
 
   test('the header names the factory and its tabs, and the breadcrumb says where you are', async () => {
@@ -1403,7 +1409,7 @@ describe('launching and conversing', () => {
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
       expect(frame).toMatch(/Merge policy\s+‹ full-auto/);
-      expect(frame).toContain('Full-auto pushes and merges changes to workflow files, so the factory’s GitHub App needs Workflows write on acme/widgets, which its installation doesn’t grant yet.');
+      expect(frame).toContain(FULL_AUTO_REFUSED);
     });
     await eventually(() => expect(connection.sent).toContainEqual({ type: 'checkApp', repo: 'acme/widgets' }));
     app.stdin.write('\x0f');
@@ -2335,7 +2341,7 @@ describe('launching and conversing', () => {
     const settingsUrl = 'https://github.com/settings/installations/1';
     const permissions = { contents: 'write', metadata: 'read', checks: 'read', statuses: 'read' } as const;
     const lacking = { ...widgets, app: { installed: true as const, checkedAt: 1, permissions, settingsUrl } };
-    const reason = `Full-auto pushes and merges changes to workflow files, so the factory’s GitHub App needs Workflows write on acme/widgets, which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick semi-auto or the operator policy. Approve them at ${settingsUrl}, then try again.`;
+    const reason = `${FULL_AUTO_REFUSED} Approve them at ${settingsUrl}, then try again.`;
     const state = { ...factoryState([{ ...onLean, handoff: { ...sheet, brief } }]), runs: { R1: run }, repositories: { 'acme/widgets': lacking } };
     const { app } = await started(state, { connection });
     widen(app, 400);

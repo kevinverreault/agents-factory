@@ -9,6 +9,7 @@
 // Its push and merge have Workflows write, so a branch that changes workflow
 // files is pushed and merged too, which under any other policy the operator
 // pushes by hand. Under `operator`, nothing else changes.
+import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -218,6 +219,27 @@ describe('a branch that changes workflow files', () => {
     ]);
   });
 
+  test('pushed under full-auto, then switched to semi-auto, its merge still has Workflows write, without which GitHub refuses it', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    // No path tripwire, so the judging run decides.
+    writeFileSync(factory.paths.mergeGatePath, ['repositories:', '  acme/widgets:', '    tripwires:', '      paths: ["**/migrations/**"]', ''].join('\n'));
+    factory.github.runChecks('acme/widgets', 'pending');
+    await operator.send(fullAuto);
+    await throughOpenPr(launched, 'T1', 1, files);
+    await tui.until((state) => state.tasks.T1?.gate?.checks === 'pending');
+
+    expect(await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'judged' })).toEqual({ ok: true });
+    factory.github.setChecks(101, 'green');
+    factory.clock.advance(2 * MINUTE);
+    const judging = await started(factory, 4);
+    factory.executor.report(judging.runId, { type: 'verdictReported', verdict: 'merge', reason: 'It does what the brief says.' });
+    factory.executor.report(judging.runId, { type: 'runCompleted' });
+
+    await tui.until((state) => state.tasks.T1?.label === 'Done');
+    expect(factory.github.prWrites.find(({ action }) => action === 'merge')?.token.permissions).toEqual({ contents: 'write', pull_requests: 'write', metadata: 'read', workflows: 'write' });
+  });
+
   test.each(['judged', 'operator'] as const)('under %s isn’t pushed: an attention request asks the operator to push it by hand', async (mergePolicy) => {
     const launched = await attached();
     const { factory, operator, tui } = launched;
@@ -297,6 +319,8 @@ describe('under the operator policy', () => {
     await operator.send({ type: 'daemon.status' });
     expect(factory.github.checkReads).toEqual([]);
     expect(factory.github.prWrites).toEqual([]);
+    // Only full-auto pushes with Workflows write.
+    expect(factory.github.pushes.map(({ token }) => token.permissions)).toEqual([{ contents: 'write', metadata: 'read' }]);
   });
 });
 

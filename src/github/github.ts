@@ -67,10 +67,10 @@ export type Installation = { permissions: Permissions; settingsUrl: string };
 
 // What the factory pushes (ADR 0004): the task branch, or a research
 // branch (ADR 0007), of the clone at `clonePath`, to the branch of the same
-// name in the repository `repo`. `workflows` says whether its commits may
+// name in the repository `repo`. `allowWorkflows` says whether its commits may
 // change workflow files: only a full-auto task's may, pushed with a token
 // that has Workflows write (ADR 0004, as amended).
-export type BranchPush = { clonePath: string; repo: string; branch: string; workflows?: boolean };
+export type BranchPush = { clonePath: string; repo: string; branch: string; allowWorkflows?: boolean };
 // The tip GitHub has of the branch once pushed, or, unpushed, the workflow
 // files its commits change where the push doesn't allow them, which the
 // operator then pushes by hand (ADR 0004); or, for a research branch, the
@@ -371,7 +371,7 @@ export function gitHubApi(): GitHub {
       const comments = await list(`${issuePath(ref)}/comments`, token, `read the comments on ${ref}`);
       return comments.map((comment) => String(comment.body ?? ''));
     },
-    async push(token, { clonePath, repo, branch, workflows: allowWorkflows }) {
+    async push(token, { clonePath, repo, branch, allowWorkflows }) {
       const refusal = pushRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
       const url = `https://github.com/${repo}.git`;
