@@ -250,6 +250,17 @@ describe('git: the check after an AFK run', () => {
       expect(await check()).toEqual([]);
     }));
 
+  // `git submodule add` records the submodule's `url` and `active` in the
+  // clone's config, as `git submodule init` would from the committed
+  // `.gitmodules`: nothing the commit doesn't already say.
+  test('a run that adds a submodule and commits it keeps every invariant', () =>
+    started(async ({ root, inRun, check }) => {
+      inRun('-c', 'protocol.file.allow=always', 'submodule', 'add', '--quiet', join(root, 'widgets-origin.git'), 'vendor/widgets');
+      inRun('commit', '--quiet', '-m', 'Vendor the widgets');
+
+      expect(await check()).toEqual([]);
+    }));
+
   test.each<[string, (run: Started) => void, string[]]>([
     [
       'switches branch',
@@ -278,6 +289,11 @@ describe('git: the check after an AFK run', () => {
     [
       'points its branch’s pushes elsewhere',
       ({ inRun }) => inRun('config', 'branch.factory/T1-a.pushRemote', 'fork'),
+      ['The run changed the git config.'],
+    ],
+    [
+      'sets the command a submodule updates with',
+      ({ inRun }) => inRun('config', 'submodule.vendor/widgets.update', '!./steal.sh'),
       ['The run changed the git config.'],
     ],
     [

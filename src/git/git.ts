@@ -528,8 +528,12 @@ function listed(items: string[]): string {
 // The config settings a run is held to, in a comparable form: all but other
 // branches' settings, which the operator's own tools write to the shared
 // clone, and the task branch's beyond where it pushes and merges from.
+// Nor a submodule's `url` and `active`, which `git submodule add` and `init`
+// copy from `.gitmodules`, committed: they say nothing the commit doesn't.
+// Its other settings, such as an `update` command, still count.
 function heldTo(config: string[], branch: string): string {
   const held = config.filter((setting) => {
+    if (/^submodule\..+\.(url|active)\n/.test(setting)) return false;
     // Section and key are lowercase; the branch name between them may hold dots.
     const [, name, key] = /^branch\.(.+)\.([^.\n]+)\n/.exec(setting) ?? [];
     return name === undefined || (name === branch && ['remote', 'pushremote', 'merge'].includes(key!));
