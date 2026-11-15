@@ -1,7 +1,7 @@
 // The GitHub port's contract, shared by the fake and the REST adapter so the
 // two can't drift apart.
 import { describe, expect, test } from 'vitest';
-import { CHECKS_READ, GitHubError, MERGE, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, TICKET_WRITE, type FactoryApp, type GitHub, type Permissions, type PrStatus } from './github.ts';
+import { CHECKS_READ, GitHubError, MERGE, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, READY, TICKET_WRITE, type FactoryApp, type GitHub, type Permissions, type PrStatus } from './github.ts';
 
 export type GitHubFixture = {
   github: GitHub;
@@ -345,7 +345,7 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       await expect(github.readChecks((await github.mintToken(app, installedRepo, READ_ONLY)).token, installedRepo, tip)).rejects.toThrow(GitHubError);
     });
 
-    test('a PR-writing token marks a draft ready, and marking it again is no error; a merge token merges it with a merge commit, but not while a draft, nor once its head moved', async () => {
+    test('a ready token marks a draft ready, while a PR-writing one can’t, and marking it again is no error; a merge token merges it with a merge commit, but not while a draft, nor once its head moved', async () => {
       const { github, app, installedRepo, clone, operator, baseBranch, draftsOffered } = await makeFixture();
       const branch = `factory/contract-${unique()}`;
       const tip = await clone.commitOn(branch, { [`contract/${unique()}.txt`]: 'Merged by the contract test.\n' });
@@ -360,8 +360,11 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       if (draftsOffered) await expect(github.mergePr(merge, ref, { method: 'merge', head: tip })).rejects.toThrow(GitHubError);
       await expect(github.markReady(read, ref)).rejects.toThrow(GitHubError);
       const write = (await github.mintToken(app, installedRepo, PR_WRITE)).token;
-      await github.markReady(write, ref);
-      await github.markReady(write, ref);
+      // Only a draft tells: a regular PR is ready already, which is no error.
+      if (draftsOffered) await expect(github.markReady(write, ref)).rejects.toThrow(GitHubError);
+      const ready = (await github.mintToken(app, installedRepo, READY)).token;
+      await github.markReady(ready, ref);
+      await github.markReady(ready, ref);
       expect((await github.readPr(read, ref)).draft).toBe(false);
 
       await expect(github.mergePr(write, ref, { method: 'merge', head: tip })).rejects.toThrow(GitHubError);

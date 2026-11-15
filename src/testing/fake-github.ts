@@ -413,6 +413,8 @@ export class FakeGitHub implements GitHub {
   async markReady(token: string, ref: string): Promise<void> {
     await this.held();
     const minted = this.scoped(token, ref, 'pull_requests', 'write');
+    // GitHub's mutation refuses an App token without it, as for a merge.
+    this.scoped(token, ref, 'contents', 'write');
     const pr = this.foundPr(ref);
     if (!pr.draft) return;
     pr.draft = false;

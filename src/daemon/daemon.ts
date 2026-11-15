@@ -19,6 +19,7 @@ import {
   PR_WRITE,
   PUSH,
   READ_ONLY,
+  READY,
   TICKET_WRITE,
   type FactoryApp,
   type GitHub,
@@ -1106,14 +1107,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return lifecycle.intents[intent.id] ? rollBack() : 'resumed';
   }
 
-  // What each step writes with, and the write: marking the draft PR ready
-  // takes Pull requests write, as GitHub merges no draft; merging takes
+  // What each step writes with, and the write: marking the draft PR ready,
+  // as GitHub merges no draft, takes Contents and Pull requests write, as
+  // GitHub's mutation refuses an App token without both; merging takes
   // Contents and Pull requests write, with the method its frozen merge gate
   // config names (a merge commit for tasks frozen before it), and only while
   // the PR's head is still the commit whose checks let it through, once the
   // PR body lists its judgement calls.
   const MERGE_WRITES: Record<MergeStep, { permissions: Permissions; take(token: string, ref: string, task: Task): Promise<void> }> = {
-    ready: { permissions: PR_WRITE, take: (token, ref) => github.markReady(token, ref) },
+    ready: { permissions: READY, take: (token, ref) => github.markReady(token, ref) },
     merge: {
       permissions: MERGE,
       async take(token, ref, task) {
