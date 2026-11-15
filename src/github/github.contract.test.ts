@@ -107,6 +107,22 @@ async function cloneOnce(repo: string): Promise<{ clone: GitHubClone; baseBranch
     async pushByHand(branch) {
       await operatorGit(path, 'push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`);
     },
+    async advanceBaseByHand(files) {
+      await operatorGit(path, 'fetch', '--quiet', 'origin', baseBranch);
+      await operatorGit(path, 'checkout', '--quiet', '--detach', `origin/${baseBranch}`);
+      for (const [file, content] of Object.entries(files)) {
+        if (content === null) {
+          await operatorGit(path, 'rm', '--quiet', '--', file);
+        } else {
+          mkdirSync(dirname(join(path, file)), { recursive: true });
+          writeFileSync(join(path, file), content);
+          await operatorGit(path, 'add', '--', file);
+        }
+      }
+      await operatorGit(path, '-c', 'user.name=Contract test', '-c', 'user.email=contract@example.invalid', 'commit', '--quiet', '-m', 'Contract test base commit');
+      await operatorGit(path, 'push', '--quiet', 'origin', `HEAD:refs/heads/${baseBranch}`);
+      await operatorGit(path, 'fetch', '--quiet', 'origin', baseBranch);
+    },
   };
   return { clone, baseBranch };
 }

@@ -30,6 +30,6 @@ AFK agents commit locally and never write to GitHub. The daemon writes for them 
 ## Consequences
 
 - The walking skeleton (ADR 0001) gains a check that `gh` re-reads `hosts.yml` on every call, so a refreshed token takes effect mid-run.
-- Outside full-auto, an agent can't push its own fixes for workflow files. Those branches need a hand push from the operator. Under full-auto the factory pushes and merges them itself, with no human in the loop.
+- Outside full-auto, an agent can't push its own fixes for workflow files. Those branches need a hand push from the operator. So does a new branch cut before the base changed a workflow file: GitHub counts a new branch's workflow files against the base's tip, not against where the branch was cut (T60). Under full-auto the factory pushes and merges them itself, with no human in the loop.
 - If the factory comes to watch CI on its PRs, the App gains Checks or Actions read, and the operator approves the change on the installation. ADR 0014 does so for L3: Checks and Statuses read.
 - Which repos the App is installed on is part of repository registration, which is still undecided.

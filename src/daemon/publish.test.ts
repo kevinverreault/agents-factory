@@ -289,4 +289,22 @@ describe('a task branch that changes workflow files', () => {
     expect(factory.git.originTip(clone, branch)).toBe(tip);
     expect(published.attentionQueue).toEqual([{ kind: 'review', taskId: 'T1' }]);
   });
+
+  test('a branch that changes none, cut before the base changed one, isn’t pushed either: GitHub counts a new branch’s workflow files against the base’s', async () => {
+    const { factory, operator, tui } = await inReview();
+    factory.git.advanceOrigin(clone, 'main', { '.github/workflows/ci.yml': 'on: pull_request\n' });
+
+    await operator.send({ type: 'pushAndOpenPr', taskId: 'T1' });
+
+    const asked = await tui.until((state) => state.attentionQueue.length === 2);
+    expect(asked.attentionQueue[0]).toMatchObject({
+      taskId: 'T1',
+      attention: 'github-write',
+      reason:
+        `${branch} changes workflow files (.github/workflows/ci.yml), which the factory’s App may not push. ` +
+        `Push it by hand (\`git push origin ${branch}\`), then answer to open the draft PR.`,
+    });
+    expect(factory.github.pushes).toEqual([]);
+    expect(factory.git.originTip(clone, branch)).toBeNull();
+  });
 });
