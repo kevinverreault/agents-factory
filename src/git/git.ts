@@ -195,6 +195,22 @@ export function guardChecks(runner: GitRunner): Pick<Git, 'snapshot' | 'violatio
     return branches;
   }
 
+  // The settings `git submodule add` and `init` copy from `.gitmodules` as
+  // `commit` has it, as `key\nvalue`: each submodule's `url`, a relative one
+  // resolved against `remoteUrl` as git resolves it, and its `active`.
+  async function settingsCopiedFromGitmodules(worktreePath: string, commit: string, remoteUrl: string | null): Promise<Set<string>> {
+    // Each setting NUL-ended, its key and value split by a newline; no `.gitmodules` fails.
+    const listing = (await git(worktreePath, 'config', '--blob', `${commit}:.gitmodules`, '--list', '-z')) ?? '';
+    const copied = new Set<string>();
+    for (const setting of listing.split('\0')) {
+      const [, name, url] = /^submodule\.(.+)\.url\n(.*)$/s.exec(setting) ?? [];
+      if (name === undefined) continue;
+      const resolved = resolvedSubmoduleUrl(url!, remoteUrl);
+      if (resolved !== null) copied.add(`submodule.${name}.url\n${resolved}`).add(`submodule.${name}.active\ntrue`);
+    }
+    return copied;
+  }
+
   const checks: Pick<Git, 'snapshot' | 'violations'> = {
     async snapshot(worktreePath) {
       const [branch, head, refs, remotes, gitDir, commonDir, scoped] = await Promise.all([
@@ -250,7 +266,15 @@ export function guardChecks(runner: GitRunner): Pick<Git, 'snapshot' | 'violatio
       if (refs.length) found.push(`The run added refs: ${listed(refs)}.`);
       const remotes = after.remotes.filter((remote) => !before.remotes.includes(remote));
       if (remotes.length) found.push(`The run added remotes: ${listed(remotes)}.`);
-      if (heldTo(after.config, before.branch) !== heldTo(before.config, before.branch)) found.push('The run changed the git config.');
+      // Git resolves a relative submodule URL against the branch's remote, or origin's.
+      const remote = (before.branch && (await git(worktreePath, 'config', '--get', `branch.${before.branch}.remote`))) || 'origin';
+      const remoteUrl = await git(worktreePath, 'config', '--get', `remote.${remote}.url`);
+      // Each side is held to the `.gitmodules` of its own commit, so a URL the run commits and syncs is no change.
+      const [copiedBefore, copiedAfter] = await Promise.all([
+        settingsCopiedFromGitmodules(worktreePath, before.head, remoteUrl),
+        settingsCopiedFromGitmodules(worktreePath, 'HEAD', remoteUrl),
+      ]);
+      if (heldTo(after.config, before.branch, copiedAfter) !== heldTo(before.config, before.branch, copiedBefore)) found.push('The run changed the git config.');
       const pushUrls = lines((await git(worktreePath, 'config', '--name-only', '--get-regexp', '^remote\\..*\\.pushurl$')) ?? '');
       if (pushUrls.length) found.push(`A remote has a pushurl, which the run's push guard can't cover: ${listed(pushUrls)}.`);
       const hooks = [...new Set([...Object.keys(before.hooks), ...Object.keys(after.hooks)])].filter((hook) => before.hooks[hook] !== after.hooks[hook]);
@@ -528,13 +552,55 @@ function listed(items: string[]): string {
 // The config settings a run is held to, in a comparable form: all but other
 // branches' settings, which the operator's own tools write to the shared
 // clone, and the task branch's beyond where it pushes and merges from.
-function heldTo(config: string[], branch: string): string {
+// Nor those `copied` from the committed `.gitmodules`, which `git submodule
+// add` and `init` write: they say nothing the commit doesn't. A submodule's
+// other settings, such as an `update` command, and a `url` the commit doesn't
+// give it, still count.
+function heldTo(config: string[], branch: string, copied: Set<string>): string {
   const held = config.filter((setting) => {
+    if (copied.has(setting)) return false;
     // Section and key are lowercase; the branch name between them may hold dots.
     const [, name, key] = /^branch\.(.+)\.([^.\n]+)\n/.exec(setting) ?? [];
     return name === undefined || (name === branch && ['remote', 'pushremote', 'merge'].includes(key!));
   });
   return JSON.stringify(held.sort());
+}
+
+// A submodule's `url` from `.gitmodules` as `git submodule add` and `init`
+// write it to the config: as it is unless it starts with `./` or `../`, else
+// resolved against `remoteUrl`, each `../` taking off its last part, as git's
+// `relative_url` does. Null when git would have no remote to resolve it
+// against (it then resolves against the clone's own path, which isn't held
+// for), or when it would refuse to.
+function resolvedSubmoduleUrl(url: string, remoteUrl: string | null): string | null {
+  const dotSlash = /^\.[/\\]/;
+  const dotDotSlash = /^\.\.[/\\]/;
+  if (!dotSlash.test(url) && !dotDotSlash.test(url)) return url;
+  if (!remoteUrl) return null;
+  let remote = /[/\\]$/.test(remoteUrl) ? remoteUrl.slice(0, -1) : remoteUrl;
+  // A local path, rather than a URL or `host:path`, that isn't absolute.
+  const colon = remote.indexOf(':');
+  const slash = remote.search(/[/\\]/);
+  const local = colon < 0 || (slash >= 0 && slash < colon) || /^[A-Za-z]:[/\\]/.test(remote);
+  const relative = local && !/^([/\\]|[A-Za-z]:[/\\])/.test(remote);
+  if (relative && !dotSlash.test(remote) && !dotDotSlash.test(remote)) remote = `./${remote}`;
+  let colonSeparated = false;
+  let rest = url;
+  for (;;) {
+    if (dotDotSlash.test(rest)) {
+      rest = rest.slice(3);
+      const dir = Math.max(remote.lastIndexOf('/'), remote.lastIndexOf('\\'));
+      const host = remote.lastIndexOf(':');
+      if (dir >= 0) remote = remote.slice(0, dir);
+      else if (host >= 0) [remote, colonSeparated] = [remote.slice(0, host), true];
+      else if (relative || remote === '.') return null;
+      else remote = '.';
+    } else if (dotSlash.test(rest)) rest = rest.slice(2);
+    else break;
+  }
+  let resolved = `${remote}${colonSeparated ? ':' : '/'}${rest}`;
+  if (rest.endsWith('/')) resolved = resolved.slice(0, -1);
+  return dotSlash.test(resolved) ? resolved.slice(2) : resolved;
 }
 
 // Each file in the hooks directory, with a hash of its content.
