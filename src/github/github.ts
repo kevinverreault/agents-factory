@@ -17,7 +17,7 @@ import { isResearchBranch, outsideResearch } from './research-branch.ts';
 // the credential store.
 export type FactoryApp = { id: number; slug: string; privateKey: string };
 
-export type Permission = 'contents' | 'issues' | 'pull_requests' | 'metadata' | 'checks' | 'statuses';
+export type Permission = 'contents' | 'issues' | 'pull_requests' | 'metadata' | 'checks' | 'statuses' | 'workflows';
 export type Permissions = Partial<Record<Permission, 'read' | 'write'>>;
 
 // What an AFK run reads GitHub with, and the daemon reads a root's PR with
@@ -29,6 +29,11 @@ export const TICKET_WRITE: Permissions = { issues: 'write', metadata: 'read' };
 
 // What pushing a task branch writes with: the repository's contents alone.
 export const PUSH: Permissions = { contents: 'write', metadata: 'read' };
+
+// What pushing a full-auto task's branch writes with (ADR 0004, as amended):
+// Workflows write besides, without which GitHub refuses a branch that
+// changes workflow files.
+export const PUSH_WORKFLOWS: Permissions = { ...PUSH, workflows: 'write' };
 
 // What opening a PR, and assigning it, writes with: pull requests alone, and
 // Contents read, without which GitHub can't read the branches ("not all refs
@@ -42,6 +47,10 @@ export const CHECKS_READ: Permissions = { checks: 'read', statuses: 'read', meta
 // What merging a PR writes with: GitHub writes the merge commit to the base
 // branch, so it needs Contents write besides Pull requests write.
 export const MERGE: Permissions = { contents: 'write', pull_requests: 'write', metadata: 'read' };
+
+// What merging a full-auto task's PR writes with: Workflows write besides,
+// without which GitHub refuses to merge changes to workflow files.
+export const MERGE_WORKFLOWS: Permissions = { ...MERGE, workflows: 'write' };
 
 // What marking a draft PR ready writes with: GitHub's GraphQL mutation
 // refuses an App token without Contents write besides Pull requests write
@@ -58,11 +67,13 @@ export type Installation = { permissions: Permissions; settingsUrl: string };
 
 // What the factory pushes (ADR 0004): the task branch, or a research
 // branch (ADR 0007), of the clone at `clonePath`, to the branch of the same
-// name in the repository `repo`.
-export type BranchPush = { clonePath: string; repo: string; branch: string };
+// name in the repository `repo`. `allowWorkflows` says whether its commits may
+// change workflow files: only a full-auto task's may, pushed with a token
+// that has Workflows write (ADR 0004, as amended).
+export type BranchPush = { clonePath: string; repo: string; branch: string; allowWorkflows?: boolean };
 // The tip GitHub has of the branch once pushed, or, unpushed, the workflow
-// files its commits change: the App has no Workflows permission, so the
-// operator pushes those by hand (ADR 0004); or, for a research branch, the
+// files its commits change where the push doesn't allow them, which the
+// operator then pushes by hand (ADR 0004); or, for a research branch, the
 // paths its commits change outside `docs/research/` (ADR 0007).
 export type Pushed = { pushed: string } | { workflowFiles: string[] } | { outsideResearch: string[] };
 
@@ -141,7 +152,9 @@ export interface GitHub {
   // forced, and with no hooks run. A branch GitHub already has at that tip,
   // such as one the operator pushed by hand, is pushed already. Otherwise a
   // branch whose commits GitHub doesn't have change workflow files isn't
-  // pushed. Throws a `GitHubError` when the refspec guard or GitHub refuses it.
+  // pushed, unless the push allows them. Throws a `GitHubError` when the
+  // refspec guard or GitHub refuses it, as GitHub refuses workflow changes
+  // pushed with a token without Workflows write.
   push(token: string, push: BranchPush): Promise<Pushed>;
   // Opens the draft PR with `token`, which needs Pull requests write, and
   // assigns it; or finds the open PR of its head branch, as when the factory
@@ -226,8 +239,9 @@ export function installationPage(id: number, account: string, accountType: Accou
     : `https://github.com/settings/installations/${id}`;
 }
 
-// The App's permissions (ADR 0004): no Workflows, Actions or Administration,
-// and Checks and Statuses read alone, for L3's merges (ADR 0014).
+// The App's permissions (ADR 0004): no Actions or Administration, Checks
+// and Statuses read alone, for L3's merges (ADR 0014), and Workflows write,
+// which only full-auto tasks' pushes and merges use.
 export const APP_PERMISSIONS: Permissions = {
   contents: 'write',
   pull_requests: 'write',
@@ -235,6 +249,7 @@ export const APP_PERMISSIONS: Permissions = {
   metadata: 'read',
   checks: 'read',
   statuses: 'read',
+  workflows: 'write',
 };
 
 const API = 'https://api.github.com';
@@ -356,7 +371,7 @@ export function gitHubApi(): GitHub {
       const comments = await list(`${issuePath(ref)}/comments`, token, `read the comments on ${ref}`);
       return comments.map((comment) => String(comment.body ?? ''));
     },
-    async push(token, { clonePath, repo, branch }) {
+    async push(token, { clonePath, repo, branch, allowWorkflows }) {
       const refusal = pushRefusal(branch);
       if (refusal) throw new GitHubError(refusal);
       const url = `https://github.com/${repo}.git`;
@@ -371,7 +386,7 @@ export function gitHubApi(): GitHub {
       const outside = outsideResearch(branch, paths);
       if (outside.length) return { outsideResearch: outside };
       const workflows = workflowFiles(paths);
-      if (workflows.length) return { workflowFiles: workflows };
+      if (workflows.length && !allowWorkflows) return { workflowFiles: workflows };
       // The tip checked, not whatever the branch points at by now.
       await git('push', '--no-verify', '--porcelain', url, `${tip}:refs/heads/${branch}`);
       return { pushed: tip };

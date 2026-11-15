@@ -90,6 +90,12 @@ function resize(app: { stdout: NodeJS.EventEmitter }, rows: number) {
 // The frame's lines.
 const lines = (app: { lastFrame(): string | undefined }) => app.lastFrame()!.split('\n');
 
+// Why full-auto is refused where the installation lacks Workflows write, as
+// the card and the sheet say it.
+const FULL_AUTO_REFUSED =
+  'Full-auto pushes and merges changes to workflow files, so the factory’s GitHub App needs Workflows write on acme/widgets, which its installation doesn’t grant yet. ' +
+  'Approve the App’s new permissions on GitHub, or pick semi-auto or the operator policy.';
+
 describe('the frame', () => {
 
   test('the header names the factory and its tabs, and the breadcrumb says where you are', async () => {
@@ -1378,6 +1384,47 @@ describe('launching and conversing', () => {
     );
   });
 
+  test('full-auto where the App’s installation lacks Workflows write is refused on the card, with the settings to approve it, and the fresh check lifts it', async () => {
+    const connection = inWidgets();
+    connection.replyTo('listPresets', { ok: true, value: presetsView });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const settingsUrl = 'https://github.com/settings/installations/1';
+    const granted = { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read' } as const;
+    const lacking = { ...widgets, app: { installed: true as const, checkedAt: 1, permissions: granted, settingsUrl } };
+    const opened: string[] = [];
+    connection.serveSnapshot({ ...factoryState([]), repositories: { ...repositories, 'acme/widgets': lacking } });
+    const app = render(<App connection={connection} cwd="/clones/widgets/src" openUrl={(url) => opened.push(url)} prefs={memoryPrefs()} />);
+    apps.push(app);
+    await settle();
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() => expect(app.lastFrame()).toMatch(/Start stage\s+grill · HITL · opus/));
+    await press(app, UP, RIGHT, RIGHT, DOWN, DOWN);
+    await type(app, '#12');
+    await press(app, DOWN, DOWN, RIGHT, RIGHT, DOWN, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toMatch(/Merge policy\s+‹ semi-auto/));
+    expect(unwrapped(app.lastFrame()!)).not.toContain('Workflows write');
+    await press(app, RIGHT);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toMatch(/Merge policy\s+‹ full-auto/);
+      expect(frame).toContain(FULL_AUTO_REFUSED);
+    });
+    await eventually(() => expect(connection.sent).toContainEqual({ type: 'checkApp', repo: 'acme/widgets' }));
+    app.stdin.write('\x0f');
+    await eventually(() => expect(opened).toEqual([settingsUrl]));
+
+    connection.servePatch([
+      { op: 'set', path: ['repositories', 'acme/widgets'], value: { ...lacking, app: { ...lacking.app, checkedAt: 2, permissions: { ...granted, workflows: 'write' } } } },
+    ]);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).not.toContain('Workflows write'));
+    app.stdin.write('\r');
+    await eventually(() =>
+      expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'implement', prompt: '', issues: ['#12'], autonomy: 'L3', mergePolicy: 'unattended' }),
+    );
+  });
+
   test('the merge policy is offered only at L3, labelled operator, semi-auto or full-auto, defaulting to operator, and goes back to operator below L3', async () => {
     const connection = inWidgets();
     connection.replyTo('listPresets', { ok: true, value: presetsView });
@@ -2287,6 +2334,30 @@ describe('launching and conversing', () => {
     // The refusal is the note already shown, not said twice.
     await settle();
     expect(unwrapped(app.lastFrame()!).split(reason)).toHaveLength(2);
+  });
+
+  test('full-auto on the sheet, where the App’s installation lacks Workflows write, shows why with the link that approves it, and semi-auto doesn’t', async () => {
+    const connection = new FakeConnection();
+    const settingsUrl = 'https://github.com/settings/installations/1';
+    const permissions = { contents: 'write', metadata: 'read', checks: 'read', statuses: 'read' } as const;
+    const lacking = { ...widgets, app: { installed: true as const, checkedAt: 1, permissions, settingsUrl } };
+    const reason = `${FULL_AUTO_REFUSED} Approve them at ${settingsUrl}, then try again.`;
+    const state = { ...factoryState([{ ...onLean, handoff: { ...sheet, brief } }]), runs: { R1: run }, repositories: { 'acme/widgets': lacking } };
+    const { app } = await started(state, { connection });
+    widen(app, 400);
+    await press(app, '\r', '\r');
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('HAND OFF T1 TO IMPLEMENT (AFK)'));
+
+    await press(app, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, RIGHT, RIGHT, DOWN, RIGHT);
+    await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain('› Merge policy ‹ semi-auto'));
+    expect(unwrapped(app.lastFrame()!)).not.toContain(reason);
+    await press(app, RIGHT);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('› Merge policy ‹ full-auto');
+      expect(frame).toContain(reason);
+    });
+    await eventually(() => expect(connection.sent).toContainEqual({ type: 'checkApp', repo: 'acme/widgets' }));
   });
 
   test('the sheet offers the merge policy at L3 alone, defaulting to operator, and sends the one picked', async () => {
