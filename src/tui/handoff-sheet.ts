@@ -116,13 +116,14 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
     rerender();
   });
 
-  // L3 picked where the installation, as last checked, refuses it: the sheet
-  // says why, with the link that approves it, and asks GitHub again, as the
-  // operator may have approved it since.
-  const refusedL3 = draft.current.autonomy === 'L3' ? l3RefusalText(task.repo, app) : null;
+  // L3 picked where the installation, as last checked, refuses it, or
+  // full-auto where it lacks Workflows write: the sheet says why, with the
+  // link that approves it, and asks GitHub again, as the operator may have
+  // approved it since.
+  const refusedL3 = draft.current.autonomy === 'L3' ? l3RefusalText(task.repo, app, draft.current.mergePolicy) : null;
   useEffect(() => {
     if (refusedL3) void connection.send({ type: 'checkApp', repo: task.repo });
-  }, [connection, task.repo, !!refusedL3]);
+  }, [connection, task.repo, refusedL3]);
 
   const at = lines[draft.current.line];
   const to = handoff.stage ? `to ${handoff.stage} (AFK)` : 'to one AFK run on the brief';

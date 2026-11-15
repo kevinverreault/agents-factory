@@ -1,5 +1,5 @@
 ---
-status: accepted (App permissions amended by ADR 0014)
+status: accepted (App permissions amended by ADR 0014, and for full-auto's workflow changes)
 ---
 
 # The factory is the only GitHub writer for AFK work, as a GitHub App
@@ -13,6 +13,7 @@ AFK agents commit locally and never write to GitHub. The daemon writes for them 
   - *Amended by ADR 0014:* the App also has Checks R and Statuses R, so that an L3 task's PR merges only once its checks pass. An installation made before asks the operator to approve them on GitHub. Until they do, the launch card and the handoff sheet refuse L3 on that repository, saying why with a link to the installation settings, and never fall back to L2.
   - Workflows still trigger: pushes and PRs made with an installation token start `push` / `pull_request` runs, drafts included.
   - Without Workflows write the bot can't push `.github/workflows/` changes. The `push` action checks for them first and raises an **attention request** asking the operator to push the branch by hand.
+  - *Amended for full-auto:* the App also has Workflows write, which only an L3 task under the `unattended` merge policy (full-auto, ADR 0014) uses. Its push and merge tokens include Workflows write, so it pushes and merges branches that change `.github/workflows/` with no attention request. Every other policy and level mints tokens as before and still asks the operator to push such a branch by hand. An installation made before asks the operator to approve the new permission on GitHub. Until they do, the launch card and the handoff sheet refuse full-auto on that repository, saying why with a link to the installation settings, and never fall back to another policy.
 - **One token per action.** The daemon mints an installation token for each action, narrowed through the token API's `repositories` and `permissions` parameters to the task's repo and to what that action needs. Nothing is cached.
 - **No fallback to the operator's account.** The launch card checks the App's installation on the task's repo whenever the frozen preset has a stage that writes. A failure at action time becomes an attention request, and the action is retried after the operator fixes it. A silent fallback hides breakage, as the reference factory's bug-bash (BB-07) found.
 - **AFK runs read GitHub with a read-only bot token.** It carries Issues, Pull requests and Metadata read, and sits in a per-run `GH_CONFIG_DIR` the daemon refreshes before the 1-hour expiry, so the skills' `gh issue view` keeps working. The operator's login is removed from the run environment (`GH_TOKEN` unset, git credential helper off, `GIT_TERMINAL_PROMPT=0`). On the host that prevents accidents, not malice, and containment remains L2's job.
@@ -29,6 +30,6 @@ AFK agents commit locally and never write to GitHub. The daemon writes for them 
 ## Consequences
 
 - The walking skeleton (ADR 0001) gains a check that `gh` re-reads `hosts.yml` on every call, so a refreshed token takes effect mid-run.
-- An agent can't push its own fixes for workflow files. Those branches always need a hand push from the operator.
+- Outside full-auto, an agent can't push its own fixes for workflow files. Those branches need a hand push from the operator. Under full-auto the factory pushes and merges them itself, with no human in the loop.
 - If the factory comes to watch CI on its PRs, the App gains Checks or Actions read, and the operator approves the change on the installation. ADR 0014 does so for L3: Checks and Statuses read.
 - Which repos the App is installed on is part of repository registration, which is still undecided.

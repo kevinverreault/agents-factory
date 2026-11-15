@@ -33,4 +33,19 @@ describe('the L3 refusal', () => {
       'L3 works as the factory’s App on acme/widgets. It isn’t installed. Install it from https://github.com/apps/x/installations/new, then try again.',
     );
   });
+
+  test('under full-auto, also asks for Workflows write, which no other policy needs', () => {
+    const l3 = installed({ checks: 'read', statuses: 'read' });
+
+    expect(l3Refusal('acme/widgets', l3, 'unattended')).toEqual({
+      reason: expect.stringContaining('Full-auto pushes and merges changes to workflow files, so the factory’s GitHub App needs Workflows write on acme/widgets'),
+      fixUrl: settingsUrl,
+    });
+    expect(l3RefusalText('acme/widgets', installed({ checks: 'read', statuses: 'read', workflows: 'read' }), 'unattended')).toMatch(
+      new RegExp(`Workflows write .* or pick semi-auto or the operator policy\\. Approve them at ${settingsUrl}, then try again\\.$`),
+    );
+    expect(l3Refusal('acme/widgets', l3, 'judged')).toBeNull();
+    expect(l3Refusal('acme/widgets', l3, 'operator')).toBeNull();
+    expect(l3Refusal('acme/widgets', installed({ checks: 'read', statuses: 'read', workflows: 'write' }), 'unattended')).toBeNull();
+  });
 });

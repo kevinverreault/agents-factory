@@ -46,7 +46,7 @@ describe('setup github', () => {
       name: 'agents-factory-kevin',
       public: false,
       redirect_url: `${page.origin}/created`,
-      default_permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read' },
+      default_permissions: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read', workflows: 'write' },
       default_events: [],
       hook_attributes: { active: false },
     });

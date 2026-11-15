@@ -1,7 +1,7 @@
 // The GitHub port's contract, shared by the fake and the REST adapter so the
 // two can't drift apart.
 import { describe, expect, test } from 'vitest';
-import { CHECKS_READ, GitHubError, MERGE, OPEN_PR, PR_WRITE, PUSH, READ_ONLY, READY, TICKET_WRITE, type FactoryApp, type GitHub, type Permissions, type PrStatus } from './github.ts';
+import { CHECKS_READ, GitHubError, MERGE, OPEN_PR, PR_WRITE, PUSH, PUSH_WORKFLOWS, READ_ONLY, READY, TICKET_WRITE, type FactoryApp, type GitHub, type Permissions, type PrStatus } from './github.ts';
 
 export type GitHubFixture = {
   github: GitHub;
@@ -203,6 +203,28 @@ export function describeGitHubContract(name: string, makeFixture: () => Promise<
       const { token } = await github.mintToken(app, installedRepo, PUSH);
 
       expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch })).toEqual({ workflowFiles: [workflow] });
+
+      expect(await clone.remoteTip(branch)).toBeNull();
+    });
+
+    test('pushes a branch whose commits change workflow files where the push allows them, with Workflows write', async () => {
+      const { github, app, installedRepo, clone } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      const tip = await clone.commitOn(branch, { [`.github/workflows/contract-${unique()}.yml`]: WORKFLOW });
+      const { token } = await github.mintToken(app, installedRepo, PUSH_WORKFLOWS);
+
+      expect(await github.push(token, { clonePath: clone.path, repo: installedRepo, branch, workflows: true })).toEqual({ pushed: tip });
+
+      expect(await clone.remoteTip(branch)).toBe(tip);
+    });
+
+    test('GitHub refuses workflow changes a push allows but its token has no Workflows write for, pushing nothing', async () => {
+      const { github, app, installedRepo, clone } = await makeFixture();
+      const branch = `factory/contract-${unique()}`;
+      await clone.commitOn(branch, { [`.github/workflows/contract-${unique()}.yml`]: WORKFLOW });
+      const { token } = await github.mintToken(app, installedRepo, PUSH);
+
+      await expect(github.push(token, { clonePath: clone.path, repo: installedRepo, branch, workflows: true })).rejects.toThrow(GitHubError);
 
       expect(await clone.remoteTip(branch)).toBeNull();
     });

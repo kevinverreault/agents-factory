@@ -138,12 +138,13 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   // A cached check that found the App missing may be stale, as when the
   // operator has just installed it: the card asks GitHub again, and the
   // repository's state shows the answer.
-  // So may one that found L3's permissions ungranted, once L3 is picked.
+  // So may one that found L3's permissions ungranted, once L3 is picked, or
+  // Workflows write ungranted, once full-auto is.
   useEffect(() => {
     const { repo } = draft;
     const app = repo ? state.repositories[repo]?.app : undefined;
-    if (repo && app && (!app.installed || (draft.autonomy === 'L3' && l3Refusal(repo, app)))) void connection.send({ type: 'checkApp', repo });
-  }, [connection, draft.repo, draft.autonomy === 'L3']);
+    if (repo && app && (!app.installed || (draft.autonomy === 'L3' && l3Refusal(repo, app, policyOf(draft))))) void connection.send({ type: 'checkApp', repo });
+  }, [connection, draft.repo, draft.autonomy === 'L3', policyOf(draft) === 'unattended']);
 
   const cardFor = (draft: Draft) =>cardOf(draft, draft.repo ? listings[draft.repo] : undefined);
   const card = cardFor(draft);
@@ -151,8 +152,9 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const app = draft.repo ? (state.repositories[draft.repo]?.app ?? null) : null;
   const blocked = card.choice && 'appStages' in card.choice ? appBlock(card.choice.name, card.choice.appStages, app) : null;
   // L3 is refused, never lowered to L2, where the App's installation lacks
-  // what it needs (ADR 0014): the card says so before the launch does.
-  const refusedL3 = !blocked && card.start?.mode === 'AFK' && draft.autonomy === 'L3' && draft.repo ? l3Refusal(draft.repo, app) : null;
+  // what it needs (ADR 0014), as full-auto is where it lacks Workflows
+  // write: the card says so before the launch does.
+  const refusedL3 = !blocked && card.start?.mode === 'AFK' && draft.autonomy === 'L3' && draft.repo ? l3Refusal(draft.repo, app, policyOf(draft)) : null;
   const fixUrl = blocked && app && !app.installed ? app.fixUrl : (refusedL3?.fixUrl ?? null);
 
   useInput((input, key) => {

@@ -15,9 +15,11 @@ import {
   GitHubError,
   installationSettings,
   MERGE,
+  MERGE_WORKFLOWS,
   OPEN_PR,
   PR_WRITE,
   PUSH,
+  PUSH_WORKFLOWS,
   READ_ONLY,
   READY,
   TICKET_WRITE,
@@ -62,6 +64,7 @@ import {
   pushedBranch,
   runsContained,
   l3RefusalText,
+  handlesWorkflows,
   DECLINED_QUESTION,
   atMergeGate,
   gateJudges,
@@ -831,9 +834,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const check = await checkApp(repo);
         const blocked = appBlock(resolved.preset.name, stages, check);
         if (blocked) return { ok: false, reason: `${blocked}${!check.installed && check.fixUrl ? ` Install it from ${check.fixUrl}, then launch again.` : ''}` };
-        // L3 reads the PR's checks as the App (ADR 0014): refused, never
-        // lowered to L2, where its installation doesn't grant that.
-        const refusedL3 = action.autonomy === 'L3' && start.stage.mode === 'AFK' ? l3RefusalText(repo, check) : null;
+        // L3 reads the PR's checks as the App (ADR 0014), and full-auto
+        // pushes and merges workflow changes: refused, never lowered to L2
+        // or another policy, where its installation doesn't grant that.
+        const refusedL3 = action.autonomy === 'L3' && start.stage.mode === 'AFK' ? l3RefusalText(repo, check, policyOf(action)) : null;
         if (refusedL3) return { ok: false, reason: refusedL3 };
       }
       // At an AFK stage launching ticket tasks, one issue ref with no
@@ -1052,7 +1056,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function takeMergeStep(task: Task, step: MergeStep): Promise<MergeEvent> {
     const { permissions, take } = MERGE_WRITES[step];
     try {
-      const { token } = await appToken(task.repo, permissions);
+      const { token } = await appToken(task.repo, permissions(task));
       await take(token, prRef(task.repo, task.pr!.number), task);
       return { type: MERGE_STEP_DONE[step], taskId: task.id };
     } catch (error) {
@@ -1114,10 +1118,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // config names (a merge commit for tasks frozen before it), and only while
   // the PR's head is still the commit whose checks let it through, once the
   // PR body lists its judgement calls.
-  const MERGE_WRITES: Record<MergeStep, { permissions: Permissions; take(token: string, ref: string, task: Task): Promise<void> }> = {
-    ready: { permissions: READY, take: (token, ref) => github.markReady(token, ref) },
+  const MERGE_WRITES: Record<MergeStep, { permissions(task: Task): Permissions; take(token: string, ref: string, task: Task): Promise<void> }> = {
+    ready: { permissions: () => READY, take: (token, ref) => github.markReady(token, ref) },
     merge: {
-      permissions: MERGE,
+      permissions: (task) => (handlesWorkflows(task) ? MERGE_WORKFLOWS : MERGE),
       async take(token, ref, task) {
         await writeJudgementCalls(task, ref);
         await github.mergePr(token, ref, { method: (task.mergeGate ?? DEFAULT_MERGE_GATE).mergeMethod, head: task.gate!.head });
@@ -1700,6 +1704,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return answerAlways(action.taskId, action.permission);
       }
       if (action.type === 'setAutonomy') await checkAppForL3(action.taskId, action.autonomy);
+      // Full-auto needs Workflows write, checked as the installation is now.
+      if (action.type === 'setMergePolicy' && action.mergePolicy === 'unattended') await checkAppForL3(action.taskId, 'L3');
       const refusal = await settle(action, new Set());
       if (refusal) return { ok: false, reason: refusal };
       if (action.type === 'createTask') return { ok: true, value: { taskId: `T${lifecycle.counters.task}` } };
@@ -2346,8 +2352,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // Pushes the root's task branch as the App, with a token minted for this
   // write alone and narrowed to Contents (ADR 0004), under the fixed refspec
-  // the GitHub port holds to. The base branch is fetched first, so what the
-  // base already has on GitHub doesn't count as this push's workflow changes.
+  // the GitHub port holds to. A full-auto task's token also has Workflows
+  // write, and its push may change workflow files (ADR 0004, as amended);
+  // any other's that does is left to the operator. The base branch is
+  // fetched first, so what the base already has on GitHub doesn't count as
+  // this push's workflow changes.
   async function pushBranch(task: Task): Promise<PublishEvent> {
     const failed = (reason: string): PublishEvent => ({ type: 'publishFailed', taskId: task.id, step: 'push', reason });
     const repository = lifecycle.repositories[task.repo];
@@ -2355,8 +2364,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const unfetched = await fetchBase(git, repository);
     if (unfetched) return failed(unfetched);
     try {
-      const { token } = await appToken(task.repo, PUSH);
-      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch });
+      const workflows = handlesWorkflows(task);
+      const { token } = await appToken(task.repo, workflows ? PUSH_WORKFLOWS : PUSH);
+      const pushed = await github.push(token, { clonePath: repository.path, repo: task.repo, branch: task.worktree!.branch, workflows });
       if ('workflowFiles' in pushed) return { type: 'pushRefused', taskId: task.id, workflowFiles: pushed.workflowFiles };
       // A task branch is never a research branch.
       if ('outsideResearch' in pushed) return failed(`${task.worktree!.branch} isn’t a task branch.`);

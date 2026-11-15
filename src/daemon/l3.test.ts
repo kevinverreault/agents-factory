@@ -4,7 +4,9 @@
 // stage ceiling of L2 clamps it. L3 needs the App's installation to grant
 // Checks and Statuses read: without them the launch and the handoff refuse
 // L3, with the reason and the link that approves them, and never fall back
-// to L2. Under the operator policy, an L3 task ends In review as at L2.
+// to L2. Full-auto also needs Workflows write, and without it is refused,
+// never lowered to another policy. Under the operator policy, an L3 task
+// ends In review as at L2.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -25,6 +27,12 @@ const clone = resolve('/clones/widgets');
 const SETTINGS = 'https://github.com/settings/installations/1';
 // What an installation made before the App asked for Checks and Statuses grants.
 const BEFORE_L3 = { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' } as const;
+// What an installation made before the App asked for Workflows write grants.
+const BEFORE_WORKFLOWS = { ...BEFORE_L3, checks: 'read', statuses: 'read' } as const;
+const REFUSED_FULL_AUTO =
+  'Full-auto pushes and merges changes to workflow files, so the factory’s GitHub App needs Workflows write on acme/widgets, ' +
+  'which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick semi-auto or the operator policy. ' +
+  `Approve them at ${SETTINGS}, then try again.`;
 const REFUSED =
   'L3 merges a PR only once its checks pass, so the factory’s GitHub App needs Checks read and Statuses read on acme/widgets, ' +
   'which its installation doesn’t grant yet. Approve the App’s new permissions on GitHub, or pick L2. ' +
@@ -182,5 +190,65 @@ describe('L3 where the App’s installation lacks Checks and Statuses read', () 
 
     expect(await operator.send({ type: 'setAutonomy', taskId: 'T1', autonomy: 'L3' })).toEqual({ ok: false, reason: REFUSED });
     expect(tui.state().tasks.T1?.autonomy).toBe('L2');
+  });
+});
+
+describe('full-auto where the App’s installation lacks Workflows write', () => {
+  test('a launch under full-auto is refused with the reason and the link, no task is made, and semi-auto still launches', async () => {
+    const { factory, operator, tui } = await attached();
+    factory.github.install('acme/widgets', BEFORE_WORKFLOWS);
+
+    expect(await operator.send({ ...implementAtL3, mergePolicy: 'unattended' })).toEqual({ ok: false, reason: REFUSED_FULL_AUTO });
+
+    expect(tui.state().tasks).toEqual({});
+    expect(factory.executor.started).toEqual([]);
+    expect(await operator.send({ ...implementAtL3, mergePolicy: 'judged' })).toEqual({ ok: true, value: { taskId: 'T1' } });
+  });
+
+  test('once the operator approves it, the launch goes ahead', async () => {
+    const { factory, operator } = await attached();
+    factory.github.install('acme/widgets', BEFORE_WORKFLOWS);
+    expect(await operator.send({ ...implementAtL3, mergePolicy: 'unattended' })).toEqual({ ok: false, reason: REFUSED_FULL_AUTO });
+
+    factory.github.approvePermissions('acme/widgets');
+
+    expect(await operator.send({ ...implementAtL3, mergePolicy: 'unattended' })).toEqual({ ok: true, value: { taskId: 'T1' } });
+  });
+
+  test('a handoff under full-auto is refused, the sheet stays open, and it goes ahead once it is approved', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Grill me about the login flow.' });
+    await tui.until((state) => state.tasks.T1?.liveRunId === 'R1');
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await operator.send({ type: 'openHandoff', taskId: 'T1' });
+    factory.executor.report('R1', { type: 'briefWritten', brief: { goal: 'Build the login flow.', decided: [], doneWhen: [], outOfScope: [], links: [] } });
+    factory.executor.report('R1', { type: 'turnEnded' });
+    const { brief, tier, maxTurns } = (await tui.until((state) => !!state.tasks.T1?.handoff?.brief)).tasks.T1!.handoff!;
+    const confirm = { type: 'handoff', taskId: 'T1', brief: brief!, continueAs: 'resume', autonomy: 'L3', mergePolicy: 'unattended', tier, maxTurns } as const;
+    factory.github.install('acme/widgets', BEFORE_WORKFLOWS);
+    await operator.send({ type: 'checkApp', repo: 'acme/widgets' });
+
+    expect(await operator.send(confirm)).toEqual({ ok: false, reason: REFUSED_FULL_AUTO });
+    expect(tui.state().tasks.T1).toMatchObject({ mode: 'HITL', handoff: expect.objectContaining({ brief }) });
+
+    factory.github.approvePermissions('acme/widgets');
+    await operator.send({ type: 'checkApp', repo: 'acme/widgets' });
+    expect(await operator.send(confirm)).toEqual({ ok: true });
+    expect(await started(factory, 2)).toMatchObject({ mode: 'AFK', autonomy: 'L3' });
+  });
+
+  test('a live task can’t be switched to full-auto, though it can to a lower policy, and once it is approved the switch goes ahead', async () => {
+    const { factory, operator, tui } = await attached();
+    factory.github.install('acme/widgets', BEFORE_WORKFLOWS);
+    expect(await operator.send({ ...implementAtL3, mergePolicy: 'judged' })).toEqual({ ok: true, value: { taskId: 'T1' } });
+    await started(factory, 1);
+
+    expect(await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' })).toEqual({ ok: false, reason: REFUSED_FULL_AUTO });
+    expect(await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'operator' })).toEqual({ ok: true });
+
+    // Checked as the installation is now, not as last cached.
+    factory.github.approvePermissions('acme/widgets');
+    expect(await operator.send({ type: 'setMergePolicy', taskId: 'T1', mergePolicy: 'unattended' })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.mergePolicy === 'unattended');
   });
 });

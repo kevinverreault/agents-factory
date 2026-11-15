@@ -152,6 +152,9 @@ describe('semi-auto’s gate check', () => {
     const done = await tui.until((state) => state.tasks.T2?.label === 'Done');
     expect(done.attentionQueue).toEqual([]);
     expect(factory.github.prState(101).state).toBe('merged');
+    // Only full-auto pushes and merges with Workflows write.
+    expect(factory.github.pushes.map(({ token }) => token.permissions)).toEqual([{ contents: 'write', metadata: 'read' }]);
+    expect(factory.github.prWrites.find(({ action }) => action === 'merge')?.token.permissions).toEqual({ contents: 'write', pull_requests: 'write', metadata: 'read' });
     const line = 'Merged on the gate check’s judgement: It does what the ticket says and nothing more.';
     expect(factory.github.pullRequests[0]!.body).toContain(`## Judgement calls\n\n- ${line}`);
     await vi.waitFor(() => expect(factory.github.writes.filter(({ action }) => action === 'comment')).toHaveLength(1));

@@ -6,7 +6,9 @@
 // it with a merge commit, each GitHub call with a token of its own. The root
 // then follows the merged-PR path: its ticket closes, and it is Done and
 // cleaned up. A red check gets a fix run, as check-fixes.test.ts covers.
-// Under `operator`, nothing changes.
+// Its push and merge have Workflows write, so a branch that changes workflow
+// files is pushed and merged too, which under any other policy the operator
+// pushes by hand. Under `operator`, nothing else changes.
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
@@ -52,11 +54,11 @@ async function started(factory: TestFactory, n: number) {
 }
 
 // Works the task's implement, review and PR body runs, from the run `first`
-// on: the implement run commits in the task's container.
-async function throughOpenPr({ factory }: Factory, taskId = 'T1', first = 1): Promise<void> {
+// on: the implement run commits `files` in the task's container.
+async function throughOpenPr({ factory }: Factory, taskId = 'T1', first = 1, files: Record<string, string> = { 'src/logout.ts': 'export {};\n' }): Promise<void> {
   await started(factory, first);
   const workdir = factory.sandbox.workdirOf(taskId);
-  factory.git.editFile(workdir, 'src/logout.ts', 'export {};\n');
+  for (const [path, content] of Object.entries(files)) factory.git.editFile(workdir, path, content);
   factory.git.commitAll(workdir);
   factory.executor.report(`R${first}`, { type: 'runCompleted' });
   await started(factory, first + 1);
@@ -105,7 +107,8 @@ describe('under full-auto (unattended)', () => {
         repo: 'acme/widgets',
         number: 101,
         method: 'merge',
-        token: expect.objectContaining({ repo: 'acme/widgets', permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' } }),
+        // Workflows write besides, as GitHub refuses to merge workflow changes without it.
+        token: expect.objectContaining({ repo: 'acme/widgets', permissions: { contents: 'write', pull_requests: 'write', metadata: 'read', workflows: 'write' } }),
       },
     ]);
     // Each read of the checks has its own token, narrowed to them.
@@ -188,6 +191,50 @@ describe('under full-auto (unattended)', () => {
 
     await tui.until((state) => state.tasks.T1?.label === 'Done');
     expect(factory.github.prWrites.map(({ action }) => action)).toEqual(['ready', 'merge']);
+  });
+});
+
+describe('a branch that changes workflow files', () => {
+  const files = { '.github/workflows/ci.yml': 'on: push\n', 'src/logout.ts': 'export {};\n' };
+
+  test('under full-auto is pushed and merged with Workflows write, with no attention request', async () => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+    factory.github.runChecks('acme/widgets', 'green');
+
+    expect(await operator.send(fullAuto)).toEqual({ ok: true, value: { taskId: 'T1' } });
+    await throughOpenPr(launched, 'T1', 1, files);
+
+    const done = await tui.until((state) => state.tasks.T1?.label === 'Done');
+    expect(done.attentionQueue).toEqual([]);
+    expect(factory.github.prState(101).state).toBe('merged');
+    expect(factory.github.pushes).toEqual([
+      expect.objectContaining({ repo: 'acme/widgets', token: expect.objectContaining({ permissions: { contents: 'write', metadata: 'read', workflows: 'write' } }) }),
+    ]);
+    expect(factory.github.prWrites).toEqual([
+      // Marking it ready writes no contents, so it needs no Workflows write.
+      expect.objectContaining({ action: 'ready', token: expect.objectContaining({ permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' } }) }),
+      expect.objectContaining({ action: 'merge', token: expect.objectContaining({ permissions: { contents: 'write', pull_requests: 'write', metadata: 'read', workflows: 'write' } }) }),
+    ]);
+  });
+
+  test.each(['judged', 'operator'] as const)('under %s isn’t pushed: an attention request asks the operator to push it by hand', async (mergePolicy) => {
+    const launched = await attached();
+    const { factory, operator, tui } = launched;
+
+    expect(await operator.send({ ...fullAuto, mergePolicy })).toEqual({ ok: true, value: { taskId: 'T1' } });
+    await throughOpenPr(launched, 'T1', 1, files);
+
+    const asked = await tui.until((state) => state.attentionQueue.some((item) => item.kind === 'attention'));
+    const branch = asked.tasks.T1!.branch!;
+    expect(asked.attentionQueue[0]).toMatchObject({
+      kind: 'attention',
+      taskId: 'T1',
+      attention: 'github-write',
+      reason: expect.stringContaining(`${branch} changes workflow files (.github/workflows/ci.yml), which the factory’s App may not push. Push it by hand`),
+    });
+    expect(factory.github.pushes).toEqual([]);
+    expect(factory.git.originTip(clone, branch)).toBeNull();
   });
 });
 
