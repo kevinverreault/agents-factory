@@ -195,6 +195,19 @@ export function guardChecks(runner: GitRunner): Pick<Git, 'snapshot' | 'violatio
     return branches;
   }
 
+  // The settings `git submodule add` and `init` copy from `.gitmodules` as
+  // HEAD commits it, as `key\nvalue`: each submodule's `url`, and its `active`.
+  async function submodulesCommitted(worktreePath: string): Promise<Set<string>> {
+    // Each setting NUL-ended, its key and value split by a newline; no `.gitmodules` fails.
+    const listing = (await git(worktreePath, 'config', '--blob', 'HEAD:.gitmodules', '--list', '-z')) ?? '';
+    const copied = new Set<string>();
+    for (const setting of listing.split('\0')) {
+      const [, name] = /^submodule\.(.+)\.url\n/.exec(setting) ?? [];
+      if (name !== undefined) copied.add(setting).add(`submodule.${name}.active\ntrue`);
+    }
+    return copied;
+  }
+
   const checks: Pick<Git, 'snapshot' | 'violations'> = {
     async snapshot(worktreePath) {
       const [branch, head, refs, remotes, gitDir, commonDir, scoped] = await Promise.all([
@@ -250,7 +263,8 @@ export function guardChecks(runner: GitRunner): Pick<Git, 'snapshot' | 'violatio
       if (refs.length) found.push(`The run added refs: ${listed(refs)}.`);
       const remotes = after.remotes.filter((remote) => !before.remotes.includes(remote));
       if (remotes.length) found.push(`The run added remotes: ${listed(remotes)}.`);
-      if (heldTo(after.config, before.branch) !== heldTo(before.config, before.branch)) found.push('The run changed the git config.');
+      const copied = await submodulesCommitted(worktreePath);
+      if (heldTo(after.config, before.branch, copied) !== heldTo(before.config, before.branch, copied)) found.push('The run changed the git config.');
       const pushUrls = lines((await git(worktreePath, 'config', '--name-only', '--get-regexp', '^remote\\..*\\.pushurl$')) ?? '');
       if (pushUrls.length) found.push(`A remote has a pushurl, which the run's push guard can't cover: ${listed(pushUrls)}.`);
       const hooks = [...new Set([...Object.keys(before.hooks), ...Object.keys(after.hooks)])].filter((hook) => before.hooks[hook] !== after.hooks[hook]);
@@ -528,12 +542,13 @@ function listed(items: string[]): string {
 // The config settings a run is held to, in a comparable form: all but other
 // branches' settings, which the operator's own tools write to the shared
 // clone, and the task branch's beyond where it pushes and merges from.
-// Nor a submodule's `url` and `active`, which `git submodule add` and `init`
-// copy from `.gitmodules`, committed: they say nothing the commit doesn't.
-// Its other settings, such as an `update` command, still count.
-function heldTo(config: string[], branch: string): string {
+// Nor those `copied` from the committed `.gitmodules`, which `git submodule
+// add` and `init` write: they say nothing the commit doesn't. A submodule's
+// other settings, such as an `update` command, and a `url` the commit doesn't
+// give it, still count.
+function heldTo(config: string[], branch: string, copied: Set<string>): string {
   const held = config.filter((setting) => {
-    if (/^submodule\..+\.(url|active)\n/.test(setting)) return false;
+    if (copied.has(setting)) return false;
     // Section and key are lowercase; the branch name between them may hold dots.
     const [, name, key] = /^branch\.(.+)\.([^.\n]+)\n/.exec(setting) ?? [];
     return name === undefined || (name === branch && ['remote', 'pushremote', 'merge'].includes(key!));

