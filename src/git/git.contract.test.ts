@@ -220,7 +220,17 @@ test('git: a merge commit’s changes are its author’s resolution and edits by
 });
 
 describe('git: the check after an AFK run', () => {
-  type Started = { root: string; clone: string; path: string; inRun(...args: string[]): string; check(branches?: string[]): Promise<string[]> };
+  type Started = {
+    root: string;
+    clone: string;
+    path: string;
+    // The clone's `origin`, a repository on disk.
+    origin: string;
+    inRun(...args: string[]): string;
+    check(branches?: string[]): Promise<string[]>;
+    // Snapshots the worktree afresh, as the task's next run starting in it finds it: `check` then reads that run.
+    nextRun(): Promise<void>;
+  };
 
   // A task worktree on factory/T1-a, snapshotted as a run starting in it
   // finds it. `inRun` runs git as the run does, in its cleaned environment.
@@ -231,10 +241,20 @@ describe('git: the check after an AFK run', () => {
       const path = join(root, 'worktrees', 'T1');
       await gitCli.fetch(clone, 'main');
       await gitCli.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
-      const before = await gitCli.snapshot(path);
+      let before = await gitCli.snapshot(path);
       const env = { ...process.env, ...prepareRunGit(join(root, 'run'), FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'sonnet' }) };
       const inRun = (...args: string[]) => execFileSync('git', args, { cwd: path, env, encoding: 'utf8', windowsHide: true }).trim();
-      await body({ root, clone, path, inRun, check: (branches = []) => gitCli.violations(path, before, branches, FACTORY_IDENTITY.email) });
+      await body({
+        root,
+        clone,
+        path,
+        origin: git(clone, 'remote', 'get-url', 'origin'),
+        inRun,
+        check: (branches = []) => gitCli.violations(path, before, branches, FACTORY_IDENTITY.email),
+        nextRun: async () => {
+          before = await gitCli.snapshot(path);
+        },
+      });
     } finally {
       await dispose();
     }
@@ -253,22 +273,49 @@ describe('git: the check after an AFK run', () => {
   // `git submodule add` records the submodule's `url` and `active` in the
   // clone's config, as `git submodule init` would from the committed
   // `.gitmodules`: nothing the commit doesn't already say.
-  test('a run that adds a submodule and commits it keeps every invariant', () =>
-    started(async ({ root, inRun, check }) => {
-      inRun('-c', 'protocol.file.allow=always', 'submodule', 'add', '--quiet', join(root, 'widgets-origin.git'), 'vendor/widgets');
-      inRun('commit', '--quiet', '-m', 'Vendor the widgets');
+  // The run vendors the clone's origin, from `url`, at vendor/widgets, and commits it.
+  function vendorsWidgets({ origin, inRun }: Started, url = origin): void {
+    inRun('-c', 'protocol.file.allow=always', 'submodule', 'add', '--quiet', url, 'vendor/widgets');
+    inRun('commit', '--quiet', '-m', 'Vendor the widgets');
+  }
 
-      expect(await check()).toEqual([]);
+  test('a run that adds a submodule and commits it keeps every invariant', () =>
+    started(async (run) => {
+      vendorsWidgets(run);
+
+      expect(await run.check()).toEqual([]);
+    }));
+
+  // The config then holds the URL resolved against origin's, as git resolves it.
+  test('a run that adds a submodule by a URL relative to origin’s keeps every invariant', () =>
+    started(async (run) => {
+      vendorsWidgets(run, '../widgets-origin.git');
+
+      expect(run.inRun('config', 'submodule.vendor/widgets.url')).toBe(run.origin);
+      expect(await run.check()).toEqual([]);
+    }));
+
+  // The old URL was the commit's word when the run started, the new one is now.
+  test('a run that commits a new URL for a submodule and syncs it keeps every invariant', () =>
+    started(async (run) => {
+      vendorsWidgets(run);
+      await run.nextRun();
+      const mirror = join(run.root, 'widgets-mirror.git');
+      git(run.root, 'clone', '--quiet', '--bare', run.origin, mirror);
+      run.inRun('config', '--file', '.gitmodules', 'submodule.vendor/widgets.url', mirror);
+      run.inRun('commit', '--quiet', '--all', '-m', 'Vendor the widgets from the mirror');
+      run.inRun('submodule', '--quiet', 'sync');
+
+      expect(await run.check()).toEqual([]);
     }));
 
   // Where `git submodule update` fetches from is then the config's word, not the commit's.
   test('a run that points a submodule elsewhere than its committed `.gitmodules` says breaks the invariants', () =>
-    started(async ({ root, inRun, check }) => {
-      inRun('-c', 'protocol.file.allow=always', 'submodule', 'add', '--quiet', join(root, 'widgets-origin.git'), 'vendor/widgets');
-      inRun('commit', '--quiet', '-m', 'Vendor the widgets');
-      inRun('config', 'submodule.vendor/widgets.url', 'https://example.com/evil.git');
+    started(async (run) => {
+      vendorsWidgets(run);
+      run.inRun('config', 'submodule.vendor/widgets.url', 'https://example.com/evil.git');
 
-      expect(await check()).toEqual(['The run changed the git config.']);
+      expect(await run.check()).toEqual(['The run changed the git config.']);
     }));
 
   test.each<[string, (run: Started) => void, string[]]>([
