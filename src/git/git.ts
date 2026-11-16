@@ -80,6 +80,7 @@ export interface Git {
   commit(worktreePath: string, paths: string[], message: string): Promise<string>;
   // The identity the worktree's own commits are made under, from its git
   // config at any scope: the operator's. Null when it has no name or email.
+  // Throws a `GitError` when git can't read its config.
   identity(worktreePath: string): Promise<GitIdentity | null>;
   // The worktree as an AFK run starting in it finds it.
   snapshot(worktreePath: string): Promise<RunSnapshot>;
@@ -381,7 +382,9 @@ export const gitCli: Git = {
   },
 
   async identity(worktreePath) {
-    const [name, email] = await Promise.all([git(worktreePath, 'config', 'user.name'), git(worktreePath, 'config', 'user.email')]);
+    // An unset key reads as empty; any other failure is git's to say.
+    const setting = (key: string) => run(worktreePath, 'config', '--default', '', '--get', key);
+    const [name, email] = await Promise.all([setting('user.name'), setting('user.email')]);
     return name && email ? { name, email } : null;
   },
 

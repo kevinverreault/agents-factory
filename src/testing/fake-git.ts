@@ -5,7 +5,7 @@ import { GitError, type ChangedFile, type Clone, type DirectoryFile, type Git, t
 // The email the fake's worktrees commit under, as the operator's own.
 export const FAKE_OPERATOR_EMAIL = 'operator@example.com';
 // The operator's git identity, which the fake's worktrees have.
-export const FAKE_OPERATOR = { name: 'Olive Operator', email: FAKE_OPERATOR_EMAIL };
+export const FAKE_OPERATOR: GitIdentity = { name: 'Olive Operator', email: FAKE_OPERATOR_EMAIL };
 
 type CloneSetup = { originUrl?: string | null; defaultBranch?: string | null };
 
@@ -366,11 +366,13 @@ export class FakeGit implements Git {
     this.pushUrls.set(worktreePath, urls);
   }
 
-  // The operator's git identity, which every worktree has: null as if they set no name or email.
-  operator: GitIdentity | null = FAKE_OPERATOR;
+  // The operator's git identity, which every worktree has: null as if they
+  // set no name or email, or a reason as if git couldn't read its config.
+  operator: GitIdentity | null | { unreadable: string } = FAKE_OPERATOR;
 
   async identity(worktreePath: string): Promise<GitIdentity | null> {
     this.worktreeAt(worktreePath);
+    if (this.operator && 'unreadable' in this.operator) throw new GitError(this.operator.unreadable);
     return this.operator;
   }
 

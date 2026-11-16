@@ -483,8 +483,10 @@ function containedOptions({ mode, maxTurns, guards, token, container }: RunStart
     env: {
       CLAUDE_CODE_OAUTH_TOKEN: token!,
       ...(mode === 'AFK' && RETRY_WATCHDOG_ENV),
-      // The sessions mount is the host project directory, auto memory's too,
-      // which the container may only ever read (ADR 0015): it stays off.
+      // Off for now, against ADR 0015 for a contained HITL run, which is to
+      // get the project's auto memory: the sessions mount is the host project
+      // directory, auto memory's too, and writable, while the ADR carries
+      // memory in read-only. It stays off until memory comes in that way.
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       ...guards!.env,
@@ -520,21 +522,19 @@ function hardDenies(cwd: string, start: string, git?: (args: string[]) => Promis
 // Why the executor can't start the run, or null.
 function whyUnstartable({ mode, autonomy, cwd, firstMessage, guards, container, credential, token }: RunStart): string | null {
   if (cwd === null) return 'The task has no worktree to run in.';
-  // A HITL run on the host acts as the operator; one in a container is guarded as an L2 run is (ADR 0015).
-  if (mode === 'HITL') {
-    if (container === null) return null;
-    if (guards === null) return 'A contained HITL run never starts without its git guards.';
-    return credential === 'subscription-token' && token ? null : 'A contained HITL run starts only with its subscription token.';
-  }
-  if (guards === null) return 'An AFK run never starts without its git guards.';
-  // An L3 run is contained as an L2 run is (ADR 0014).
-  const contained = runsContained(autonomy);
+  // A HITL run on the host acts as the operator, unguarded.
+  if (mode === 'HITL' && container === null) return null;
+  // One in a container is guarded as an L2 run is (ADR 0015), and an L3 run
+  // is contained as an L2 run is (ADR 0014).
+  const run = mode === 'HITL' ? 'A contained HITL run' : 'An AFK run';
+  if (guards === null) return `${run} never starts without its git guards.`;
+  const contained = mode === 'HITL' || runsContained(autonomy);
   if (contained && (container === null || credential !== 'subscription-token' || !token)) {
-    return `An ${autonomy} run starts only in its task’s container, with its subscription token.`;
+    return `${mode === 'HITL' ? run : `An ${autonomy} run`} starts only in its task’s container, with its subscription token.`;
   }
   if (!contained && container !== null) return 'Only an L2 or L3 run, or a contained HITL run, starts in a container.';
   // An AFK run takes no chat, so with nothing to start on it would wait forever.
-  return firstMessage === null ? 'The AFK run has no first message to work on.' : null;
+  return mode === 'AFK' && firstMessage === null ? 'The AFK run has no first message to work on.' : null;
 }
 
 // What the operator does when Claude Code can't sign in with the run's

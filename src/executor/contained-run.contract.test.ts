@@ -1,10 +1,10 @@
-// Seam 3: real L2 AFK runs, end to end, as the daemon starts them: the
-// executor runs Claude Code in the task's Docker container on the operator's
-// subscription token, the guards are checked in the container, and the run's
-// commit comes out to the host task branch through a bundle. They spend a
-// little usage on haiku, and need Docker and the token `agents-factory setup
-// token` stored. A contained HITL run (ADR 0015) is started the same way, as
-// a conversation in the container, committing as the operator.
+// Seam 3: real runs in a task's container, end to end, as the daemon starts
+// them: L2 AFK runs, and contained HITL runs (ADR 0015), conversations that
+// commit as the operator. The executor runs Claude Code in the task's Docker
+// container on the operator's subscription token, the guards are checked in
+// the container, and the run's commit comes out to the host task branch
+// through a bundle. They spend a little usage on haiku, and need Docker and
+// the token `agents-factory setup token` stored.
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -33,8 +33,11 @@ async function storedToken(): Promise<string> {
   return token;
 }
 
+// The operator, as the host's git and a contained HITL run's commits name them.
+const OPERATOR: GitIdentity = { name: 'Factory Test', email: 'test@example.com' };
+
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'user.name=Factory Test', '-c', 'user.email=test@example.com', ...args], { cwd, encoding: 'utf8', windowsHide: true }).trim();
+  return execFileSync('git', ['-c', `user.name=${OPERATOR.name}`, '-c', `user.email=${OPERATOR.email}`, ...args], { cwd, encoding: 'utf8', windowsHide: true }).trim();
 }
 
 const BRANCH = 'factory/T1';
@@ -55,16 +58,25 @@ type ContainedRun = {
   ended: () => boolean;
 };
 
-// The operator a contained HITL run commits as.
-const OPERATOR: GitIdentity = { name: 'Olive Operator', email: 'olive@example.com' };
+// The runs that execute in a task's container: who each one's commits
+// name, and how it starts beside an L1 run's start. An L2 run is the
+// factory's, with max turns; a contained HITL run is the operator's
+// conversation, with no level, turn limit or allow rules.
+const KINDS = {
+  L2: { identity: FACTORY_IDENTITY, start: { autonomy: 'L2' } },
+  HITL: { identity: OPERATOR, start: { mode: 'HITL', autonomy: null, maxTurns: null, allowRules: [] } },
+} as const satisfies Record<string, { identity: GitIdentity; start: Partial<RunStart> }>;
 
-// Starts an L2 run of `firstMessage` in a fresh task's container, as the
-// daemon would, over a repo of a README and `files`, and cleans the task up
-// after `body`. With `hitl`, it is a contained HITL run instead, at a
-// planning stage, committing as `OPERATOR`.
-async function withContainedRun(firstMessage: string, body: (contained: ContainedRun) => Promise<void>, files: Record<string, string> = {}, { hitl = false } = {}): Promise<void> {
+// Starts a run of `firstMessage` of `kind` in a fresh task's container, as
+// the daemon would, over a repo of a README and `files`, and cleans the task
+// up after `body`.
+async function withContainedRun(
+  firstMessage: string,
+  body: (contained: ContainedRun) => Promise<void>,
+  { files = {}, kind = 'L2' }: { files?: Record<string, string>; kind?: keyof typeof KINDS } = {},
+): Promise<void> {
   const token = await storedToken();
-  const root = mkdtempSync(join(tmpdir(), 'factory-l2-run-'));
+  const root = mkdtempSync(join(tmpdir(), 'factory-contained-run-'));
   const clonePath = join(root, 'clone');
   const worktree = join(root, 'worktree');
   git(root, 'init', '--quiet', '--initial-branch=main', clonePath);
@@ -82,10 +94,10 @@ async function withContainedRun(firstMessage: string, body: (contained: Containe
   try {
     const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir, egress: [...BUILT_IN_EGRESS] });
     const snapshot = await container.checks.snapshot(container.workdir);
-    const env = prepareRunGit(runDir, hitl ? OPERATOR : FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
+    const env = prepareRunGit(runDir, KINDS[kind].identity, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
     const run: RunStart = {
       ...afkRun(worktree, firstMessage, 10),
-      ...(hitl ? { mode: 'HITL' as const, autonomy: null, maxTurns: null, allowRules: [] } : { autonomy: 'L2' as const }),
+      ...KINDS[kind].start,
       credential: 'subscription-token',
       token,
       container,
@@ -179,7 +191,7 @@ test('an L2 run looks up symbols through its container’s language server, and 
       expect(live.at(-1)).toMatchObject({ type: 'message', from: 'agent', text: expect.stringContaining(CODE_INTELLIGENCE_ERROR) });
       expect(await container.deniedHosts()).toEqual([]);
     },
-    typeScriptProject(),
+    { files: typeScriptProject() },
   ), 600_000);
 
 test('a contained HITL run converses in its container: its question is a card, it takes the operator’s next message, nothing asks, and it commits as the operator', () =>
@@ -220,6 +232,5 @@ test('a contained HITL run converses in its container: its question is a card, i
       const tip = await sandbox.bringOut('T1', worktree, BRANCH);
       expect(git(worktree, 'show', `${tip}:notes.txt`)).toBe('notes from the grill');
     },
-    {},
-    { hitl: true },
+    { kind: 'HITL' },
   ), 600_000);

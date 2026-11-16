@@ -16,12 +16,12 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | Keep-awake helper holds an idle-sleep block | Holds | `src/os/windows-processes.contract.test.ts` |
 | Descendant sweep: a run's tree, by its job and by parent PID, never a reused PID (#62) | Holds | `src/os/windows-processes.contract.test.ts` |
 | Factory plugin loads, `/factory:<skill> args`, cross-skill calls | Holds. No `.claude/skills/` fallback needed | `src/skills/plugin.contract.test.ts` |
-| TypeScript code intelligence plugin: the `LSP` tool, and type errors shown after an edit, on the host and in an L2 container | Holds, with `typescript-language-server` over a pinned TypeScript 6. Diagnostics reach only runs with a shell tool | `src/executor/code-intelligence.contract.test.ts`, `src/sandbox/docker.contract.test.ts`, `src/executor/l2-run.contract.test.ts` |
+| TypeScript code intelligence plugin: the `LSP` tool, and type errors shown after an edit, on the host and in an L2 container | Holds, with `typescript-language-server` over a pinned TypeScript 6. Diagnostics reach only runs with a shell tool | `src/executor/code-intelligence.contract.test.ts`, `src/sandbox/docker.contract.test.ts`, `src/executor/contained-run.contract.test.ts` |
 | Security guidance plugin: its edit hook warns about a dangerous pattern, with no review that calls a model, through the bash and Python on the host | Holds. The hook needs bash and Python 3 on `PATH` | `src/security-guidance/security-guidance.contract.test.ts` |
 | `gh` re-reads a refreshed `hosts.yml` | Holds | `src/github/gh-config.contract.test.ts` |
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
 | L2 sandbox: bundle round trip, restart, no credentials (#64) | Holds on Docker Desktop 27 (WSL 2 engine) | `src/sandbox/docker.contract.test.ts` |
-| A real L2 run in its container: commits on the subscription token, guards checked there, commit brought out, questions reach the operator despite `bypassPermissions` (#64), through the egress proxy with nothing denied (#65) | Holds. Needs `agents-factory setup token` | `src/executor/l2-run.contract.test.ts` |
+| A real L2 run in its container: commits on the subscription token, guards checked there, commit brought out, questions reach the operator despite `bypassPermissions` (#64), through the egress proxy with nothing denied (#65) | Holds. Needs `agents-factory setup token` | `src/executor/contained-run.contract.test.ts` |
 | L2 egress: default-deny through a proxy of the task's own (#65) | Holds on Docker Desktop 27 | `src/sandbox/docker.contract.test.ts` |
 | Ink tells `ctrl+h` from Backspace | No. Windows Terminal sends `08` for ctrl+h (and for ctrl+Backspace), `7f` for Backspace, and no kitty sequences. `/handoff` is the primary path | `src/tui/keys.contract.test.tsx`, `npm run probe:keys` |
 
@@ -165,5 +165,5 @@ To re-check after a Windows Terminal or Ink upgrade, run `npm run probe:keys` an
 
 - Egress is default-deny (#65). The container shares an internal network with its task's egress proxy alone (`src/sandbox/egress-proxy.ts`, run by the image's Node). On that network no outside name resolves and no outside address routes: `curl --noproxy '*'` fails to the allowed host by name and to `1.1.1.1` by address. Through the proxy, HTTPS to the allowed host goes through, and HTTPS and plain HTTP to any other host get a 403. The container lists each denied host once, and the next prepare starts the list afresh with its new allowlist.
 
-A real L2 run (`src/executor/l2-run.contract.test.ts`, on the token from `agents-factory setup token`) runs Claude Code in the container through the proxy on the built-in hosts alone, with nothing denied, recorded on 2026-11-07. Its CLI runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so its telemetry never shows among the denied hosts.
+A real L2 run (`src/executor/contained-run.contract.test.ts`, on the token from `agents-factory setup token`) runs Claude Code in the container through the proxy on the built-in hosts alone, with nothing denied, recorded on 2026-11-07. Its CLI runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so its telemetry never shows among the denied hosts.
 

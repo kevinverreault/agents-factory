@@ -95,14 +95,35 @@ describe('a contained HITL stage', () => {
     expect(state.runs.R1).toMatchObject({ mode: 'HITL', contained: true, stage: 'grill' });
   });
 
-  test('opens on its skill, then the L2 scratch-folder factory note', async () => {
+  test('opens on its skill, then the scratch-folder factory note, which says only its commits come out of the container', async () => {
     const { factory, operator } = await attached();
     await operator.send(launch);
 
     const run = await started(factory, 1);
 
-    expect(run.firstMessage).toMatch(/^\/factory:grill-me Grill me about the login flow\.\n\n## Factory note\n\nLeave the worktree clean: /);
+    expect(run.firstMessage).toMatch(/^\/factory:grill-me Grill me about the login flow\.\n\n## Factory note\n\nLeave the worktree clean, and commit your work as you go: /);
+    expect(run.firstMessage).toContain('only they ever come out to the operator’s task branch, never uncommitted changes or untracked files.');
     expect(run.firstMessage).toContain('files you ask the operator for, in /scratch, outside the clone');
+    // Nothing fails it for a dirty tree, as the guards fail an L2 run.
+    expect(run.firstMessage).not.toContain('the factory fails a run');
+  });
+
+  test('that fails on its own logs the hosts its container denied it, and keeps its commits in the container', async () => {
+    const { factory, operator, tui } = await attached();
+    await operator.send(launch);
+    await started(factory, 1);
+    const [worktree] = await factory.git.worktrees(clone);
+    factory.git.editFile(factory.sandbox.workdirOf('T1'), 'NOTES.md', 'from the grill');
+    factory.git.commitAll(factory.sandbox.workdirOf('T1'));
+    expect(factory.sandbox.request('T1', 'docs.example.com')).toBe(false);
+
+    factory.executor.report('R1', { type: 'runFailed', reason: 'The CLI exited.' });
+
+    const state = await tui.until((state) => state.runs.R1?.status === 'ended');
+    expect(state.runs.R1).toMatchObject({ outcome: 'failed', deniedHosts: ['docs.example.com'] });
+    expect(factory.git.checked).toEqual([]);
+    expect(factory.sandbox.calls).not.toContain('bringOut T1');
+    expect(factory.git.branchTip(clone, worktree!.branch)).toBe(worktree!.head);
   });
 
   test('raises no permission card, even for a call no rule covers, while its questions still show as cards', async () => {
@@ -197,10 +218,14 @@ describe('a contained HITL stage', () => {
     expect(await started(factory, 2)).toMatchObject({ runId: 'R2', resumesSession: true, container: { taskId: 'T1' }, guards: { start: tip } });
   });
 
-  test('advancing to a stage that isn’t contained runs it on the host, and stops the container', async () => {
+  test('advancing to a stage that isn’t contained runs it on the host, with the container’s commits brought out first, and stops the container', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(launch);
     await started(factory, 1);
+    const [worktree] = await factory.git.worktrees(clone);
+    factory.git.editFile(factory.sandbox.workdirOf('T1'), 'NOTES.md', 'from the grill');
+    factory.git.commitAll(factory.sandbox.workdirOf('T1'));
+    const tip = factory.git.branchTip(factory.sandbox.clonePathOf('T1'), worktree!.branch)!;
     factory.executor.report('R1', { type: 'turnEnded' });
     await settled(operator);
 
@@ -209,10 +234,11 @@ describe('a contained HITL stage', () => {
     const next = await started(factory, 2);
     expect(next).toMatchObject({ mode: 'HITL', container: null, credential: 'subscription-host', guards: null });
     expect((await tui.until((state) => state.runs.R2?.status === 'active')).runs.R2).toMatchObject({ stage: 'notes', contained: false });
+    expect(factory.git.branchTip(clone, worktree!.branch)).toBe(tip);
     await vi.waitFor(() => expect(factory.sandbox.state('T1')).toBe('stopped'));
   });
 
-  test('fails, saying why, when the operator has no git identity to commit under, or there is no subscription token', async () => {
+  test('fails, saying why, when the operator has no git identity to commit under, git can’t read it, or there is no subscription token', async () => {
     const { factory, operator, tui } = await attached();
     factory.git.operator = null;
     await operator.send(launch);
@@ -221,6 +247,14 @@ describe('a contained HITL stage', () => {
     expect(state.runs.R1).toMatchObject({ outcome: 'failed' });
     expect(factory.executor.started).toEqual([]);
     expect(JSON.stringify(state.attentionQueue)).toContain('git config --global user.email');
+
+    const unreadable = await attached();
+    unreadable.factory.git.operator = { unreadable: 'fatal: bad config line 3 in file .gitconfig' };
+    await unreadable.operator.send(launch);
+    const unread = await unreadable.tui.until((state) => state.runs.R1?.status === 'ended');
+    expect(JSON.stringify(unread.attentionQueue)).toContain(
+      'The factory couldn’t read your git identity, which a contained HITL run commits under: fatal: bad config line 3 in file .gitconfig',
+    );
 
     const tokenless = await attached({ token: null });
     await tokenless.operator.send(launch);
