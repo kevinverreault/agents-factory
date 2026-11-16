@@ -39,7 +39,7 @@ function git(cwd: string, ...args: string[]): string {
 
 const BRANCH = 'factory/T1';
 
-type L2Run = {
+type ContainedRun = {
   executor: Executor;
   sandbox: Sandbox;
   container: Container;
@@ -62,7 +62,7 @@ const OPERATOR: GitIdentity = { name: 'Olive Operator', email: 'olive@example.co
 // daemon would, over a repo of a README and `files`, and cleans the task up
 // after `body`. With `hitl`, it is a contained HITL run instead, at a
 // planning stage, committing as `OPERATOR`.
-async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void>, files: Record<string, string> = {}, { hitl = false } = {}): Promise<void> {
+async function withContainedRun(firstMessage: string, body: (contained: ContainedRun) => Promise<void>, files: Record<string, string> = {}, { hitl = false } = {}): Promise<void> {
   const token = await storedToken();
   const root = mkdtempSync(join(tmpdir(), 'factory-l2-run-'));
   const clonePath = join(root, 'clone');
@@ -117,7 +117,7 @@ async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void
 }
 
 test('an L2 run commits in its container on the subscription token, keeps the guards, and its commit comes out to the host task branch', () =>
-  withL2Run(
+  withContainedRun(
     'Run these commands with the Bash tool, one call each: `echo "hello from the container" > hello.txt`, then `git add hello.txt`, ' +
       'then `git commit -m "Say hello"`. Then reply with only DONE.',
     async ({ executor, sandbox, container, snapshot, run, worktree, start, reported, live, ended }) => {
@@ -148,7 +148,7 @@ test('an L2 run commits in its container on the subscription token, keeps the gu
   ), 600_000);
 
 test('an L2 run’s question reaches the operator as an attention request, holds the run open, and takes their answer', () =>
-  withL2Run(
+  withContainedRun(
     'Use the AskUserQuestion tool to ask me which colour I prefer, with exactly two options: Red and Blue. ' +
       'After I answer, reply with only the colour I chose, in capitals.',
     async ({ executor, reported, live, ended }) => {
@@ -169,7 +169,7 @@ test('an L2 run’s question reaches the operator as an attention request, holds
   ), 600_000);
 
 test('an L2 run looks up symbols through its container’s language server, and sees the type error its edit introduces', () =>
-  withL2Run(
+  withContainedRun(
     CODE_INTELLIGENCE_TASK,
     async ({ container, reported, live, ended }) => {
       await waitFor(ended, 290_000);
@@ -183,7 +183,7 @@ test('an L2 run looks up symbols through its container’s language server, and 
   ), 600_000);
 
 test('a contained HITL run converses in its container: its question is a card, it takes the operator’s next message, nothing asks, and it commits as the operator', () =>
-  withL2Run(
+  withContainedRun(
     'Use the AskUserQuestion tool to ask me which colour I prefer, with exactly two options: Red and Blue. ' +
       'After I answer, reply with only the colour I chose, in capitals.',
     async ({ executor, sandbox, container, snapshot, worktree, reported, live, asked }) => {

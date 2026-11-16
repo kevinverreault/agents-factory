@@ -483,6 +483,8 @@ function containedOptions({ mode, maxTurns, guards, token, container }: RunStart
     env: {
       CLAUDE_CODE_OAUTH_TOKEN: token!,
       ...(mode === 'AFK' && RETRY_WATCHDOG_ENV),
+      // The sessions mount is the host project directory, auto memory's too,
+      // which the container may only ever read (ADR 0015): it stays off.
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       ...guards!.env,

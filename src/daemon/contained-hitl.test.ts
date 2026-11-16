@@ -172,6 +172,31 @@ describe('a contained HITL stage', () => {
     expect((await tui.until((state) => state.runs.R2?.status === 'active')).runs.R2).toMatchObject({ contained: true });
   });
 
+  test('cut short by a crash, its turn dies with a restart of its container, whose commits stay there, and the parked task reopens in it', async () => {
+    const { factory, operator } = await attached();
+    await operator.send(launch);
+    await started(factory, 1);
+    const [worktree] = await factory.git.worktrees(clone);
+    await factory.crash();
+    // The crash left the container running the dead daemon's turn, which commits.
+    await factory.sandbox.start('T1');
+    factory.git.editFile(factory.sandbox.workdirOf('T1'), 'NOTES.md', 'from the grill');
+    factory.git.commitAll(factory.sandbox.workdirOf('T1'));
+    const tip = factory.git.branchTip(factory.sandbox.clonePathOf('T1'), worktree!.branch)!;
+    factory.sandbox.calls.length = 0;
+
+    await factory.startDaemon();
+    const reattached = watch(await factory.attach());
+    await reattached.until((state) => state.tasks.T1?.label === 'Ready for you');
+    await vi.waitFor(() => expect(factory.sandbox.state('T1')).toBe('stopped'));
+    expect(factory.sandbox.calls).toEqual(['restart T1', 'stop T1']);
+    expect(factory.git.branchTip(clone, worktree!.branch)).toBe(worktree!.head);
+
+    const reopener = await factory.attach();
+    expect(await reopener.send({ type: 'open', taskId: 'T1' })).toEqual({ ok: true });
+    expect(await started(factory, 2)).toMatchObject({ runId: 'R2', resumesSession: true, container: { taskId: 'T1' }, guards: { start: tip } });
+  });
+
   test('advancing to a stage that isn’t contained runs it on the host, and stops the container', async () => {
     const { factory, operator, tui } = await attached();
     await operator.send(launch);
