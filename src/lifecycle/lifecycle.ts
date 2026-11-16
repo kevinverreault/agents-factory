@@ -11,7 +11,7 @@ import { issueRef } from '../artifacts/capture.ts';
 import type { Checks, ChecksState, FailedCheck, Issue, Mergeability, Permission as AppPermission, Permissions, PrState, PullRequest } from '../github/github.ts';
 import { researchNameRefusal } from '../github/research-branch.ts';
 import { DEFAULT_MERGE_GATE, type MergeGateConfig } from '../merge-gate/merge-gate.ts';
-import { artifactKindsIn, fillOpening, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
+import { artifactKindsIn, fillOpening, isContained, isRetiredLoop, isWorkLoop, TREE_LIMITS, type LaunchInputs, type ResolvedPreset, type Stage, type TreeLimits } from '../presets/presets.ts';
 import { callWithRule, isRule, patternFor, ruleFor, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import { cutToFit, oneLineOf } from '../text/lines.ts';
 import { SETUP_PRESET } from '../skills/repo-setup.ts';
@@ -614,6 +614,12 @@ export type Run = {
   permission?: Permission | null;
   // The stage of its task's preset the run works on, if the task has one.
   stage: string | null;
+  // Whether it is a HITL run that executes in its task's container under
+  // `bypassPermissions` (ADR 0015): decided from its stage when it starts.
+  // A takeover's run is at the AFK stage it took over, so never is. An AFK
+  // run's level decides where it runs instead (`runsContained`). Runs stored
+  // before it have none, and ran on the host.
+  contained?: boolean;
   // The ticket it works on, as a ticket task's run (ADR 0013). Runs stored
   // before ticket tasks have none.
   ticket?: string | null;
@@ -3584,6 +3590,7 @@ function startRun(
     queued: [],
     question: null,
     stage: task.stage ?? null,
+    contained: task.mode === 'HITL' && isContained(stageOf(task, task.stage)),
     ticket: task.kind === 'ticket' ? (task.ticket ?? null) : null,
     opening,
     reports: reported.map((child) => child.id),

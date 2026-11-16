@@ -2,7 +2,7 @@
 // can't drift apart.
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { GitError, type Git } from './git.ts';
+import { GitError, type Git, type GitIdentity } from './git.ts';
 
 export type CloneFixture = {
   git: Git;
@@ -13,7 +13,7 @@ export type CloneFixture = {
   clone(name: string, setup: { originUrl?: string; defaultBranch?: string }): Promise<string>;
   move(from: string, to: string): Promise<void>;
   // Makes a clone at `<root>/<name>` whose origin is reachable and has
-  // `branch`, and returns its path.
+  // `branch`, and returns its path. Its commits are made under `identity`.
   cloneWithOrigin(name: string, branch: string): Promise<string>;
   // Adds a commit to `branch` on the clone's origin, not yet fetched, and
   // returns its hash. The commit writes `files` (by path, with `/`).
@@ -35,6 +35,8 @@ export type CloneFixture = {
   push(clonePath: string, branch: string): Promise<void>;
   // Fast-forwards origin's `base` to the clone's `branch`, as merging its PR would.
   merge(clonePath: string, branch: string, base: string): Promise<void>;
+  // The operator's git identity, as the clones `cloneWithOrigin` makes have it.
+  identity: GitIdentity;
   dispose(): Promise<void>;
 };
 
@@ -130,6 +132,16 @@ export function describeGitContract(name: string, makeFixture: () => Promise<Clo
 
         await editFile(path, 'GLOSSARY.md');
         expect(await git.uncommitted(path, files)).toEqual(['GLOSSARY.md']);
+      }));
+
+    test('a worktree’s git identity is the operator’s, as its commits would name them', () =>
+      withFixture(async ({ git, root, cloneWithOrigin, identity }) => {
+        const clone = await cloneWithOrigin('widgets', 'main');
+        const path = join(root, 'wt', 'T1');
+        await git.fetch(clone, 'main');
+        await git.addWorktree(clone, { path, branch: 'factory/T1-a', startPoint: 'origin/main' });
+
+        expect(await git.identity(path)).toEqual(identity);
       }));
 
     test('a worktree’s state tells the branch checked out, every uncommitted path and each remote’s pushurl', () =>

@@ -51,6 +51,7 @@ Stage fields:
 | `mode` | `HITL` or `AFK` |
 | `model` | A model tier: `opus`, `sonnet` or `haiku` |
 | `autonomy` | `L1`, `L2` or `L3`, the ceiling an AFK stage may run at. HITL stages have none |
+| `contained` | `true` when a HITL `run` or `loop` stage's runs execute in the task's container under `bypassPermissions` (ADR 0015): the operator converses with them as on the host, their questions still show as cards, and nothing asks for permission. Each run decides it from its stage when it starts, and a takeover always continues on the host. An AFK stage runs where its autonomy level says, so it can't be contained |
 | `max_turns` | A whole number of at least 1, the runaway guard of an AFK stage's runs: hitting it ends the run `failed` with a failure attention request. Without it a run gets the global default of 300; the launch card's max turns overrides both |
 | `context` | `resume` (the default) or `fresh` |
 | `optional` | `true` when the advance sheet may skip it |

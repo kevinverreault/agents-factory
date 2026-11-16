@@ -3,7 +3,8 @@
 // subscription token, the guards are checked in the container, and the run's
 // commit comes out to the host task branch through a bundle. They spend a
 // little usage on haiku, and need Docker and the token `agents-factory setup
-// token` stored.
+// token` stored. A contained HITL run (ADR 0015) is started the same way, as
+// a conversation in the container, committing as the operator.
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -18,7 +19,8 @@ import { waitFor } from '../os/test-support.ts';
 import { dockerSandbox } from '../sandbox/docker.ts';
 import { BUILT_IN_EGRESS, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { windowsCredentials } from '../secrets/secrets.ts';
-import type { RunSnapshot } from '../git/git.ts';
+import type { GitIdentity, RunSnapshot } from '../git/git.ts';
+import type { ToolCall } from '../permissions/permissions.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, Executor, RunStart } from './executor.ts';
 import { afkRun, CODE_INTELLIGENCE_ERROR, CODE_INTELLIGENCE_TASK, typeScriptProject, typesOf } from './sdk-test-support.ts';
@@ -48,13 +50,19 @@ type L2Run = {
   start: string;
   reported: RunEvent[];
   live: ConversationEvent[];
+  // The calls that reached the factory's gate.
+  asked: ToolCall[];
   ended: () => boolean;
 };
 
+// The operator a contained HITL run commits as.
+const OPERATOR: GitIdentity = { name: 'Olive Operator', email: 'olive@example.com' };
+
 // Starts an L2 run of `firstMessage` in a fresh task's container, as the
 // daemon would, over a repo of a README and `files`, and cleans the task up
-// after `body`.
-async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void>, files: Record<string, string> = {}): Promise<void> {
+// after `body`. With `hitl`, it is a contained HITL run instead, at a
+// planning stage, committing as `OPERATOR`.
+async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void>, files: Record<string, string> = {}, { hitl = false } = {}): Promise<void> {
   const token = await storedToken();
   const root = mkdtempSync(join(tmpdir(), 'factory-l2-run-'));
   const clonePath = join(root, 'clone');
@@ -74,10 +82,10 @@ async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void
   try {
     const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir, egress: [...BUILT_IN_EGRESS] });
     const snapshot = await container.checks.snapshot(container.workdir);
-    const env = prepareRunGit(runDir, FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
+    const env = prepareRunGit(runDir, hitl ? OPERATOR : FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
     const run: RunStart = {
       ...afkRun(worktree, firstMessage, 10),
-      autonomy: 'L2',
+      ...(hitl ? { mode: 'HITL' as const, autonomy: null, maxTurns: null, allowRules: [] } : { autonomy: 'L2' as const }),
       credential: 'subscription-token',
       token,
       container,
@@ -85,15 +93,19 @@ async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void
     };
     const reported: RunEvent[] = [];
     const live: ConversationEvent[] = [];
+    const asked: ToolCall[] = [];
     executor.start(run, {
       report: (event) => reported.push(event),
       converse: (event) => live.push(event),
       // A call that reaches the gate is let through, as the daemon's gate would for a run in a container.
-      askPermission: (call) => executor.permit('R1', call.id, { allow: true }),
+      askPermission: (call) => {
+        asked.push(call);
+        executor.permit('R1', call.id, { allow: true });
+      },
     });
     const ended = () => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed');
     try {
-      await body({ executor, sandbox, container, snapshot, run, worktree, start, reported, live, ended });
+      await body({ executor, sandbox, container, snapshot, run, worktree, start, reported, live, asked, ended });
     } finally {
       executor.stop('R1');
     }
@@ -168,4 +180,46 @@ test('an L2 run looks up symbols through its container’s language server, and 
       expect(await container.deniedHosts()).toEqual([]);
     },
     typeScriptProject(),
+  ), 600_000);
+
+test('a contained HITL run converses in its container: its question is a card, it takes the operator’s next message, nothing asks, and it commits as the operator', () =>
+  withL2Run(
+    'Use the AskUserQuestion tool to ask me which colour I prefer, with exactly two options: Red and Blue. ' +
+      'After I answer, reply with only the colour I chose, in capitals.',
+    async ({ executor, sandbox, container, snapshot, worktree, reported, live, asked }) => {
+      const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
+      const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
+      const question = () => reported.find((event) => event.type === 'questionAsked');
+      await waitFor(() => question() !== undefined || reported.some((event) => event.type === 'runFailed'), 120_000);
+      const card = (question() as Extract<RunEvent, { type: 'questionAsked' }>).question;
+      // The card holds the turn open.
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      expect(turnsEnded()).toBe(0);
+
+      executor.answer('R1', card.id, { [card.questions[0]!.question]: 'Blue' });
+      await waitFor(() => turnsEnded() === 1, 120_000);
+      expect(agentSaid('BLUE')).toBe(true);
+
+      executor.send(
+        'R1',
+        'Run these commands with the Bash tool, one call each: `echo "notes from the grill" > notes.txt`, then `git add notes.txt`, ' +
+          'then `git commit -m "Keep the grill notes"`. Then reply with only DONE.',
+      );
+      await waitFor(() => turnsEnded() === 2, 290_000);
+
+      expect(typesOf(reported)).toEqual(['runStarted', 'questionAsked', 'turnEnded', 'turnEnded']);
+      expect(agentSaid('DONE')).toBe(true);
+      // No call asked: the container, not the gate, keeps the run safe.
+      expect(asked).toEqual([]);
+      expect(await container.deniedHosts()).toEqual([]);
+      const { stdout } = await container.git(['log', '-1', '--format=%an <%ae>|%cn <%ce>%n%B']);
+      expect(stdout).toContain(`${OPERATOR.name} <${OPERATOR.email}>|${OPERATOR.name} <${OPERATOR.email}>`);
+      expect(stdout).toContain('Factory-Run: R1');
+      // Guarded as an L2 run is, under the operator's email.
+      expect(await container.checks.violations(container.workdir, snapshot, [], OPERATOR.email)).toEqual([]);
+      const tip = await sandbox.bringOut('T1', worktree, BRANCH);
+      expect(git(worktree, 'show', `${tip}:notes.txt`)).toBe('notes from the grill');
+    },
+    {},
+    { hitl: true },
   ), 600_000);

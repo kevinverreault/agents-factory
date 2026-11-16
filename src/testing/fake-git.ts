@@ -1,9 +1,11 @@
 import { relative, isAbsolute } from 'node:path';
 import { FACTORY_IDENTITY } from '../guards/run-git.ts';
-import { GitError, type ChangedFile, type Clone, type DirectoryFile, type Git, type RunSnapshot, type Worktree, type WorktreeState } from '../git/git.ts';
+import { GitError, type ChangedFile, type Clone, type DirectoryFile, type Git, type GitIdentity, type RunSnapshot, type Worktree, type WorktreeState } from '../git/git.ts';
 
 // The email the fake's worktrees commit under, as the operator's own.
 export const FAKE_OPERATOR_EMAIL = 'operator@example.com';
+// The operator's git identity, which the fake's worktrees have.
+export const FAKE_OPERATOR = { name: 'Olive Operator', email: FAKE_OPERATOR_EMAIL };
 
 type CloneSetup = { originUrl?: string | null; defaultBranch?: string | null };
 
@@ -362,6 +364,14 @@ export class FakeGit implements Git {
     if (url === null) urls.delete(remote);
     else urls.set(remote, url);
     this.pushUrls.set(worktreePath, urls);
+  }
+
+  // The operator's git identity, which every worktree has: null as if they set no name or email.
+  operator: GitIdentity | null = FAKE_OPERATOR;
+
+  async identity(worktreePath: string): Promise<GitIdentity | null> {
+    this.worktreeAt(worktreePath);
+    return this.operator;
   }
 
   async worktreeState(worktreePath: string): Promise<WorktreeState> {

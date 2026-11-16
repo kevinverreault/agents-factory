@@ -35,6 +35,8 @@ const stageFields = {
   exit: z.string().optional(),
   requires: z.literal('L2').optional(),
   on_findings: z.literal('fix-once').optional(),
+  // Whether the stage's HITL runs execute in the task's container (ADR 0015).
+  contained: z.boolean().optional(),
 };
 
 const stageSchema = z.strictObject(stageFields);
@@ -181,6 +183,17 @@ export function fillOpening(stage: Stage, valueOf: (variable: string) => string 
 // Whether a stage's args name the launch prompt.
 export function namesPrompt(stage: Stage): boolean {
   return variablesOf(stage).includes('prompt');
+}
+
+// Whether the stage's runs are HITL runs of an agent: a HITL run or loop stage.
+function runsHitl(stage: Stage): boolean {
+  return stage.mode === 'HITL' && (stage.kind === 'run' || stage.kind === 'loop');
+}
+
+// Whether the stage's HITL runs execute contained, in the task's container
+// under `bypassPermissions`, rather than on the operator's host (ADR 0015).
+export function isContained(stage: Stage | undefined): boolean {
+  return !!stage?.contained && runsHitl(stage);
 }
 
 // Whether the stage is a work loop over a map (wayfinder's `work`): a HITL
@@ -337,6 +350,7 @@ function stageProblem(stage: Stage): string | null {
   if (stage.kind === 'tickets' && stage.skill === undefined) return 'a tickets stage needs a skill.';
   if (stage.kind === 'run' && stage.skill === undefined && stage.args === undefined) return 'a run stage needs a skill or args.';
   if (stage.mode === 'HITL' && stage.autonomy !== undefined) return 'only an AFK stage has an autonomy ceiling.';
+  if (stage.contained && !runsHitl(stage)) return 'only a HITL run or loop stage can be contained: an AFK stage runs where its autonomy level says.';
   return null;
 }
 

@@ -9,7 +9,7 @@ import { capture } from '../artifacts/capture.ts';
 import { DependenciesError, type Dependencies } from '../dependencies/dependencies.ts';
 import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart, type Verdict } from '../executor/executor.ts';
 import { DELETION_ORDER, listedLeftovers, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
-import { GitError, type ChangedFile, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
+import { GitError, type ChangedFile, type Git, type GitIdentity, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   CHECKS_READ,
   GitHubError,
@@ -286,6 +286,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // The tasks whose containers may still run a turn the daemon cut short:
   // restarted before anything else happens in them (ADR 0003).
   const staleTurns = new Set<string>();
+  // Those of them whose turn is a contained HITL run's (ADR 0015): its
+  // restart brings nothing out, as its commits come out at advance, handoff
+  // and spawn instead.
+  const keptInContainer = new Set<string>();
   // The runs whose checks found broken guards, until their end is in.
   const brokenRuns = new Set<string>();
   // What the daemon does to each task's container, one step at a time, and
@@ -1634,11 +1638,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     for (const run of Object.values(lifecycle.runs)) {
       // Even one Docker didn't list: it may answer by the time the run is prepared.
-      if (run.status !== 'ended' && runsInContainer(run)) staleTurns.add(run.taskId);
+      if (run.status !== 'ended' && runsInContainer(run)) markStale(run);
     }
     // So may the container of an L2 run a takeover ended, its turn not yet ended there.
     const takeovers = Object.values(lifecycle.intents).filter((intent) => intent.verb === 'takeover');
-    for (const { taskId } of takeovers) staleTurns.add(taskId);
+    for (const { taskId } of takeovers) markStale(taskId);
     for (const taskId of [...staleTurns]) await onContainer(taskId, () => endStaleTurn(taskId)).catch(() => {});
     for (const intent of takeovers) {
       // One Docker didn't answer for carries on once it does.
@@ -2552,7 +2556,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         // One whose guards broke ended its turn, and keeps its commits there.
         const brokeGuards = brokenRuns.delete(run.id);
         if (startedHere && runsInContainer(run) && containers.has(run.taskId) && (!ownEvent || (action.type === 'runFailed' && !brokeGuards))) {
-          staleTurns.add(run.taskId);
+          markStale(run);
           settleContainer(run.taskId);
         }
       }
@@ -2645,7 +2649,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Starts the run on the executor. An AFK run in a worktree starts guarded
   // (ADR 0007), once its worktree is snapshotted, unless it ended meanwhile.
   // An L2 run starts in its task's container (ADR 0007), prepared with the
-  // host task branch's commits, and its checks are made there. Any run of a
+  // host task branch's commits, and its checks are made there. So does a
+  // HITL run at a contained stage (ADR 0015), guarded alike, but committing
+  // as the operator, and holding its commits there when it ends. Any run of a
   // task with a container waits for what the container is doing first, such
   // as bringing out the commits of a run cut short. A HITL run on the host
   // then gets the commits the container still holds, such as those of an L2
@@ -2654,12 +2660,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function startRun(run: Run): Promise<void> {
     const task = lifecycle.tasks[run.taskId]!;
     const cwd = task.worktree?.path ?? null;
+    const contained = runsInContainer(run);
     let guards: RunGuards | null = null;
     let container: Container | null = null;
     let token: string | null = null;
     if (containers.has(task.id)) await onContainer(task.id, async () => {});
     // Commits that can't come out stay there: the next run's prepare, or the task's cleanup, says why.
-    if (run.mode === 'HITL' && cwd && containers.has(task.id)) await bringOutOfContainer(task);
+    if (run.mode === 'HITL' && !contained && cwd && containers.has(task.id)) await bringOutOfContainer(task);
     // The CLI resumes a session only from its file (ADR 0011).
     // A judging run's session is its own (ADR 0014).
     const sessionId = run.sessionId ?? task.sessionId;
@@ -2671,13 +2678,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // 0010); an L2 run's container installs its own. One that failed holds
     // the run back no more than a missing lockfile would.
     let uninstalled: string | null = null;
-    if (cwd && !runsContained(run.autonomy)) {
+    if (cwd && !contained) {
       uninstalled = await installDependencies(cwd);
       if (lifecycle.runs[run.id]?.status !== 'active') return;
     }
-    if (run.mode === 'AFK' && cwd) {
+    // A contained HITL run is guarded as an L2 run is, but its commits are
+    // the operator's own (ADR 0015).
+    if ((run.mode === 'AFK' || contained) && cwd) {
       const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
-      const contained = runsContained(run.autonomy);
+      let identity = FACTORY_IDENTITY;
+      if (run.mode === 'HITL') {
+        let operator: GitIdentity | null;
+        try {
+          operator = await git.identity(cwd);
+        } catch (error) {
+          if (!(error instanceof GitError)) throw error;
+          return fail(`The factory couldn’t read your git identity, which a contained run commits under: ${error.message}`);
+        }
+        if (!operator) return fail(NO_GIT_IDENTITY);
+        identity = operator;
+      }
       if (contained) {
         try {
           token = await secrets.read(SUBSCRIPTION_TOKEN_SECRET);
@@ -2720,7 +2740,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
       // The run's git keeps the settings its worktree was checked out under:
       // the operator's on the host, the image's in a container.
-      const env = prepareRunGit(dir, FACTORY_IDENTITY, { task: task.id, run: run.id, model: run.model }, snapshot!.checkout);
+      const env = prepareRunGit(dir, identity, { task: task.id, run: run.id, model: run.model }, snapshot!.checkout);
       const ghConfigDir = join(dir, 'gh');
       Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
       guarded.set(run.id, { worktree: container?.workdir ?? cwd, host: cwd, dir, checks: container?.checks ?? git, container, snapshot: snapshot!, scripts: new Set() });
@@ -2920,6 +2940,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const guard = guarded.get(event.runId);
     if (!guard || (event.type !== 'runCompleted' && event.type !== 'runFailed')) return event;
     unguard(event.runId);
+    // A contained HITL run's commits stay in its container until the task
+    // advances, hands off or spawns, which check and bring them out (ADR 0015).
+    if (lifecycle.runs[event.runId]?.mode === 'HITL') return event;
     // What the run's container denied it is logged on the run, whatever else it did.
     if (guard.container) {
       const deniedHosts = await guard.container.deniedHosts().catch((error) => {
@@ -3109,6 +3132,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
   }
 
+  // Marks the turn of `run`, or of the task's run a takeover ended, as one
+  // its container may still run.
+  function markStale(of: Run | string): void {
+    const taskId = typeof of === 'string' ? of : of.taskId;
+    staleTurns.add(taskId);
+    if (typeof of !== 'string' && of.mode === 'HITL') keptInContainer.add(taskId);
+    else keptInContainer.delete(taskId);
+  }
+
   // Restarts the task's container, which kills a turn still running in it
   // and keeps its clone, then brings its commits out to the host task branch.
   // Until the restart is made, the turn may still run: the next run's
@@ -3116,8 +3148,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function endStaleTurn(taskId: string): Promise<void> {
     const had = await sandbox.restart(taskId);
     staleTurns.delete(taskId);
+    const keeps = keptInContainer.delete(taskId);
     if (!had) return void containers.delete(taskId);
     containers.set(taskId, true);
+    if (keeps) return;
     const worktree = lifecycle.tasks[taskId]?.worktree;
     if (!worktree) return;
     // Commits that can't come out stay in the container: the next run's
@@ -3183,6 +3217,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // otherwise is refused, with its reason. The run's later calls may run the
   // temp scripts a call the rules cover writes, but none a call overwrote.
   function gate(runId: string, call: ToolCall): void {
+    // A contained HITL run asks about nothing: its container keeps it safe (ADR 0015).
+    if (lifecycle.runs[runId]?.contained) return executor.permit(runId, call.id, { allow: true });
     const { rules, error } = readAllowRules(options.permissionsPath);
     const guard = guarded.get(runId);
     // A HITL run is unguarded, but works in its task's worktree all the same.
@@ -3248,13 +3284,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 // Why no run starts while the daemon replays its unfinished intents.
 const REPLAYING = 'The factory is finishing what it left unfinished, so it starts no new run yet.';
 const NO_APP = 'The factory has no GitHub App yet: run `agents-factory setup github` to create it.';
+const NO_GIT_IDENTITY =
+  'The factory couldn’t name you as the author of this contained run’s commits: your git has no user.name or user.email. Set them with `git config --global user.name` and `git config --global user.email`, then retry the run.';
 const NO_SUBSCRIPTION_TOKEN =
   'The factory has no subscription token for L2 runs yet: run `claude setup-token`, then `agents-factory setup token` to store what it prints.';
 
 // Whether the run executes in its task's container: an L2 AFK run (ADR
-// 0007), or an L3 one, contained alike (ADR 0014).
+// 0007), or an L3 one, contained alike (ADR 0014), or a HITL run at a
+// contained stage (ADR 0015).
 function runsInContainer(run: Run): boolean {
-  return run.mode === 'AFK' && runsContained(run.autonomy);
+  return run.mode === 'AFK' ? runsContained(run.autonomy) : !!run.contained;
 }
 
 // What the factory holds about a guarded AFK run while it runs (ADR 0007):
