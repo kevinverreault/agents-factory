@@ -67,6 +67,10 @@ _Avoid_: Pipeline, recipe
 One step of a workflow preset: an agent run of one skill, a work loop, a spec task's launching of ticket tasks, or a factory action, with its own mode, model tier and autonomy ceiling.
 _Avoid_: Step, phase
 
+**Containment**:
+Whether a run executes on the operator's host or in its task's container. Every AFK run at L2 or above is contained; a HITL stage is contained when its workflow preset says so, as the built-in planning stages are, setup aside.
+_Avoid_: Sandbox mode, isolation (for the domain term)
+
 **Model tier**:
 The class of model a stage or run asks for, resolved to an exact model when the run starts. A delegating agent can only ask for its own tier or a lower one.
 _Avoid_: Model, size
@@ -227,7 +231,7 @@ A decision the factory made where an attended task would have asked the operator
 _Avoid_: Assumption, auto-decision
 
 **Factory identity**:
-The GitHub identity the factory acts under for AFK work, distinct from the operator's own. HITL work stays under the operator's identity. One exception: once a setup task reaches review, the factory pushes its branch and opens its draft PR under this identity, HITL or not (ADR 0010).
+The GitHub identity the factory acts under for AFK work and for the issues a contained HITL run writes, distinct from the operator's own. HITL work on the host stays under the operator's identity, and a contained run's commits still name the operator as author. One more exception: once a setup task reaches review, the factory pushes its branch and opens its draft PR under this identity, HITL or not (ADR 0010).
 _Avoid_: Bot account, service account
 
 **Attention request**:
@@ -235,8 +239,12 @@ An AFK run's call for an operator answer, permission or decision, raised when it
 _Avoid_: Interrupt, alert, needs-human
 
 **Permission card**:
-A HITL run's call that no rule covers, waiting in its conversation for the operator to allow or deny it. Unlike an attention request it suspends nothing, and it ends with the agent's turn.
+A call by a HITL run on the host that no rule covers, waiting in its conversation for the operator to allow or deny it. Unlike an attention request it suspends nothing, and it ends with the agent's turn. A contained HITL run raises none.
 _Avoid_: Permission prompt, HITL request
+
+**Host card**:
+A host a contained HITL run tried to reach outside its allowed egress, waiting in its conversation for the operator to allow it for the task or always, or to deny it.
+_Avoid_: Egress prompt, network permission
 
 **Parked run**:
 A run ended while it waited on the operator, either suspended on an attention request or a HITL run left idle. Answering or reopening it starts a new run on the same conversation.
