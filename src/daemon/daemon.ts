@@ -2728,9 +2728,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return fail(writesIssues ? await issuesWriteRefusal(task.repo, error) : `The factory couldn’t give the run its read-only GitHub token: ${error.message}`);
       }
       if (writesIssues) {
+        // The operator is the App's owner, as for the PRs the factory assigns
+        // them (ADR 0004). An App an organization owns would name the
+        // organization, which GitHub can't assign an issue to.
         try {
-          // `botToken` found the App.
-          operatorLogin = await github.appOwner((await factoryApp())!);
+          operatorLogin = await github.appOwner(bot.app);
         } catch (error) {
           if (!isGitHubFailure(error)) throw error;
           return fail(`The factory couldn’t read your GitHub login, which a contained HITL run assigns you by: ${error.message}`);
@@ -3024,7 +3026,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function botToken(repo: string, permissions: Permissions): Promise<BotToken> {
     const found = await factoryApp();
     if (!found) throw new GitHubError(NO_APP);
-    return { user: `${found.slug}[bot]`, ...(await github.mintToken(found, repo, permissions)) };
+    return { app: found, user: `${found.slug}[bot]`, ...(await github.mintToken(found, repo, permissions)) };
   }
 
   // Why a contained HITL run got no token that writes issues: the App's
@@ -3488,7 +3490,8 @@ function childListing(child: Task) {
 }
 
 // An AFK run's read-only token, and the App's bot user it reads as.
-type BotToken = { user: string; token: string; expiresAt: number };
+// A bot token, the App it was minted from, and the App's bot user it acts as.
+type BotToken = { app: FactoryApp; user: string; token: string; expiresAt: number };
 
 // GitHub refused or was unreachable, the credential store couldn't be read,
 // or what it holds isn't the App.

@@ -13,12 +13,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, describe, expect, test } from 'vitest';
-import { GITHUB_APP_SECRET } from '../daemon/daemon.ts';
-import { factoryPaths } from '../daemon/paths.ts';
-import { gitHubApi, ISSUES_WRITE, type FactoryApp } from '../github/github.ts';
+import { gitHubApi, ISSUES_WRITE } from '../github/github.ts';
 import { writeRunGh } from '../github/run-gh.ts';
 import { prepareRunGit } from '../guards/run-git.ts';
-import { windowsCredentials } from '../secrets/secrets.ts';
+import { sh, storedApp } from '../testing/contract-support.ts';
 import { dockerSandbox } from './docker.ts';
 import { BUILT_IN_EGRESS, inRunDir, type Container } from './sandbox.ts';
 
@@ -27,25 +25,10 @@ const repo = process.env.FACTORY_CONTRACT_REPO;
 // The image build can take minutes the first time.
 const BUILD_MS = 15 * 60_000;
 
-// The operator's own factory home, as `setup github` wrote it.
-async function storedApp(): Promise<FactoryApp> {
-  const { AGENTS_FACTORY_HOME, ...env } = process.env;
-  const stored = await windowsCredentials(factoryPaths(env).credentialPrefix).read(GITHUB_APP_SECRET);
-  if (!stored) throw new Error('No factory App is stored: run `agents-factory setup github` first.');
-  return JSON.parse(stored) as FactoryApp;
-}
-
-// Runs `script` with `sh` in the container, with exactly `env` set besides
-// the image's own, and gives its exit code and output, stderr included.
-function sh(container: Container, script: string, env: Record<string, string>): Promise<{ code: number | null; stdout: string }> {
-  return new Promise((done, fail) => {
-    const child = container.spawn('sh', ['-c', `(${script}) 2>&1`], { env });
-    let stdout = '';
-    child.stdout!.on('data', (chunk) => (stdout += chunk));
-    child.stdin!.end();
-    child.on('error', fail);
-    child.on('close', (code) => done({ code, stdout: stdout.trim() }));
-  });
+// Runs `script` as `sh` does, with its stderr in its output, trimmed.
+async function shOut(container: Container, script: string, env: Record<string, string>): Promise<{ code: number | null; stdout: string }> {
+  const { code, stdout } = await sh(container, `(${script}) 2>&1`, env);
+  return { code, stdout: stdout.trim() };
 }
 
 // `gh api` as the operator, on the host, with their own login.
@@ -53,6 +36,7 @@ async function operatorApi(...args: string[]): Promise<any> {
   return JSON.parse((await execFileAsync('gh', ['api', ...args])).stdout);
 }
 
+// Git on the host, as a test that makes the task's clone.
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=Factory Test', '-c', 'user.email=test@example.com', ...args], { cwd, encoding: 'utf8', windowsHide: true }).trim();
 }
@@ -103,7 +87,7 @@ if (!repo) {
             runDir,
           );
           const run = async (script: string) => {
-            const result = await sh(container, script, env);
+            const result = await shOut(container, script, env);
             expect(result, script).toMatchObject({ code: 0 });
             return result.stdout;
           };
@@ -117,6 +101,9 @@ if (!repo) {
           const parent = await create('Contract test: a spec');
           const child = await create('Contract test: a ticket');
           const blocker = await create('Contract test: its blocker');
+          // The doc's older-gh way: the image's gh, from Debian bookworm's
+          // packages (docker.ts), predates 2.94's `--parent` and
+          // `--add-sub-issue`, so this is the call a contained run makes.
           await run(`gh api --method POST repos/{owner}/{repo}/issues/${parent.number}/sub_issues -F sub_issue_id=${child.id}`);
           await run(`gh api --method POST repos/{owner}/{repo}/issues/${child.number}/dependencies/blocked_by -F issue_id=${blocker.id}`);
           await run('gh label create factory-contract --force --description "The factory identity contract test"');
@@ -133,13 +120,15 @@ if (!repo) {
           // git can't push: not as the run's git config has it, and not with
           // the token itself, without that config, which has no Contents write.
           await run('echo x > x.txt && git add x.txt && git commit --quiet -m "Work"');
-          const pushed = await sh(container, 'git push origin HEAD:refs/heads/elsewhere', env);
+          const pushed = await shOut(container, 'git push origin HEAD:refs/heads/elsewhere', env);
           expect(pushed.code).not.toBe(0);
           expect(pushed.stdout).toContain('the-factory-pushes-for-you');
           const branch = `factory-contract-${randomBytes(4).toString('hex')}`;
           const unguarded = 'env -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_COUNT git';
-          const direct = await sh(container, `${unguarded} push "https://x-access-token:${token}@github.com/${repo}.git" HEAD:refs/heads/${branch}`, env);
+          const direct = await shOut(container, `${unguarded} push "https://x-access-token:${token}@github.com/${repo}.git" HEAD:refs/heads/${branch}`, env);
           expect(direct.code).not.toBe(0);
+          // GitHub refused it, not the network on the way.
+          expect(direct.stdout).toMatch(/Permission to \S+ denied|Write access to repository not granted|\b403\b/);
           expect((await execFileAsync('git', ['ls-remote', '--heads', `https://github.com/${repo}.git`, branch])).stdout.trim()).toBe('');
         } finally {
           for (const { taskId } of await sandbox.list()) await sandbox.remove(taskId);
