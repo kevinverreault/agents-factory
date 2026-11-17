@@ -11,6 +11,7 @@ import { beforeAll, describe, expect, test } from 'vitest';
 import { pinnedLanguageServerVersions } from '../code-intelligence/code-intelligence.ts';
 import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import { dockerSandbox } from './docker.ts';
+import { sh } from '../testing/contract-support.ts';
 import { inRunDir, type Container, type Sandbox } from './sandbox.ts';
 import { describeSandboxContract, type SandboxFixture } from './sandbox-contract.ts';
 
@@ -19,19 +20,6 @@ const BUILD_MS = 15 * 60_000;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=Factory Test', '-c', 'user.email=test@example.com', ...args], { cwd, encoding: 'utf8', windowsHide: true }).trim();
-}
-
-// Runs `script` with `sh` in the container, with exactly `env` set besides the
-// image's own, and gives its exit code and output.
-function sh(container: Container, script: string, env: Record<string, string> = {}): Promise<{ code: number | null; stdout: string }> {
-  return new Promise((done, fail) => {
-    const child = container.spawn('sh', ['-c', script], { env });
-    let stdout = '';
-    child.stdout!.on('data', (chunk) => (stdout += chunk));
-    child.stdin!.end();
-    child.on('error', fail);
-    child.on('close', (code) => done({ code, stdout }));
-  });
 }
 
 let edits = 0;

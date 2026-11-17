@@ -25,25 +25,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, describe, expect, test } from 'vitest';
-import { GITHUB_APP_SECRET } from '../daemon/daemon.ts';
-import { factoryPaths } from '../daemon/paths.ts';
-import { windowsCredentials } from '../secrets/secrets.ts';
+import { storedApp } from '../testing/contract-support.ts';
 import { describeGitHubContract, type GitHubClone } from './github-contract.ts';
-import { gitHubApi, READ_ONLY, type FactoryApp } from './github.ts';
+import { gitHubApi, READ_ONLY } from './github.ts';
 import { writeRunGh } from './run-gh.ts';
 
 const execFileAsync = promisify(execFile);
 const repo = process.env.FACTORY_CONTRACT_REPO;
 const issue = process.env.FACTORY_CONTRACT_ISSUE ?? '1';
 const github = gitHubApi();
-
-// The operator's own factory home, as `setup github` wrote it.
-async function storedApp(): Promise<FactoryApp> {
-  const { AGENTS_FACTORY_HOME, ...env } = process.env;
-  const stored = await windowsCredentials(factoryPaths(env).credentialPrefix).read(GITHUB_APP_SECRET);
-  if (!stored) throw new Error('No factory App is stored: run `agents-factory setup github` first.');
-  return JSON.parse(stored) as FactoryApp;
-}
 
 // `gh` as an AFK run calls it: the operator's login removed, the run's config dir set.
 function gh(runEnv: Record<string, string>, args: string[]): Promise<{ ok: boolean; output: string }> {

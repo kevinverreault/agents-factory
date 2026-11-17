@@ -263,6 +263,76 @@ describe('a contained HITL stage', () => {
   });
 });
 
+describe('what a contained HITL stage writes GitHub as', () => {
+  const hostsOf = (runDir: string) => readFileSync(join(runDir, 'gh', 'hosts.yml'), 'utf8');
+
+  test('the factory identity, with a token for its repository alone that writes issues and reads pull requests, never the operator’s login', async () => {
+    const { factory, operator } = await attached();
+    await operator.send(launch);
+
+    const run = await started(factory, 1);
+
+    expect(factory.github.minted).toEqual([
+      { repo: 'acme/widgets', permissions: { issues: 'write', pull_requests: 'read', metadata: 'read' }, token: 'ghs_fake1', expiresAt: expect.any(Number) },
+    ]);
+    const [spec] = factory.sandbox.prepared;
+    expect(hostsOf(spec!.runDir)).toContain('oauth_token: ghs_fake1');
+    expect(hostsOf(spec!.runDir)).toContain('agents-factory-operator[bot]');
+    // The container's clone has no GitHub remote: gh is told the repository.
+    expect(run.guards!.env).toMatchObject({ GH_CONFIG_DIR: '/factory/run/gh', GH_REPO: 'acme/widgets' });
+  });
+
+  test('knows the operator’s login, in its environment and its opening note, to assign them where a convention says `@me`', async () => {
+    const { factory, operator } = await attached();
+    await operator.send(launch);
+
+    const run = await started(factory, 1);
+
+    expect(run.guards!.env).toMatchObject({ FACTORY_OPERATOR_LOGIN: factory.github.operator });
+    expect(run.firstMessage).toContain(`the operator’s GitHub login, ${factory.github.operator}, which is also in $FACTORY_OPERATOR_LOGIN`);
+  });
+
+  test('its token is refreshed in place before it expires, with the same scope', async () => {
+    const { factory, operator } = await attached();
+    await operator.send(launch);
+    const run = await started(factory, 1);
+    const [spec] = factory.sandbox.prepared;
+
+    factory.clock.advance(minutes(55));
+
+    await vi.waitFor(() => expect(hostsOf(spec!.runDir)).toContain('ghs_fake2'));
+    expect(factory.github.minted.map(({ permissions }) => permissions)).toEqual([
+      { issues: 'write', pull_requests: 'read', metadata: 'read' },
+      { issues: 'write', pull_requests: 'read', metadata: 'read' },
+    ]);
+    expect(run.guards!.env.GH_CONFIG_DIR).toBe('/factory/run/gh');
+  });
+
+  test('is refused, with where to approve it, when the App’s installation doesn’t grant issues write', async () => {
+    const { factory, operator, tui } = await attached();
+    factory.github.install('acme/widgets', { contents: 'write', pull_requests: 'write', issues: 'read', metadata: 'read' });
+    await operator.send(launch);
+
+    const state = await tui.until((state) => state.runs.R1?.status === 'ended');
+
+    expect(state.runs.R1).toMatchObject({ outcome: 'failed' });
+    const reason = JSON.stringify(state.attentionQueue);
+    expect(reason).toContain('A contained HITL run writes issues as the factory’s GitHub App, which needs Issues write on acme/widgets, and its installation doesn’t grant it yet.');
+    expect(reason).toContain('https://github.com/settings/installations/');
+    expect(factory.executor.started).toEqual([]);
+  });
+
+  test('an AFK run in the same task keeps the read-only token', async () => {
+    const { factory, operator } = await attached();
+    await operator.send({ ...launch, stage: 'implement', autonomy: 'L2' });
+
+    const run = await started(factory, 1);
+
+    expect(factory.github.minted.map(({ permissions }) => permissions)).toEqual([{ issues: 'read', pull_requests: 'read', metadata: 'read' }]);
+    expect(run.guards!.env.FACTORY_OPERATOR_LOGIN).toBeUndefined();
+  });
+});
+
 describe('a takeover', () => {
   test('continues on the host, even in a preset with contained stages', async () => {
     const { factory, operator, tui } = await attached();

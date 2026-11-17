@@ -69,7 +69,7 @@ describe('an L2 AFK run', () => {
       credential: 'subscription-token',
       token: 'oauth-token',
       container: { taskId: 'T1', workdir: factory.sandbox.workdirOf('T1') },
-      guards: { start: worktree!.head, env: { GIT_CONFIG_GLOBAL: '/factory/run/gitconfig', GH_CONFIG_DIR: '/factory/run/gh', GIT_CONFIG_VALUE_0: '/factory/run/hooks' } },
+      guards: { start: worktree!.head, env: { GIT_CONFIG_GLOBAL: '/factory/run/gitconfig', GH_CONFIG_DIR: '/factory/run/gh', GH_REPO: 'acme/widgets', GIT_CONFIG_VALUE_0: '/factory/run/hooks' } },
     });
     expect(factory.sandbox.state('T1')).toBe('running');
     // The run's git config is written where the container mounts it, read-only.
