@@ -4,7 +4,7 @@
 import type { Answers, AutonomyLevel, Mode, Report, RunEvent } from '../lifecycle/lifecycle.ts';
 import type { Tier } from '../models/routing.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
-import type { Container } from '../sandbox/sandbox.ts';
+import type { Container, OperatorProfile } from '../sandbox/sandbox.ts';
 
 export type RunStart = {
   runId: string;
@@ -155,4 +155,8 @@ export interface Executor {
   // Where the CLI keeps the session transcripts of runs whose cwd is `cwd`:
   // an L2 container mounts it, so its runs and the host's share sessions.
   sessionsDir(cwd: string): string;
+  // Where the operator's user `CLAUDE.md` is, and the auto memory of the
+  // project whose repository is at `root`, as a run on the host would read
+  // them: what a contained HITL run is given of their profile (ADR 0015).
+  profileOf(root: string): OperatorProfile;
 }

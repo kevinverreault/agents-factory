@@ -218,6 +218,15 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
       return claudeProjectDir(cwd);
     },
 
+    // The user `CLAUDE.md` in the CLI's config directory, and the auto
+    // memory in the project directory of the repository, as claude.exe
+    // 2.1.312 keys it: by the repository's main working tree, which every
+    // worktree of it shares. An `autoMemoryDirectory` the operator set
+    // themselves isn't followed.
+    profileOf(root) {
+      return { claudeMd: join(claudeConfigDir(), 'CLAUDE.md'), memory: join(claudeProjectDir(root), 'memory') };
+    },
+
     async archive({ sessionId, cwd }, dir) {
       try {
         if (!(await getSessionInfo(sessionId, { dir: cwd }))) return;
@@ -347,7 +356,12 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
 export function claudeProjectDir(cwd: string): string {
   const name = cwd.replace(/[^a-zA-Z0-9]/g, '-');
   if (name.length > 200) throw new Error(`The worktree path ${cwd} is too long for an L2 container to share its sessions.`);
-  return join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects', name);
+  return join(claudeConfigDir(), 'projects', name);
+}
+
+// Claude Code's config directory on the host.
+function claudeConfigDir(): string {
+  return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
 }
 
 // The session transcripts archived in `dir` (ADR 0011), one JSONL file per
@@ -478,26 +492,30 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
 // A contained HITL run is a conversation: it takes the streamed input as a
 // host HITL run does, its questions become cards, and the operator, not a
 // watchdog or max turns, decides about limits.
+//
+// A contained HITL run also has the operator's profile, but nothing
+// executable of it (ADR 0015): the user settings source loads, from a
+// container home that holds no settings of theirs, only their user
+// `CLAUDE.md`, read-only, and its auto memory is the project's, carried in
+// read-only, not the writable sessions mount's. No user MCP server loads
+// either way: the MCP config is the factory's alone. An AFK run has neither.
 function containedOptions({ mode, maxTurns, guards, token, container }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
+  const memory = mode === 'HITL' ? container!.memory : null;
   return {
     env: {
       CLAUDE_CODE_OAUTH_TOKEN: token!,
       ...(mode === 'AFK' && RETRY_WATCHDOG_ENV),
-      // Off for now, against ADR 0015 for a contained HITL run, which is to
-      // get the project's auto memory: the sessions mount is the host project
-      // directory, auto memory's too, and writable, while the ADR carries
-      // memory in read-only. It stays off until memory comes in that way.
-      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+      ...(memory === null && { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       ...guards!.env,
     },
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
-    settingSources: ['project'],
+    settingSources: memory === null ? ['project'] : ['user', 'project'],
     mcpServers: { factory: factory.server },
     strictMcpConfig: true,
     managedSettings: { ...AFK_PLUGIN_POLICY, allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
-    settings: { ...RETENTION, attribution: { commit: '', pr: '' } },
+    settings: { ...RETENTION, attribution: { commit: '', pr: '' }, ...(memory !== null && { autoMemoryDirectory: memory }) },
     hooks: { PreToolUse: [{ hooks: [hardDenies(container!.workdir, guards!.start, (args) => container!.git(args).then(({ code }) => code))] }] },
     ...(mode === 'AFK' && maxTurns !== null && { maxTurns }),
     canUseTool,

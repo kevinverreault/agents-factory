@@ -231,6 +231,42 @@ describe('the Docker sandbox: containment', () => {
       expect(await container.checks.violations(container.workdir, before, [], FACTORY_IDENTITY.email)).toEqual(['The run left uncommitted changes: T29.jsonl.']);
     }));
 
+  test('the operator’s profile is copied in read-only, what the host has of it alone, and the next prepare without one takes it away', () =>
+    withTask(async (f, sandbox) => {
+      const { spec } = await f.task('T2');
+      const memory = join(f.root, 'memory');
+      mkdirSync(join(memory, 'topics'), { recursive: true });
+      writeFileSync(join(memory, 'MEMORY.md'), '- [Login](topics/login.md)\n');
+      writeFileSync(join(memory, 'topics', 'login.md'), 'The login flow uses Okta.\n');
+      const claudeMd = join(f.root, 'CLAUDE.md');
+      writeFileSync(claudeMd, 'Write British English.\n');
+
+      const run = await sandbox.prepare({ ...spec, profile: { claudeMd, memory } });
+
+      expect(run.memory).not.toBeNull();
+      expect((await sh(run, 'cat ~/.claude/CLAUDE.md')).stdout).toBe('Write British English.\n');
+      expect((await sh(run, `cat ${run.memory}/MEMORY.md ${run.memory}/topics/login.md`)).stdout).toBe('- [Login](topics/login.md)\nThe login flow uses Okta.\n');
+      // Read-only: the run's user changes none of it.
+      expect((await sh(run, 'echo x >> ~/.claude/CLAUDE.md')).code).not.toBe(0);
+      expect((await sh(run, `echo x >> ${run.memory}/MEMORY.md`)).code).not.toBe(0);
+      expect((await sh(run, `touch ${run.memory}/new.md`)).code).not.toBe(0);
+      expect((await sh(run, `touch ${run.memory}/topics/new.md`)).code).not.toBe(0);
+      // Nothing else of the operator's profile goes in.
+      expect((await sh(run, 'ls -A ~/.claude')).stdout.trim().split('\n').sort()).toEqual(['CLAUDE.md', 'projects']);
+
+      // The next prepare copies afresh what the host has now: no CLAUDE.md.
+      rmSync(claudeMd);
+      writeFileSync(join(memory, 'MEMORY.md'), '- [Billing](topics/billing.md)\n');
+      const again = await sandbox.prepare({ ...spec, profile: { claudeMd, memory } });
+      expect((await sh(again, 'test -e ~/.claude/CLAUDE.md')).code).not.toBe(0);
+      expect((await sh(again, `cat ${again.memory}/MEMORY.md`)).stdout).toBe('- [Billing](topics/billing.md)\n');
+
+      // An AFK run's prepare carries none, and takes away what was there.
+      const afk = await sandbox.prepare(spec);
+      expect(afk.memory).toBeNull();
+      expect((await sh(afk, `test -e ~/.claude/CLAUDE.md || test -e ${run.memory}`)).code).not.toBe(0);
+    }));
+
   test('the container’s CLI is the Linux build of the one the pinned SDK bundles', () =>
     withTask(async (_f, _sandbox, container) => {
       const entry = createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk');

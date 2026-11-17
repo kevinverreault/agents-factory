@@ -22,6 +22,7 @@ They spend a little subscription usage on haiku (the SDK and plugin proofs), ope
 | Retry watchdog wait caps | Behave as #23 expects, with the settings below | `src/executor/retry-watchdog.contract.test.ts` |
 | L2 sandbox: bundle round trip, restart, no credentials (#64) | Holds on Docker Desktop 27 (WSL 2 engine) | `src/sandbox/docker.contract.test.ts` |
 | A real L2 run in its container: commits on the subscription token, guards checked there, commit brought out, questions reach the operator despite `bypassPermissions` (#64), through the egress proxy with nothing denied (#65) | Holds. Needs `agents-factory setup token` | `src/executor/contained-run.contract.test.ts` |
+| A contained HITL run has the operator's user `CLAUDE.md` and the project's auto memory, both read-only, through the user settings source and `autoMemoryDirectory` (#209) | Not yet recorded. Needs Docker and `agents-factory setup token` | `src/sandbox/docker.contract.test.ts`, `src/executor/contained-run.contract.test.ts` |
 | L2 egress: default-deny through a proxy of the task's own (#65) | Holds on Docker Desktop 27 | `src/sandbox/docker.contract.test.ts` |
 | Ink tells `ctrl+h` from Backspace | No. Windows Terminal sends `08` for ctrl+h (and for ctrl+Backspace), `7f` for Backspace, and no kitty sequences. `/handoff` is the primary path | `src/tui/keys.contract.test.tsx`, `npm run probe:keys` |
 

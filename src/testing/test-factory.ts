@@ -136,7 +136,7 @@ export async function startTestFactory({
           const value = Reflect.get(target, key, target);
           if (typeof value !== 'function') return value;
           return (...args: unknown[]) => {
-            if (!dead || key === 'sessionsDir') return value.apply(target, args);
+            if (!dead || key === 'sessionsDir' || key === 'profileOf') return value.apply(target, args);
             if (key === 'history') return Promise.resolve([]);
             if (key === 'archive') return Promise.reject(new ArchiveError(CRASHED));
             return undefined;

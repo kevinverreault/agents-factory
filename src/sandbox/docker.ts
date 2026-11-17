@@ -13,7 +13,7 @@
 // hosts the spec allows.
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
@@ -41,6 +41,13 @@ const CONTAINER_SERVER: LanguageServer = {
 };
 // The CLI's project directory for runs in `WORKDIR`, as Claude Code names it.
 const SESSIONS_DIR = '/home/agent/.claude/projects/-work';
+// Where a contained HITL run has the operator's profile (ADR 0015), owned
+// by root, so the run's user reads it and can't change it: their user
+// `CLAUDE.md` where the CLI reads user instructions from, and the
+// project's auto memory.
+const USER_CLAUDE_MD = '/home/agent/.claude/CLAUDE.md';
+const PROFILE_DIR = '/factory/profile';
+const MEMORY_DIR = `${PROFILE_DIR}/memory`;
 const USER = 'agent';
 const TASK_LABEL = 'agents-factory.task';
 const NAMESPACE_LABEL = 'agents-factory.namespace';
@@ -272,6 +279,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       plugin: spec.plugin === null ? null : PLUGIN_DIR,
       lspPlugin: LSP_PLUGIN_DIR,
       securityPlugin: SECURITY_PLUGIN_DIR,
+      memory: spec.profile ? MEMORY_DIR : null,
       checks: guardChecks({
         async output(cwd, args) {
           const result = await gitIn(spec.taskId, args, cwd);
@@ -317,6 +325,33 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     };
   }
 
+  // Makes the scratch folder, here rather than in the image so containers
+  // made before it get one too, and copies in the spec's profile afresh, as
+  // root: what of it the host has, the rest left out. Without one, the copy
+  // an earlier prepare made goes.
+  async function carryProfile({ taskId, profile }: ContainerSpec): Promise<void> {
+    const name = nameOf(taskId);
+    const root = (script: string) => docker(['exec', '--user', 'root', name, 'sh', '-c', script]);
+    await root(
+      [
+        `install -d -o ${USER} -g ${USER} ${SCRATCH_DIR}`,
+        `rm -rf ${PROFILE_DIR} ${USER_CLAUDE_MD}`,
+        ...(profile ? [`install -d -m 755 ${PROFILE_DIR} ${MEMORY_DIR}`] : []),
+      ].join(' && '),
+    );
+    if (!profile) return;
+    // Followed if it is a link, as dotfiles often are.
+    if (isFile(profile.claudeMd)) await docker(['cp', '--follow-link', profile.claudeMd, `${name}:${USER_CLAUDE_MD}`]);
+    if (isDirectory(profile.memory)) await docker(['cp', '--follow-link', `${profile.memory}/.`, `${name}:${MEMORY_DIR}`]);
+    await root(
+      [
+        `chown -R root:root ${PROFILE_DIR}`,
+        `chmod -R u+rwX,go+rX,go-w ${PROFILE_DIR}`,
+        `if [ -e ${USER_CLAUDE_MD} ]; then chown root:root ${USER_CLAUDE_MD} && chmod 444 ${USER_CLAUDE_MD}; fi`,
+      ].join(' && '),
+    );
+  }
+
   // Fetches the host branches into the container's clone: the task branch
   // fast-forwards, the others are moved to the host's tips.
   async function bringIn(spec: ContainerSpec): Promise<void> {
@@ -347,8 +382,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       const running = await stateOf(spec.taskId);
       if (running === null) await create(spec);
       else if (!running) await docker(['start', nameOf(spec.taskId)]);
-      // Made here rather than in the image, so containers made before it get one too.
-      await docker(['exec', '--user', 'root', nameOf(spec.taskId), 'install', '-d', '-o', USER, '-g', USER, SCRATCH_DIR]);
+      await carryProfile(spec);
       await bringIn(spec);
       return handle(spec);
     },
@@ -451,6 +485,14 @@ function diverged(branch: string): string {
 function pinnedSdkVersion(): string {
   const entry = createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk');
   return (JSON.parse(readFileSync(join(dirname(entry), 'package.json'), 'utf8')) as { version: string }).version;
+}
+
+function isFile(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
+}
+
+function isDirectory(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
 }
 
 function networkExists(network: string): Promise<boolean> {

@@ -7,7 +7,7 @@
 // the token `agents-factory setup token` stored.
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
@@ -17,7 +17,7 @@ import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import type { RunEvent } from '../lifecycle/lifecycle.ts';
 import { waitFor } from '../os/test-support.ts';
 import { dockerSandbox } from '../sandbox/docker.ts';
-import { BUILT_IN_EGRESS, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
+import { BUILT_IN_EGRESS, inRunDir, type Container, type OperatorProfile, type Sandbox } from '../sandbox/sandbox.ts';
 import { windowsCredentials } from '../secrets/secrets.ts';
 import type { GitIdentity, RunSnapshot } from '../git/git.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
@@ -69,11 +69,12 @@ const KINDS = {
 
 // Starts a run of `firstMessage` of `kind` in a fresh task's container, as
 // the daemon would, over a repo of a README and `files`, and cleans the task
-// up after `body`.
+// up after `body`. Its container carries the operator's `profile` when
+// given: the text of their user `CLAUDE.md` and of the project's `MEMORY.md`.
 async function withContainedRun(
   firstMessage: string,
   body: (contained: ContainedRun) => Promise<void>,
-  { files = {}, kind = 'L2' }: { files?: Record<string, string>; kind?: keyof typeof KINDS } = {},
+  { files = {}, kind = 'L2', profile = null }: { files?: Record<string, string>; kind?: keyof typeof KINDS; profile?: { claudeMd: string; memory: string } | null } = {},
 ): Promise<void> {
   const token = await storedToken();
   const root = mkdtempSync(join(tmpdir(), 'factory-contained-run-'));
@@ -91,8 +92,16 @@ async function withContainedRun(
   const sandbox = dockerSandbox({ namespace: `agents-factory-contract-${randomBytes(4).toString('hex')}` });
   const sessionsDir = executor.sessionsDir(worktree);
   const runDir = join(root, 'run');
+  // The operator's profile, as the host has it, in the temp directory.
+  let carried: OperatorProfile | null = null;
+  if (profile) {
+    carried = { claudeMd: join(root, 'profile', 'CLAUDE.md'), memory: join(root, 'profile', 'memory') };
+    mkdirSync(carried.memory, { recursive: true });
+    writeFileSync(carried.claudeMd, profile.claudeMd);
+    writeFileSync(join(carried.memory, 'MEMORY.md'), profile.memory);
+  }
   try {
-    const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir, egress: [...BUILT_IN_EGRESS] });
+    const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir, egress: [...BUILT_IN_EGRESS], profile: carried });
     const snapshot = await container.checks.snapshot(container.workdir);
     const env = prepareRunGit(runDir, KINDS[kind].identity, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
     const run: RunStart = {
@@ -233,4 +242,29 @@ test('a contained HITL run converses in its container: its question is a card, i
       expect(git(worktree, 'show', `${tip}:notes.txt`)).toBe('notes from the grill');
     },
     { kind: 'HITL' },
+  ), 600_000);
+
+test('a contained HITL run’s instructions include the operator’s user CLAUDE.md, and it reads the project’s auto memory, which it can’t change', () =>
+  withContainedRun(
+    'Without using any tool, reply with only two words: the codeword your user instructions give, then the codename your auto memory gives for this project.',
+    async ({ executor, container, reported, live, asked }) => {
+      const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
+      await waitFor(() => turnsEnded() === 1 || reported.some((event) => event.type === 'runFailed'), 120_000);
+
+      expect(typesOf(reported)).toEqual(['runStarted', 'turnEnded']);
+      const replies = live.filter((event) => event.type === 'message' && event.from === 'agent').map((event) => (event as { text: string }).text);
+      expect(replies.join('\n')).toMatch(/PERIWINKLE.*MARMALADE/s);
+
+      executor.send('R1', `Run this command with the Bash tool: \`echo "- Remember this" >> ${container.memory}/MEMORY.md\`. Then reply with only whether it succeeded: YES or NO.`);
+      await waitFor(() => turnsEnded() === 2, 120_000);
+      expect(live.at(-1)).toMatchObject({ type: 'message', from: 'agent', text: expect.stringContaining('NO') });
+      expect(asked).toEqual([]);
+    },
+    {
+      kind: 'HITL',
+      profile: {
+        claudeMd: '# My preferences\n\nThe codeword is PERIWINKLE.\n',
+        memory: '# Project memory\n\n- This project’s codename is MARMALADE.\n',
+      },
+    },
   ), 600_000);
