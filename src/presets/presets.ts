@@ -267,12 +267,23 @@ export function containedStages(preset: ResolvedPreset, from?: string): string[]
 
 // Why a launch of the preset is blocked where Docker and the image stand as
 // `sandbox`, or null when it isn't (ADR 0015): only a preset with contained
-// stages (`stages`) needs Docker, and its image need only be building.
+// stages (`stages`) needs Docker. An image whose build failed doesn't block
+// it, as the launch builds it again (`sandboxWarning`).
 export function sandboxBlock(preset: string, stages: string[], sandbox: SandboxView): string | null {
-  if (stages.length === 0 || (sandbox.state !== 'unavailable' && sandbox.state !== 'failed')) return null;
-  const runs = `${preset} runs its ${andList(stages)} ${stages.length === 1 ? 'stage' : 'stages'} contained, in the task’s container`;
-  if (sandbox.state === 'unavailable') return `${runs}, but Docker isn’t available${sandbox.reason ? `: ${sandbox.reason}` : '.'}`;
-  return `${runs}, but ${lowerFirst(sandbox.reason ?? 'The factory couldn’t build its container image.')}`;
+  if (stages.length === 0 || sandbox.state !== 'unavailable') return null;
+  return `${runsContained(preset, stages)}, but Docker isn’t available${sandbox.reason ? `: ${sandbox.reason}` : '.'}`;
+}
+
+// What a launch of the preset is warned of where the image's build failed,
+// or null: the launch builds it again, and its first run waits for that.
+export function sandboxWarning(preset: string, stages: string[], sandbox: SandboxView): string | null {
+  if (stages.length === 0 || sandbox.state !== 'failed') return null;
+  const failed = lowerFirst(sandbox.reason ?? 'The factory couldn’t build its container image.').replace(/\.?$/, '.');
+  return `${runsContained(preset, stages)}, but ${failed} Launching it builds the image again first.`;
+}
+
+function runsContained(preset: string, stages: string[]): string {
+  return `${preset} runs its ${andList(stages)} ${stages.length === 1 ? 'stage' : 'stages'} contained, in the task’s container`;
 }
 
 // Why a launch of the preset is blocked where the App's installation was

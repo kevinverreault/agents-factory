@@ -623,10 +623,10 @@ export type Run = {
   // `bypassPermissions` (ADR 0015): decided from its stage when it starts.
   // A takeover's run is at the AFK stage it took over, so never is. An AFK
   // run's level decides where it runs instead (`runsContained`). Runs stored
-  // before it have none, and ran on the host. `onHost` when it is at a
-  // contained stage but runs on the host, as the operator chose (run on host
-  // this time).
+  // before it have none, and ran on the host.
   contained?: boolean;
+  // True when it is a HITL run at a contained stage that runs on the host
+  // instead, as the operator chose: Run on host this time (ADR 0015).
   onHost?: boolean;
   // The ticket it works on, as a ticket task's run (ADR 0013). Runs stored
   // before ticket tasks have none.
@@ -711,9 +711,10 @@ export type AttentionRequest = {
   // The skipped tickets a spec task's request offers to relaunch, once it
   // can launch no more tickets (ADR 0013). Other requests have none.
   skipped?: string[] | null;
-  // Whether a failure's run was a contained HITL run that failed before its
-  // CLI started, its container not prepared (ADR 0015): retried, or run on
-  // the host this time, it starts again on the message it would have opened on.
+  // Whether a failure's run was a contained HITL run whose container the
+  // daemon couldn't prepare, so its CLI never started (ADR 0015): retried,
+  // or run on the host this time, it starts again on the message it would
+  // have opened on.
   unprepared?: boolean;
   raisedAt: number;
 };
@@ -3600,6 +3601,7 @@ function startRun(
   const allowOnce = task.allowOnce ?? [];
   task.allowOnce = [];
   task.sessionId ??= `S${task.id.slice(1)}`;
+  const atContainedStage = task.mode === 'HITL' && isContained(stageOf(task, task.stage));
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -3614,8 +3616,8 @@ function startRun(
     queued: [],
     question: null,
     stage: task.stage ?? null,
-    contained: task.mode === 'HITL' && isContained(stageOf(task, task.stage)) && !task.onHost,
-    ...(task.mode === 'HITL' && isContained(stageOf(task, task.stage)) && task.onHost && { onHost: true }),
+    contained: atContainedStage && !task.onHost,
+    ...(atContainedStage && task.onHost && { onHost: true }),
     ticket: task.kind === 'ticket' ? (task.ticket ?? null) : null,
     opening,
     reports: reported.map((child) => child.id),
@@ -4069,8 +4071,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.state = 'queued';
       break;
     case 'open': {
-      // Run on host this time lasts until the conversation is reopened (ADR 0015).
-      task.onHost = false;
+      // Run on host this time lasts until a conversation that ran before is
+      // reopened (ADR 0015): a work loop's ticket picks, its first included,
+      // keep it.
+      if (task.runIds.length > 0 && !picksFromFrontier(task)) task.onHost = false;
       if (!picksFromFrontier(task)) {
         startRun(state, task, at);
         break;

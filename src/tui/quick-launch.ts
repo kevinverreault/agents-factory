@@ -4,14 +4,16 @@
 // opens the handoff sheet once the grill is done, at L1 by default; `ctrl+h`
 // (or `/handoff`) opens it at any question, and `ctrl+e` expands the card into
 // the full conversation on the same session. Esc leaves the grill to carry
-// on as an ordinary conversation.
+// on as an ordinary conversation. Where Docker isn't available for a
+// contained grill (ADR 0015), it says so up front, and `ctrl+r` launches it
+// with Run on host this time.
 import { createElement as h, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
-import type { Reply } from '../protocol/protocol.ts';
+import type { PresetsView, Reply } from '../protocol/protocol.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
-import { cycle, defaultRepo, NO_REPOSITORY, RUN_ON_HOST_HINT } from './launch-card.ts';
+import { cycle, defaultRepo, NO_REPOSITORY, RUN_ON_HOST_HINT, useSandboxCheck } from './launch-card.ts';
 import { Output } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
@@ -41,6 +43,20 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
   // Whether the launch's refusal offered to run on the host this time,
   // Docker being unavailable (ADR 0015).
   const [hostable, setHostable] = useState(false);
+  // The contained stages of the quick preset in each repository, read only
+  // once Docker or the image isn't there, so the card can say so up front.
+  const [contained, setContained] = useState<Record<string, string[]>>({});
+  const docker = state.sandbox?.state;
+  useEffect(() => {
+    if (!repo || contained[repo] || (docker !== 'unavailable' && docker !== 'failed')) return;
+    void connection.send({ type: 'listPresets', repo }).then((reply) => {
+      const quick = reply.ok ? (reply.value as PresetsView | undefined)?.presets.find(({ name }) => name === QUICK_PRESET) : undefined;
+      const stages = quick && 'startStages' in quick ? (quick.startStages[0]?.contained ?? []) : [];
+      setContained((contained) => ({ ...contained, [repo]: stages }));
+    });
+  }, [connection, repo, docker]);
+  const sandbox = useSandboxCheck(connection, state, QUICK_PRESET, (repo && contained[repo]) || []);
+  const offersHost = sandbox.checks || (hostable && !!refusal);
   // While the daemon names and launches the task. Left meanwhile, the grill
   // it launches goes on as an ordinary conversation, as after any esc.
   const launching = useLaunch(connection);
@@ -103,7 +119,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
       // The launch under way takes no other key.
       if (taskId || launching.busy()) return;
       if (key.return) return launch();
-      if (key.ctrl && input === 'r') return hostable && refusal ? launch(true) : undefined;
+      if (key.ctrl && input === 'r') return offersHost ? launch(true) : undefined;
       if (key.upArrow || key.downArrow) return setRepo((repo) => cycle(repositories, repo, key.upArrow ? -1 : 1));
       typeKey(typed, input, key);
       return rerender();
@@ -151,7 +167,9 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
       h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)),
       launching.indicator ?? (taskId ? h(Text, tone('dim'), 'Starting the grill…') : null),
       refusal ? h(Text, tone('bad'), refusal) : null,
-      refusal && hostable ? h(Text, tone('dim'), `enter retries · ${RUN_ON_HOST_HINT}`) : null,
+      sandbox.block && !refusal ? h(Text, tone('bad'), sandbox.block) : null,
+      sandbox.warning && !refusal ? h(Text, tone('warn'), sandbox.warning) : null,
+      offersHost ? h(Text, tone('dim'), `${refusal ? 'enter retries · ' : ''}${RUN_ON_HOST_HINT}`) : null,
     );
   }
   return h(

@@ -6,18 +6,18 @@
 // the repository. Where the factory's App isn't installed, a preset with
 // AFK stages shows why its launch is blocked, and `ctrl+o` opens the
 // App's installation settings. Where Docker isn't available, a preset with
-// contained stages shows why (ADR 0015), and `ctrl+r` launches it to run on
-// the host this time instead. The prompt takes several lines (text-area.ts),
+// contained stages shows why, or warns that its image failed to build
+// (ADR 0015), and `ctrl+r` launches it with Run on host this time instead. The prompt takes several lines (text-area.ts),
 // and `ctrl+e` opens it in the operator's own editor.
 import { createElement as h, useEffect, useState, type ReactNode } from 'react';
 import { Box, Text, useApp, useInput, usePaste, type Key } from 'ink';
 import { appRefusal, AUTONOMY_LEVELS, DEFAULT_MAX_TURNS, OFFERED_POLICIES, POLICY_NAMES, policyOf, PRIORITIES, type AutonomyLevel, type MergePolicy, type Priority } from '../lifecycle/lifecycle.ts';
 import { DEFAULT_TIER, TIERS, type Tier } from '../models/routing.ts';
 import type { Edited } from '../os/edit-externally.ts';
-import { appBlock, lackingInputs, sandboxBlock, type PresetChoice, type StartStage } from '../presets/presets.ts';
+import { appBlock, lackingInputs, sandboxBlock, sandboxWarning, type PresetChoice, type StartStage } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
-import type { LaunchCommand, PresetsView } from '../protocol/protocol.ts';
+import { RUN_ON_HOST, type LaunchCommand, type PresetsView } from '../protocol/protocol.ts';
 import { lineBreaks } from '../text/lines.ts';
 import { useColumns } from './screen.ts';
 import { editArea, windowed } from './text-area.ts';
@@ -72,7 +72,7 @@ const PROMPT_ROWS = 8;
 // sheet's border and padding, the cursor, the label and the gaps.
 const PROMPT_INSET = LABEL + 3 + 4;
 // What a launch refused for want of Docker offers (ADR 0015).
-export const RUN_ON_HOST_HINT = 'ctrl+r: run on host this time, where its calls ask you again';
+export const RUN_ON_HOST_HINT = `ctrl+r: ${RUN_ON_HOST} (its calls ask you again)`;
 // What a launch says while no repository is registered.
 export const NO_REPOSITORY = 'Register a repository first: run `agents-factory repo add` in a clone.';
 
@@ -162,15 +162,9 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   // write: the card says so before the launch does.
   const refusedByApp = !blocked && card.start?.mode === 'AFK' && draft.autonomy === 'L3' && draft.repo ? appRefusal(draft.repo, app, policyOf(draft)) : null;
   const fixUrl = blocked && app && !app.installed ? app.fixUrl : (refusedByApp?.fixUrl ?? null);
-  // As last checked: the launch checks Docker afresh. A daemon from before
-  // contained stages lists none.
-  const contained = card.start?.contained ?? [];
-  const unsandboxed = card.choice && state.sandbox ? sandboxBlock(card.choice.name, contained, state.sandbox) : null;
-  // Docker may have started since: the card asks again.
-  useEffect(() => {
-    if (unsandboxed) void connection.send({ type: 'checkSandbox' });
-  }, [connection, unsandboxed !== null, card.choice?.name]);
-  const offersHost = !!unsandboxed || (hostable && !!refusal);
+  // A daemon from before contained stages lists none.
+  const sandbox = useSandboxCheck(connection, state, card.choice?.name ?? null, card.start?.contained ?? []);
+  const offersHost = sandbox.checks || (hostable && !!refusal);
 
   useInput((input, key) => {
     if (key.escape) {
@@ -273,11 +267,32 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     listing && 'warning' in listing && listing.warning ? h(Text, tone('warn'), listing.warning) : null,
     blocked ? h(Text, tone('bad'), blocked) : null,
     fixUrl ? h(Text, tone('dim'), refusedByApp ? 'ctrl+o opens its installation settings, to approve them' : 'ctrl+o opens its installation settings') : null,
-    unsandboxed && !refusal ? h(Text, tone('bad'), unsandboxed) : null,
+    sandbox.block && !refusal ? h(Text, tone('bad'), sandbox.block) : null,
+    sandbox.warning && !refusal ? h(Text, tone('warn'), sandbox.warning) : null,
     launching.indicator,
     refusal ? h(Text, tone('bad'), refusal) : null,
     offersHost ? h(Text, tone('dim'), `${refusal ? 'enter retries · ' : ''}${RUN_ON_HOST_HINT}`) : null,
   );
+}
+
+// Where Docker and the image stand for a launch of `preset`, whose task
+// reaches the `contained` stages (ADR 0015), as last checked (the launch
+// checks afresh): why it is blocked, or what it is warned of, and whether
+// either is so. While one is, the card asks the daemon again, as Docker may
+// have started since, or the image be built again.
+export function useSandboxCheck(
+  connection: FactoryConnection,
+  state: FactoryState,
+  preset: string | null,
+  contained: string[],
+): { block: string | null; warning: string | null; checks: boolean } {
+  const block = preset && state.sandbox ? sandboxBlock(preset, contained, state.sandbox) : null;
+  const warning = preset && state.sandbox ? sandboxWarning(preset, contained, state.sandbox) : null;
+  const checks = block !== null || warning !== null;
+  useEffect(() => {
+    if (checks) void connection.send({ type: 'checkSandbox' });
+  }, [connection, checks, preset]);
+  return { block, warning, checks };
 }
 
 type Card = {

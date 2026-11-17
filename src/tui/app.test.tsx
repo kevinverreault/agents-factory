@@ -1113,7 +1113,7 @@ describe('launching and conversing', () => {
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
       expect(frame).toContain(`main-flow runs its grill, spec and tickets stages contained, in the task’s container, but Docker isn’t available: ${down}`);
-      expect(frame).toContain('ctrl+r: run on host this time, where its calls ask you again');
+      expect(frame).toContain('ctrl+r: Run on host this time (its calls ask you again)');
       expect(frame).not.toContain('enter retries');
     });
     await eventually(() => expect(connection.sent).toContainEqual({ type: 'checkSandbox' }));
@@ -1123,6 +1123,50 @@ describe('launching and conversing', () => {
     await eventually(() =>
       expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'grill', prompt: 'Grill me about the login flow.', onHost: true }),
     );
+  });
+
+  test('where the image failed to build, a preset with contained stages warns that the launch builds it again, and blocks nothing', async () => {
+    const connection = inWidgets();
+    const mainFlow = presetsView.presets[0]! as Extract<PresetsView['presets'][number], { startStages: unknown }>;
+    const planning = { ...mainFlow, startStages: mainFlow.startStages.map((stage) => (stage.id === 'grill' ? { ...stage, contained: ['grill'] } : stage)) };
+    connection.replyTo('listPresets', { ok: true, value: { ...presetsView, presets: [planning, ...presetsView.presets.slice(1)] } });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const failed = { state: 'failed' as const, reason: 'The factory couldn’t build its container image: no space left on device' };
+    const { app } = await started({ ...factoryState([]), repositories, sandbox: failed }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('N');
+    await settle();
+    await eventually(() =>
+      expect(unwrapped(app.lastFrame()!)).toContain(
+        'main-flow runs its grill stage contained, in the task’s container, but the factory couldn’t build its container image: no space left on device. Launching it builds the image again first.',
+      ),
+    );
+    await eventually(() => expect(connection.sent).toContainEqual({ type: 'checkSandbox' }));
+    await type(app, 'Grill me about the login flow.');
+    app.stdin.write('\r');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'main-flow', stage: 'grill', prompt: 'Grill me about the login flow.' }));
+  });
+
+  test('a quick launch says up front when Docker isn’t available for its contained grill, and ctrl+r runs it on the host this time', async () => {
+    const connection = inWidgets();
+    const quick = { name: 'quick', source: 'built-in' as const, description: null, startStages: [{ id: 'grill', mode: 'HITL' as const, model: 'opus' as const, needs: ['prompt' as const], contained: ['grill'] }], appStages: [] };
+    connection.replyTo('listPresets', { ok: true, value: { ...presetsView, presets: [quick] } });
+    connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([]), repositories, sandbox: { state: 'unavailable', reason: 'Docker isn’t running.' } }, { cwd: '/clones/widgets/src', connection });
+
+    app.stdin.write('n');
+    await settle();
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('quick runs its grill stage contained, in the task’s container, but Docker isn’t available: Docker isn’t running.');
+      expect(frame).toContain('ctrl+r: Run on host this time (its calls ask you again)');
+    });
+    expect(connection.sent).toContainEqual({ type: 'listPresets', repo: 'acme/widgets' });
+    await type(app, 'Spike the cache');
+    app.stdin.write('\x12');
+
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'launchTask', repo: 'acme/widgets', preset: 'quick', prompt: 'Spike the cache', quick: true, onHost: true }));
   });
 
   test('a quick launch refused for want of Docker offers ctrl+r, to run it on the host this time', async () => {
@@ -1137,7 +1181,7 @@ describe('launching and conversing', () => {
     await type(app, 'Spike the cache');
     app.stdin.write('\r');
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(reason));
-    expect(unwrapped(app.lastFrame()!)).toContain('enter retries · ctrl+r: run on host this time');
+    expect(unwrapped(app.lastFrame()!)).toContain('enter retries · ctrl+r: Run on host this time');
     connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
     app.stdin.write('\x12');
 
@@ -2821,7 +2865,7 @@ describe('answering from Needs you', () => {
     await press(app, '2');
     await eventually(() =>
       expect(unwrapped(app.lastFrame()!)).toContain(
-        'FAILURE The factory couldn’t prepare T2’s container: Cannot connect to the Docker daemon. [1] Retry [2] Run on host this time, where its calls ask you again [3] Cancel a answer',
+        'FAILURE The factory couldn’t prepare T2’s container: Cannot connect to the Docker daemon. [1] Retry [2] Run on host this time [3] Cancel a answer',
       ),
     );
 

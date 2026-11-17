@@ -155,12 +155,13 @@ export type RunView = Pick<
   deniedHosts: string[];
   // While an AFK run waits out a 5-hour usage limit, when its wait ends.
   waitingForWindow: number | null;
-  // Whether it is a HITL run in its task's container (ADR 0015), and
-  // whether that container is still being prepared: from its start until
-  // its CLI is up to take the agent's first turn. Or whether it is at a
-  // contained stage but runs on the host, as the operator chose.
+  // Whether it is a HITL run in its task's container (ADR 0015).
   contained: boolean;
+  // Whether its container is still being prepared: from its start until its
+  // CLI is up to take the agent's first turn.
   preparing: boolean;
+  // Whether it is at a contained stage but runs on the host, as the operator
+  // chose: Run on host this time.
   onHost: boolean;
 };
 
@@ -173,8 +174,6 @@ export type RepositoryView = Pick<Repository, 'id' | 'path' | 'baseBranch' | 'de
 
 // A file or issue linked to its task, in the order captured.
 export type ArtifactView = Artifact;
-
-export type { SandboxView };
 
 export type FactoryState = {
   repositories: Record<string, RepositoryView>;

@@ -72,7 +72,7 @@ Whether a run executes on the operator's host or in its task's container. Every 
 _Avoid_: Sandbox mode, isolation (for the domain term)
 
 **Run on host this time**:
-The operator's explicit choice, when Docker is unavailable or a contained run's container couldn't be prepared, to run a task's contained HITL runs on the host instead, permission cards and all, until the task is next opened. The factory never makes this choice itself.
+The operator's explicit choice, when Docker is unavailable or a contained run's container couldn't be prepared, to run a task's contained HITL runs on the host instead, permission cards and all, until its conversation is reopened after it ran. The factory never makes this choice itself.
 _Avoid_: Fallback, host mode
 
 **Model tier**:

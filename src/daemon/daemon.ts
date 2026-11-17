@@ -120,9 +120,10 @@ import {
   type TaskLaunched,
   unfinishedTicketTasks,
 } from '../lifecycle/lifecycle.ts';
-import { diffFactoryState, repositoryView, toFactoryState, type FactoryState, type SandboxView } from '../protocol/factory-state.ts';
+import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
 import {
   PROTOCOL_VERSION,
+  RUN_ON_HOST,
   readMessages,
   send,
   type ClientMessage,
@@ -167,7 +168,7 @@ import {
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
 import type { AwakeBlock, Processes } from '../os/processes.ts';
-import { SandboxError, egressFor, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
+import { SandboxError, egressFor, inRunDir, type Container, type Sandbox, type SandboxView } from '../sandbox/sandbox.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import { checkSkillsSetup, SETUP_FILES, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
@@ -849,17 +850,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const refusedByApp = action.autonomy === 'L3' && start.stage.mode === 'AFK' ? appRefusalText(repo, check, policyOf(action)) : null;
         if (refusedByApp) return { ok: false, reason: refusedByApp };
       }
-      // No silent fallback to the host (ADR 0015): a preset with contained
-      // stages launches only where Docker is available, its image built or
-      // building, unless the operator chose to run on the host this time.
-      // Those the task reaches from its start stage on.
+      // Never on the host unasked (ADR 0015): a preset with contained
+      // stages, of those the task reaches from its start stage on, launches
+      // only where Docker is available, unless the operator chose Run on
+      // host this time. Its image is built, or building: checking builds
+      // one that failed again, which the task's first prepare waits for.
       const contained = containedStages(resolved.preset, start.stage.id);
       if (contained.length && !action.onHost) {
         const blocked = sandboxBlock(resolved.preset.name, contained, await checkSandbox());
         if (blocked) {
           const choose: Option[] = [
             { label: 'Retry', command },
-            { label: 'Run on host this time', command: { ...command, onHost: true } },
+            { label: RUN_ON_HOST, command: { ...command, onHost: true } },
           ];
           return { ok: false, reason: blocked, choose };
         }
@@ -2731,9 +2733,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // A contained HITL run is guarded as an L2 run is, but its commits are
     // the operator's own (ADR 0015).
     if ((run.mode === 'AFK' || contained) && cwd) {
-      // A contained HITL run failing here never started its CLI: the
-      // operator may retry it, or run it on the host this time (ADR 0015).
-      const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason, ...(isContainedHitl(run) && { unprepared: true }) });
+      // A contained HITL run whose container couldn't be prepared is
+      // `unprepared`: the operator may retry it, or run it on the host this
+      // time (ADR 0015).
+      const fail = (reason: string, unprepared = false) =>
+        void dispatch({ type: 'runFailed', runId: run.id, reason, ...(unprepared && isContainedHitl(run) && { unprepared }) });
       let identity = FACTORY_IDENTITY;
       if (isContainedHitl(run)) {
         let operator: GitIdentity | null;
@@ -2781,7 +2785,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           snapshot = await container.checks.snapshot(container.workdir);
         } catch (error) {
           if (!(error instanceof SandboxError || error instanceof GitError)) throw error;
-          return fail(`The factory couldn’t prepare ${task.id}’s container: ${error.message}`);
+          return fail(`The factory couldn’t prepare ${task.id}’s container: ${error.message}`, true);
         }
         // Ended while its container was prepared: the container is settled again.
         if (lifecycle.runs[run.id]?.status !== 'active') return settleContainer(task.id);

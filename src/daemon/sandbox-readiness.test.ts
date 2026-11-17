@@ -145,6 +145,29 @@ describe('a launch while Docker is unavailable', () => {
     expect((await tui.until((state) => state.runs.R2?.status === 'active')).tasks.T1).toMatchObject({ onHost: false });
   });
 
+  test('run on host this time at a contained work loop holds for the tickets the operator picks from its map', async () => {
+    const { factory, operator, tui } = await attached({ before: (factory) => factory.sandbox.dockerDown(DOWN) });
+    writeFileSync(
+      join(factory.paths.presetsDir, 'mapped.preset.yaml'),
+      'stages:\n  - { id: work, kind: loop, skill: wayfinder, args: "{{artifacts.map}}", mode: HITL, exit: map-cleared, contained: true }\n',
+    );
+    factory.github.addIssue('acme/widgets#30', { title: 'Billing overhaul', labels: ['wayfinder:map'] });
+    factory.github.addIssue('acme/widgets#31', { parent: 'acme/widgets#30', title: 'Which payment provider?', labels: ['wayfinder:grilling'] });
+    factory.github.addIssue('acme/widgets#33', { parent: 'acme/widgets#30', title: 'Invoice layout', labels: ['wayfinder:prototype'] });
+    const mapped = { type: 'launchTask' as const, repo: 'acme/widgets', preset: 'mapped', issues: ['acme/widgets#30'] };
+    expect(await operator.send(mapped)).toMatchObject({ ok: false, choose: [{ label: 'Retry' }, { label: 'Run on host this time' }] });
+
+    expect(await operator.send({ ...mapped, onHost: true })).toMatchObject({ ok: true });
+    await tui.until((state) => !!state.tasks.T1?.loop?.frontier);
+    expect(await operator.send({ type: 'open', taskId: 'T1', ticket: 'acme/widgets#33' })).toEqual({ ok: true });
+
+    expect(await started(factory, 1)).toMatchObject({ mode: 'HITL', container: null, credential: 'subscription-host' });
+    const state = await tui.until((state) => state.runs.R1?.status === 'active');
+    expect(state.runs.R1).toMatchObject({ stage: 'work', ticket: null, contained: false, onHost: true });
+    expect(state.tasks.T1).toMatchObject({ onHost: true });
+    expect(factory.sandbox.prepared).toEqual([]);
+  });
+
   test('a launch at a start stage past every contained stage launches as before', async () => {
     const { factory, operator } = await attached({ before: (factory) => factory.sandbox.dockerDown(DOWN) });
 
@@ -212,6 +235,16 @@ describe('a contained run whose container can’t be prepared', () => {
     expect(state.tasks.T1).toMatchObject({ onHost: true });
     factory.executor.askPermission('R2', { id: 'toolu_1', tool: 'Bash', input: { command: 'npm publish' } });
     expect((await tui.until((state) => state.runs.R2?.permission !== null)).runs.R2?.permission).toMatchObject({ tool: 'Bash' });
+  });
+
+  test('one that fails before its prepare, for want of a subscription token, offers no run on host', async () => {
+    const { factory, operator, tui } = await attached();
+    await factory.secrets.write(SUBSCRIPTION_TOKEN_SECRET, '');
+    await operator.send(launch);
+
+    const state = await tui.until((state) => state.runs.R1?.status === 'ended');
+    expect(state.attentionQueue).toEqual([expect.objectContaining({ attention: 'failure', unprepared: false })]);
+    expect(factory.sandbox.prepared).toEqual([]);
   });
 
   test('a failure of a run whose container was prepared, or of a run on the host, offers no run on host', async () => {

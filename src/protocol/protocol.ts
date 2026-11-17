@@ -11,6 +11,10 @@ import type { FactoryState, PatchOp } from './factory-state.ts';
 
 export const PROTOCOL_VERSION = 25;
 
+// The operator's choice to run a task's contained HITL runs on the host
+// (ADR 0015), as every client and the daemon name it.
+export const RUN_ON_HOST = 'Run on host this time';
+
 // The daemon's own verbs, which a client of another protocol version may
 // still send (ADR 0002): their shapes never change. `daemon.stop` stops it
 // gracefully at once; `daemon.restartWhenIdle` has it start no new run and

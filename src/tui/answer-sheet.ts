@@ -10,7 +10,7 @@ import type { AttentionQueueItem, Permission, PermissionAnswer } from '../lifecy
 import { isRetiredLoop, isWorkLoop } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
-import type { Command, Option, Reply } from '../protocol/protocol.ts';
+import { RUN_ON_HOST, type Command, type Option, type Reply } from '../protocol/protocol.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { answersText, toolUseOf, withOption } from './answered.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
@@ -100,7 +100,7 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
       if (item.unprepared) {
         return [
           { label: 'Retry', command: answer, opens: true },
-          { label: 'Run on host this time, where its calls ask you again', command: { type: 'answer', taskId, onHost: true }, opens: true },
+          { label: RUN_ON_HOST, command: { type: 'answer', taskId, onHost: true }, opens: true },
           cancel,
         ];
       }

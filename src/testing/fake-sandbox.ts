@@ -24,10 +24,13 @@ export class FakeSandbox implements Sandbox {
   private unlistable: string | null = null;
   // Why Docker doesn't answer, while it doesn't.
   private down: string | null = null;
-  // How many image builds were asked for, and the one under way, if held.
+  // How many image builds were started.
   builds = 0;
+  // Why image builds fail, while they do.
   private buildFailure: string | null = null;
+  // The build under way, if any, and how a held one finishes.
   private building: { promise: Promise<void>; finish: () => void } | null = null;
+  // Whether builds take until `finishBuild`.
   private held = false;
 
   constructor(private readonly git: FakeGit) {}
@@ -133,7 +136,7 @@ export class FakeSandbox implements Sandbox {
 
   async prepare(spec: ContainerSpec): Promise<Container> {
     this.record('prepare', spec.taskId);
-    if (this.down) throw new SandboxError(this.down);
+    // Fails as Docker does while it doesn't answer.
     await this.buildImage();
     this.prepared.push(spec);
     let container = this.containers.get(spec.taskId);

@@ -1,6 +1,6 @@
 // Preset resolution and schema validation: pure, so tested directly.
 import { describe, expect, test } from 'vitest';
-import { builtInPresets, containedStages, fillOpening, issueRefs, openingMessage, planStart, resolvePreset, sandboxBlock, startStages, type PresetFile } from './presets.ts';
+import { builtInPresets, containedStages, fillOpening, issueRefs, openingMessage, planStart, resolvePreset, sandboxBlock, sandboxWarning, startStages, type PresetFile } from './presets.ts';
 
 const user = (name: string, content: string): PresetFile => ({ scope: 'user', name, path: `~/.agent-factory/presets/${name}.preset.yaml`, content });
 const repo = (name: string, content: string): PresetFile => ({ scope: 'repo', name, path: `.agent-factory/presets/${name}.preset.yaml`, content });
@@ -241,7 +241,7 @@ describe('the schema', () => {
     );
   });
 
-  test('the contained stages from a start stage on need Docker, and block a launch only once Docker is unavailable or the image failed', () => {
+  test('the contained stages from a start stage on need Docker, and block a launch only while Docker is unavailable', () => {
     const files = nightly(
       '{ id: grill, kind: run, skill: grill-me, mode: HITL, contained: true }',
       '{ id: work, kind: loop, skill: work, mode: HITL, exit: map-cleared, contained: true }',
@@ -260,9 +260,14 @@ describe('the schema', () => {
       'nightly runs its grill stage contained, in the task’s container, but Docker isn’t available: Docker isn’t running.',
     );
     expect(sandboxBlock('nightly', ['grill'], { state: 'unavailable', reason: null })).toBe('nightly runs its grill stage contained, in the task’s container, but Docker isn’t available.');
-    expect(sandboxBlock('nightly', ['grill', 'work'], { state: 'failed', reason: 'The factory couldn’t build its container image: no space left on device.' })).toBe(
-      'nightly runs its grill and work stages contained, in the task’s container, but the factory couldn’t build its container image: no space left on device.',
+    // A failed build is built again by the launch: a warning, not a block.
+    const failed = { state: 'failed', reason: 'The factory couldn’t build its container image: no space left on device' } as const;
+    expect(sandboxBlock('nightly', ['grill', 'work'], failed)).toBeNull();
+    expect(sandboxWarning('nightly', ['grill', 'work'], failed)).toBe(
+      'nightly runs its grill and work stages contained, in the task’s container, but the factory couldn’t build its container image: no space left on device. Launching it builds the image again first.',
     );
+    for (const state of ['checking', 'building', 'ready', 'unavailable'] as const) expect(sandboxWarning('nightly', ['grill'], { state, reason: null })).toBeNull();
+    expect(sandboxWarning('nightly', [], failed)).toBeNull();
   });
 
   test('the Ralph loop’s exit, tickets-closed, is refused: the loop was retired', () => {
