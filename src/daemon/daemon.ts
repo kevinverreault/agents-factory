@@ -9,7 +9,7 @@ import { capture } from '../artifacts/capture.ts';
 import { DependenciesError, type Dependencies } from '../dependencies/dependencies.ts';
 import { ArchiveError, type ConversationEvent, type Delegation, type DelegationReply, type Executor, type RunGuards, type RunStart, type Verdict } from '../executor/executor.ts';
 import { DELETION_ORDER, listedLeftovers, lookAround, matchLeftovers, sameLeftover } from '../gc/leftovers.ts';
-import { GitError, type ChangedFile, type Git, type RunSnapshot, type WorktreeState } from '../git/git.ts';
+import { GitError, type ChangedFile, type Git, type GitIdentity, type RunSnapshot, type WorktreeState } from '../git/git.ts';
 import {
   CHECKS_READ,
   GitHubError,
@@ -285,7 +285,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const containers = new Map<string, boolean>();
   // The tasks whose containers may still run a turn the daemon cut short:
   // restarted before anything else happens in them (ADR 0003).
-  const staleTurns = new Set<string>();
+  const staleTurns = new Map<string, StaleTurn>();
   // The runs whose checks found broken guards, until their end is in.
   const brokenRuns = new Set<string>();
   // What the daemon does to each task's container, one step at a time, and
@@ -1634,12 +1634,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     for (const run of Object.values(lifecycle.runs)) {
       // Even one Docker didn't list: it may answer by the time the run is prepared.
-      if (run.status !== 'ended' && runsInContainer(run)) staleTurns.add(run.taskId);
+      if (run.status !== 'ended' && runsInContainer(run)) staleTurns.set(run.taskId, staleTurnOf(run));
     }
     // So may the container of an L2 run a takeover ended, its turn not yet ended there.
     const takeovers = Object.values(lifecycle.intents).filter((intent) => intent.verb === 'takeover');
-    for (const { taskId } of takeovers) staleTurns.add(taskId);
-    for (const taskId of [...staleTurns]) await onContainer(taskId, () => endStaleTurn(taskId)).catch(() => {});
+    for (const { taskId } of takeovers) staleTurns.set(taskId, TAKEN_OVER_TURN);
+    for (const taskId of [...staleTurns.keys()]) await onContainer(taskId, () => endStaleTurn(taskId)).catch(() => {});
     for (const intent of takeovers) {
       // One Docker didn't answer for carries on once it does.
       const finished = !staleTurns.has(intent.taskId);
@@ -2552,7 +2552,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         // One whose guards broke ended its turn, and keeps its commits there.
         const brokeGuards = brokenRuns.delete(run.id);
         if (startedHere && runsInContainer(run) && containers.has(run.taskId) && (!ownEvent || (action.type === 'runFailed' && !brokeGuards))) {
-          staleTurns.add(run.taskId);
+          staleTurns.set(run.taskId, staleTurnOf(run));
           settleContainer(run.taskId);
         }
       }
@@ -2645,7 +2645,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Starts the run on the executor. An AFK run in a worktree starts guarded
   // (ADR 0007), once its worktree is snapshotted, unless it ended meanwhile.
   // An L2 run starts in its task's container (ADR 0007), prepared with the
-  // host task branch's commits, and its checks are made there. Any run of a
+  // host task branch's commits, and its checks are made there. So does a
+  // HITL run at a contained stage (ADR 0015), guarded alike, but committing
+  // as the operator, and holding its commits there when it ends. Any run of a
   // task with a container waits for what the container is doing first, such
   // as bringing out the commits of a run cut short. A HITL run on the host
   // then gets the commits the container still holds, such as those of an L2
@@ -2654,12 +2656,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   async function startRun(run: Run): Promise<void> {
     const task = lifecycle.tasks[run.taskId]!;
     const cwd = task.worktree?.path ?? null;
+    const contained = runsInContainer(run);
     let guards: RunGuards | null = null;
     let container: Container | null = null;
     let token: string | null = null;
     if (containers.has(task.id)) await onContainer(task.id, async () => {});
     // Commits that can't come out stay there: the next run's prepare, or the task's cleanup, says why.
-    if (run.mode === 'HITL' && cwd && containers.has(task.id)) await bringOutOfContainer(task);
+    if (run.mode === 'HITL' && !contained && cwd && containers.has(task.id)) await bringOutOfContainer(task);
     // The CLI resumes a session only from its file (ADR 0011).
     // A judging run's session is its own (ADR 0014).
     const sessionId = run.sessionId ?? task.sessionId;
@@ -2671,13 +2674,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // 0010); an L2 run's container installs its own. One that failed holds
     // the run back no more than a missing lockfile would.
     let uninstalled: string | null = null;
-    if (cwd && !runsContained(run.autonomy)) {
+    if (cwd && !contained) {
       uninstalled = await installDependencies(cwd);
       if (lifecycle.runs[run.id]?.status !== 'active') return;
     }
-    if (run.mode === 'AFK' && cwd) {
+    // A contained HITL run is guarded as an L2 run is, but its commits are
+    // the operator's own (ADR 0015).
+    if ((run.mode === 'AFK' || contained) && cwd) {
       const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
-      const contained = runsContained(run.autonomy);
+      let identity = FACTORY_IDENTITY;
+      if (isContainedHitl(run)) {
+        let operator: GitIdentity | null;
+        try {
+          operator = await git.identity(cwd);
+        } catch (error) {
+          if (!(error instanceof GitError)) throw error;
+          return fail(`The factory couldn’t read your git identity, which a contained HITL run commits under: ${error.message}`);
+        }
+        if (!operator) return fail(NO_GIT_IDENTITY);
+        identity = operator;
+      }
       if (contained) {
         try {
           token = await secrets.read(SUBSCRIPTION_TOKEN_SECRET);
@@ -2720,7 +2736,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
       // The run's git keeps the settings its worktree was checked out under:
       // the operator's on the host, the image's in a container.
-      const env = prepareRunGit(dir, FACTORY_IDENTITY, { task: task.id, run: run.id, model: run.model }, snapshot!.checkout);
+      const env = prepareRunGit(dir, identity, { task: task.id, run: run.id, model: run.model }, snapshot!.checkout);
       const ghConfigDir = join(dir, 'gh');
       Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
       guarded.set(run.id, { worktree: container?.workdir ?? cwd, host: cwd, dir, checks: container?.checks ?? git, container, snapshot: snapshot!, scripts: new Set() });
@@ -2737,7 +2753,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       cwd,
       firstMessage: withFactoryNotes(run.opening, [
         uninstalled === null ? null : installNote(uninstalled),
-        container === null ? null : scratchNote(container.scratch),
+        container === null ? null : scratchNote(container.scratch, isContainedHitl(run)),
       ]),
       model: run.model,
       maxTurns: run.maxTurns ?? null,
@@ -2928,6 +2944,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       });
       if (deniedHosts.length) event = { ...event, deniedHosts };
     }
+    // A contained HITL run's end neither checks nor brings out its commits:
+    // they stay in its container, for the next run there, or for the host
+    // HITL run that next starts on the task, which brings them out first.
+    const run = lifecycle.runs[event.runId];
+    if (run && isContainedHitl(run)) return event;
     // The factory's own branches for other tasks, cut while the run worked.
     const branches = Object.values(lifecycle.tasks).flatMap((task) =>
       task.worktree && task.worktree.path !== guard.worktree ? [task.worktree.branch] : [],
@@ -3110,14 +3131,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // Restarts the task's container, which kills a turn still running in it
-  // and keeps its clone, then brings its commits out to the host task branch.
-  // Until the restart is made, the turn may still run: the next run's
-  // prepare tries it again first.
+  // and keeps its clone, then brings its commits out to the host task branch,
+  // unless the turn keeps them there. Until the restart is made, the turn
+  // may still run: the next run's prepare tries it again first.
   async function endStaleTurn(taskId: string): Promise<void> {
     const had = await sandbox.restart(taskId);
+    const { keepsCommits } = staleTurns.get(taskId) ?? TAKEN_OVER_TURN;
     staleTurns.delete(taskId);
     if (!had) return void containers.delete(taskId);
     containers.set(taskId, true);
+    if (keepsCommits) return;
     const worktree = lifecycle.tasks[taskId]?.worktree;
     if (!worktree) return;
     // Commits that can't come out stay in the container: the next run's
@@ -3183,6 +3206,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // otherwise is refused, with its reason. The run's later calls may run the
   // temp scripts a call the rules cover writes, but none a call overwrote.
   function gate(runId: string, call: ToolCall): void {
+    // A contained HITL run asks about nothing: its container keeps it safe (ADR 0015).
+    const asking = lifecycle.runs[runId];
+    if (asking && isContainedHitl(asking)) return executor.permit(runId, call.id, { allow: true });
     const { rules, error } = readAllowRules(options.permissionsPath);
     const guard = guarded.get(runId);
     // A HITL run is unguarded, but works in its task's worktree all the same.
@@ -3248,13 +3274,33 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 // Why no run starts while the daemon replays its unfinished intents.
 const REPLAYING = 'The factory is finishing what it left unfinished, so it starts no new run yet.';
 const NO_APP = 'The factory has no GitHub App yet: run `agents-factory setup github` to create it.';
+const NO_GIT_IDENTITY =
+  'The factory couldn’t name you as the author of this contained run’s commits: your git has no user.name or user.email. Set them with `git config --global user.name` and `git config --global user.email`, then retry the run.';
 const NO_SUBSCRIPTION_TOKEN =
   'The factory has no subscription token for L2 runs yet: run `claude setup-token`, then `agents-factory setup token` to store what it prints.';
 
 // Whether the run executes in its task's container: an L2 AFK run (ADR
-// 0007), or an L3 one, contained alike (ADR 0014).
+// 0007), or an L3 one, contained alike (ADR 0014), or a HITL run at a
+// contained stage (ADR 0015).
 function runsInContainer(run: Run): boolean {
-  return run.mode === 'AFK' && runsContained(run.autonomy);
+  return run.mode === 'AFK' ? runsContained(run.autonomy) : isContainedHitl(run);
+}
+
+// Whether the run is a HITL run at a contained stage (ADR 0015).
+function isContainedHitl(run: Run): boolean {
+  return run.mode === 'HITL' && !!run.contained;
+}
+
+// A turn the daemon cut short in a task's container, and whether its
+// container's restart keeps its commits there rather than bringing them out
+// to the host task branch: a contained HITL run's do, as they are the
+// operator's to bring out with the task's next step (ADR 0015).
+type StaleTurn = { keepsCommits: boolean };
+// The turn of an L2 run a takeover ended, whose commits the operator takes over on the host.
+const TAKEN_OVER_TURN: StaleTurn = { keepsCommits: false };
+
+function staleTurnOf(run: Run): StaleTurn {
+  return { keepsCommits: isContainedHitl(run) };
 }
 
 // What the factory holds about a guarded AFK run while it runs (ADR 0007):
@@ -3288,11 +3334,16 @@ function installNote(uninstalled: string): string {
   return `The factory couldn’t install this worktree’s dependencies before the run started: ${uninstalled} Install them in the worktree from its lockfile before you need them, rather than reading or running another clone’s.`;
 }
 
-// The note for an L2 run (ADR 0007): the guards fail a run that leaves its
-// worktree unclean, so what isn't its work, files it asks the operator for
-// included, goes in its container's scratch folder.
-function scratchNote(scratch: string): string {
-  return `Leave the worktree clean: the factory fails a run that leaves uncommitted changes or untracked files in it, and holds its commits in this container. Keep files that aren’t part of the work, such as notes, downloads and files you ask the operator for, in ${scratch}, outside the clone, where they stay for this task’s later runs. When you ask the operator for files, ask them to copy them there, never into the worktree.`;
+// The note for a run in a container: an L2 run's guards fail it when it
+// leaves its worktree unclean (ADR 0007), and only a contained HITL run's
+// commits ever come out of its container (ADR 0015), so what isn't its
+// work, files it asks the operator for included, goes in its container's
+// scratch folder.
+function scratchNote(scratch: string, hitl: boolean): string {
+  const clean = hitl
+    ? 'Leave the worktree clean, and commit your work as you go: your commits stay in this container, and only they ever come out to the operator’s task branch, never uncommitted changes or untracked files.'
+    : 'Leave the worktree clean: the factory fails a run that leaves uncommitted changes or untracked files in it, and holds its commits in this container.';
+  return `${clean} Keep files that aren’t part of the work, such as notes, downloads and files you ask the operator for, in ${scratch}, outside the clone, where they stay for this task’s later runs. When you ask the operator for files, ask them to copy them there, never into the worktree.`;
 }
 
 function verdictOf(answer: PermissionAnswer): Verdict {

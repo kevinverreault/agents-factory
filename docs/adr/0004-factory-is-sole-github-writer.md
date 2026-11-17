@@ -1,5 +1,5 @@
 ---
-status: accepted (App permissions amended by ADR 0014, and for full-auto's workflow changes)
+status: accepted (App permissions amended by ADR 0014, and for full-auto's workflow changes; contained HITL stages' issues written by the factory identity, ADR 0015)
 ---
 
 # The factory is the only GitHub writer for AFK work, as a GitHub App

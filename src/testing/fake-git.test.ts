@@ -1,6 +1,6 @@
 import { join, resolve } from 'node:path';
 import { describeGitContract } from '../git/git-contract.ts';
-import { FakeGit } from './fake-git.ts';
+import { FAKE_OPERATOR, FakeGit } from './fake-git.ts';
 
 describeGitContract('the fake git', async () => {
   const git = new FakeGit();
@@ -49,6 +49,7 @@ describeGitContract('the fake git', async () => {
     async merge(clonePath, branch, base) {
       git.mergeIntoOrigin(clonePath, branch, base);
     },
+    identity: FAKE_OPERATOR,
     async dispose() {},
   };
 });

@@ -78,6 +78,10 @@ export interface Git {
   // the worktree's own git identity, and returns the commit.
   // Changes to other paths stay uncommitted.
   commit(worktreePath: string, paths: string[], message: string): Promise<string>;
+  // The identity the worktree's own commits are made under, from its git
+  // config at any scope: the operator's. Null when it has no name or email.
+  // Throws a `GitError` when git can't read its config.
+  identity(worktreePath: string): Promise<GitIdentity | null>;
   // The worktree as an AFK run starting in it finds it.
   snapshot(worktreePath: string): Promise<RunSnapshot>;
   // The commits on the worktree's HEAD since `base`, which is in its
@@ -106,6 +110,9 @@ export interface Git {
   // it pushes and merges from.
   violations(worktreePath: string, before: RunSnapshot, branches: string[], committer: string): Promise<string[]>;
 }
+
+// Who a commit is authored or committed by.
+export type GitIdentity = { name: string; email: string };
 
 export type DirectoryFile = { path: string; content: string };
 
@@ -372,6 +379,13 @@ export const gitCli: Git = {
     if (paths.length === 0) return [];
     const changed = new Set(changedIn(await output(worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...paths)));
     return paths.filter((path) => changed.has(path));
+  },
+
+  async identity(worktreePath) {
+    // An unset key reads as empty; any other failure is git's to say.
+    const setting = (key: string) => run(worktreePath, 'config', '--default', '', '--get', key);
+    const [name, email] = await Promise.all([setting('user.name'), setting('user.email')]);
+    return name && email ? { name, email } : null;
   },
 
   async worktreeState(worktreePath) {

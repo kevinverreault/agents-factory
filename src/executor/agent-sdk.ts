@@ -134,17 +134,20 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
       };
       // HITL and L1 runs hand what would prompt to the factory's gate: a HITL
       // run's asks with a card in its conversation, an L1 run's with a
-      // request. An L2 run's container prompts for nothing but questions.
-      const canUseTool = askTheOperator(start.runId, spawning, gateCall(spawning));
+      // request. A run in a container, L2 or a contained HITL run's, prompts
+      // for nothing but questions.
+      const canUseTool = askTheOperator(start.runId, spawning, start.container ? allowInContainer : gateCall(spawning));
       // Skills dispatch as `/factory:<skill>`, so no other copy can shadow
       // them. An L2 run loads the container's copies of its plugins.
       const skills = start.plugin === null ? null : (start.container?.plugin ?? start.plugin);
       const plugins = [skills, ...afkPluginsOf(start, { lspPlugin, securityPlugin })].flatMap((path) => (path === null ? [] : [{ type: 'local' as const, path }]));
       const options: Options = {
         ...(start.mode === 'HITL'
-          ? hitlOptions(start.credential, canUseTool, hitlFactoryTools(start.runId, sink, start))
+          ? start.container
+            ? containedOptions(start, canUseTool, hitlFactoryTools(start.runId, sink, start))
+            : hitlOptions(start.credential, canUseTool, hitlFactoryTools(start.runId, sink, start))
           : start.container
-            ? l2Options(start, askTheOperator(start.runId, spawning, allowInContainer), afkFactoryTools(start.runId, sink, start.reports, start))
+            ? containedOptions(start, canUseTool, afkFactoryTools(start.runId, sink, start.reports, start))
             : l1Options(start, canUseTool, afkFactoryTools(start.runId, sink, start.reports, start))),
         cwd: start.cwd!,
         model: start.model,
@@ -376,7 +379,8 @@ function archiveStore(dir: string): SessionStore {
 // and security guidance plugins, an L1 run the host's copies, an L2 run its
 // container's own. A HITL run acts as the operator (ADR 0005), so it has
 // whatever their own plugins give it, and no second TypeScript server or
-// security hook beside theirs.
+// security hook beside theirs. A contained HITL run, a planning stage's
+// (ADR 0015), loads the skill set alone.
 function afkPluginsOf(start: RunStart, host: Pick<AgentSdkExecutorOptions, 'lspPlugin' | 'securityPlugin'>): (string | null)[] {
   if (start.mode === 'HITL') return [];
   if (start.container) return [start.container.lspPlugin, start.container.securityPlugin];
@@ -459,9 +463,9 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
   };
 }
 
-// L2 AFK runs (ADR 0007) execute in their task's container, where nothing
-// they do reaches the operator's machine or GitHub, so they ask no
-// permissions: `bypassPermissions` lets every call run but what the hard
+// L2 AFK runs (ADR 0007), and HITL runs at a contained stage (ADR 0015),
+// execute in their task's container, where nothing they do reaches the
+// operator's machine or GitHub, so they ask no permissions: `bypassPermissions` lets every call run but what the hard
 // denies refuse, which hold here as at L1, and questions still reach the
 // operator through `canUseTool`. The environment is the container's alone:
 // the run's subscription token, and its git and gh config, at their paths
@@ -471,11 +475,18 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
 // AskUserQuestion still reaches it, as the L2 run contract test shows. The
 // CLI sends no telemetry or error reports: the container's egress proxy
 // would deny them, and they would crowd the hosts a failed run lists.
-function l2Options({ maxTurns, guards, token, container }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
+// A contained HITL run is a conversation: it takes the streamed input as a
+// host HITL run does, its questions become cards, and the operator, not a
+// watchdog or max turns, decides about limits.
+function containedOptions({ mode, maxTurns, guards, token, container }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
   return {
     env: {
       CLAUDE_CODE_OAUTH_TOKEN: token!,
-      ...RETRY_WATCHDOG_ENV,
+      ...(mode === 'AFK' && RETRY_WATCHDOG_ENV),
+      // Off for now, against ADR 0015 for a contained HITL run, which is to
+      // get the project's auto memory: the sessions mount is the host project
+      // directory, auto memory's too, and writable, while the ADR carries
+      // memory in read-only. It stays off until memory comes in that way.
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       ...guards!.env,
@@ -488,7 +499,7 @@ function l2Options({ maxTurns, guards, token, container }: RunStart, canUseTool:
     managedSettings: { ...AFK_PLUGIN_POLICY, allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
     settings: { ...RETENTION, attribution: { commit: '', pr: '' } },
     hooks: { PreToolUse: [{ hooks: [hardDenies(container!.workdir, guards!.start, (args) => container!.git(args).then(({ code }) => code))] }] },
-    ...(maxTurns !== null && { maxTurns }),
+    ...(mode === 'AFK' && maxTurns !== null && { maxTurns }),
     canUseTool,
   };
 }
@@ -511,16 +522,19 @@ function hardDenies(cwd: string, start: string, git?: (args: string[]) => Promis
 // Why the executor can't start the run, or null.
 function whyUnstartable({ mode, autonomy, cwd, firstMessage, guards, container, credential, token }: RunStart): string | null {
   if (cwd === null) return 'The task has no worktree to run in.';
-  if (mode === 'HITL') return null;
-  if (guards === null) return 'An AFK run never starts without its git guards.';
-  // An L3 run is contained as an L2 run is (ADR 0014).
-  const contained = runsContained(autonomy);
+  // A HITL run on the host acts as the operator, unguarded.
+  if (mode === 'HITL' && container === null) return null;
+  // One in a container is guarded as an L2 run is (ADR 0015), and an L3 run
+  // is contained as an L2 run is (ADR 0014).
+  const run = mode === 'HITL' ? 'A contained HITL run' : 'An AFK run';
+  if (guards === null) return `${run} never starts without its git guards.`;
+  const contained = mode === 'HITL' || runsContained(autonomy);
   if (contained && (container === null || credential !== 'subscription-token' || !token)) {
-    return `An ${autonomy} run starts only in its task’s container, with its subscription token.`;
+    return `${mode === 'HITL' ? run : `An ${autonomy} run`} starts only in its task’s container, with its subscription token.`;
   }
-  if (!contained && container !== null) return 'Only an L2 or L3 run starts in a container.';
+  if (!contained && container !== null) return 'Only an L2 or L3 run, or a contained HITL run, starts in a container.';
   // An AFK run takes no chat, so with nothing to start on it would wait forever.
-  return firstMessage === null ? 'The AFK run has no first message to work on.' : null;
+  return mode === 'AFK' && firstMessage === null ? 'The AFK run has no first message to work on.' : null;
 }
 
 // What the operator does when Claude Code can't sign in with the run's
@@ -642,7 +656,7 @@ function runEnv(credential: CredentialProfile): Record<string, string | undefine
       return env;
     }
     case 'subscription-token':
-      // Only an L2 run, in its container, has this profile: `l2Options` builds its environment.
+      // Only a run in a container has this profile: `containedOptions` builds its environment.
       throw new Error('A run on the host never uses the subscription-token profile.');
   }
 }

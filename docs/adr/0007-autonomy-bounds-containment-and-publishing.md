@@ -1,5 +1,5 @@
 ---
-status: accepted (levels table amended by ADR 0014)
+status: accepted (levels table amended by ADR 0014; contained HITL runs, which ask no permissions and are guarded, ADR 0015)
 ---
 
 # Autonomy levels bound where code runs and what the factory publishes, not what the agent writes

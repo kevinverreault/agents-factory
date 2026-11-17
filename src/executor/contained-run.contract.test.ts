@@ -1,9 +1,10 @@
-// Seam 3: real L2 AFK runs, end to end, as the daemon starts them: the
-// executor runs Claude Code in the task's Docker container on the operator's
-// subscription token, the guards are checked in the container, and the run's
-// commit comes out to the host task branch through a bundle. They spend a
-// little usage on haiku, and need Docker and the token `agents-factory setup
-// token` stored.
+// Seam 3: real runs in a task's container, end to end, as the daemon starts
+// them: L2 AFK runs, and contained HITL runs (ADR 0015), conversations that
+// commit as the operator. The executor runs Claude Code in the task's Docker
+// container on the operator's subscription token, the guards are checked in
+// the container, and the run's commit comes out to the host task branch
+// through a bundle. They spend a little usage on haiku, and need Docker and
+// the token `agents-factory setup token` stored.
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -18,7 +19,8 @@ import { waitFor } from '../os/test-support.ts';
 import { dockerSandbox } from '../sandbox/docker.ts';
 import { BUILT_IN_EGRESS, inRunDir, type Container, type Sandbox } from '../sandbox/sandbox.ts';
 import { windowsCredentials } from '../secrets/secrets.ts';
-import type { RunSnapshot } from '../git/git.ts';
+import type { GitIdentity, RunSnapshot } from '../git/git.ts';
+import type { ToolCall } from '../permissions/permissions.ts';
 import { agentSdkExecutor } from './agent-sdk.ts';
 import type { ConversationEvent, Executor, RunStart } from './executor.ts';
 import { afkRun, CODE_INTELLIGENCE_ERROR, CODE_INTELLIGENCE_TASK, typeScriptProject, typesOf } from './sdk-test-support.ts';
@@ -31,13 +33,16 @@ async function storedToken(): Promise<string> {
   return token;
 }
 
+// The operator, as the host's git and a contained HITL run's commits name them.
+const OPERATOR: GitIdentity = { name: 'Factory Test', email: 'test@example.com' };
+
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'user.name=Factory Test', '-c', 'user.email=test@example.com', ...args], { cwd, encoding: 'utf8', windowsHide: true }).trim();
+  return execFileSync('git', ['-c', `user.name=${OPERATOR.name}`, '-c', `user.email=${OPERATOR.email}`, ...args], { cwd, encoding: 'utf8', windowsHide: true }).trim();
 }
 
 const BRANCH = 'factory/T1';
 
-type L2Run = {
+type ContainedRun = {
   executor: Executor;
   sandbox: Sandbox;
   container: Container;
@@ -48,15 +53,30 @@ type L2Run = {
   start: string;
   reported: RunEvent[];
   live: ConversationEvent[];
+  // The calls that reached the factory's gate.
+  asked: ToolCall[];
   ended: () => boolean;
 };
 
-// Starts an L2 run of `firstMessage` in a fresh task's container, as the
-// daemon would, over a repo of a README and `files`, and cleans the task up
-// after `body`.
-async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void>, files: Record<string, string> = {}): Promise<void> {
+// The runs that execute in a task's container: who each one's commits
+// name, and how it starts beside an L1 run's start. An L2 run is the
+// factory's, with max turns; a contained HITL run is the operator's
+// conversation, with no level, turn limit or allow rules.
+const KINDS = {
+  L2: { identity: FACTORY_IDENTITY, start: { autonomy: 'L2' } },
+  HITL: { identity: OPERATOR, start: { mode: 'HITL', autonomy: null, maxTurns: null, allowRules: [] } },
+} as const satisfies Record<string, { identity: GitIdentity; start: Partial<RunStart> }>;
+
+// Starts a run of `firstMessage` of `kind` in a fresh task's container, as
+// the daemon would, over a repo of a README and `files`, and cleans the task
+// up after `body`.
+async function withContainedRun(
+  firstMessage: string,
+  body: (contained: ContainedRun) => Promise<void>,
+  { files = {}, kind = 'L2' }: { files?: Record<string, string>; kind?: keyof typeof KINDS } = {},
+): Promise<void> {
   const token = await storedToken();
-  const root = mkdtempSync(join(tmpdir(), 'factory-l2-run-'));
+  const root = mkdtempSync(join(tmpdir(), 'factory-contained-run-'));
   const clonePath = join(root, 'clone');
   const worktree = join(root, 'worktree');
   git(root, 'init', '--quiet', '--initial-branch=main', clonePath);
@@ -74,10 +94,10 @@ async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void
   try {
     const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir, egress: [...BUILT_IN_EGRESS] });
     const snapshot = await container.checks.snapshot(container.workdir);
-    const env = prepareRunGit(runDir, FACTORY_IDENTITY, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
+    const env = prepareRunGit(runDir, KINDS[kind].identity, { task: 'T1', run: 'R1', model: 'claude-haiku-5-5' }, snapshot.checkout);
     const run: RunStart = {
       ...afkRun(worktree, firstMessage, 10),
-      autonomy: 'L2',
+      ...KINDS[kind].start,
       credential: 'subscription-token',
       token,
       container,
@@ -85,15 +105,19 @@ async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void
     };
     const reported: RunEvent[] = [];
     const live: ConversationEvent[] = [];
+    const asked: ToolCall[] = [];
     executor.start(run, {
       report: (event) => reported.push(event),
       converse: (event) => live.push(event),
       // A call that reaches the gate is let through, as the daemon's gate would for a run in a container.
-      askPermission: (call) => executor.permit('R1', call.id, { allow: true }),
+      askPermission: (call) => {
+        asked.push(call);
+        executor.permit('R1', call.id, { allow: true });
+      },
     });
     const ended = () => reported.some((event) => event.type === 'runCompleted' || event.type === 'runFailed');
     try {
-      await body({ executor, sandbox, container, snapshot, run, worktree, start, reported, live, ended });
+      await body({ executor, sandbox, container, snapshot, run, worktree, start, reported, live, asked, ended });
     } finally {
       executor.stop('R1');
     }
@@ -105,7 +129,7 @@ async function withL2Run(firstMessage: string, body: (l2: L2Run) => Promise<void
 }
 
 test('an L2 run commits in its container on the subscription token, keeps the guards, and its commit comes out to the host task branch', () =>
-  withL2Run(
+  withContainedRun(
     'Run these commands with the Bash tool, one call each: `echo "hello from the container" > hello.txt`, then `git add hello.txt`, ' +
       'then `git commit -m "Say hello"`. Then reply with only DONE.',
     async ({ executor, sandbox, container, snapshot, run, worktree, start, reported, live, ended }) => {
@@ -136,7 +160,7 @@ test('an L2 run commits in its container on the subscription token, keeps the gu
   ), 600_000);
 
 test('an L2 run’s question reaches the operator as an attention request, holds the run open, and takes their answer', () =>
-  withL2Run(
+  withContainedRun(
     'Use the AskUserQuestion tool to ask me which colour I prefer, with exactly two options: Red and Blue. ' +
       'After I answer, reply with only the colour I chose, in capitals.',
     async ({ executor, reported, live, ended }) => {
@@ -157,7 +181,7 @@ test('an L2 run’s question reaches the operator as an attention request, holds
   ), 600_000);
 
 test('an L2 run looks up symbols through its container’s language server, and sees the type error its edit introduces', () =>
-  withL2Run(
+  withContainedRun(
     CODE_INTELLIGENCE_TASK,
     async ({ container, reported, live, ended }) => {
       await waitFor(ended, 290_000);
@@ -167,5 +191,46 @@ test('an L2 run looks up symbols through its container’s language server, and 
       expect(live.at(-1)).toMatchObject({ type: 'message', from: 'agent', text: expect.stringContaining(CODE_INTELLIGENCE_ERROR) });
       expect(await container.deniedHosts()).toEqual([]);
     },
-    typeScriptProject(),
+    { files: typeScriptProject() },
+  ), 600_000);
+
+test('a contained HITL run converses in its container: its question is a card, it takes the operator’s next message, nothing asks, and it commits as the operator', () =>
+  withContainedRun(
+    'Use the AskUserQuestion tool to ask me which colour I prefer, with exactly two options: Red and Blue. ' +
+      'After I answer, reply with only the colour I chose, in capitals.',
+    async ({ executor, sandbox, container, snapshot, worktree, reported, live, asked }) => {
+      const turnsEnded = () => reported.filter((event) => event.type === 'turnEnded').length;
+      const agentSaid = (text: string) => live.some((event) => event.type === 'message' && event.from === 'agent' && event.text.includes(text));
+      const question = () => reported.find((event) => event.type === 'questionAsked');
+      await waitFor(() => question() !== undefined || reported.some((event) => event.type === 'runFailed'), 120_000);
+      const card = (question() as Extract<RunEvent, { type: 'questionAsked' }>).question;
+      // The card holds the turn open.
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      expect(turnsEnded()).toBe(0);
+
+      executor.answer('R1', card.id, { [card.questions[0]!.question]: 'Blue' });
+      await waitFor(() => turnsEnded() === 1, 120_000);
+      expect(agentSaid('BLUE')).toBe(true);
+
+      executor.send(
+        'R1',
+        'Run these commands with the Bash tool, one call each: `echo "notes from the grill" > notes.txt`, then `git add notes.txt`, ' +
+          'then `git commit -m "Keep the grill notes"`. Then reply with only DONE.',
+      );
+      await waitFor(() => turnsEnded() === 2, 290_000);
+
+      expect(typesOf(reported)).toEqual(['runStarted', 'questionAsked', 'turnEnded', 'turnEnded']);
+      expect(agentSaid('DONE')).toBe(true);
+      // No call asked: the container, not the gate, keeps the run safe.
+      expect(asked).toEqual([]);
+      expect(await container.deniedHosts()).toEqual([]);
+      const { stdout } = await container.git(['log', '-1', '--format=%an <%ae>|%cn <%ce>%n%B']);
+      expect(stdout).toContain(`${OPERATOR.name} <${OPERATOR.email}>|${OPERATOR.name} <${OPERATOR.email}>`);
+      expect(stdout).toContain('Factory-Run: R1');
+      // Guarded as an L2 run is, under the operator's email.
+      expect(await container.checks.violations(container.workdir, snapshot, [], OPERATOR.email)).toEqual([]);
+      const tip = await sandbox.bringOut('T1', worktree, BRANCH);
+      expect(git(worktree, 'show', `${tip}:notes.txt`)).toBe('notes from the grill');
+    },
+    { kind: 'HITL' },
   ), 600_000);

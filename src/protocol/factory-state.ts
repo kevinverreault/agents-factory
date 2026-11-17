@@ -152,6 +152,8 @@ export type RunView = Pick<
   deniedHosts: string[];
   // While an AFK run waits out a 5-hour usage limit, when its wait ends.
   waitingForWindow: number | null;
+  // Whether it is a HITL run in its task's container (ADR 0015).
+  contained: boolean;
 };
 
 // `app` is null until the daemon has checked the App's installation, and
@@ -277,6 +279,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       ticket: run.ticket ?? null,
       usage: structuredClone(run.usage ?? {}),
       waitingForWindow: run.waitingForWindow ?? null,
+      contained: !!run.contained,
       cli,
       skillSet: skillSet ?? null,
       startedAt,

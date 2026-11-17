@@ -99,6 +99,7 @@ async function fixture(): Promise<CloneFixture> {
     async merge(clonePath, branch, base) {
       git(clonePath, 'push', '--quiet', 'origin', `${branch}:${base}`);
     },
+    identity: { name: 'Factory Test', email: 'test@example.com' },
     async dispose() {
       rmSync(root, { recursive: true, force: true });
     },

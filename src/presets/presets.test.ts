@@ -221,6 +221,26 @@ describe('the schema', () => {
     expect(refusal(nightly('{ id: open-pr, kind: action, mode: AFK, requires: L3 }'), 'nightly')).toMatch(/stage open-pr: requires/);
   });
 
+  test('a HITL run or loop stage may be contained, frozen with the preset, and no other stage may be', () => {
+    const preset = resolved(nightly('{ id: grill, kind: run, skill: grill-me, mode: HITL, contained: true }'), 'nightly');
+    expect(preset.stages).toEqual([{ id: 'grill', kind: 'run', skill: 'grill-me', mode: 'HITL', contained: true }]);
+    expect(resolved(nightly('{ id: work, kind: loop, skill: work, mode: HITL, exit: map-cleared, contained: true }'), 'nightly').stages[0]).toMatchObject({ contained: true });
+    // Saying a stage isn't contained is the default, and fine anywhere.
+    expect(resolved(nightly('{ id: implement, kind: run, skill: implement, mode: AFK, contained: false }'), 'nightly').stages[0]).toMatchObject({ contained: false });
+    // It is part of what the task freezes: changing it changes the hash.
+    expect(resolved(nightly('{ id: grill, kind: run, skill: grill-me, mode: HITL }'), 'nightly').hash).not.toBe(preset.hash);
+
+    expect(refusal(nightly('{ id: implement, kind: run, skill: implement, mode: AFK, contained: true }'), 'nightly')).toBe(
+      `${at}: stage implement: only a HITL run or loop stage can be contained: an AFK stage runs where its autonomy level says.`,
+    );
+    expect(refusal(nightly('{ id: implement, kind: tickets, skill: implement, mode: HITL, exit: spec-closed, contained: true }'), 'nightly')).toMatch(
+      /stage implement: only a HITL run or loop stage can be contained/,
+    );
+    expect(refusal(nightly('{ id: grill, kind: run, skill: grill-me, mode: HITL, contained: yes please }'), 'nightly')).toBe(
+      `${at}: stage grill: contained must be a boolean.`,
+    );
+  });
+
   test('the Ralph loop’s exit, tickets-closed, is refused: the loop was retired', () => {
     expect(refusal(nightly('{ id: implement, kind: loop, skill: implement, mode: AFK, exit: tickets-closed }'), 'nightly')).toBe(
       `${at}: stage implement: exit tickets-closed was the Ralph loop’s, which is retired: work a spec’s tickets with kind: tickets and exit spec-closed instead (ADR 0013).`,
