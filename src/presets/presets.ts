@@ -11,8 +11,9 @@ import { parse } from 'yaml';
 import { z } from 'zod';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { AppCheck } from '../lifecycle/lifecycle.ts';
+import type { SandboxView } from '../sandbox/sandbox.ts';
 import { DEFAULT_PRESET, OWNER_NAME } from '../repositories/registry.ts';
-import { orList } from '../text/lines.ts';
+import { andList, orList } from '../text/lines.ts';
 
 export type PresetScope = 'built-in' | 'user' | 'repo';
 // Higher wins a name clash.
@@ -254,6 +255,24 @@ export function appStages(preset: ResolvedPreset): string[] {
   return preset.stages.filter((stage) => stage.mode === 'AFK').map(({ id }) => id);
 }
 
+// The stages whose HITL runs execute contained (ADR 0015), which need Docker.
+export function containedStages(preset: ResolvedPreset): string[] {
+  return preset.stages.filter(isContained).map(({ id }) => id);
+}
+
+// Why a launch of the preset is blocked where Docker and the image stand as
+// `sandbox`, or null when it isn't (ADR 0015): only a preset with contained
+// stages (`stages`) needs Docker, and its image need only be building.
+export function sandboxBlock(preset: string, stages: string[], sandbox: SandboxView): string | null {
+  if (stages.length === 0 || (sandbox.state !== 'unavailable' && sandbox.state !== 'failed')) return null;
+  const runs = `${preset} runs its ${andList(stages)} ${stages.length === 1 ? 'stage' : 'stages'} contained, in the task’s container`;
+  return sandbox.state === 'unavailable' ? `${runs}, but Docker isn’t available: ${sandbox.reason}` : `${runs}, but ${lowerFirst(sandbox.reason ?? 'its image couldn’t be built.')}`;
+}
+
+function lowerFirst(text: string): string {
+  return text.charAt(0).toLowerCase() + text.slice(1);
+}
+
 // Why a launch of the preset is blocked where the App's installation was
 // checked as `check`, or null when it isn't: only a preset with stages that
 // work as the App (`stages`) needs it.
@@ -265,7 +284,7 @@ export function appBlock(preset: string, stages: string[], check: AppCheck | nul
 // A preset as a launch card offers it: the stages it can start at and those
 // that work as the factory's App, or why it doesn't resolve.
 export type PresetChoice =
-  | { name: string; source: PresetScope; description: string | null; startStages: StartStage[]; appStages: string[] }
+  | { name: string; source: PresetScope; description: string | null; startStages: StartStage[]; appStages: string[]; containedStages: string[] }
   | { name: string; source: PresetScope; error: string };
 
 // Every preset name among `files`, by name, each as it resolves.
@@ -275,7 +294,7 @@ export function presetChoices(files: PresetFile[]): PresetChoice[] {
     const { scope } = winner(files, name)!;
     if ('error' in result) return { name, source: scope, error: result.error };
     const { description } = result.preset;
-    return { name, source: scope, description, startStages: startStages(result.preset), appStages: appStages(result.preset) };
+    return { name, source: scope, description, startStages: startStages(result.preset), appStages: appStages(result.preset), containedStages: containedStages(result.preset) };
   });
 }
 

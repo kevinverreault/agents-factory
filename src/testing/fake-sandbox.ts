@@ -22,6 +22,13 @@ export class FakeSandbox implements Sandbox {
   private readonly built = new Map<string, { usedElsewhere: boolean }>();
   private failures = new Map<string, string>();
   private unlistable: string | null = null;
+  // Why Docker doesn't answer, while it doesn't.
+  private down: string | null = null;
+  // How many image builds were asked for, and the one under way, if held.
+  builds = 0;
+  private buildFailure: string | null = null;
+  private building: { promise: Promise<void>; finish: () => void } | null = null;
+  private held = false;
 
   constructor(private readonly git: FakeGit) {}
 
@@ -57,6 +64,28 @@ export class FakeSandbox implements Sandbox {
     return false;
   }
 
+  // Docker doesn't answer from now on, saying `reason`, as with its daemon
+  // stopped, or answers again (null). Everything the sandbox does fails meanwhile.
+  dockerDown(reason: string | null): void {
+    this.down = reason;
+  }
+
+  // Image builds fail with `reason` from now on, or work again (null).
+  failBuild(reason: string | null): void {
+    this.buildFailure = reason;
+  }
+
+  // Image builds from now on take until `finishBuild`.
+  holdBuild(): void {
+    this.held = true;
+  }
+
+  // The build under way finishes, and later ones take no time.
+  finishBuild(): void {
+    this.held = false;
+    this.building?.finish();
+  }
+
   // Listing fails with `reason` from now on, as with Docker unreachable, or works again.
   failList(reason: string | null): void {
     this.unlistable = reason;
@@ -81,8 +110,31 @@ export class FakeSandbox implements Sandbox {
     return this.built.has(image);
   }
 
+  async unavailable(): Promise<string | null> {
+    return this.down;
+  }
+
+  // Shared while under way, as the Docker adapter's is.
+  async buildImage(): Promise<void> {
+    if (this.down) throw new SandboxError(this.down);
+    if (!this.building) {
+      this.builds++;
+      let finish!: () => void;
+      const done = new Promise<void>((resolve) => (finish = resolve));
+      const promise = (this.held ? done : Promise.resolve()).then(() => {
+        this.building = null;
+        if (this.buildFailure) throw new SandboxError(this.buildFailure);
+        if (!this.built.has(CURRENT_IMAGE)) this.built.set(CURRENT_IMAGE, { usedElsewhere: false });
+      });
+      this.building = { promise, finish };
+    }
+    return this.building.promise;
+  }
+
   async prepare(spec: ContainerSpec): Promise<Container> {
     this.record('prepare', spec.taskId);
+    if (this.down) throw new SandboxError(this.down);
+    await this.buildImage();
     this.prepared.push(spec);
     let container = this.containers.get(spec.taskId);
     if (!container) {

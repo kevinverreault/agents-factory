@@ -38,6 +38,9 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
   const [repo, setRepo] = useState(() => defaultRepo(state, here));
   const [taskId, setTaskId] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
+  // Whether the launch's refusal offered to run on the host this time,
+  // Docker being unavailable (ADR 0015).
+  const [hostable, setHostable] = useState(false);
   // While the daemon names and launches the task. Left meanwhile, the grill
   // it launches goes on as an ordinary conversation, as after any esc.
   const launching = useLaunch(connection);
@@ -63,13 +66,17 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
   const question = run?.status === 'active' && run.question && run.question.id !== typing.current.answered ? run.question : null;
   const card = question && typing.current.cardFor === question.id ? typing.current.card : newCard();
 
-  const launch = () => {
+  const launch = (onHost = false) => {
     const prompt = typing.current.draft.trim();
     if (!repo || !prompt) return;
     setRefusal(null);
-    launching.launch({ type: 'launchTask', repo, preset: QUICK_PRESET, prompt, quick: true }, (launched) => {
+    setHostable(false);
+    launching.launch({ type: 'launchTask', repo, preset: QUICK_PRESET, prompt, quick: true, ...(onHost && { onHost }) }, (launched) => {
       if (launched.ok && launched.left) return void connection.send({ type: 'expandQuickLaunch', taskId: launched.taskId });
-      if (!launched.ok) return setRefusal(launched.reason);
+      if (!launched.ok) {
+        setHostable(launched.onHost);
+        return setRefusal(launched.reason);
+      }
       typing.current.draft = '';
       setTaskId(launched.taskId);
     });
@@ -96,6 +103,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
       // The launch under way takes no other key.
       if (taskId || launching.busy()) return;
       if (key.return) return launch();
+      if (key.ctrl && input === 'r') return hostable && refusal ? launch(true) : undefined;
       if (key.upArrow || key.downArrow) return setRepo((repo) => cycle(repositories, repo, key.upArrow ? -1 : 1));
       typeKey(typed, input, key);
       return rerender();
@@ -143,6 +151,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
       h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)),
       launching.indicator ?? (taskId ? h(Text, tone('dim'), 'Starting the grill…') : null),
       refusal ? h(Text, tone('bad'), refusal) : null,
+      refusal && hostable ? h(Text, tone('dim'), 'enter retries · ctrl+r runs it on this machine this time, where its calls ask you again') : null,
     );
   }
   return h(

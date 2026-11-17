@@ -94,6 +94,16 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
   const cancel: Choice = { label: 'Cancel', command: { type: 'cancel', taskId } };
   switch (item.attention) {
     case 'failure': {
+      // A contained run whose container couldn't be prepared starts again
+      // at once, in its container or, as the operator chooses, on the host
+      // this time (ADR 0015): never on the host unasked.
+      if (item.unprepared) {
+        return [
+          { label: 'Retry', command: answer, opens: true },
+          { label: 'Run on host this time, where its calls ask you again', command: { type: 'answer', taskId, onHost: true }, opens: true },
+          cancel,
+        ];
+      }
       // Only the operator decides what a failure means.
       return [{ label: 'Retry', command: answer }, ...allowHosts(taskId, item.deniedHosts ?? []), ...takeOver, cancel];
     }
@@ -195,7 +205,7 @@ export function cardItem(task: TaskView, permission: Permission): AttentionQueue
     question: null,
     permission,
     recovery: null,
-    deniedHosts: null, skipped: null,
+    deniedHosts: null, skipped: null, unprepared: false,
   };
 }
 

@@ -120,7 +120,7 @@ import {
   type TaskLaunched,
   unfinishedTicketTasks,
 } from '../lifecycle/lifecycle.ts';
-import { diffFactoryState, repositoryView, toFactoryState, type FactoryState } from '../protocol/factory-state.ts';
+import { diffFactoryState, repositoryView, toFactoryState, type FactoryState, type SandboxView } from '../protocol/factory-state.ts';
 import {
   PROTOCOL_VERSION,
   readMessages,
@@ -150,6 +150,8 @@ import { addOperatorRules, readAllowRules, trackScripts, uncovered, type ToolCal
 import {
   appBlock,
   appStages,
+  containedStages,
+  sandboxBlock,
   builtInPresets,
   issueRefs,
   launchDefault,
@@ -262,7 +264,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let lifecycle: Lifecycle = store.loadLifecycle() ?? initialLifecycle();
   // Whether the daemon before this one stopped gracefully (ADR 0003).
   const cleanStart = store.takeCleanShutdown();
-  let published: FactoryState = toFactoryState(lifecycle, new Set(), clock.now());
+  // Docker and this factory version's image, as last found (ADR 0015).
+  let sandboxView: SandboxView = { state: 'checking', reason: null };
+  let published: FactoryState = toFactoryState(lifecycle, new Set(), clock.now(), sandboxView);
   const startedAt = clock.now();
   const sockets = new Set<Socket>();
   const subscribers = new Set<Socket>();
@@ -472,6 +476,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           if (!lifecycle.repositories[command.repo]) return { ok: false, reason: `${command.repo} is not registered.` };
           return { ok: true, value: await checkSkills(command.repo, { fetch: true }) };
         });
+      case 'checkSandbox':
+        return { ok: true, value: await checkSandbox() };
       case 'launchTask':
         return launch(command);
       case 'advanceStage':
@@ -795,6 +801,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         maxTurns: command.maxTurns ?? null,
         priority: command.priority ?? 'normal',
         quick: command.quick === true,
+        ...(command.onHost === true && { onHost: true }),
         worktree: { branch: '', path: '' },
         sessionId: randomUUID(),
         skillSet: '',
@@ -841,6 +848,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         // or another policy, where its installation doesn't grant that.
         const refusedByApp = action.autonomy === 'L3' && start.stage.mode === 'AFK' ? appRefusalText(repo, check, policyOf(action)) : null;
         if (refusedByApp) return { ok: false, reason: refusedByApp };
+      }
+      // No silent fallback to the host (ADR 0015): a preset with contained
+      // stages launches only where Docker is available, its image built or
+      // building, unless the operator chose to run on the host this time.
+      const contained = containedStages(resolved.preset);
+      if (contained.length && !action.onHost) {
+        const blocked = sandboxBlock(resolved.preset.name, contained, await checkSandbox());
+        if (blocked) {
+          const choose: Option[] = [
+            { label: 'Retry', command },
+            { label: 'Run on host this time', command: { ...command, onHost: true } },
+          ];
+          return { ok: false, reason: blocked, choose };
+        }
       }
       // At an AFK stage launching ticket tasks, one issue ref with no
       // sub-issues is a ticket task's ticket, and a spec ref or several refs
@@ -1650,6 +1671,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const found = cleanStart ? undefined : await foundAtStart();
     await settle({ type: 'runsReconciled', interruption: cleanStart ? 'graceful' : 'unclean', replayed, ...(found && { found }) }, new Set());
   });
+
+  // The image is built in the background as the daemon starts, an upgrade's
+  // restart included, so a launch never waits for a build (ADR 0015).
+  void checkSandbox();
+
+  // Whether Docker answers now, and, once it does, this factory version's
+  // image, built in the background unless it is built or building: as the
+  // state shows them, and as they stand once Docker has answered. A launch
+  // needn't wait for the build, which its run's prepare waits for.
+  async function checkSandbox(): Promise<SandboxView> {
+    const down = await sandbox.unavailable().catch((error: Error) => error.message || 'Docker didn’t answer.');
+    if (down) setReadiness({ state: 'unavailable', reason: down });
+    else if (sandboxView.state !== 'building' && sandboxView.state !== 'ready') {
+      setReadiness({ state: 'building', reason: null });
+      sandbox.buildImage().then(
+        () => setReadiness({ state: 'ready', reason: null }),
+        (error: Error) => setReadiness({ state: 'failed', reason: `The factory couldn’t build its container image: ${error.message}` }),
+      );
+    }
+    return sandboxView;
+  }
+
+  function setReadiness(next: SandboxView): void {
+    sandboxView = next;
+    publish();
+  }
 
   // What an unclean start finds that no live task has (ADR 0003): the
   // containers and worktrees the leftover matcher finds, origin left
@@ -2681,7 +2728,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // A contained HITL run is guarded as an L2 run is, but its commits are
     // the operator's own (ADR 0015).
     if ((run.mode === 'AFK' || contained) && cwd) {
-      const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason });
+      // A contained HITL run failing here never started its CLI: the
+      // operator may retry it, or run it on the host this time (ADR 0015).
+      const fail = (reason: string) => void dispatch({ type: 'runFailed', runId: run.id, reason, ...(isContainedHitl(run) && { unprepared: true }) });
       let identity = FACTORY_IDENTITY;
       if (isContainedHitl(run)) {
         let operator: GitIdentity | null;
@@ -3232,7 +3281,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   function publish(): void {
-    const next = toFactoryState(lifecycle, watched(), clock.now());
+    const next = toFactoryState(lifecycle, watched(), clock.now(), sandboxView);
     const ops = diffFactoryState(published, next);
     published = next;
     if (ops.length) for (const socket of subscribers) send(socket, { type: 'patch', ops });

@@ -1,6 +1,6 @@
 // Preset resolution and schema validation: pure, so tested directly.
 import { describe, expect, test } from 'vitest';
-import { builtInPresets, fillOpening, issueRefs, openingMessage, planStart, resolvePreset, startStages, type PresetFile } from './presets.ts';
+import { builtInPresets, containedStages, fillOpening, issueRefs, openingMessage, planStart, presetChoices, resolvePreset, sandboxBlock, startStages, type PresetFile } from './presets.ts';
 
 const user = (name: string, content: string): PresetFile => ({ scope: 'user', name, path: `~/.agent-factory/presets/${name}.preset.yaml`, content });
 const repo = (name: string, content: string): PresetFile => ({ scope: 'repo', name, path: `.agent-factory/presets/${name}.preset.yaml`, content });
@@ -238,6 +238,26 @@ describe('the schema', () => {
     );
     expect(refusal(nightly('{ id: grill, kind: run, skill: grill-me, mode: HITL, contained: yes please }'), 'nightly')).toBe(
       `${at}: stage grill: contained must be a boolean.`,
+    );
+  });
+
+  test('a launch card is offered the contained stages, which need Docker, and is blocked only once Docker is unavailable or the image failed', () => {
+    const files = nightly(
+      '{ id: grill, kind: run, skill: grill-me, mode: HITL, contained: true }',
+      '{ id: work, kind: loop, skill: work, mode: HITL, exit: map-cleared, contained: true }',
+      '{ id: notes, kind: run, skill: notes, mode: HITL }',
+    );
+    const preset = resolved(files, 'nightly');
+    expect(containedStages(preset)).toEqual(['grill', 'work']);
+    expect(presetChoices([...builtInPresets(), ...files]).find(({ name }) => name === 'nightly')).toMatchObject({ containedStages: ['grill', 'work'] });
+
+    for (const state of ['checking', 'building', 'ready'] as const) expect(sandboxBlock('nightly', ['grill', 'work'], { state, reason: null })).toBeNull();
+    expect(sandboxBlock('nightly', [], { state: 'unavailable', reason: 'Docker isn’t running.' })).toBeNull();
+    expect(sandboxBlock('nightly', ['grill'], { state: 'unavailable', reason: 'Docker isn’t running.' })).toBe(
+      'nightly runs its grill stage contained, in the task’s container, but Docker isn’t available: Docker isn’t running.',
+    );
+    expect(sandboxBlock('nightly', ['grill', 'work'], { state: 'failed', reason: 'The factory couldn’t build its container image: no space left on device.' })).toBe(
+      'nightly runs its grill and work stages contained, in the task’s container, but the factory couldn’t build its container image: no space left on device.',
     );
   });
 
