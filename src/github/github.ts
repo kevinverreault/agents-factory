@@ -24,6 +24,12 @@ export type Permissions = Partial<Record<Permission, 'read' | 'write'>>;
 // (ADR 0011): Issues, Pull requests and Metadata read.
 export const READ_ONLY: Permissions = { issues: 'read', pull_requests: 'read', metadata: 'read' };
 
+// What a contained HITL run writes issues with (ADR 0015, amending ADR
+// 0004): its specs, maps and tickets, their labels, sub-issues and
+// dependencies, and claims, besides an AFK run's reads, but no contents or
+// pull request write.
+export const ISSUES_WRITE: Permissions = { issues: 'write', pull_requests: 'read', metadata: 'read' };
+
 // What closing a ticket writes with: a comment and the issue's state.
 export const TICKET_WRITE: Permissions = { issues: 'write', metadata: 'read' };
 

@@ -14,6 +14,7 @@ import {
   CHECKS_READ,
   GitHubError,
   installationSettings,
+  ISSUES_WRITE,
   MERGE,
   MERGE_WORKFLOWS,
   OPEN_PR,
@@ -296,7 +297,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const takeoversInFlight = new Set<string>();
   // Each guarded AFK run's read-only bot token (ADR 0004): its gh config
   // directory, and when it is next replaced.
-  const botTokens = new Map<string, { repo: string; dir: string; refreshAt: number }>();
+  const botTokens = new Map<string, { repo: string; permissions: Permissions; dir: string; refreshAt: number }>();
   // The work loops whose read of their map is under way on GitHub.
   const mapReadsInFlight = new Set<string>();
   // The Done roots whose cleanup this daemon has started, and those of them
@@ -2660,6 +2661,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     let guards: RunGuards | null = null;
     let container: Container | null = null;
     let token: string | null = null;
+    let operatorLogin: string | null = null;
     if (containers.has(task.id)) await onContainer(task.id, async () => {});
     // Commits that can't come out stay there: the next run's prepare, or the task's cleanup, says why.
     if (run.mode === 'HITL' && !contained && cwd && containers.has(task.id)) await bringOutOfContainer(task);
@@ -2712,12 +2714,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           return fail(`The factory couldn't read the run's worktree at ${cwd}: ${error.message}`);
         }
       }
-      // The run reads GitHub as the App, never as the operator (ADR 0004).
+      // The run reads GitHub as the App, never as the operator (ADR 0004). A
+      // contained HITL run writes issues as it too, and knows the operator's
+      // login, which its `@me` doesn't name (ADR 0015).
+      const permissions = isContainedHitl(run) ? ISSUES_WRITE : READ_ONLY;
       let bot: BotToken;
       try {
-        bot = await botToken(task.repo);
+        bot = await botToken(task.repo, permissions);
+        if (isContainedHitl(run)) operatorLogin = await github.appOwner((await factoryApp())!);
       } catch (error) {
         if (!isGitHubFailure(error)) throw error;
+        if (permissions === ISSUES_WRITE) return fail(await issuesWriteRefusal(task.repo, error));
         return fail(`The factory couldn’t give the run its read-only GitHub token: ${error.message}`);
       }
       if (lifecycle.runs[run.id]?.status !== 'active') return;
@@ -2739,8 +2746,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const env = prepareRunGit(dir, identity, { task: task.id, run: run.id, model: run.model }, snapshot!.checkout);
       const ghConfigDir = join(dir, 'gh');
       Object.assign(env, writeRunGh(ghConfigDir, bot.user, bot.token));
+      // The container's clone has no GitHub remote for `gh` to find the repository by.
+      if (contained) env.GH_REPO = task.repo;
+      if (operatorLogin) env.FACTORY_OPERATOR_LOGIN = operatorLogin;
       guarded.set(run.id, { worktree: container?.workdir ?? cwd, host: cwd, dir, checks: container?.checks ?? git, container, snapshot: snapshot!, scripts: new Set() });
-      botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
+      botTokens.set(run.id, { repo: task.repo, permissions, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
       guards = { start: snapshot!.head, env: contained ? inRunDir(env, dir) : env };
     }
     const start: RunStart = {
@@ -2754,6 +2764,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       firstMessage: withFactoryNotes(run.opening, [
         uninstalled === null ? null : installNote(uninstalled),
         container === null ? null : scratchNote(container.scratch, isContainedHitl(run)),
+        operatorLogin === null ? null : operatorNote(operatorLogin),
       ]),
       model: run.model,
       maxTurns: run.maxTurns ?? null,
@@ -2999,12 +3010,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
   }
 
-  // A read-only token of the App's installation on the repository, and the
-  // App's bot user it reads as.
-  async function botToken(repo: string): Promise<BotToken> {
+  // A token of the App's installation on the repository, with `permissions`
+  // alone, and the App's bot user it acts as.
+  async function botToken(repo: string, permissions: Permissions): Promise<BotToken> {
     const found = await factoryApp();
     if (!found) throw new GitHubError(NO_APP);
-    return { user: `${found.slug}[bot]`, ...(await github.mintToken(found, repo, READ_ONLY)) };
+    return { user: `${found.slug}[bot]`, ...(await github.mintToken(found, repo, permissions)) };
+  }
+
+  // Why a contained HITL run got no token that writes issues: the App's
+  // installation doesn't grant Issues write, with where to approve it, or
+  // else what went wrong.
+  async function issuesWriteRefusal(repo: string, error: Error): Promise<string> {
+    const failed = `The factory couldn’t give the run its GitHub token, with which a contained HITL run writes issues: ${error.message}`;
+    try {
+      const found = await factoryApp();
+      const installation = found && (await github.installation(found, repo));
+      if (!installation || installation.permissions.issues === 'write') return failed;
+      return `A contained HITL run writes issues as the factory’s GitHub App, which needs Issues write on ${repo}, and its installation doesn’t grant it yet. Approve the App’s permissions at ${installation.settingsUrl}, then try again.`;
+    } catch (cause) {
+      if (!isGitHubFailure(cause)) throw cause;
+      return failed;
+    }
   }
 
   // Replaces each guarded run's bot token that expires soon, in place: `gh`
@@ -3015,7 +3042,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (held.refreshAt > clock.now()) continue;
       // None other starts while this one is under way.
       held.refreshAt = Infinity;
-      void botToken(held.repo).then(
+      void botToken(held.repo, held.permissions).then(
         (bot) => {
           if (botTokens.get(runId) !== held) return;
           writeRunGh(held.dir, bot.user, bot.token);
@@ -3344,6 +3371,12 @@ function scratchNote(scratch: string, hitl: boolean): string {
     ? 'Leave the worktree clean, and commit your work as you go: your commits stay in this container, and only they ever come out to the operator’s task branch, never uncommitted changes or untracked files.'
     : 'Leave the worktree clean: the factory fails a run that leaves uncommitted changes or untracked files in it, and holds its commits in this container.';
   return `${clean} Keep files that aren’t part of the work, such as notes, downloads and files you ask the operator for, in ${scratch}, outside the clone, where they stay for this task’s later runs. When you ask the operator for files, ask them to copy them there, never into the worktree.`;
+}
+
+// The note for a contained HITL run (ADR 0015): its `gh` acts as the
+// factory's App, so `@me` names the App's bot, not the operator.
+function operatorNote(login: string): string {
+  return `In this container, \`gh\` acts as the factory’s GitHub App, not as the operator: the issues you write have the factory as author, and \`@me\` names the App’s bot. Where a convention assigns \`@me\`, such as claiming a ticket, assign the operator’s GitHub login, ${login}, which is also in $FACTORY_OPERATOR_LOGIN.`;
 }
 
 function verdictOf(answer: PermissionAnswer): Verdict {
