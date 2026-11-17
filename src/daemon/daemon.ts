@@ -1747,10 +1747,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   // A host card's answer (ADR 0015). Allow always's host goes into the
-  // operator's permissions file before the card is answered, so the
-  // Lifecycle first checks the answer without applying it: if the host
-  // can't go in, the answer fails with why, and the card stays open. An
-  // allowed host joins the live run's proxy's allowlist in place.
+  // operator's permissions file, and an allowed host into the live run's
+  // proxy's allowlist, in place, before the card is answered, so the
+  // Lifecycle first checks the answer without applying it: if either fails,
+  // the answer fails with why, and the card stays open.
   async function answerHost(action: Extract<LifecycleAction, { type: 'answerHost' }>): Promise<Reply> {
     const { refusal } = reduce(lifecycle, action, clock.now(), routes(), { holdRuns });
     if (refusal) return { ok: false, reason: refusal };
@@ -1758,18 +1758,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const problem = addEgressHosts(options.permissionsPath, [action.host]);
       if (problem) return { ok: false, reason: `Allow always added no host: ${problem}` };
     }
-    const asking = liveRun(lifecycle, lifecycle.tasks[action.taskId]!)!;
-    const refused = await settle(action, new Set());
-    if (refused) return { ok: false, reason: refused };
-    const container = guarded.get(asking.id)?.container;
-    if (action.answer === 'deny' || !container) return { ok: true };
-    try {
-      await container.setEgress(egressOf(lifecycle.tasks[action.taskId]!));
-    } catch (error) {
-      if (!(error instanceof SandboxError)) throw error;
-      return { ok: false, reason: `The host is allowed from the run’s next start, but its container’s proxy couldn’t allow it now: ${error.message}` };
+    const task = lifecycle.tasks[action.taskId]!;
+    const container = guarded.get(liveRun(lifecycle, task)!.id)?.container;
+    if (action.answer !== 'deny' && container) {
+      try {
+        await container.setEgress([...new Set([...egressOf(task), action.host])]);
+      } catch (error) {
+        if (!(error instanceof SandboxError)) throw error;
+        return { ok: false, reason: `The factory couldn’t allow ${action.host} in ${task.id}’s egress proxy: ${error.message}` };
+      }
     }
-    return { ok: true };
+    const refused = await settle(action, new Set());
+    return refused ? { ok: false, reason: refused } : { ok: true };
   }
 
   // The hosts each live contained HITL run's container denied it, read for

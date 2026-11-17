@@ -186,6 +186,22 @@ describe('answering a host card', () => {
     expect(tui.state().runs.R1?.hostCards).toEqual(['docs.example.com']);
   });
 
+  test('fails with the reason, leaving the card open and the task’s egress as it was, when the proxy can’t take the host', async () => {
+    const { factory, operator, tui } = await denied('docs.example.com');
+    factory.sandbox.fail('setEgress', 'the proxy is gone.');
+
+    expect(await operator.send({ type: 'answerHost', taskId: 'T1', host: 'docs.example.com', answer: 'task' })).toEqual({
+      ok: false,
+      reason: 'The factory couldn’t allow docs.example.com in T1’s egress proxy: the proxy is gone.',
+    });
+    expect(tui.state().runs.R1?.hostCards).toEqual(['docs.example.com']);
+    expect(tui.state().tasks.T1?.egressHosts).toEqual([]);
+
+    factory.sandbox.fail('setEgress', null);
+    expect(await operator.send({ type: 'answerHost', taskId: 'T1', host: 'docs.example.com', answer: 'task' })).toEqual({ ok: true });
+    expect(factory.sandbox.request('T1', 'docs.example.com')).toBe(true);
+  });
+
   test('Deny leaves the host blocked and closes the card, and the host raises no second card', async () => {
     const { factory, operator, tui } = await denied('docs.example.com');
 

@@ -41,7 +41,7 @@ export class FakeSandbox implements Sandbox {
 
   // Each call of `op` (such as `prepare` or `bringOut`) fails with a
   // `SandboxError` saying `reason` from now on, or works again (null).
-  fail(op: 'prepare' | 'bringOut' | 'start' | 'stop' | 'restart' | 'remove', reason: string | null): void {
+  fail(op: 'prepare' | 'bringOut' | 'start' | 'stop' | 'restart' | 'remove' | 'setEgress', reason: string | null): void {
     if (reason === null) this.failures.delete(op);
     else this.failures.set(op, reason);
   }
@@ -185,6 +185,8 @@ export class FakeSandbox implements Sandbox {
       git: () => Promise.reject(new Error('The fake sandbox runs no git command.')),
       deniedHosts: async () => [...container.denied],
       setEgress: async (egress) => {
+        const failure = this.failures.get('setEgress');
+        if (failure) throw new SandboxError(failure);
         if (!container.running) throw new SandboxError(`${spec.taskId}’s container isn’t running.`);
         container.spec = { ...container.spec, egress: [...egress] };
       },
