@@ -73,7 +73,11 @@ _Avoid_: Sandbox mode, isolation (for the domain term)
 
 **Operator profile**:
 What a contained HITL run gets of the operator's own Claude Code setup: their user `CLAUDE.md` and the project's auto memory, both read-only. Nothing executable of theirs comes with it: no user settings, MCP servers, plugins or hooks.
-_Avoid_: Credential profile, which is how a run authenticates
+_Avoid_: Credential profile
+
+**Credential profile**:
+How a run authenticates, chosen per run by the scheduler and only applied by the executor (ADR 0001): the operator's own subscription login on the host, or, in a container, the subscription token the factory stores.
+_Avoid_: Operator profile, auth mode
 
 **Model tier**:
 The class of model a stage or run asks for, resolved to an exact model when the run starts. A delegating agent can only ask for its own tier or a lower one.

@@ -40,17 +40,24 @@ export type ContainerSpec = {
   // The hosts the container may reach (ADR 0007): its egress is denied
   // anywhere else. Each prepare sets them afresh.
   egress: string[];
-  // The operator's profile, copied in read-only for a contained HITL run
-  // (ADR 0015), or none. Each prepare copies it afresh, or, with none,
+  // The operator profile, copied in read-only for a contained HITL run
+  // (ADR 0015), or null. Each prepare copies it afresh, or, with none,
   // removes the copy an earlier prepare made, so an AFK run never sees it.
-  profile?: OperatorProfile | null;
+  profile: OperatorProfile | null;
 };
 
 // What a contained HITL run gets of the operator's profile, as host paths,
 // each copied in only when it is there (ADR 0015): their user `CLAUDE.md`,
-// and the project's auto memory directory. Nothing executable, such as
-// their user settings, MCP servers, plugins or hooks, ever goes in.
-export type OperatorProfile = { claudeMd: string; memory: string };
+// and the project's auto memory directory, or null when the operator has
+// auto memory off. Nothing executable, such as their user settings, MCP
+// servers, plugins or hooks, ever goes in.
+export type OperatorProfile = { claudeMd: string; memory: string | null };
+
+// The operator profile as a run finds it in its container: the user
+// `CLAUDE.md` where the CLI reads user instructions from, read-only, and
+// the project's auto memory directory, read-only too, or null when the
+// operator has auto memory off.
+export type CarriedProfile = { memory: string | null };
 
 // The hosts every L2 run may reach (ADR 0007): the Claude API its CLI runs
 // on, GitHub's API and site for reading issues and PRs with the run's
@@ -100,10 +107,8 @@ export type Container = {
   // The security guidance plugin's directory, in the container: the
   // image's own copy, for the python3 it installs.
   securityPlugin: string;
-  // The project's auto memory, read-only in the container, when the spec
-  // carried the operator's profile: the user `CLAUDE.md` is then where the
-  // CLI reads its user instructions from, read-only too. Null otherwise.
-  memory: string | null;
+  // The operator profile, when the spec carried one, or null.
+  profile: CarriedProfile | null;
   // The git checks of an AFK run (ADR 0007), made on the container's clone,
   // at `workdir`.
   checks: Pick<Git, 'snapshot' | 'violations'>;

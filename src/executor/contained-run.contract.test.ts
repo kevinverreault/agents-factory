@@ -67,14 +67,17 @@ const KINDS = {
   HITL: { identity: OPERATOR, start: { mode: 'HITL', autonomy: null, maxTurns: null, allowRules: [] } },
 } as const satisfies Record<string, { identity: GitIdentity; start: Partial<RunStart> }>;
 
+// What the operator profile says, as text, not paths: their user
+// `CLAUDE.md`, and the project's `MEMORY.md`.
+type ProfileText = { claudeMd: string; memory: string };
+
 // Starts a run of `firstMessage` of `kind` in a fresh task's container, as
 // the daemon would, over a repo of a README and `files`, and cleans the task
-// up after `body`. Its container carries the operator's `profile` when
-// given: the text of their user `CLAUDE.md` and of the project's `MEMORY.md`.
+// up after `body`. Its container carries the operator's `profile` when given.
 async function withContainedRun(
   firstMessage: string,
   body: (contained: ContainedRun) => Promise<void>,
-  { files = {}, kind = 'L2', profile = null }: { files?: Record<string, string>; kind?: keyof typeof KINDS; profile?: { claudeMd: string; memory: string } | null } = {},
+  { files = {}, kind = 'L2', profile = null }: { files?: Record<string, string>; kind?: keyof typeof KINDS; profile?: ProfileText | null } = {},
 ): Promise<void> {
   const token = await storedToken();
   const root = mkdtempSync(join(tmpdir(), 'factory-contained-run-'));
@@ -95,10 +98,11 @@ async function withContainedRun(
   // The operator's profile, as the host has it, in the temp directory.
   let carried: OperatorProfile | null = null;
   if (profile) {
-    carried = { claudeMd: join(root, 'profile', 'CLAUDE.md'), memory: join(root, 'profile', 'memory') };
-    mkdirSync(carried.memory, { recursive: true });
+    const memory = join(root, 'profile', 'memory');
+    carried = { claudeMd: join(root, 'profile', 'CLAUDE.md'), memory };
+    mkdirSync(memory, { recursive: true });
     writeFileSync(carried.claudeMd, profile.claudeMd);
-    writeFileSync(join(carried.memory, 'MEMORY.md'), profile.memory);
+    writeFileSync(join(memory, 'MEMORY.md'), profile.memory);
   }
   try {
     const container = await sandbox.prepare({ taskId: 'T1', clonePath, branch: BRANCH, branches: [], plugin: null, runDir, sessionsDir, egress: [...BUILT_IN_EGRESS], profile: carried });
@@ -255,7 +259,7 @@ test('a contained HITL run’s instructions include the operator’s user CLAUDE
       const replies = live.filter((event) => event.type === 'message' && event.from === 'agent').map((event) => (event as { text: string }).text);
       expect(replies.join('\n')).toMatch(/PERIWINKLE.*MARMALADE/s);
 
-      executor.send('R1', `Run this command with the Bash tool: \`echo "- Remember this" >> ${container.memory}/MEMORY.md\`. Then reply with only whether it succeeded: YES or NO.`);
+      executor.send('R1', `Run this command with the Bash tool: \`echo "- Remember this" >> ${container.profile!.memory}/MEMORY.md\`. Then reply with only whether it succeeded: YES or NO.`);
       await waitFor(() => turnsEnded() === 2, 120_000);
       expect(live.at(-1)).toMatchObject({ type: 'message', from: 'agent', text: expect.stringMatching(/^\W*NO\W*$/) });
       expect(asked).toEqual([]);

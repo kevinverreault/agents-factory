@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { lspPluginManifest, pinnedLanguageServerVersions, type LanguageServer, type LanguageServerVersions } from '../code-intelligence/code-intelligence.ts';
 import { GitError, guardChecks } from '../git/git.ts';
 import { SECURITY_PLUGIN, securityPluginDigest } from '../security-guidance/security-guidance.ts';
-import { RUN_DIR, SandboxError, type Container, type ContainerListing, type ContainerSpec, type GitResult, type ImageListing, type Sandbox } from './sandbox.ts';
+import { RUN_DIR, SandboxError, type Container, type OperatorProfile, type ContainerListing, type ContainerSpec, type GitResult, type ImageListing, type Sandbox } from './sandbox.ts';
 
 const WORKDIR = '/work';
 // The run's scratch folder, outside the clone, which the guards never read.
@@ -45,10 +45,15 @@ const SESSIONS_DIR = '/home/agent/.claude/projects/-work';
 // by root, so the run's user reads it and can't change it: their user
 // `CLAUDE.md` where the CLI reads user instructions from, and the
 // project's auto memory.
-const USER_CLAUDE_MD = '/home/agent/.claude/CLAUDE.md';
+const CLAUDE_HOME = '/home/agent/.claude';
+const USER_CLAUDE_MD = `${CLAUDE_HOME}/CLAUDE.md`;
 const PROFILE_DIR = '/factory/profile';
 const MEMORY_DIR = `${PROFILE_DIR}/memory`;
 const USER = 'agent';
+// Makes the scratch folder, as root: at each prepare rather than in the
+// image, so containers made before it get one too.
+const MAKE_SCRATCH = `install -d -o ${USER} -g ${USER} ${SCRATCH_DIR}`;
+
 const TASK_LABEL = 'agents-factory.task';
 const NAMESPACE_LABEL = 'agents-factory.namespace';
 const IMAGE_LABEL = 'agents-factory.sandbox';
@@ -279,7 +284,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       plugin: spec.plugin === null ? null : PLUGIN_DIR,
       lspPlugin: LSP_PLUGIN_DIR,
       securityPlugin: SECURITY_PLUGIN_DIR,
-      memory: spec.profile ? MEMORY_DIR : null,
+      profile: spec.profile && { memory: spec.profile.memory === null ? null : MEMORY_DIR },
       checks: guardChecks({
         async output(cwd, args) {
           const result = await gitIn(spec.taskId, args, cwd);
@@ -325,26 +330,22 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     };
   }
 
-  // Furnishes the container for its next run: makes the scratch folder,
-  // here rather than in the image so containers made before it get one too,
-  // and copies in the spec's operator profile afresh, as root: what of it the
-  // host has, the rest left out. Without one, the copy an earlier prepare
-  // made goes.
-  async function furnish({ taskId, profile }: ContainerSpec): Promise<void> {
-    const name = nameOf(taskId);
-    const root = (script: string) => docker(['exec', '--user', 'root', name, 'sh', '-c', script]);
-    await root(
-      [
-        `install -d -o ${USER} -g ${USER} ${SCRATCH_DIR}`,
-        `rm -rf ${PROFILE_DIR} ${USER_CLAUDE_MD}`,
-        ...(profile ? [`install -d -m 755 ${PROFILE_DIR} ${MEMORY_DIR}`] : []),
-      ].join(' && '),
-    );
+  // Runs `script` with `sh` in the task's container, as root.
+  function asRoot(taskId: string, script: string): Promise<string> {
+    return docker(['exec', '--user', 'root', nameOf(taskId), 'sh', '-c', script]);
+  }
+
+  // Copies the spec's operator profile in afresh, as root, after
+  // `clearProfile` made room for it: what of it the host has, the rest
+  // left out.
+  async function carryProfile({ taskId, profile }: ContainerSpec): Promise<void> {
     if (!profile) return;
+    const name = nameOf(taskId);
     // Followed if it is a link, as dotfiles often are.
     if (isFile(profile.claudeMd)) await docker(['cp', '--follow-link', profile.claudeMd, `${name}:${USER_CLAUDE_MD}`]);
-    if (isDirectory(profile.memory)) await docker(['cp', '--follow-link', `${profile.memory}/.`, `${name}:${MEMORY_DIR}`]);
-    await root(
+    if (profile.memory !== null && isDirectory(profile.memory)) await docker(['cp', '--follow-link', `${profile.memory}/.`, `${name}:${MEMORY_DIR}`]);
+    await asRoot(
+      taskId,
       [
         `chown -R root:root ${PROFILE_DIR}`,
         `chmod -R u+rwX,go+rX,go-w ${PROFILE_DIR}`,
@@ -383,7 +384,9 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       const running = await stateOf(spec.taskId);
       if (running === null) await create(spec);
       else if (!running) await docker(['start', nameOf(spec.taskId)]);
-      await furnish(spec);
+      // Both in one exec, so a warm prepare stays quick.
+      await asRoot(spec.taskId, `${MAKE_SCRATCH} && ${clearProfile(spec.profile)}`);
+      await carryProfile(spec);
       await bringIn(spec);
       return handle(spec);
     },
@@ -476,6 +479,20 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       await docker(['image', 'rm', ref]);
     },
   };
+}
+
+// Removes, as root, the operator profile an earlier prepare copied in, and
+// everything else a run left in the CLI's user config directory but the
+// sessions mount: the user settings, skills or agents a run wrote there
+// would load in the task's next contained HITL run, which reads the user
+// settings source (ADR 0015). Then makes room for `profile`, if any.
+function clearProfile(profile: OperatorProfile | null): string {
+  return [
+    `rm -rf ${PROFILE_DIR}`,
+    `find ${CLAUDE_HOME} -mindepth 1 -maxdepth 1 ! -name projects -exec rm -rf {} +`,
+    ...(profile ? [`install -d -m 755 ${PROFILE_DIR}`] : []),
+    ...(profile?.memory != null ? [`install -d -m 755 ${MEMORY_DIR}`] : []),
+  ].join(' && ');
 }
 
 function diverged(branch: string): string {

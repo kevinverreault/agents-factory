@@ -2743,6 +2743,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
       guards = { start: snapshot!.head, env: contained ? inRunDir(env, dir) : env };
     }
+    // The operator's auto memory, read-only in a contained HITL run's container.
+    const memory = container?.profile?.memory ?? null;
     const start: RunStart = {
       runId: run.id,
       taskId: task.id,
@@ -2754,7 +2756,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       firstMessage: withFactoryNotes(run.opening, [
         uninstalled === null ? null : installNote(uninstalled),
         container === null ? null : scratchNote(container.scratch, isContainedHitl(run)),
-        container?.memory ? memoryNote(container.memory) : null,
+        memory === null ? null : memoryNote(memory),
       ]),
       model: run.model,
       maxTurns: run.maxTurns ?? null,

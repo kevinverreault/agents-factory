@@ -65,7 +65,7 @@ describe('an L2 AFK run', () => {
     });
     // The operator's profile is a contained HITL run's alone (ADR 0015).
     expect(spec!.profile).toBeNull();
-    expect(run.container!.memory).toBeNull();
+    expect(run.container!.profile).toBeNull();
     expect(run.firstMessage).not.toContain('auto memory');
     expect(run).toMatchObject({
       autonomy: 'L2',

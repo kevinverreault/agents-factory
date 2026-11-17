@@ -113,8 +113,11 @@ export class FakeExecutor implements Executor {
     return `${cwd}.sessions`;
   }
 
+  // Whether the operator has auto memory off, as their profile then says.
+  autoMemoryOff = false;
+
   profileOf(root: string): OperatorProfile {
-    return { claudeMd: '/operator/.claude/CLAUDE.md', memory: `${this.sessionsDir(root)}/memory` };
+    return { claudeMd: '/operator/.claude/CLAUDE.md', memory: this.autoMemoryOff ? null : `${this.sessionsDir(root)}/memory` };
   }
 
   // Claude Code's retention sweep deletes the session's transcript.

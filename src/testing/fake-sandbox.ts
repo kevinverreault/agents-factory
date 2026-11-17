@@ -181,7 +181,7 @@ export class FakeSandbox implements Sandbox {
       plugin: spec.plugin === null ? null : '/opt/factory/plugin',
       lspPlugin: '/opt/factory/lsp',
       securityPlugin: '/opt/factory/security',
-      memory: spec.profile ? '/factory/profile/memory' : null,
+      profile: spec.profile && { memory: spec.profile.memory === null ? null : '/factory/profile/memory' },
       checks: this.git,
       git: () => Promise.reject(new Error('The fake sandbox runs no git command.')),
       deniedHosts: async () => [...container.denied],
