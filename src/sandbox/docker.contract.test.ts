@@ -81,6 +81,12 @@ async function fixture(): Promise<DockerFixture> {
       if (code !== 0) throw new Error(`The commit in the container failed: ${stdout}`);
       return stdout.trim();
     },
+    async editInContainer(container) {
+      const path = `untracked-${++edits}.txt`;
+      const { code, stdout } = await sh(container, `echo ${edits} > ${path}`);
+      if (code !== 0) throw new Error(`The edit in the container failed: ${stdout}`);
+      return path;
+    },
     async fetchOnHost(spec, branch) {
       // The fixture's clone has no origin: its remote-tracking branch is made from the local one.
       const from = `refs/heads/${branch}`;

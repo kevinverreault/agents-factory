@@ -2115,6 +2115,52 @@ describe('launching and conversing', () => {
     expect(connection.sent.filter((command) => command.type === 'interrupt')).toEqual([]);
   });
 
+  test('an advance blocked by a branch both sides changed offers ctrl+g, which asks the agent to merge the host branch and backs out to the conversation', async () => {
+    const connection = new FakeConnection();
+    const reason = 'The advance is blocked. factory/T1 has commits in T1’s container and on the host that the other lacks.';
+    connection.replyTo('advanceStage', { ok: false, reason, confirm: { type: 'askToMergeHost', taskId: 'T1' } });
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await settle();
+    app.stdin.write(CTRL_N);
+    await eventually(() => expect(app.lastFrame()).toContain('ADVANCE T1 FROM GRILL'));
+    // Nothing to ask before the advance is refused.
+    app.stdin.write('\x07');
+    await settle();
+    expect(connection.sent.filter((command) => command.type === 'askToMergeHost')).toEqual([]);
+
+    app.stdin.write('\r');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain(reason);
+      expect(frame).toContain('ctrl+g ask the agent to merge the host branch');
+    });
+
+    app.stdin.write('\x07');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'askToMergeHost', taskId: 'T1' }));
+    await eventually(() => expect(app.lastFrame()).not.toContain('ADVANCE T1'));
+  });
+
+  test('the advance sheet shows, as it opens, what blocks its bring-out from a contained stage, and ctrl+g asks the agent to merge the host branch', async () => {
+    const connection = new FakeConnection();
+    const blocker = 'factory/T1 has commits in T1’s container and on the host that the other lacks, so neither can take the other’s. Ask the agent to merge the host branch in first.';
+    connection.replyTo('checkAdvance', { ok: true, value: { blockers: [blocker], mergesHost: true } });
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await settle();
+    app.stdin.write(CTRL_N);
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain(`✗ ${blocker}`);
+      expect(frame).toContain('ctrl+g ask the agent to merge the host branch');
+    });
+    expect(connection.sent).toContainEqual({ type: 'checkAdvance', taskId: 'T1' });
+
+    app.stdin.write('\x07');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'askToMergeHost', taskId: 'T1' }));
+  });
+
   test('the advance sheet says when the next stage is the handoff’s, or the last stage is ending; a task without a preset has none', async () => {
     const connection = new FakeConnection();
     const atTickets = { ...onLean, stage: 'tickets' };
@@ -2664,6 +2710,22 @@ describe('launching and conversing', () => {
       expect(frame).toContain('No ticket set: the handoff is one run on the brief.');
       expect(frame).toContain(problem);
     });
+  });
+
+  test('a handoff blocked by a branch both sides changed offers ctrl+g, which asks the agent to merge the host branch', async () => {
+    const connection = new FakeConnection();
+    const blocker = 'factory/T1 has commits in T1’s container and on the host that the other lacks, so neither can take the other’s. Ask the agent to merge the host branch in first.';
+    const blocked = { ...sheet, brief, readiness: { blockers: [blocker], toCommit: [], mergesHost: true } };
+    const { app } = await started({ ...factoryState([{ ...onLean, handoff: blocked }]), runs: { R1: { ...run, turn: 'operator' as const } } }, { connection });
+    await press(app, '\r', '\r');
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain(`✗ ${blocker}`);
+      expect(frame).toContain('ctrl+g ask the agent to merge the host branch');
+    });
+
+    app.stdin.write('\x07');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'askToMergeHost', taskId: 'T1' }));
   });
 
   test('a blocked handoff shows what blocks it, and esc backs out of the sheet to keep talking', async () => {

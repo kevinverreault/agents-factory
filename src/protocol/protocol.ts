@@ -83,7 +83,14 @@ export type LaunchCommand = {
 // one, skipping the optional stages named in `skip`. At a work loop it
 // finishes the ticket its run works; once the map cleared, `skip` may jump
 // over the next stage, and `end` puts the task In review.
-export type AdvanceCommand = { type: 'advanceStage'; taskId: string; skip?: string[]; end?: boolean };
+// `checkAdvance` replies with what would block the advance's bring-out from
+// a contained stage now (ADR 0015), an `AdvanceCheck`, for the sheet to
+// show as it opens; the confirm checks afresh.
+export type AdvanceCommand = { type: 'advanceStage'; taskId: string; skip?: string[]; end?: boolean } | { type: 'checkAdvance'; taskId: string };
+// What blocks a bring-out from a contained stage, and whether its task
+// branch changed in the container and on the host, which the operator can
+// ask the agent to merge (`askToMergeHost`).
+export type AdvanceCheck = { blockers: string[]; mergesHost: boolean };
 // The handoff sheet (`ctrl+h` or `/handoff`): opening it has the HITL run
 // write the brief, interrupting the agent mid-turn or resuming a parked
 // conversation, and `closeHandoff` backs out. `handoff` confirms it with the

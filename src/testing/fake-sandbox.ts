@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { SandboxError, type Container, type ContainerListing, type ContainerSpec, type ImageListing, type Sandbox } from '../sandbox/sandbox.ts';
+import { SandboxError, type Container, type ContainerListing, type ContainerWork, type ContainerSpec, type ImageListing, type Sandbox } from '../sandbox/sandbox.ts';
 import type { FakeGit } from './fake-git.ts';
 
 type FakeContainer = { spec: ContainerSpec; running: boolean; denied: string[]; image: string };
@@ -12,7 +12,7 @@ export const CURRENT_IMAGE = 'agents-factory-sandbox:current';
 // tree at `workdirOf(task)`, where a test edits and commits as the run's
 // agent would. It records what it was asked to do, in order.
 export class FakeSandbox implements Sandbox {
-  // `prepare T1`, `stop T1`, `restart T1`, `start T1`, `bringOut T1`, `remove T1`.
+  // `prepare T1`, `stop T1`, `restart T1`, `start T1`, `bringOut T1`, `work T1`, `checks T1`, `remove T1`.
   readonly calls: string[] = [];
   // Each spec a container was prepared with.
   readonly prepared: ContainerSpec[] = [];
@@ -51,7 +51,7 @@ export class FakeSandbox implements Sandbox {
 
   // Each call of `op` (such as `prepare` or `bringOut`) fails with a
   // `SandboxError` saying `reason` from now on, or works again (null).
-  fail(op: 'prepare' | 'bringOut' | 'start' | 'stop' | 'restart' | 'remove', reason: string | null): void {
+  fail(op: 'prepare' | 'bringOut' | 'work' | 'checks' | 'start' | 'stop' | 'restart' | 'remove', reason: string | null): void {
     if (reason === null) this.failures.delete(op);
     else this.failures.set(op, reason);
   }
@@ -151,8 +151,9 @@ export class FakeSandbox implements Sandbox {
     const path = this.clonePathOf(spec.taskId);
     const host = this.git.branchTip(spec.clonePath, spec.branch)!;
     const mine = this.git.branchTip(path, spec.branch)!;
+    this.git.setFetched(path, spec.branch, host);
     if (this.git.inHistory(mine, host)) this.git.moveBranch(path, spec.branch, host);
-    else if (!this.git.inHistory(host, mine)) throw new SandboxError(`${spec.branch} has commits in the container and on the host that the other lacks.`);
+    else if (!this.git.inHistory(host, mine) && !spec.mergesHost) throw new SandboxError(`${spec.branch} has commits in the container and on the host that the other lacks.`);
     for (const branch of spec.branches) this.git.moveBranch(path, branch, this.git.branchTip(spec.clonePath, branch)!);
     for (const branch of spec.fetched ?? []) this.git.setFetched(path, branch, this.git.fetchedTip(spec.clonePath, branch)!);
     return this.handle(spec);
@@ -193,6 +194,22 @@ export class FakeSandbox implements Sandbox {
     }
     if (this.git.inHistory(mine, host)) return host;
     throw new SandboxError(`${branch} has commits in the container and on the host that the other lacks.`);
+  }
+
+  async work(taskId: string, branch: string): Promise<ContainerWork> {
+    this.record('work', taskId);
+    const container = this.containers.get(taskId);
+    if (!container?.running) throw new SandboxError(`${taskId}’s container isn’t running.`);
+    const host = this.git.branchTip(container.spec.clonePath, branch)!;
+    const mine = this.git.branchTip(this.clonePathOf(taskId), branch)!;
+    const { uncommitted } = await this.git.worktreeState(this.workdirOf(taskId));
+    return { uncommitted, diverged: !this.git.inHistory(host, mine) && !this.git.inHistory(mine, host) };
+  }
+
+  async checks(taskId: string): Promise<Pick<Container, 'workdir' | 'checks'>> {
+    this.record('checks', taskId);
+    if (!this.containers.get(taskId)?.running) throw new SandboxError(`${taskId}’s container isn’t running.`);
+    return { workdir: this.workdirOf(taskId), checks: this.git };
   }
 
   async remove(taskId: string): Promise<void> {

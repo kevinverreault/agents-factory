@@ -1,5 +1,5 @@
 ---
-status: accepted (watchdog rule and `stopped` outcome superseded by ADR 0008)
+status: accepted (watchdog rule and `stopped` outcome superseded by ADR 0008; an advance from a contained stage finished just after runs are reconciled, ADR 0015)
 ---
 
 # Recovery reconciles the store against the world

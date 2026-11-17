@@ -114,7 +114,10 @@ export type ContinueAs = 'resume' | 'fresh';
 export const CONTINUE_AS: readonly ContinueAs[] = ['resume', 'fresh'];
 // How the task's worktree stands for a handoff: why it can't be confirmed
 // yet, and the files the handoff commit takes.
-export type Readiness = { blockers: string[]; toCommit: string[] };
+// `mergesHost` when what blocks it is a task branch its contained stage's
+// container and the host both changed (ADR 0015): the operator can ask the
+// agent to merge the host branch in. Readiness read before it has none.
+export type Readiness = { blockers: string[]; toCommit: string[]; mergesHost?: boolean };
 // The handoff sheet, open on a HITL task from the operator's handoff until
 // they confirm it or back out. Its fields are pre-filled from the AFK stage
 // it hands off to; what the operator changes travels with the confirm.
@@ -737,7 +740,13 @@ export type RunRef = { taskId: string; runId: string };
 export type Intent =
   // A confirmed handoff: the daemon commits the files of `committed`, then
   // the task is handed off as the operator confirmed it.
+  // A handoff from a contained stage (ADR 0015) brings the container's
+  // commits out to the host task branch first, unless it continues there.
   | { id: string; verb: 'handoff'; taskId: string; handoff: Omit<HandedOff, 'type' | 'intent'> }
+  // A confirmed advance from a contained stage (ADR 0015): the daemon checks
+  // the container's commits and brings them out to the host task branch,
+  // then the task advances as the operator confirmed it.
+  | { id: string; verb: 'advance'; taskId: string; advance: Omit<StageAdvanced, 'type' | 'intent'> }
   // A run's `spawn_child` call, keyed by the run and its tool call: the
   // daemon cuts the child's worktree from `startPoint`, then the child is
   // spawned. A research child's `base` is read from its worktree once cut.
@@ -906,6 +915,10 @@ export type OperatorCommand =
   // Expands a quick launch into a full conversation (`ctrl+e`): its grill
   // goes on as long as the operator likes, and opens no handoff sheet itself.
   | { type: 'expandQuickLaunch'; taskId: string }
+  // Asks the agent of a contained HITL stage, with a factory note, to merge
+  // the host task branch into its own, which both changed: the advance and
+  // handoff sheets offer it while that blocks them (ADR 0015).
+  | { type: 'askToMergeHost'; taskId: string }
   | { type: 'takeOver'; taskId: string }
   // Answers the task's open attention request: a question's with `answers`,
   // a permission request's with `permission`. A failed L2
@@ -1131,7 +1144,9 @@ export type TicketSetEvent =
 // session, for a next stage whose context is fresh. At a work loop it
 // finishes the live ticket instead, and once the map cleared may jump over
 // the next stage, or `end` the task (In review).
-export type StageAdvanced = { type: 'stageAdvanced'; taskId: string; skip: string[]; sessionId: string; end?: boolean };
+// `intent` is the intent it finishes, when the daemon journaled one: an
+// advance from a contained stage, whose commits came out first (ADR 0015).
+export type StageAdvanced = { type: 'stageAdvanced'; taskId: string; skip: string[]; sessionId: string; end?: boolean; intent?: string };
 
 // The operator opened the handoff sheet (`ctrl+h` or `/handoff`), and the
 // daemon read how the task's worktree stands.
@@ -2558,6 +2573,10 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       return task.handoff ? null : `${task.id} has no handoff sheet open.`;
     case 'expandQuickLaunch':
       return task.quick ? null : `${task.id} is no quick launch, or is one no longer.`;
+    case 'askToMergeHost': {
+      if (isTerminal(task) || !holdsWorkInContainer(state, task)) return `${task.id} isn’t at a contained HITL stage.`;
+      return task.factoryNotes?.includes(mergeHostNote(task)) ? `${task.id}’s agent is already asked to merge the host branch.` : null;
+    }
     case 'takeOver':
       if (!(task.mode === 'AFK' && ['queued', 'running', 'waiting'].includes(task.state))) return 'Only a live AFK task (queued, running or needing you) can be taken over.';
       return atRetiredLoop(task) ? retiredLoopReason(task, stageOf(task, task.stage)!) : cantStartRuns(state, task);
@@ -3322,6 +3341,24 @@ function noteParent(state: Lifecycle, child: Task, note = childNote(child)): voi
 // A factory note saying what `paragraphs` say, in the conversation's Markdown.
 function factoryNote(...paragraphs: string[]): string {
   return ['## Factory note', ...paragraphs].join('\n\n');
+}
+
+// Whether the task's work is held in its container: a HITL task whose
+// last run was at a contained stage (ADR 0015), until the task advances,
+// hands off or spawns, which bring it out.
+export function holdsWorkInContainer(state: Lifecycle, task: Task): boolean {
+  const last = state.runs[task.runIds.at(-1) ?? ''];
+  return task.mode === 'HITL' && !!task.worktree && last?.mode === 'HITL' && !!last.contained;
+}
+
+// The factory note asking a contained HITL stage's agent to merge the host
+// task branch in (ADR 0015): the container's origin is the host clone.
+function mergeHostNote(task: Task): string {
+  const { branch } = task.worktree!;
+  return factoryNote(
+    `The operator’s task branch ${branch} and yours both have commits the other lacks, so your work can’t come out of this container to them. ` +
+      `Merge theirs into yours: run \`git fetch origin ${branch}\`, then \`git merge origin/${branch}\`, resolve any conflicts, and commit the merge. Never rewrite or force-move either branch.`,
+  );
 }
 
 // What the factory note of a child's report says.
@@ -4196,6 +4233,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       break;
     case 'expandQuickLaunch':
       task.quick = null;
+      break;
+    case 'askToMergeHost':
+      // Delivered on the operator's turn, or in the next run's opening.
+      (task.factoryNotes ??= []).push(mergeHostNote(task));
       break;
     case 'takeOver':
       if (request) request.status = 'superseded';

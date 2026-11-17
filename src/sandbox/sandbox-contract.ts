@@ -14,6 +14,8 @@ export type SandboxFixture = {
   branchOnHost(spec: ContainerSpec, branch: string): Promise<string>;
   // Commits a change on the task branch in the container's clone, and returns the new tip.
   commitInContainer(container: Container): Promise<string>;
+  // Writes a new file in the container's clone, left untracked, and returns its path.
+  editInContainer(container: Container): Promise<string>;
   // Moves the host clone's `origin/<branch>` on by a commit, as fetching it
   // would, and returns its tip.
   fetchOnHost(spec: ContainerSpec, branch: string): Promise<string>;
@@ -223,6 +225,50 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
         await expect(sandbox.prepare(spec)).rejects.toBeInstanceOf(SandboxError);
         await sandbox.start('T1');
         await expect(sandbox.bringOut('T1', worktree, spec.branch)).rejects.toBeInstanceOf(SandboxError);
+      }));
+
+    test('a running container’s work says what its clone leaves uncommitted, untracked files included, and whether its task branch and the host’s diverged', () =>
+      withFixture(async ({ sandbox, task, commitInContainer, editInContainer, commitOnHost }) => {
+        const { spec, worktree } = await task('T1');
+        const container = await sandbox.prepare(spec);
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [], diverged: false });
+
+        const path = await editInContainer(container);
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [path], diverged: false });
+
+        // Ahead of the host is no divergence, nor is behind it.
+        await commitInContainer(container);
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [], diverged: false });
+        await sandbox.bringOut('T1', worktree, spec.branch);
+        await commitOnHost(worktree);
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [], diverged: false });
+
+        await commitInContainer(container);
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [], diverged: true });
+      }));
+
+    test('a container’s checks are made on its clone, as its prepared handle’s are', () =>
+      withFixture(async ({ sandbox, task, commitInContainer }) => {
+        const { spec } = await task('T1');
+        const container = await sandbox.prepare(spec);
+        const tip = await commitInContainer(container);
+
+        const { workdir, checks } = await sandbox.checks('T1');
+
+        expect(workdir).toBe(container.workdir);
+        expect(await checks.snapshot(workdir)).toMatchObject({ branch: spec.branch, head: tip });
+      }));
+
+    test('a spec whose run merges the host’s branch prepares a container whose branch diverged, the host’s tip fetched as its origin’s', () =>
+      withFixture(async ({ sandbox, task, commitInContainer, commitOnHost, containerTip, containerFetchedTip }) => {
+        const { spec, worktree } = await task('T1');
+        const mine = await commitInContainer(await sandbox.prepare(spec));
+        const host = await commitOnHost(worktree);
+
+        const container = await sandbox.prepare({ ...spec, mergesHost: true });
+
+        expect(await containerTip(container, spec.branch)).toBe(mine);
+        expect(await containerFetchedTip(container, spec.branch)).toBe(host);
       }));
   });
 }
