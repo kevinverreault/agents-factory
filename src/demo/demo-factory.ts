@@ -26,7 +26,7 @@ function task(id: string, title: string, state: TaskView['state'], label: string
   return {
     id, title, repo: 'acme/widgets', parent: null, depth: 0, child: null, progress: null, rollup: null, kind: 'plain', ticket: null, mergePolicy: null, judgementCalls: [], gate: null, sentToOperator: null, resolving: null, specTask: null, ticketSet: null, mode, autonomy: mode === 'AFK' ? 'L1' : null,
     priority: 'normal', groups: [], state, label, liveRunId: null, branch: null, worktree: null, sessionId: null, skillSet: null, preset: null, stage: null,
-    tier: 'sonnet', allowRules: [], egressHosts: [], goal: null, handoff: null, quick: null, loop: null,
+    tier: 'sonnet', allowRules: [], egressHosts: [], onHost: false, goal: null, handoff: null, quick: null, loop: null,
     launchSummary: null, prBody: null, prTitle: null, publishing: null, pr: null, pushed: false, cleanup: null, transcripts: null,
     ...more,
   };
@@ -38,7 +38,7 @@ function run(id: string, taskId: string, more: Partial<RunView> = {}): RunView {
   return {
     id, taskId, mode: 'AFK', autonomy: 'L1', status: 'active', outcome: null, interruption: null, turn: 'agent', queued: [], question: null, permission: null,
     stage: 'implement', ticket: null, proposal: null, tier: 'sonnet', model: 'claude-sonnet-5-5', maxTurns: 300, cli: { pid: 4242, createdAt: NOW }, skillSet: null,
-    startedAt: NOW - 30 * MINUTE, endedAt: null, usage: {}, hostCards: [], deniedHosts: [], waitingForWindow: null, contained: false,
+    startedAt: NOW - 30 * MINUTE, endedAt: null, usage: {}, hostCards: [], deniedHosts: [], waitingForWindow: null, contained: false, preparing: false, onHost: false,
     ...more,
   };
 }
@@ -116,6 +116,7 @@ function demoState(): FactoryState {
   ];
   return {
     repositories: { 'acme/gadgets': gadgets, 'acme/widgets': widgets },
+    sandbox: { state: 'ready', reason: null },
     tasks: Object.fromEntries(tasks.map((t) => [t.id, t])),
     runs: {
       R1: GRILLING,
@@ -134,7 +135,7 @@ function demoState(): FactoryState {
     attentionQueue: [
       {
         kind: 'attention', taskId: 'T5', repo: 'acme/widgets', requestId: 'A1', attention: 'question', holdsRun: true,
-        reason: 'Which identity provider times out on Safari?', question: QUESTION, permission: null, recovery: null, deniedHosts: null, skipped: null,
+        reason: 'Which identity provider times out on Safari?', question: QUESTION, permission: null, recovery: null, deniedHosts: null, skipped: null, unprepared: false,
       },
       { kind: 'review', taskId: 'T6' },
       { kind: 'ready', taskId: 'T7' },

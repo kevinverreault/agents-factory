@@ -271,6 +271,7 @@ describe('the Factory recovered report', () => {
         permission: null,
         deniedHosts: null,
         skipped: null,
+        unprepared: false,
         recovery: {
           requeued: [{ taskId: 'T1', runId: 'R1' }],
           parked: [

@@ -45,6 +45,7 @@ import {
   type TicketSet,
 } from '../lifecycle/lifecycle.ts';
 import type { PullRequest } from '../github/github.ts';
+import type { SandboxView } from '../sandbox/sandbox.ts';
 import type { Tier } from '../models/routing.ts';
 import { tokensPerHour, windowView, type ModelUsage, type WindowView } from '../usage/usage.ts';
 
@@ -108,6 +109,8 @@ export type TaskView = {
   allowRules: string[];
   // The hosts the operator allowed its L2 runs to reach, besides the built-in ones.
   egressHosts: string[];
+  // Whether its contained HITL runs run on the host this time (ADR 0015).
+  onHost: boolean;
   // What its runs work towards: its first run's first message, or the brief
   // once handed off.
   goal: string | null;
@@ -157,6 +160,12 @@ export type RunView = Pick<
   waitingForWindow: number | null;
   // Whether it is a HITL run in its task's container (ADR 0015).
   contained: boolean;
+  // Whether its container is still being prepared: from its start until its
+  // CLI is up to take the agent's first turn.
+  preparing: boolean;
+  // Whether it is at a contained stage but runs on the host, as the operator
+  // chose: Run on host this time.
+  onHost: boolean;
 };
 
 // `app` is null until the daemon has checked the App's installation, and
@@ -171,6 +180,7 @@ export type ArtifactView = Artifact;
 
 export type FactoryState = {
   repositories: Record<string, RepositoryView>;
+  sandbox: SandboxView;
   tasks: Record<string, TaskView>;
   runs: Record<string, RunView>;
   artifacts: Record<string, ArtifactView>;
@@ -190,7 +200,7 @@ export type UsageSummary = { window: WindowView; weekly: WindowView; tokensPerHo
 
 // `watched` holds the runs whose conversations a TUI has open, and `at` is
 // now: a usage snapshot past its reset or too old by then is unknown.
-export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string>, at: number): FactoryState {
+export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string>, at: number, sandbox: SandboxView = { state: 'checking', reason: null }): FactoryState {
   const repositories: Record<string, RepositoryView> = {};
   for (const repository of Object.values(lifecycle.repositories)) repositories[repository.id] = repositoryView(repository);
   const tasks: Record<string, TaskView> = {};
@@ -230,6 +240,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       tier: nextTier(task),
       allowRules: [...(task.allowRules ?? [])],
       egressHosts: [...(task.egressHosts ?? [])],
+      onHost: task.onHost ?? false,
       goal: task.goal,
       handoff: handoffView(task.handoff ?? null),
       quick: task.quick ? { ...task.quick } : null,
@@ -284,6 +295,8 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       usage: structuredClone(run.usage ?? {}),
       waitingForWindow: run.waitingForWindow ?? null,
       contained: !!run.contained,
+      preparing: !!run.contained && status === 'active' && cli === null,
+      onHost: run.onHost ?? false,
       cli,
       skillSet: skillSet ?? null,
       startedAt,
@@ -292,6 +305,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
   }
   return {
     repositories,
+    sandbox: { ...sandbox },
     tasks,
     runs,
     artifacts: structuredClone(lifecycle.artifacts),

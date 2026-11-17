@@ -11,8 +11,9 @@ import { parse } from 'yaml';
 import { z } from 'zod';
 import { TIERS, type Tier } from '../models/routing.ts';
 import type { AppCheck } from '../lifecycle/lifecycle.ts';
+import type { SandboxView } from '../sandbox/sandbox.ts';
 import { DEFAULT_PRESET, OWNER_NAME } from '../repositories/registry.ts';
-import { orList } from '../text/lines.ts';
+import { andList, lowerFirst, orList } from '../text/lines.ts';
 
 export type PresetScope = 'built-in' | 'user' | 'repo';
 // Higher wins a name clash.
@@ -116,7 +117,9 @@ export type LaunchInput = 'prompt' | 'issues';
 // A stage a task can start at, skipping the ones before it, and the launch
 // inputs it needs. `maxTurns` is its `max_turns`, when it sets one. With
 // `anyOf`, any one of its `needs` starts it rather than all of them.
-export type StartStage = { id: string; mode: Stage['mode']; model: Tier | null; maxTurns?: number; needs: LaunchInput[]; anyOf?: true };
+// `contained` names the contained stages a task starting there would reach
+// (ADR 0015), which need Docker, when there are any.
+export type StartStage = { id: string; mode: Stage['mode']; model: Tier | null; maxTurns?: number; needs: LaunchInput[]; anyOf?: true; contained?: string[] };
 
 // The stages whose args the launch inputs can fill: the prompt fills
 // `{{prompt}}`, and issue refs stand for the issue artifacts (map, spec,
@@ -134,7 +137,8 @@ export function startStages(preset: ResolvedPreset): StartStage[] {
     if (i > 0 && needs.size === 0) return [];
     const maxTurns = stage.max_turns === undefined ? {} : { maxTurns: stage.max_turns };
     const anyOf = takesEither(stage) ? { anyOf: true as const } : {};
-    return [{ id: stage.id, mode: stage.mode, model: stage.model ?? null, ...maxTurns, needs: [...needs], ...anyOf }];
+    const contained = containedStages(preset, stage.id);
+    return [{ id: stage.id, mode: stage.mode, model: stage.model ?? null, ...maxTurns, needs: [...needs], ...anyOf, ...(contained.length && { contained }) }];
   });
 }
 
@@ -252,6 +256,34 @@ export function planStart(
 // as it. HITL stages act as the operator.
 export function appStages(preset: ResolvedPreset): string[] {
   return preset.stages.filter((stage) => stage.mode === 'AFK').map(({ id }) => id);
+}
+
+// The stages whose HITL runs execute contained (ADR 0015), which need
+// Docker: from the stage `from` on, by default the first.
+export function containedStages(preset: ResolvedPreset, from?: string): string[] {
+  const at = from === undefined ? 0 : preset.stages.findIndex(({ id }) => id === from);
+  return preset.stages.slice(Math.max(at, 0)).filter(isContained).map(({ id }) => id);
+}
+
+// Why a launch of the preset is blocked where Docker and the image stand as
+// `sandbox`, or null when it isn't (ADR 0015): only a preset with contained
+// stages (`stages`) needs Docker. An image whose build failed doesn't block
+// it, as the launch builds it again (`sandboxWarning`).
+export function sandboxBlock(preset: string, stages: string[], sandbox: SandboxView): string | null {
+  if (stages.length === 0 || sandbox.state !== 'unavailable') return null;
+  return `${runsContained(preset, stages)}, but Docker isn’t available${sandbox.reason ? `: ${sandbox.reason}` : '.'}`;
+}
+
+// What a launch of the preset is warned of where the image's build failed,
+// or null: the launch builds it again, and its first run waits for that.
+export function sandboxWarning(preset: string, stages: string[], sandbox: SandboxView): string | null {
+  if (stages.length === 0 || sandbox.state !== 'failed') return null;
+  const failed = lowerFirst(sandbox.reason ?? 'The factory couldn’t build its container image.').replace(/\.?$/, '.');
+  return `${runsContained(preset, stages)}, but ${failed} Launching it builds the image again first.`;
+}
+
+function runsContained(preset: string, stages: string[]): string {
+  return `${preset} runs its ${andList(stages)} ${stages.length === 1 ? 'stage' : 'stages'} contained, in the task’s container`;
 }
 
 // Why a launch of the preset is blocked where the App's installation was

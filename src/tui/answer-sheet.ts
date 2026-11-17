@@ -10,7 +10,7 @@ import type { AttentionQueueItem, HostAnswer, HostCard, Permission, PermissionAn
 import { isRetiredLoop, isWorkLoop } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
-import type { Command, Option, Reply } from '../protocol/protocol.ts';
+import { RUN_ON_HOST, type Command, type Option, type Reply } from '../protocol/protocol.ts';
 import { ChoosePrompt, chooseKey } from './choose.ts';
 import { answersText, toolUseOf, withOption } from './answered.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
@@ -95,6 +95,16 @@ export function choicesFor(item: SheetItem, task: TaskView | undefined): Choice[
   const cancel: Choice = { label: 'Cancel', command: { type: 'cancel', taskId } };
   switch (item.attention) {
     case 'failure': {
+      // A contained run whose container couldn't be prepared starts again
+      // at once, in its container or, as the operator chooses, on the host
+      // this time (ADR 0015): never on the host unasked.
+      if (item.unprepared) {
+        return [
+          { label: 'Retry', command: answer, opens: true },
+          { label: RUN_ON_HOST, command: { type: 'answer', taskId, onHost: true }, opens: true },
+          cancel,
+        ];
+      }
       // Only the operator decides what a failure means.
       return [{ label: 'Retry', command: answer }, ...allowHosts(taskId, item.deniedHosts ?? []), ...takeOver, cancel];
     }
@@ -196,7 +206,7 @@ export function cardItem(task: TaskView, permission: Permission): AttentionQueue
     question: null,
     permission,
     recovery: null,
-    deniedHosts: null, skipped: null,
+    deniedHosts: null, skipped: null, unprepared: false,
   };
 }
 
