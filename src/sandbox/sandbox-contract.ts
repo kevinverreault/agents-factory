@@ -220,6 +220,15 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
         expect(await reach(container, allowedHost)).toBe(false);
       }));
 
+    test('egress set on a stopped container is refused', () =>
+      withFixture(async ({ sandbox, task, deniedHost }) => {
+        const { spec } = await task('T1');
+        const container = await sandbox.prepare(spec);
+        await sandbox.stop('T1');
+
+        await expect(container.setEgress([...spec.egress, deniedHost])).rejects.toBeInstanceOf(SandboxError);
+      }));
+
     test('a task branch changed on both sides is refused, by prepare and by bringing it out', () =>
       withFixture(async ({ sandbox, task, commitInContainer, commitOnHost }) => {
         const { spec, worktree } = await task('T1');

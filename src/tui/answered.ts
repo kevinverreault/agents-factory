@@ -34,7 +34,7 @@ export function answeredLine(answer: string, title?: string): string {
 
 // The agent's tool call an item answers, if it answers one: a question's
 // `AskUserQuestion`, or the call a permission request asks about.
-export function toolUseOf(item: AttentionQueueItem): string | null {
+export function toolUseOf(item: AttentionQueueItem | { kind: 'host' }): string | null {
   return item.kind === 'attention' ? (item.question?.id ?? item.permission?.id ?? null) : null;
 }
 

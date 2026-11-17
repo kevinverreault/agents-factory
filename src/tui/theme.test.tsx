@@ -136,7 +136,6 @@ const ATTENTION_LOOKS = {
   'pr-closed-unmerged': ['PR closed', 'warn'],
   'repo-missing': ['repo missing', 'bad'],
   'recovery-report': ['recovered', 'accent'],
-  host: ['host', 'warn'],
 } as const satisfies Record<AttentionKind, readonly [string, string]>;
 
 describe('Needs you kinds', () => {

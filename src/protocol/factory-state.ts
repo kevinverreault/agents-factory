@@ -34,6 +34,7 @@ import {
   type AttentionQueueItem,
   type Artifact,
   type Repository,
+  type HostCard,
   type Permission,
   type Run,
   type SkillsSetup,
@@ -150,7 +151,7 @@ export type RunView = Pick<
   usage: ModelUsage;
   permission: Permission | null;
   // A contained HITL run's host cards (ADR 0015), while it is live.
-  hostCards: string[];
+  hostCards: HostCard[];
   deniedHosts: string[];
   // While an AFK run waits out a 5-hour usage limit, when its wait ends.
   waitingForWindow: number | null;
@@ -272,7 +273,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       queued,
       question,
       permission: run.permission ?? null,
-      hostCards: [...(run.hostCards ?? [])],
+      hostCards: structuredClone(run.hostCards ?? []),
       deniedHosts: [...(run.deniedHosts ?? [])],
       stage,
       proposal,

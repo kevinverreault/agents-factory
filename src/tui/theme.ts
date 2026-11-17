@@ -97,7 +97,7 @@ export function stateLook(label: string): Look {
 // What a Needs you item is, as its kind column names it, and the role it
 // is lit in: questions and the operator's turn in the accent, what blocks
 // work in warn, what failed in bad, and what waits for review in review.
-type Item = { kind: 'attention'; attention: AttentionKind } | { kind: 'ready' } | { kind: 'review' };
+type Item = { kind: 'attention'; attention: AttentionKind } | { kind: 'ready' } | { kind: 'review' } | { kind: 'host' };
 const KINDS: Record<AttentionKind, [string, Role]> = {
   question: ['question', 'accent'],
   permission: ['permission', 'warn'],
@@ -107,12 +107,13 @@ const KINDS: Record<AttentionKind, [string, Role]> = {
   'pr-closed-unmerged': ['PR closed', 'warn'],
   'repo-missing': ['repo missing', 'bad'],
   'recovery-report': ['recovered', 'accent'],
-  host: ['host', 'warn'],
 };
 
 export function kindLook(item: Item): { kind: string; role: Role } {
   if (item.kind === 'ready') return { kind: 'your turn', role: 'accent' };
   if (item.kind === 'review') return { kind: 'review', role: 'review' };
+  // A HITL run's host card (ADR 0015), which blocks a host as a permission card blocks a call.
+  if (item.kind === 'host') return { kind: 'host', role: 'warn' };
   const [kind, role] = KINDS[item.attention];
   return { kind, role };
 }

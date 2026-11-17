@@ -49,9 +49,9 @@ export type ContainerSpec = {
 export const BUILT_IN_EGRESS: readonly string[] = ['api.anthropic.com', 'api.github.com', 'github.com', 'registry.npmjs.org'];
 
 // The hosts a task's container may reach: the built-in ones, then the
-// task's own that aren't among them.
+// task's own that aren't among them, each once.
 export function egressFor(taskHosts: readonly string[]): string[] {
-  return [...BUILT_IN_EGRESS, ...taskHosts.filter((host) => !BUILT_IN_EGRESS.includes(host))];
+  return [...new Set([...BUILT_IN_EGRESS, ...taskHosts])];
 }
 
 // Where the run's own git config, hooks and gh config are, in the container.
@@ -101,7 +101,8 @@ export type Container = {
   // Sets the hosts its egress allows to `egress`, in place (ADR 0015): its
   // proxy allows them from its next request on, with no restart, and the
   // hosts it denied since it was prepared stay listed. The next prepare
-  // sets them afresh from its spec.
+  // sets them afresh from its spec. The container must be running: a
+  // `SandboxError` says why the proxy kept its allowlist.
   setEgress(egress: string[]): Promise<void>;
   // Starts `command` in the container, as its non-root user, in `workdir`,
   // with exactly `env` set besides the image's own, its stdin and stdout piped.

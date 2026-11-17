@@ -3,6 +3,8 @@
 // the operator's permissions file and the task, never from the target repo.
 // Rules use Claude Code's syntax: `Tool`, or `Tool(specifier)`. Bash rules
 // are best-effort, not a security boundary: L1 guards against accidents.
+// The operator's permissions file also holds the egress hosts every task's
+// container may reach (ADR 0015), which a host card's Allow always adds to.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, posix } from 'node:path';
@@ -518,7 +520,7 @@ export function readEgressHosts(path: string): { hosts: string[]; error: string 
 // list of hosts, or can't be written.
 export function addEgressHosts(path: string, hosts: readonly string[]): string | null {
   const invalid = hosts.find((host) => !isHost(host));
-  if (invalid !== undefined) return `${String(invalid)} isn’t a host the file can hold, such as \`docs.example.com\`.`;
+  if (invalid !== undefined) return `${invalid} isn’t a host the file can hold, such as \`${EGRESS_HOSTS.example}\`.`;
   const { document, entries: present, error } = readOperatorList(path, EGRESS_HOSTS);
   if (error) return error;
   return addToList(path, document, EGRESS_HOSTS, present.map(normalHost), hosts.map(normalHost));
@@ -533,13 +535,14 @@ function addToList(path: string, document = new Document(), list: OperatorList, 
   const added = [...new Set(entries)].filter((entry) => !held.includes(entry));
   if (added.length === 0) return null;
   const node = document.get(key, true);
-  // A list named elsewhere (`allow: *mine`) would lose its entries if replaced.
+  // A list named elsewhere (`allow: *mine`, `egress-hosts: *mine`) would
+  // lose its entries if replaced.
   if (!isSeq(node) && node !== undefined && !(isScalar(node) && node.value === null)) {
     return `${path} names its \`${key}:\` list elsewhere, so the factory can’t add to it: add the ${noun} there by hand.`;
   }
   if (isSeq(node)) for (const entry of added) node.add(entry);
   else {
-    // An empty `allow:` keeps its comment.
+    // An empty list (`allow:` or `egress-hosts:`) keeps its comment.
     const filled = document.createNode(added);
     filled.comment = node?.comment;
     document.set(key, filled);
@@ -592,11 +595,16 @@ type OperatorList = { key: string; noun: string; example: string; holds: (entry:
 const ALLOW: OperatorList = { key: 'allow', noun: 'rules', example: 'Bash(make *)', holds: isRule };
 const EGRESS_HOSTS: OperatorList = { key: 'egress-hosts', noun: 'hosts', example: 'docs.example.com', holds: isHost };
 
-// A host, as the egress proxy names hosts: a name or an address, never a
-// wildcard, a port or a path.
-export function isHost(host: unknown): host is string {
-  return typeof host === 'string' && /^[a-z0-9_]([a-z0-9_.:-]*[a-z0-9_])?$/i.test(host.trim().replace(/\.$/, ''));
+// A host, as the egress proxy names hosts: a name, an IPv4 address, or an
+// IPv6 one without its brackets, never a wildcard, a port or a path.
+function isHost(host: unknown): host is string {
+  if (typeof host !== 'string') return false;
+  const normal = normalHost(host);
+  return /^[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?$/.test(normal) || IPV6.test(normal);
 }
+
+// An IPv6 address: hex groups with at least two colons, and maybe an IPv4 tail.
+const IPV6 = /^(?=.*:.*:)[0-9a-f:]+(:\d{1,3}(\.\d{1,3}){3})?$/;
 
 // A host as the proxy matches it: lower case, with no trailing dot.
 const normalHost = (host: string) => host.trim().toLowerCase().replace(/\.$/, '');

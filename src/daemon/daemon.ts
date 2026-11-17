@@ -35,6 +35,7 @@ import { FACTORY_IDENTITY, prepareRunGit } from '../guards/run-git.ts';
 import {
   allowedRules,
   allowsByRules,
+  isContainedHitl,
   artifactsOf,
   handoffStage,
   recordedIssues,
@@ -1746,26 +1747,34 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return { ok: true };
   }
 
-  // A host card's answer (ADR 0015). Allow always's host goes into the
-  // operator's permissions file, and an allowed host into the live run's
-  // proxy's allowlist, in place, before the card is answered, so the
-  // Lifecycle first checks the answer without applying it: if either fails,
-  // the answer fails with why, and the card stays open.
+  // A host card's answer (ADR 0015). An allowed host joins the live run's
+  // proxy's allowlist in place first, then Allow always's goes into the
+  // operator's permissions file, before the card is answered, so the
+  // Lifecycle first checks the answer without applying it. If either fails,
+  // the answer fails with why, the proxy keeps the allowlist it had, and the
+  // card stays open, with nothing written.
   async function answerHost(action: Extract<LifecycleAction, { type: 'answerHost' }>): Promise<Reply> {
     const { refusal } = reduce(lifecycle, action, clock.now(), routes(), { holdRuns });
     if (refusal) return { ok: false, reason: refusal };
-    if (action.answer === 'always') {
-      const problem = addEgressHosts(options.permissionsPath, [action.host]);
-      if (problem) return { ok: false, reason: `Allow always added no host: ${problem}` };
-    }
+    const { host } = action;
     const task = lifecycle.tasks[action.taskId]!;
-    const container = guarded.get(liveRun(lifecycle, task)!.id)?.container;
-    if (action.answer !== 'deny' && container) {
+    if (action.answer !== 'deny') {
+      const container = guarded.get(liveRun(lifecycle, task)!.id)?.container;
+      if (!container) return { ok: false, reason: `${task.id}’s run has no container whose egress proxy could allow ${host}.` };
+      const egress = egressOf(task).hosts;
       try {
-        await container.setEgress([...new Set([...egressOf(task), action.host])]);
+        await container.setEgress(egress.includes(host) ? egress : [...egress, host]);
       } catch (error) {
         if (!(error instanceof SandboxError)) throw error;
-        return { ok: false, reason: `The factory couldn’t allow ${action.host} in ${task.id}’s egress proxy: ${error.message}` };
+        return { ok: false, reason: `The factory couldn’t allow ${host} in ${task.id}’s egress proxy: ${error.message}` };
+      }
+      const problem = action.answer === 'always' ? addEgressHosts(options.permissionsPath, [host]) : null;
+      if (problem) {
+        // The proxy goes back to the allowlist it had: the host was allowed nowhere.
+        await container.setEgress(egress).catch((error) => {
+          if (!(error instanceof SandboxError)) throw error;
+        });
+        return { ok: false, reason: `Allow always added no host: ${problem}` };
       }
     }
     const refused = await settle(action, new Set());
@@ -1774,7 +1783,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // The hosts each live contained HITL run's container denied it, read for
   // its host cards (ADR 0015): a read already under way for a run isn't
-  // started again.
+  // started again. Each card says why the operator's permissions file
+  // allowed none of its egress hosts, if it couldn't.
   function readDeniedHosts(runId?: string): void {
     for (const [id, guard] of guarded) {
       if ((runId && id !== runId) || !guard.container || readingDenials.has(id)) continue;
@@ -1784,8 +1794,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       void guard.container
         .deniedHosts()
         .then((hosts) => {
-          const seen = lifecycle.runs[id]?.deniedHosts ?? [];
-          if (hosts.some((host) => !seen.includes(host))) return dispatch({ type: 'hostsDenied', runId: id, hosts });
+          const asked = lifecycle.runs[id]?.hostsAsked ?? [];
+          if (!hosts.some((host) => !asked.includes(host))) return;
+          return dispatch({ type: 'hostsDenied', runId: id, hosts, problem: readEgressHosts(options.permissionsPath).error });
         })
         .catch((error) => {
           if (!(error instanceof SandboxError)) throw error;
@@ -1796,9 +1807,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // The hosts the task's container may reach: the built-in ones, the
   // task's own, and those the operator's permissions file allows every
-  // task, which a file that can't be read allows none of.
-  function egressOf(task: Task): string[] {
-    return egressFor([...new Set([...(task.egressHosts ?? []), ...readEgressHosts(options.permissionsPath).hosts])]);
+  // task. `problem` says why the file allowed none, if it couldn't: a host
+  // card the run raises says so.
+  function egressOf(task: Task): { hosts: string[]; problem: string | null } {
+    const file = readEgressHosts(options.permissionsPath);
+    return { hosts: egressFor([...(task.egressHosts ?? []), ...file.hosts]), problem: file.error };
   }
 
   // Applies the action once the clone of every run it starts is in place
@@ -3129,7 +3142,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         throw new SandboxError((error as Error).message);
       }
       const plugin = run.skillSet ? skillSets.pathOf(run.skillSet) : null;
-      const egress = egressOf(task);
+      const egress = egressOf(task).hosts;
       const { path: clonePath, baseBranch } = lifecycle.repositories[task.repo]!;
       // The base branch as the host last fetched it, which an update run merges in.
       const container = await sandbox.prepare({ taskId: task.id, clonePath, branch, branches, fetched: [baseBranch], plugin, runDir, sessionsDir, egress });
@@ -3347,10 +3360,6 @@ function runsInContainer(run: Run): boolean {
   return run.mode === 'AFK' ? runsContained(run.autonomy) : isContainedHitl(run);
 }
 
-// Whether the run is a HITL run at a contained stage (ADR 0015).
-function isContainedHitl(run: Run): boolean {
-  return run.mode === 'HITL' && !!run.contained;
-}
 
 // A turn the daemon cut short in a task's container, and whether its
 // container's restart keeps its commits there rather than bringing them out

@@ -9,6 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FactoryConnection } from '../protocol/client.ts';
+import type { RunView } from '../protocol/factory-state.ts';
 import { BUILT_IN_EGRESS } from '../sandbox/sandbox.ts';
 import { startTestFactory, type TestFactory } from '../testing/test-factory.ts';
 import { watch, type Watched } from '../testing/watch.ts';
@@ -66,6 +67,9 @@ async function denied(...hosts: string[]): Promise<{ factory: TestFactory; opera
   return attachedFactory;
 }
 
+// The hosts the run's open host cards name.
+const carded = (run: RunView | undefined) => run?.hostCards.map(({ host }) => host);
+
 // Long enough for the daemon to look at what the live runs' containers denied.
 const HOST_POLL = 5_000;
 const minutes = (n: number) => n * 60_000;
@@ -73,7 +77,7 @@ const minutes = (n: number) => n * 60_000;
 describe('a host a contained HITL run is denied', () => {
   test('raises a host card in its conversation, naming the host, once per new host', async () => {
     const { factory, tui } = await denied('docs.example.com');
-    expect(tui.state().runs.R1).toMatchObject({ hostCards: ['docs.example.com'], deniedHosts: ['docs.example.com'] });
+    expect(tui.state().runs.R1?.hostCards).toEqual([{ host: 'docs.example.com', problem: null }]);
     expect(tui.state().attentionQueue.filter((item) => item.kind === 'attention')).toEqual([]);
 
     // Denied again, it raises no second card; a new host raises its own.
@@ -81,16 +85,29 @@ describe('a host a contained HITL run is denied', () => {
     factory.sandbox.request('T1', 'cdn.example.com');
     factory.clock.advance(HOST_POLL);
     const state = await tui.until((state) => state.runs.R1?.hostCards.length === 2);
-    expect(state.runs.R1?.hostCards).toEqual(['docs.example.com', 'cdn.example.com']);
+    expect(carded(state.runs.R1)).toEqual(['docs.example.com', 'cdn.example.com']);
     factory.clock.advance(HOST_POLL * 3);
-    expect(tui.state().runs.R1?.hostCards).toEqual(['docs.example.com', 'cdn.example.com']);
+    expect(carded(tui.state().runs.R1)).toEqual(['docs.example.com', 'cdn.example.com']);
+  });
+
+  test('says why the permissions file allowed none of its egress hosts, when it couldn’t', async () => {
+    const { factory, operator, tui } = await attached();
+    operatorFile(factory, 'egress-hosts: docs.example.com\n');
+    await operator.send(launch());
+    await started(factory, 1);
+    factory.sandbox.request('T1', 'docs.example.com');
+    factory.clock.advance(HOST_POLL);
+    const state = await tui.until((state) => state.runs.R1?.hostCards.length === 1);
+    expect(state.runs.R1?.hostCards).toEqual([
+      { host: 'docs.example.com', problem: `${factory.paths.permissionsPath} must hold \`egress-hosts:\`, a list of hosts such as \`docs.example.com\`.` },
+    ]);
   });
 
   test('outlives the agent’s turn: the card stays up once the turn ended', async () => {
     const { factory, operator, tui } = await denied('docs.example.com');
     factory.executor.report('R1', { type: 'turnEnded' });
     await operator.send({ type: 'daemon.status' });
-    expect(tui.state().runs.R1?.hostCards).toEqual(['docs.example.com']);
+    expect(carded(tui.state().runs.R1)).toEqual(['docs.example.com']);
   });
 
   test('an L2 run raises none: its denials go on its failure, as before', async () => {
@@ -100,7 +117,7 @@ describe('a host a contained HITL run is denied', () => {
     factory.sandbox.request('T1', 'pypi.org');
     factory.clock.advance(HOST_POLL * 2);
     await operator.send({ type: 'daemon.status' });
-    expect(tui.state().runs.R1?.hostCards).toEqual([]);
+    expect(carded(tui.state().runs.R1)).toEqual([]);
   });
 });
 
@@ -111,7 +128,7 @@ describe('answering a host card', () => {
     expect(await operator.send({ type: 'answerHost', taskId: 'T1', host: 'docs.example.com', answer: 'task' })).toEqual({ ok: true });
 
     const state = await tui.until((state) => state.runs.R1?.hostCards.length === 1);
-    expect(state.runs.R1?.hostCards).toEqual(['cdn.example.com']);
+    expect(carded(state.runs.R1)).toEqual(['cdn.example.com']);
     expect(state.tasks.T1?.egressHosts).toEqual(['docs.example.com']);
     expect(factory.sandbox.request('T1', 'docs.example.com')).toBe(true);
     expect(factory.sandbox.request('T1', 'cdn.example.com')).toBe(false);
@@ -155,7 +172,7 @@ describe('answering a host card', () => {
       reason: `Allow always added no host: ${factory.paths.permissionsPath} must hold \`egress-hosts:\`, a list of hosts such as \`docs.example.com\`.`,
     });
     expect(readFileSync(factory.paths.permissionsPath, 'utf8')).toBe('egress-hosts: docs.example.com\n');
-    expect(tui.state().runs.R1?.hostCards).toEqual(['docs.example.com']);
+    expect(carded(tui.state().runs.R1)).toEqual(['docs.example.com']);
     expect(factory.sandbox.request('T1', 'docs.example.com')).toBe(false);
   });
 
@@ -183,7 +200,7 @@ describe('answering a host card', () => {
     chmodSync(factory.paths.permissionsPath, 0o644);
 
     expect(reply).toMatchObject({ ok: false, reason: expect.stringMatching(/^Allow always added no host: .*permissions\.yaml couldn’t be written: /) });
-    expect(tui.state().runs.R1?.hostCards).toEqual(['docs.example.com']);
+    expect(carded(tui.state().runs.R1)).toEqual(['docs.example.com']);
   });
 
   test('fails with the reason, leaving the card open and the task’s egress as it was, when the proxy can’t take the host', async () => {
@@ -194,12 +211,22 @@ describe('answering a host card', () => {
       ok: false,
       reason: 'The factory couldn’t allow docs.example.com in T1’s egress proxy: the proxy is gone.',
     });
-    expect(tui.state().runs.R1?.hostCards).toEqual(['docs.example.com']);
+    expect(carded(tui.state().runs.R1)).toEqual(['docs.example.com']);
     expect(tui.state().tasks.T1?.egressHosts).toEqual([]);
 
     factory.sandbox.fail('setEgress', null);
     expect(await operator.send({ type: 'answerHost', taskId: 'T1', host: 'docs.example.com', answer: 'task' })).toEqual({ ok: true });
     expect(factory.sandbox.request('T1', 'docs.example.com')).toBe(true);
+  });
+
+  test('Allow always writes nothing, and the proxy keeps its allowlist, when the proxy can’t take the host', async () => {
+    const { factory, operator, tui } = await denied('docs.example.com');
+    factory.sandbox.fail('setEgress', 'the proxy is gone.');
+
+    expect(await operator.send({ type: 'answerHost', taskId: 'T1', host: 'docs.example.com', answer: 'always' })).toMatchObject({ ok: false });
+
+    expect(existsSync(factory.paths.permissionsPath)).toBe(false);
+    expect(carded(tui.state().runs.R1)).toEqual(['docs.example.com']);
   });
 
   test('Deny leaves the host blocked and closes the card, and the host raises no second card', async () => {
@@ -211,7 +238,7 @@ describe('answering a host card', () => {
     expect(factory.sandbox.request('T1', 'docs.example.com')).toBe(false);
     factory.clock.advance(HOST_POLL * 2);
     await operator.send({ type: 'daemon.status' });
-    expect(tui.state().runs.R1?.hostCards).toEqual([]);
+    expect(carded(tui.state().runs.R1)).toEqual([]);
     expect(tui.state().tasks.T1?.egressHosts).toEqual([]);
   });
 
@@ -240,18 +267,34 @@ describe('the permissions file’s egress hosts', () => {
     await operator.send(launch('Grill me about sign-out.'));
     await started(factory, 2);
     expect(factory.sandbox.prepared.at(-1)).toMatchObject({ taskId: 'T2', egress: BUILT_IN_EGRESS });
+
+    // A host with a port is no host the proxy names; an IPv6 address is.
+    operatorFile(factory, 'egress-hosts:\n  - docs.example.com:443\n');
+    await operator.send(launch('Grill me about the session store.'));
+    await started(factory, 3);
+    expect(factory.sandbox.prepared.at(-1)).toMatchObject({ taskId: 'T3', egress: BUILT_IN_EGRESS });
+    operatorFile(factory, 'egress-hosts:\n  - "2001:db8::1"\n');
+    await operator.send(launch('Grill me about the audit log.'));
+    await started(factory, 4);
+    expect(factory.sandbox.prepared.at(-1)).toMatchObject({ taskId: 'T4', egress: [...BUILT_IN_EGRESS, '2001:db8::1'] });
   });
 });
 
 describe('a host card left unanswered', () => {
-  test('parks the run, as a permission card does, and the later prepare allows a host allowed for the task meanwhile', async () => {
+  test('lets the agent work on, then parks the run once its turn ended, as a permission card does, and the later prepare allows a host allowed for the task meanwhile', async () => {
     const { factory, operator, tui } = await denied('docs.example.com', 'cdn.example.com');
     await operator.send({ type: 'answerHost', taskId: 'T1', host: 'cdn.example.com', answer: 'task' });
 
-    // The agent's turn is still under way.
+    // The agent's turn is still under way: a host card holds no call.
+    factory.clock.advance(minutes(31));
+    await operator.send({ type: 'daemon.status' });
+    expect(tui.state().runs.R1?.status).toBe('active');
+
+    factory.executor.report('R1', { type: 'turnEnded' });
+    await operator.send({ type: 'daemon.status' });
     factory.clock.advance(minutes(31));
     const state = await tui.until((state) => state.runs.R1?.outcome === 'parked');
-    expect(state.runs.R1?.hostCards).toEqual([]);
+    expect(carded(state.runs.R1)).toEqual([]);
     expect(state.tasks.T1?.label).toBe('Ready for you');
 
     await operator.send({ type: 'open', taskId: 'T1' });
