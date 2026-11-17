@@ -257,7 +257,7 @@ test('a contained HITL run’s instructions include the operator’s user CLAUDE
 
       executor.send('R1', `Run this command with the Bash tool: \`echo "- Remember this" >> ${container.memory}/MEMORY.md\`. Then reply with only whether it succeeded: YES or NO.`);
       await waitFor(() => turnsEnded() === 2, 120_000);
-      expect(live.at(-1)).toMatchObject({ type: 'message', from: 'agent', text: expect.stringContaining('NO') });
+      expect(live.at(-1)).toMatchObject({ type: 'message', from: 'agent', text: expect.stringMatching(/^\W*NO\W*$/) });
       expect(asked).toEqual([]);
     },
     {

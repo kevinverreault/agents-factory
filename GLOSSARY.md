@@ -71,6 +71,10 @@ _Avoid_: Step, phase
 Whether a run executes on the operator's host or in its task's container. Every AFK run at L2 or above is contained; a HITL stage is contained when its workflow preset says so, as the built-in planning stages are, setup aside.
 _Avoid_: Sandbox mode, isolation (for the domain term)
 
+**Operator profile**:
+What a contained HITL run gets of the operator's own Claude Code setup: their user `CLAUDE.md` and the project's auto memory, both read-only. Nothing executable of theirs comes with it: no user settings, MCP servers, plugins or hooks.
+_Avoid_: Credential profile, which is how a run authenticates
+
 **Model tier**:
 The class of model a stage or run asks for, resolved to an exact model when the run starts. A delegating agent can only ask for its own tier or a lower one.
 _Avoid_: Model, size

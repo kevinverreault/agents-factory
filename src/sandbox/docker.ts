@@ -325,11 +325,12 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     };
   }
 
-  // Makes the scratch folder, here rather than in the image so containers
-  // made before it get one too, and copies in the spec's profile afresh, as
-  // root: what of it the host has, the rest left out. Without one, the copy
-  // an earlier prepare made goes.
-  async function carryProfile({ taskId, profile }: ContainerSpec): Promise<void> {
+  // Furnishes the container for its next run: makes the scratch folder,
+  // here rather than in the image so containers made before it get one too,
+  // and copies in the spec's operator profile afresh, as root: what of it the
+  // host has, the rest left out. Without one, the copy an earlier prepare
+  // made goes.
+  async function furnish({ taskId, profile }: ContainerSpec): Promise<void> {
     const name = nameOf(taskId);
     const root = (script: string) => docker(['exec', '--user', 'root', name, 'sh', '-c', script]);
     await root(
@@ -382,7 +383,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       const running = await stateOf(spec.taskId);
       if (running === null) await create(spec);
       else if (!running) await docker(['start', nameOf(spec.taskId)]);
-      await carryProfile(spec);
+      await furnish(spec);
       await bringIn(spec);
       return handle(spec);
     },
