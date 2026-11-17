@@ -886,7 +886,7 @@ describe('launching and conversing', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[], waitingForWindow: null, contained: false,
+    hostCards: [] as string[], deniedHosts: [] as string[], waitingForWindow: null, contained: false,
   };
   const repositories = { 'acme/gadgets': gadgets, 'acme/widgets': widgets };
 
@@ -3163,7 +3163,7 @@ describe('answering in the conversation', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[], waitingForWindow: null, contained: false,
+    hostCards: [] as string[], deniedHosts: [] as string[], waitingForWindow: null, contained: false,
   };
   const permission = {
     kind: 'attention' as const,
@@ -3349,6 +3349,31 @@ describe('answering in the conversation', () => {
     });
   });
 
+  test('a contained HITL run’s host card shows in its conversation, naming its host, and a digit answers it', async () => {
+    const connection = new FakeConnection();
+    const hitl: TaskView = { ...task('T1', 'Grill me about the login flow.', 'running', 'In conversation', 'HITL'), liveRunId: 'R1' };
+    const asking = { ...suspended, mode: 'HITL' as const, autonomy: null, status: 'active' as const, contained: true, hostCards: ['docs.example.com', 'cdn.example.com'] };
+    const { app } = await started({ ...factoryState([hitl]), runs: { R1: asking } }, { connection });
+    await press(app, ENTER, ENTER);
+    await eventually(() => expect(connection.conversed).toEqual(['R1']));
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain(
+        'HOST The agent tried to reach docs.example.com, which its container’s egress doesn’t allow. [1] Allow docs.example.com for this task [2] Allow docs.example.com always [3] Deny docs.example.com',
+      );
+      expect(frame).not.toContain('cdn.example.com');
+    });
+
+    await press(app, '2');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'answerHost', taskId: 'T1', host: 'docs.example.com', answer: 'always' }));
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...asking, hostCards: ['cdn.example.com'] } }]);
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain('✓ Answered Allow docs.example.com always');
+      expect(frame).toContain('[3] Deny cdn.example.com');
+    });
+  });
+
   test('an answer given on Needs you shows in the conversation after the call it answers, and still does once the conversation is left and reopened', async () => {
     const connection = new FakeConnection();
     const question = {
@@ -3446,7 +3471,7 @@ describe('taking over with c', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[], waitingForWindow: null, contained: false,
+    hostCards: [] as string[], deniedHosts: [] as string[], waitingForWindow: null, contained: false,
   };
   const permission = {
     kind: 'attention' as const,
@@ -3565,7 +3590,7 @@ describe('the conversation of an AFK task that is no longer live', () => {
     const ended = {
       id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const, interruption: null,
       turn: 'agent' as const, queued: [] as string[], question: null, permission: null, stage: 'implement', ticket: null, proposal: null,
-      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {}, deniedHosts: [] as string[], waitingForWindow: null, contained: false,
+      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {}, hostCards: [] as string[], deniedHosts: [] as string[], waitingForWindow: null, contained: false,
     };
     const { app } = await started({ ...factoryState([reviewed]), runs: { R1: ended } }, { connection });
     await press(app, '\r', '\r');
@@ -3584,7 +3609,7 @@ describe('usage', () => {
   function metered(id: string, taskId: string, stage: string | null, ticket: string | null, used: RunView['usage']): RunView {
     return {
       id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage, ticket,
-      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used, deniedHosts: [], waitingForWindow: null, contained: false,
+      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used, hostCards: [], deniedHosts: [], waitingForWindow: null, contained: false,
     };
   }
   const implementing = { ...task('T1', 'Implement the login flow', 'running', 'Running'), groups: ['login'] };
@@ -3726,7 +3751,7 @@ const SONNET = 'claude-sonnet-5-5';
 function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
   return {
     id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
-    ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, deniedHosts: [], waitingForWindow: null, contained: false, ...fields,
+    ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, hostCards: [], deniedHosts: [], waitingForWindow: null, contained: false, ...fields,
   };
 }
 
@@ -4273,7 +4298,7 @@ describe('the wayfinder work loop', () => {
     const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', frontier: null, cleared: false } };
     const run = {
       id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, interruption: null, turn: 'operator' as const, queued: [] as string[],
-      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {}, deniedHosts: [] as string[], waitingForWindow: null, contained: false,
+      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {}, hostCards: [] as string[], deniedHosts: [] as string[], waitingForWindow: null, contained: false,
     };
     const { app } = await started({ ...factoryState([working]), runs: { R1: run } }, { connection });
     await press(app, '\r', '\r');
@@ -4373,7 +4398,7 @@ describe('quick launch', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [], waitingForWindow: null, contained: false,
+    hostCards: [], deniedHosts: [], waitingForWindow: null, contained: false,
   };
   const question = {
     id: 'toolu_1',

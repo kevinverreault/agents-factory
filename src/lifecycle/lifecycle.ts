@@ -86,6 +86,10 @@ export type PermissionAnswer = { allow: 'once' } | RulesAnswer | { deny: string 
 // absent: the task's for the rest of it, or, always, the operator's
 // permissions file's, which the daemon adds them to, for every task.
 export type RulesAnswer = { allow: 'task' | 'always'; rules?: string[] };
+// How the operator answers a host card (ADR 0015): allow the host for the
+// rest of the task, or always, in the egress hosts of their permissions
+// file, which the daemon adds it to, for every task; or deny it.
+export type HostAnswer = 'task' | 'always' | 'deny';
 // Each question's text with its answer: an option's label (a multi-select's
 // labels joined by ", "), or the operator's own words.
 export type Answers = Record<string, string>;
@@ -97,7 +101,10 @@ export type AttentionKind =
   | 'github-write'
   | 'pr-closed-unmerged'
   | 'repo-missing'
-  | 'recovery-report';
+  | 'recovery-report'
+  // Never raised as a request: a HITL run's host card (ADR 0015), as the
+  // answer sheet shows it.
+  | 'host';
 export type AttentionStatus = 'open' | 'answered' | 'superseded' | 'closed';
 
 // The agent's proposal to advance the task to its next stage
@@ -612,6 +619,11 @@ export type Run = {
   // A HITL run's permission card: the tool call no rule covers, which waits
   // on the operator's answer in the conversation. Runs stored before it have none.
   permission?: Permission | null;
+  // A contained HITL run's host cards (ADR 0015): the hosts its container's
+  // egress proxy denied it that wait on the operator in the conversation,
+  // in the order first denied. Unlike a permission card, one holds no call,
+  // so it outlives the agent's turn. Runs stored before them have none.
+  hostCards?: string[];
   // The stage of its task's preset the run works on, if the task has one.
   stage: string | null;
   // Whether it is a HITL run that executes in its task's container under
@@ -656,7 +668,8 @@ export type Run = {
   // its gate check's verdict through `report_verdict` and nothing else.
   judges?: boolean;
   // The hosts its container's egress proxy denied it, for an L2 run that
-  // ended (ADR 0007). Runs stored before them have none.
+  // ended (ADR 0007), or a contained HITL run's, as it is denied them, each
+  // raising its host card once (ADR 0015). Runs stored before them have none.
   deniedHosts?: string[];
   // What it used, per model (ADR 0008): its API messages as they streamed,
   // brought into line by its session's totals. Runs stored before metering
@@ -888,6 +901,8 @@ export type OperatorCommand =
   // Cuts the agent's turn short; the run lives on.
   | { type: 'interrupt'; taskId: string }
   | { type: 'answerQuestion'; taskId: string; questionId: string; answers: Answers }
+  // Answers the live HITL run's host card for `host` (ADR 0015).
+  | { type: 'answerHost'; taskId: string; host: string; answer: HostAnswer }
   // Backs out of the handoff sheet: the conversation carries on.
   | { type: 'closeHandoff'; taskId: string }
   // Expands a quick launch into a full conversation (`ctrl+e`): its grill
@@ -949,6 +964,9 @@ export type RunEvent =
   // `context` is how full the session is now, when the executor knows.
   | { type: 'turnEnded'; runId: string; context?: ContextUse }
   | { type: 'questionAsked'; runId: string; question: Question }
+  // A contained HITL run's container denied it these hosts so far (ADR
+  // 0015), as the daemon read them: each new one raises a host card.
+  | { type: 'hostsDenied'; runId: string; hosts: string[] }
   // An AFK run asked the operator through `AskUserQuestion`.
   // A run that assumes its answers raises none (ADR 0014): the daemon tells it to choose.
   | { type: 'attentionRaised'; runId: string; kind: 'question'; question: Question }
@@ -2303,7 +2321,7 @@ export function activeAfkRuns(state: Lifecycle): number {
 
 // Whether a live run waits on the operator: its turn, or a card it asked.
 export function waitsOnOperator(run: Run): boolean {
-  return run.status === 'active' && (run.turn === 'operator' || run.question !== null || !!run.permission);
+  return run.status === 'active' && (run.turn === 'operator' || run.question !== null || !!run.permission || !!run.hostCards?.length);
 }
 
 // The permission the task's `answer` decides: its open permission request's
@@ -2511,6 +2529,15 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
       const run = liveRun(state, task);
       if (run?.status !== 'active') return `${task.id} has no live conversation.`;
       return run.turn === 'agent' ? null : `${task.id}’s agent isn’t mid-turn.`;
+    }
+    case 'answerHost': {
+      if (!['task', 'always', 'deny'].includes(action.answer)) return 'Allow the host for this task or always, or deny it.';
+      const run = liveRun(state, task);
+      return run?.status === 'active' && run.hostCards?.includes(action.host) ? null : `${task.id} has no host card for ${String(action.host)}.`;
+    }
+    case 'hostsDenied': {
+      const run = state.runs[action.runId]!;
+      return run.mode === 'HITL' && run.contained ? null : `Run ${run.id} isn’t a contained HITL run: it raises no host card.`;
     }
     case 'answerQuestion': {
       const { question } = liveRun(state, task) ?? {};
@@ -3624,6 +3651,8 @@ function endRun(run: Run, outcome: RunOutcome, at: number): void {
   run.endedAt = at;
   run.countedMessages = null;
   run.waitingForWindow = null;
+  // Its host cards go with it: a later run is denied its hosts afresh.
+  if (run.hostCards?.length) run.hostCards = [];
 }
 
 export function isMetering(action: { type: string }): action is Extract<RunEvent, { type: 'usageSampled' | 'usageTotaled' }> {
@@ -4105,6 +4134,24 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
     case 'interrupt':
       // The executor cuts the turn, and reports its end like any other.
       break;
+    case 'hostsDenied': {
+      // A host denied again raises no second card.
+      const seen = (run!.deniedHosts ??= []);
+      for (const host of action.hosts) {
+        if (seen.includes(host)) continue;
+        seen.push(host);
+        (run!.hostCards ??= []).push(host);
+      }
+      break;
+    }
+    case 'answerHost': {
+      // The daemon updates the proxy's allowlist in place. Allow always's
+      // host is the operator's file's, which the daemon added it to.
+      const asking = liveRun(state, task)!;
+      asking.hostCards = asking.hostCards!.filter((host) => host !== action.host);
+      if (action.answer === 'task' && !(task.egressHosts ??= []).includes(action.host)) task.egressHosts.push(action.host);
+      break;
+    }
     case 'answerQuestion':
       // The executor hands the answers to the waiting turn.
       if (task.quick) task.quick.questions += run!.question!.questions.length;

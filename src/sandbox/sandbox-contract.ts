@@ -205,6 +205,21 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
         expect(await again.deniedHosts()).toEqual([]);
       }));
 
+    test('egress set in place lets a denied host through from the next request, and keeps the list of hosts denied', () =>
+      withFixture(async ({ sandbox, task, reach, allowedHost, deniedHost }) => {
+        const { spec } = await task('T1');
+        const container = await sandbox.prepare(spec);
+        expect(await reach(container, deniedHost)).toBe(false);
+
+        await container.setEgress([...spec.egress, deniedHost]);
+
+        expect(await reach(container, deniedHost)).toBe(true);
+        expect(await reach(container, allowedHost)).toBe(true);
+        expect(await container.deniedHosts()).toEqual([deniedHost]);
+        await container.setEgress(spec.egress.filter((host) => host !== allowedHost));
+        expect(await reach(container, allowedHost)).toBe(false);
+      }));
+
     test('a task branch changed on both sides is refused, by prepare and by bringing it out', () =>
       withFixture(async ({ sandbox, task, commitInContainer, commitOnHost }) => {
         const { spec, worktree } = await task('T1');

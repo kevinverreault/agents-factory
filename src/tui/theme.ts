@@ -107,6 +107,7 @@ const KINDS: Record<AttentionKind, [string, Role]> = {
   'pr-closed-unmerged': ['PR closed', 'warn'],
   'repo-missing': ['repo missing', 'bad'],
   'recovery-report': ['recovered', 'accent'],
+  host: ['host', 'warn'],
 };
 
 export function kindLook(item: Item): { kind: string; role: Role } {

@@ -184,6 +184,10 @@ export class FakeSandbox implements Sandbox {
       checks: this.git,
       git: () => Promise.reject(new Error('The fake sandbox runs no git command.')),
       deniedHosts: async () => [...container.denied],
+      setEgress: async (egress) => {
+        if (!container.running) throw new SandboxError(`${spec.taskId}’s container isn’t running.`);
+        container.spec = { ...container.spec, egress: [...egress] };
+      },
       spawn: () => {
         throw new Error('The fake sandbox spawns no process.');
       },

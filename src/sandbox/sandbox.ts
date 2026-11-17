@@ -98,6 +98,11 @@ export type Container = {
   // The hosts outside its egress that the container tried to reach since it
   // was last prepared, each once, in the order first denied.
   deniedHosts(): Promise<string[]>;
+  // Sets the hosts its egress allows to `egress`, in place (ADR 0015): its
+  // proxy allows them from its next request on, with no restart, and the
+  // hosts it denied since it was prepared stay listed. The next prepare
+  // sets them afresh from its spec.
+  setEgress(egress: string[]): Promise<void>;
   // Starts `command` in the container, as its non-root user, in `workdir`,
   // with exactly `env` set besides the image's own, its stdin and stdout piped.
   spawn(command: string, args: string[], options: { env: Record<string, string | undefined>; signal?: AbortSignal }): ChildProcessByStdio<Writable, Readable, null>;

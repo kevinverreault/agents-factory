@@ -12,7 +12,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { AdvanceSheet, canAdvance } from './advance-sheet.ts';
-import { AnswerSheet, answerable, cardItem, reopens, useAnswering } from './answer-sheet.ts';
+import { AnswerSheet, answerable, cardItem, hostCardItem, reopens, useAnswering } from './answer-sheet.ts';
 import { answeredLine, answersText, placed, type AnswerLog } from './answered.ts';
 import { ArtifactRail } from './artifacts.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
@@ -83,11 +83,12 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
   const handOff = () => void inFlight.send('Opening the handoff…', { type: 'openHandoff', taskId })?.then(tell);
   const sheet = takesChat && task?.handoff ? task.handoff : null;
   // The task's open request, while it needs the operator, or else its HITL
-  // run's permission card: when its sheet takes digits, every key but ctrl+b
-  // is the sheet's.
+  // run's permission card, or else its first host card (ADR 0015): when its
+  // sheet takes digits, every key but ctrl+b is the sheet's.
   const request =
     state.attentionQueue.find((item) => item.kind === 'attention' && item.taskId === taskId) ??
-    (live && run.permission && task ? cardItem(task, run.permission) : undefined);
+    (live && run.permission && task ? cardItem(task, run.permission) : undefined) ??
+    (live && run.hostCards[0] && task ? hostCardItem(task, run.hostCards[0]) : undefined);
   // Keeps an answer given here, after the call it answers or else the
   // latest event the operator saw, and returns its id in the log.
   const remember = (answer: string, toolUseId: string | null) =>

@@ -6,7 +6,7 @@
 // the task goes next.
 import { createElement as h, useReducer, useRef } from 'react';
 import { Box, Text, type Key } from 'ink';
-import type { AttentionQueueItem, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
+import type { AttentionQueueItem, HostAnswer, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
 import { isRetiredLoop, isWorkLoop } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
@@ -109,6 +109,16 @@ export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined)
         noted('Deny with a note', 'Note for the agent', 'denies', (text) => ({ type: 'answer', taskId, permission: { deny: text } })),
       ];
     }
+    case 'host': {
+      // A host card (ADR 0015), for the one host it names.
+      const host = item.deniedHosts?.[0] ?? '';
+      const answer = (answer: HostAnswer): Command => ({ type: 'answerHost', taskId, host, answer });
+      return [
+        { label: `Allow ${host} for this task`, command: answer('task') },
+        { label: `Allow ${host} always`, command: answer('always') },
+        { label: `Deny ${host}`, command: answer('deny') },
+      ];
+    }
     case 'github-write':
       // Answered once the operator fixed what refused the write.
       return [{ label: 'Try again', command: answer }];
@@ -196,6 +206,25 @@ export function cardItem(task: TaskView, permission: Permission): AttentionQueue
     permission,
     recovery: null,
     deniedHosts: null, skipped: null,
+  };
+}
+
+// A HITL run's host card (ADR 0015), as the sheet's item: answered by a
+// digit, though it is no attention request.
+export function hostCardItem(task: TaskView, host: string): AttentionQueueItem {
+  return {
+    kind: 'attention',
+    taskId: task.id,
+    repo: task.repo,
+    requestId: `host:${host}`,
+    attention: 'host',
+    holdsRun: false,
+    reason: `The agent tried to reach ${host}, which its container’s egress doesn’t allow.`,
+    question: null,
+    permission: null,
+    recovery: null,
+    deniedHosts: [host],
+    skipped: null,
   };
 }
 

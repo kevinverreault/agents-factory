@@ -146,7 +146,7 @@ import {
 } from '../protocol/protocol.ts';
 import { RoutingTableError, type RoutingTableFile } from '../models/routing-table.ts';
 import { route, type Routes } from '../models/routing.ts';
-import { addOperatorRules, readAllowRules, trackScripts, uncovered, type ToolCall } from '../permissions/permissions.ts';
+import { addEgressHosts, addOperatorRules, readAllowRules, readEgressHosts, trackScripts, uncovered, type ToolCall } from '../permissions/permissions.ts';
 import {
   appBlock,
   appStages,
@@ -280,6 +280,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // An L2 run's are made in its container's clone, whose commits come out to
   // the host worktree once it ends.
   const guarded = new Map<string, Guarded>();
+  // The runs whose containers' denied hosts are being read.
+  const readingDenials = new Set<string>();
   // Each task's container this daemon knows of (ADR 0011), and whether it
   // runs: listed at start, then kept by what the daemon does to them.
   const containers = new Map<string, boolean>();
@@ -384,6 +386,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     publish();
     fireOverdueDeadlines();
     refreshBotTokens();
+    readDeniedHosts();
     if (clock.now() >= lastPrPoll + prPollMs()) pollPrs();
     if (needsAClock()) idleSince = null;
     else if ((idleSince ??= clock.now()) + (options.idleExitMs ?? IDLE_EXIT_MS) <= clock.now()) void stop();
@@ -1706,6 +1709,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (action.type === 'answer' && allowsByRules(action.permission) && action.permission.allow === 'always') {
         return answerAlways(action.taskId, action.permission);
       }
+      if (action.type === 'answerHost') return answerHost(action);
       if (action.type === 'setAutonomy') await checkAppFor(action.taskId, { autonomy: action.autonomy });
       if (action.type === 'setMergePolicy') await checkAppFor(action.taskId, { mergePolicy: action.mergePolicy });
       const refusal = await settle(action, new Set());
@@ -1740,6 +1744,61 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       for (const call of calls) gate(runId, call);
     }
     return { ok: true };
+  }
+
+  // A host card's answer (ADR 0015). Allow always's host goes into the
+  // operator's permissions file before the card is answered, so the
+  // Lifecycle first checks the answer without applying it: if the host
+  // can't go in, the answer fails with why, and the card stays open. An
+  // allowed host joins the live run's proxy's allowlist in place.
+  async function answerHost(action: Extract<LifecycleAction, { type: 'answerHost' }>): Promise<Reply> {
+    const { refusal } = reduce(lifecycle, action, clock.now(), routes(), { holdRuns });
+    if (refusal) return { ok: false, reason: refusal };
+    if (action.answer === 'always') {
+      const problem = addEgressHosts(options.permissionsPath, [action.host]);
+      if (problem) return { ok: false, reason: `Allow always added no host: ${problem}` };
+    }
+    const asking = liveRun(lifecycle, lifecycle.tasks[action.taskId]!)!;
+    const refused = await settle(action, new Set());
+    if (refused) return { ok: false, reason: refused };
+    const container = guarded.get(asking.id)?.container;
+    if (action.answer === 'deny' || !container) return { ok: true };
+    try {
+      await container.setEgress(egressOf(lifecycle.tasks[action.taskId]!));
+    } catch (error) {
+      if (!(error instanceof SandboxError)) throw error;
+      return { ok: false, reason: `The host is allowed from the run’s next start, but its container’s proxy couldn’t allow it now: ${error.message}` };
+    }
+    return { ok: true };
+  }
+
+  // The hosts each live contained HITL run's container denied it, read for
+  // its host cards (ADR 0015): a read already under way for a run isn't
+  // started again.
+  function readDeniedHosts(runId?: string): void {
+    for (const [id, guard] of guarded) {
+      if ((runId && id !== runId) || !guard.container || readingDenials.has(id)) continue;
+      const run = lifecycle.runs[id];
+      if (!run || run.status !== 'active' || !isContainedHitl(run)) continue;
+      readingDenials.add(id);
+      void guard.container
+        .deniedHosts()
+        .then((hosts) => {
+          const seen = lifecycle.runs[id]?.deniedHosts ?? [];
+          if (hosts.some((host) => !seen.includes(host))) return dispatch({ type: 'hostsDenied', runId: id, hosts });
+        })
+        .catch((error) => {
+          if (!(error instanceof SandboxError)) throw error;
+        })
+        .finally(() => readingDenials.delete(id));
+    }
+  }
+
+  // The hosts the task's container may reach: the built-in ones, the
+  // task's own, and those the operator's permissions file allows every
+  // task, which a file that can't be read allows none of.
+  function egressOf(task: Task): string[] {
+    return egressFor([...new Set([...(task.egressHosts ?? []), ...readEgressHosts(options.permissionsPath).hosts])]);
   }
 
   // Applies the action once the clone of every run it starts is in place
@@ -2611,6 +2670,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     } else if (action.type === 'turnEnded') {
       // The calls a HITL run's card held ended with its turn.
       if (lifecycle.runs[action.runId]!.mode === 'HITL') held.delete(action.runId);
+      // A host the turn was denied shows its card as the turn ends.
+      readDeniedHosts(action.runId);
       const { queued } = before.runs[action.runId]!;
       const { taskId } = lifecycle.runs[action.runId]!;
       // The brief, asked for once the turn a handoff interrupted has ended.
@@ -3068,7 +3129,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         throw new SandboxError((error as Error).message);
       }
       const plugin = run.skillSet ? skillSets.pathOf(run.skillSet) : null;
-      const egress = egressFor(task.egressHosts ?? []);
+      const egress = egressOf(task);
       const { path: clonePath, baseBranch } = lifecycle.repositories[task.repo]!;
       // The base branch as the host last fetched it, which an update run merges in.
       const container = await sandbox.prepare({ taskId: task.id, clonePath, branch, branches, fetched: [baseBranch], plugin, runDir, sessionsDir, egress });
