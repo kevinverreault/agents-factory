@@ -6,7 +6,7 @@
 // the task goes next.
 import { createElement as h, useReducer, useRef } from 'react';
 import { Box, Text, type Key } from 'ink';
-import type { AttentionQueueItem, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
+import type { AttentionQueueItem, HostAnswer, HostCard, Permission, PermissionAnswer } from '../lifecycle/lifecycle.ts';
 import { isRetiredLoop, isWorkLoop } from '../presets/presets.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
@@ -67,7 +67,8 @@ const SHOWN_RULE = 120;
 
 // The digits' choices on a request other than a question with its card, or
 // on a root in review.
-export function choicesFor(item: AttentionQueueItem, task: TaskView | undefined): Choice[] {
+export function choicesFor(item: SheetItem, task: TaskView | undefined): Choice[] {
+  if (item.kind === 'host') return hostChoices(item);
   if (item.kind === 'ready') return task ? workLoopChoices(task) : [];
   if (item.kind === 'review') {
     const { taskId } = item;
@@ -209,6 +210,33 @@ export function cardItem(task: TaskView, permission: Permission): AttentionQueue
   };
 }
 
+// A HITL run's host card (ADR 0015), as the sheet shows it: no attention
+// request, but answered on the sheet by a digit.
+export type HostCardItem = { kind: 'host'; taskId: string; repo: string; card: HostCard };
+// What the sheet shows: an item of Needs you, or a host card.
+export type SheetItem = AttentionQueueItem | HostCardItem;
+
+export function hostCardItem(task: TaskView, card: HostCard): HostCardItem {
+  return { kind: 'host', taskId: task.id, repo: task.repo, card };
+}
+
+// A host card's choices: allow its host for the task, or always, or deny it.
+function hostChoices({ taskId, card: { host } }: HostCardItem): Choice[] {
+  const answer = (answer: HostAnswer): Command => ({ type: 'answerHost', taskId, host, answer });
+  return [
+    { label: `Allow ${host} for this task`, command: answer('task') },
+    { label: `Allow ${host} always`, command: answer('always') },
+    { label: `Deny ${host}`, command: answer('deny') },
+  ];
+}
+
+// What a host card asks: whether its run may reach the host, with why the
+// operator's permissions file allowed none of its egress hosts, if it couldn't.
+function hostAsked({ card: { host, problem } }: HostCardItem): string {
+  const asked = `The agent tried to reach ${host}, which its container’s egress doesn’t allow.`;
+  return problem ? `${asked} (${problem.replace(/\.$/, '')}, so its egress hosts allowed nothing.)` : asked;
+}
+
 // Whether the digits answer the item.
 // A HITL task queued for its conversation with no run live: parked, or never
 // opened. Opening it starts a run, which resumes its session if it had one.
@@ -220,13 +248,14 @@ export function reopens(task: TaskView | undefined): task is TaskView {
   return !loop || !!loop.ticket || (!loop.cleared && !!loop.frontier?.length);
 }
 
-export function answerable(item: AttentionQueueItem | undefined, task: TaskView | undefined): boolean {
+export function answerable(item: SheetItem | undefined, task: TaskView | undefined): boolean {
   if (!item) return false;
   return (item.kind === 'attention' && !!item.question) || choicesFor(item, task).length > 0;
 }
 
 // What the sheet tells one item from another by.
-function keyOf(item: AttentionQueueItem): string {
+function keyOf(item: SheetItem): string {
+  if (item.kind === 'host') return `host-${item.taskId}-${item.card.host}`;
   return item.kind === 'attention' ? item.requestId : `${item.kind}-${item.taskId}`;
 }
 
@@ -241,7 +270,8 @@ export function waitingFor(item: AttentionQueueItem, task: TaskView | undefined)
 // What an item asks of the operator, without its kind, which its row and
 // sheet name apart: the request's reason or question, or else the task's
 // own label (Ready for you, In review).
-export function askedFor(item: AttentionQueueItem, task: TaskView | undefined): string {
+export function askedFor(item: SheetItem, task: TaskView | undefined): string {
+  if (item.kind === 'host') return hostAsked(item);
   if (item.kind === 'attention') return item.reason ?? item.question?.questions[0]?.question ?? '';
   if (item.kind === 'ready' && task?.loop?.cleared) return `${task.label}: the map has cleared`;
   // A semi-auto root its gate sent to the operator says why (ADR 0014).
@@ -260,8 +290,9 @@ export type Answered = { reply: Reply; taskId: string | null; title: string; too
 
 // What an item's row and sheet are titled by: its task, or else the
 // repository a request is about, or the factory itself.
-export function titleOf(item: AttentionQueueItem, task: TaskView | undefined, { withId = false } = {}): string {
+export function titleOf(item: SheetItem, task: TaskView | undefined, { withId = false } = {}): string {
   if (task) return withId ? `${task.id} ${task.title}` : task.title;
+  if (item.kind === 'host') return item.repo;
   return item.kind === 'attention' ? (item.repo ?? 'Factory recovered') : '';
 }
 
@@ -284,7 +315,7 @@ export type Form = { fields: Field[]; at: number; caret: Caret; enter: string };
 // confirms, or a digit (enter, the first) the option it picks.
 export function useAnswering(
   connection: FactoryConnection,
-  item: AttentionQueueItem | undefined,
+  item: SheetItem | undefined,
   task: TaskView | undefined,
   { onSend, onReply }: { onSend?(): void; onReply(answered: Answered): void },
 ) {
@@ -407,7 +438,7 @@ export function useAnswering(
 }
 
 type Props = {
-  item: AttentionQueueItem;
+  item: SheetItem;
   task: TaskView | undefined;
   // The card the operator is answering the item's question on.
   card: Card;

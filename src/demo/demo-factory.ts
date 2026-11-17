@@ -38,7 +38,7 @@ function run(id: string, taskId: string, more: Partial<RunView> = {}): RunView {
   return {
     id, taskId, mode: 'AFK', autonomy: 'L1', status: 'active', outcome: null, interruption: null, turn: 'agent', queued: [], question: null, permission: null,
     stage: 'implement', ticket: null, proposal: null, tier: 'sonnet', model: 'claude-sonnet-5-5', maxTurns: 300, cli: { pid: 4242, createdAt: NOW }, skillSet: null,
-    startedAt: NOW - 30 * MINUTE, endedAt: null, usage: {}, deniedHosts: [], waitingForWindow: null, contained: false, preparing: false, onHost: false,
+    startedAt: NOW - 30 * MINUTE, endedAt: null, usage: {}, hostCards: [], deniedHosts: [], waitingForWindow: null, contained: false, preparing: false, onHost: false,
     ...more,
   };
 }

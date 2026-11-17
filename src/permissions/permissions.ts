@@ -3,6 +3,8 @@
 // the operator's permissions file and the task, never from the target repo.
 // Rules use Claude Code's syntax: `Tool`, or `Tool(specifier)`. Bash rules
 // are best-effort, not a security boundary: L1 guards against accidents.
+// The operator's permissions file also holds the egress hosts every task's
+// container may reach (ADR 0015), which a host card's Allow always adds to.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, posix } from 'node:path';
@@ -484,8 +486,8 @@ const CONFIG_VALUED = new Set(['-f', '--file', '--blob', '--type', '--default'])
 // the factory's allow list and the operator's permissions file at `path`, as
 // the file reads now. `error` says why the file grants nothing, when it doesn't.
 export function readAllowRules(path: string): { rules: string[]; error: string | null } {
-  const operator = readOperatorFile(path);
-  return { rules: [...FACTORY_ALLOW_LIST, ...operator.rules], error: operator.error };
+  const operator = readOperatorList(path, ALLOW);
+  return { rules: [...FACTORY_ALLOW_LIST, ...operator.entries], error: operator.error };
 }
 
 // Adds the rules to the operator's permissions file for Allow always,
@@ -493,23 +495,57 @@ export function readAllowRules(path: string): { rules: string[]; error: string |
 // in it isn't added again. Why nothing was added, if the file can't be read,
 // doesn't hold a list of rules, or can't be written.
 export function addOperatorRules(path: string, rules: readonly string[]): string | null {
-  const { document = new Document(), rules: present, error } = readOperatorFile(path);
+  const { document, entries: present, error } = readOperatorList(path, ALLOW);
   if (error) return error;
-  if (document.contents !== null && !isMap(document.contents)) return mustHoldRules(path);
-  const held = present.map((rule) => rule.trim());
-  const added = [...new Set(rules.map((rule) => rule.trim()))].filter((rule) => !held.includes(rule));
+  return addToList(path, document, ALLOW, present, rules.map((rule) => rule.trim()));
+}
+
+// The hosts the operator allowed every task's container to reach, besides
+// the built-in ones (ADR 0015): the permissions file's egress hosts, as the
+// file reads now, each in lower case.
+//
+//   egress-hosts:
+//     - docs.example.com
+//
+// `error` says why the file allows none, when it doesn't.
+export function readEgressHosts(path: string): { hosts: string[]; error: string | null } {
+  const { entries, error } = readOperatorList(path, EGRESS_HOSTS);
+  return { hosts: entries.map(normalHost), error };
+}
+
+// Adds the hosts to the permissions file's egress hosts for a host card's
+// Allow always, as `addOperatorRules` adds rules: creating the file if
+// missing, keeping its rules and comments, and skipping hosts it already
+// holds. Why nothing was added, if the file can't be read, doesn't hold a
+// list of hosts, or can't be written.
+export function addEgressHosts(path: string, hosts: readonly string[]): string | null {
+  const invalid = hosts.find((host) => !isHost(host));
+  if (invalid !== undefined) return `${invalid} isn’t a host the file can hold, such as \`${EGRESS_HOSTS.example}\`.`;
+  const { document, entries: present, error } = readOperatorList(path, EGRESS_HOSTS);
+  if (error) return error;
+  return addToList(path, document, EGRESS_HOSTS, present.map(normalHost), hosts.map(normalHost));
+}
+
+// Adds the entries `present` lacks to the file's list under `key`, keeping
+// the rest of the document, and writes it.
+function addToList(path: string, document = new Document(), list: OperatorList, present: readonly string[], entries: readonly string[]): string | null {
+  const { key, noun } = list;
+  if (document.contents !== null && !isMap(document.contents)) return mustHold(path, list);
+  const held = present.map((entry) => entry.trim());
+  const added = [...new Set(entries)].filter((entry) => !held.includes(entry));
   if (added.length === 0) return null;
-  const allow = document.get('allow', true);
-  // A list named elsewhere (`allow: *mine`) would lose its rules if replaced.
-  if (!isSeq(allow) && allow !== undefined && !(isScalar(allow) && allow.value === null)) {
-    return `${path} names its \`allow:\` list elsewhere, so the factory can’t add to it: add the rules there by hand.`;
+  const node = document.get(key, true);
+  // A list named elsewhere (`allow: *mine`, `egress-hosts: *mine`) would
+  // lose its entries if replaced.
+  if (!isSeq(node) && node !== undefined && !(isScalar(node) && node.value === null)) {
+    return `${path} names its \`${key}:\` list elsewhere, so the factory can’t add to it: add the ${noun} there by hand.`;
   }
-  if (isSeq(allow)) for (const rule of added) allow.add(rule);
+  if (isSeq(node)) for (const entry of added) node.add(entry);
   else {
-    // An empty `allow:` keeps its comment.
-    const list = document.createNode(added);
-    list.comment = allow?.comment;
-    document.set('allow', list);
+    // An empty list (`allow:` or `egress-hosts:`) keeps its comment.
+    const filled = document.createNode(added);
+    filled.comment = node?.comment;
+    document.set(key, filled);
   }
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -520,31 +556,60 @@ export function addOperatorRules(path: string, rules: readonly string[]): string
   return null;
 }
 
-// The operator's permissions file, unless it is missing, with its own allow
-// rules:
+// The operator's permissions file, unless it is missing, with the entries
+// of one of its lists: its own allow rules, or its egress hosts.
 //
 //   allow:
 //     - Bash(make *)
+//   egress-hosts:
+//     - docs.example.com
 //
-// No file grants nothing. `error` says why a file that can't be read or
-// doesn't hold a list of rules grants nothing either.
-function readOperatorFile(path: string): { document?: Document; rules: string[]; error: string | null } {
+// No file, or no list, holds nothing. `error` says why a file that can't be
+// read, or whose list holds something else, holds nothing either: one list
+// can't take anything from the other.
+function readOperatorList(path: string, list: OperatorList): { document?: Document; entries: string[]; error: string | null } {
+  const { document, value, error } = parseOperatorFile(path);
+  if (error) return { entries: [], error };
+  const entries = value?.[list.key] ?? [];
+  if (!Array.isArray(entries) || !entries.every(list.holds)) return { entries: [], error: mustHold(path, list) };
+  return { document, entries, error: null };
+}
+
+// The permissions file parsed, unless it is missing, or why it can't be read.
+function parseOperatorFile(path: string): { document?: Document; value?: Record<string, unknown> | null; error: string | null } {
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { rules: [], error: null };
-    return { rules: [], error: `${path} couldn’t be read: ${(error as Error).message}` };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { error: null };
+    return { error: `${path} couldn’t be read: ${(error as Error).message}` };
   }
   const document = parseDocument(text);
   const [problem] = document.errors;
-  if (problem) return { rules: [], error: `${path} couldn’t be read: ${problem.message}` };
-  const allow = (document.toJS() as { allow?: unknown } | null)?.allow ?? [];
-  if (!Array.isArray(allow) || !allow.every(isRule)) return { rules: [], error: mustHoldRules(path) };
-  return { document, rules: allow, error: null };
+  if (problem) return { error: `${path} couldn’t be read: ${problem.message}` };
+  return { document, value: document.toJS() as Record<string, unknown> | null, error: null };
 }
 
-const mustHoldRules = (path: string) => `${path} must hold \`allow:\`, a list of rules such as \`Bash(make *)\`.`;
+// A list of the permissions file: its key, what it holds, and an example entry.
+type OperatorList = { key: string; noun: string; example: string; holds: (entry: unknown) => entry is string };
+const ALLOW: OperatorList = { key: 'allow', noun: 'rules', example: 'Bash(make *)', holds: isRule };
+const EGRESS_HOSTS: OperatorList = { key: 'egress-hosts', noun: 'hosts', example: 'docs.example.com', holds: isHost };
+
+// A host, as the egress proxy names hosts: a name, an IPv4 address, or an
+// IPv6 one without its brackets, never a wildcard, a port or a path.
+function isHost(host: unknown): host is string {
+  if (typeof host !== 'string') return false;
+  const normal = normalHost(host);
+  return /^[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?$/.test(normal) || IPV6.test(normal);
+}
+
+// An IPv6 address: hex groups with at least two colons, and maybe an IPv4 tail.
+const IPV6 = /^(?=.*:.*:)[0-9a-f:]+(:\d{1,3}(\.\d{1,3}){3})?$/;
+
+// A host as the proxy matches it: lower case, with no trailing dot.
+const normalHost = (host: string) => host.trim().toLowerCase().replace(/\.$/, '');
+
+const mustHold = (path: string, { key, noun, example }: OperatorList) => `${path} must hold \`${key}:\`, a list of ${noun} such as \`${example}\`.`;
 
 // The parts of the call no rule covers, each a call of its own, made in the
 // run's `worktree` when known: the commands of a Bash chain (`&&`, `||`, `;`,

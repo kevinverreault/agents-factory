@@ -987,6 +987,21 @@ describe('Allow always', () => {
     expect(rows(tui.state())).toEqual(['T1 permission']);
   });
 
+  test('keeps the file’s egress hosts, and an invalid egress-hosts section takes nothing from its rules', async () => {
+    const { factory, operator, tui } = await attached();
+    operatorRules(factory, 'egress-hosts: docs.example.com\nallow:\n  - Bash(make *)\n');
+    await operator.send(afk('Fix the login bug'));
+    factory.executor.askPermission('R1', bash('toolu_1', 'make lint'));
+    await settled(operator);
+    expect(factory.executor.verdicts('R1')).toEqual({ toolu_1: { allow: true } });
+    factory.executor.askPermission('R1', bash('toolu_2', 'docker build .'));
+    await tui.until((state) => state.runs.R1?.status === 'suspended');
+
+    expect(await operator.send({ type: 'answer', taskId: 'T1', permission: { allow: 'always' } })).toEqual({ ok: true });
+
+    expect(readFileSync(factory.paths.permissionsPath, 'utf8')).toBe('egress-hosts: docs.example.com\nallow:\n  - Bash(make *)\n  - Bash(docker build *)\n');
+  });
+
   test('fills an empty `allow:`, keeping its comment, and won’t replace a list it names elsewhere', async () => {
     const { factory, operator, tui } = await attached();
     operatorRules(factory, 'allow: # none yet\n');

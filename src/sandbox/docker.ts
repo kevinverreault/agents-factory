@@ -301,6 +301,14 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
         join: posix.join,
       }),
       git: (args) => gitIn(spec.taskId, args),
+      async setEgress(egress) {
+        const allowlist = egress.map((host) => `${host}\n`).join('');
+        try {
+          await docker(['exec', '--interactive', '--user', USER, proxyOf(spec.taskId), 'sh', '-c', `cat > ${ALLOWLIST}.new && mv ${ALLOWLIST}.new ${ALLOWLIST}`], { input: allowlist });
+        } catch (error) {
+          throw new SandboxError(`${spec.taskId}’s egress proxy kept its allowlist: ${(error as Error).message}`);
+        }
+      },
       async deniedHosts() {
         const log = await docker(['exec', '--user', USER, proxyOf(spec.taskId), 'sh', '-c', `cat ${DENIALS} 2>/dev/null; exit 0`]);
         return [...new Set(log.split('\n').map((line) => line.trim()).filter(Boolean))];

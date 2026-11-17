@@ -5,7 +5,8 @@
 // to a host on its allowlist, and refuses any other with a 403, appending
 // the host to its denial log. Both files are read and written afresh for
 // every request, so the Docker adapter changes the allowlist, and starts a
-// new log, at each prepare, without restarting it.
+// new log, at each prepare, and changes the allowlist alone when the
+// operator allows a host on a host card (ADR 0015), without restarting it.
 //
 // Node runs this file as it is, in the sandbox image: it imports nothing
 // but Node's own modules, and its types are erasable.
