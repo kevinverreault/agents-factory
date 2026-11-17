@@ -295,8 +295,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const settling = new Set<string>();
   // The takeovers' intents whose container step is under way.
   const takeoversInFlight = new Set<string>();
-  // Each guarded AFK run's read-only bot token (ADR 0004): its gh config
-  // directory, and when it is next replaced.
+  // Each guarded run's bot token: an AFK run's read-only one (ADR 0004), a
+  // contained HITL run's that writes issues (ADR 0015). Its repository and
+  // permissions, its gh config directory, and when it is next replaced.
   const botTokens = new Map<string, { repo: string; permissions: Permissions; dir: string; refreshAt: number }>();
   // The work loops whose read of their map is under way on GitHub.
   const mapReadsInFlight = new Set<string>();
@@ -2717,15 +2718,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // The run reads GitHub as the App, never as the operator (ADR 0004). A
       // contained HITL run writes issues as it too, and knows the operator's
       // login, which its `@me` doesn't name (ADR 0015).
-      const permissions = isContainedHitl(run) ? ISSUES_WRITE : READ_ONLY;
+      const writesIssues = isContainedHitl(run);
+      const permissions = writesIssues ? ISSUES_WRITE : READ_ONLY;
       let bot: BotToken;
       try {
         bot = await botToken(task.repo, permissions);
-        if (isContainedHitl(run)) operatorLogin = await github.appOwner((await factoryApp())!);
       } catch (error) {
         if (!isGitHubFailure(error)) throw error;
-        if (permissions === ISSUES_WRITE) return fail(await issuesWriteRefusal(task.repo, error));
-        return fail(`The factory couldn’t give the run its read-only GitHub token: ${error.message}`);
+        return fail(writesIssues ? await issuesWriteRefusal(task.repo, error) : `The factory couldn’t give the run its read-only GitHub token: ${error.message}`);
+      }
+      if (writesIssues) {
+        try {
+          // `botToken` found the App.
+          operatorLogin = await github.appOwner((await factoryApp())!);
+        } catch (error) {
+          if (!isGitHubFailure(error)) throw error;
+          return fail(`The factory couldn’t read your GitHub login, which a contained HITL run assigns you by: ${error.message}`);
+        }
       }
       if (lifecycle.runs[run.id]?.status !== 'active') return;
       // An L2 run's are where its container mounts them, read-only.
