@@ -157,9 +157,11 @@ export type RunView = Pick<
   waitingForWindow: number | null;
   // Whether it is a HITL run in its task's container (ADR 0015), and
   // whether that container is still being prepared: from its start until
-  // its CLI is up to take the agent's first turn.
+  // its CLI is up to take the agent's first turn. Or whether it is at a
+  // contained stage but runs on the host, as the operator chose.
   contained: boolean;
   preparing: boolean;
+  onHost: boolean;
 };
 
 // `app` is null until the daemon has checked the App's installation, and
@@ -291,6 +293,7 @@ export function toFactoryState(lifecycle: Lifecycle, watched: ReadonlySet<string
       waitingForWindow: run.waitingForWindow ?? null,
       contained: !!run.contained,
       preparing: !!run.contained && status === 'active' && cli === null,
+      onHost: run.onHost ?? false,
       cli,
       skillSet: skillSet ?? null,
       startedAt,

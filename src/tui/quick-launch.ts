@@ -11,7 +11,7 @@ import type { FactoryConnection } from '../protocol/client.ts';
 import type { FactoryState } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
 import { HandoffSheet } from './handoff-sheet.ts';
-import { cycle, defaultRepo, NO_REPOSITORY } from './launch-card.ts';
+import { cycle, defaultRepo, NO_REPOSITORY, RUN_ON_HOST_HINT } from './launch-card.ts';
 import { Output } from './output.ts';
 import { cardKey, newCard, QuestionCard, type Card } from './question-card.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
@@ -74,7 +74,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
     launching.launch({ type: 'launchTask', repo, preset: QUICK_PRESET, prompt, quick: true, ...(onHost && { onHost }) }, (launched) => {
       if (launched.ok && launched.left) return void connection.send({ type: 'expandQuickLaunch', taskId: launched.taskId });
       if (!launched.ok) {
-        setHostable(launched.onHost);
+        setHostable(launched.offersHost);
         return setRefusal(launched.reason);
       }
       typing.current.draft = '';
@@ -151,7 +151,7 @@ export function QuickLaunch({ connection, state, here, onExpand, onLeave }: Prop
       h(Text, null, h(Text, tone('ok'), `${GLYPH.operator} `), withCaret(draft, caret)),
       launching.indicator ?? (taskId ? h(Text, tone('dim'), 'Starting the grill…') : null),
       refusal ? h(Text, tone('bad'), refusal) : null,
-      refusal && hostable ? h(Text, tone('dim'), 'enter retries · ctrl+r runs it on this machine this time, where its calls ask you again') : null,
+      refusal && hostable ? h(Text, tone('dim'), `enter retries · ${RUN_ON_HOST_HINT}`) : null,
     );
   }
   return h(

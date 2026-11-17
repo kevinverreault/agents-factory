@@ -66,7 +66,7 @@ describe('the container image', () => {
     expect(factory.sandbox.hasImage('agents-factory-sandbox:current')).toBe(true);
   });
 
-  test('that failed to build says why, blocks a contained launch, and is built again once asked to check', async () => {
+  test('that failed to build says why, and is built again once asked to check', async () => {
     const { factory, operator, tui } = await attached({ before: (factory) => factory.sandbox.failBuild('failed to solve: no space left on device') });
     const failed = await tui.until((state) => state.sandbox.state === 'failed');
     expect(failed.sandbox).toEqual({ state: 'failed', reason: 'The factory couldn’t build its container image: failed to solve: no space left on device' });
@@ -129,7 +129,7 @@ describe('a launch while Docker is unavailable', () => {
 
     expect(await started(factory, 1)).toMatchObject({ mode: 'HITL', container: null, credential: 'subscription-host', guards: null });
     const state = await tui.until((state) => state.runs.R1?.status === 'active');
-    expect(state.runs.R1).toMatchObject({ stage: 'grill', contained: false, preparing: false });
+    expect(state.runs.R1).toMatchObject({ stage: 'grill', contained: false, onHost: true, preparing: false });
     expect(state.tasks.T1).toMatchObject({ onHost: true });
     expect(factory.sandbox.prepared).toEqual([]);
     factory.executor.askPermission('R1', { id: 'toolu_1', tool: 'Bash', input: { command: 'npm publish' } });
@@ -143,6 +143,14 @@ describe('a launch while Docker is unavailable', () => {
     expect(await operator.send({ type: 'open', taskId: 'T1' })).toEqual({ ok: true });
     expect(await started(factory, 2)).toMatchObject({ container: { taskId: 'T1' } });
     expect((await tui.until((state) => state.runs.R2?.status === 'active')).tasks.T1).toMatchObject({ onHost: false });
+  });
+
+  test('a launch at a start stage past every contained stage launches as before', async () => {
+    const { factory, operator } = await attached({ before: (factory) => factory.sandbox.dockerDown(DOWN) });
+
+    expect(await operator.send({ ...launch, stage: 'implement' })).toMatchObject({ ok: true });
+
+    expect(await started(factory, 1)).toMatchObject({ mode: 'AFK', autonomy: 'L1', container: null });
   });
 
   test('a preset with no contained stage launches as before', async () => {

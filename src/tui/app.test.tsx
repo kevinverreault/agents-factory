@@ -887,7 +887,7 @@ describe('launching and conversing', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false,
+    deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false, onHost: false,
   };
   const repositories = { 'acme/gadgets': gadgets, 'acme/widgets': widgets };
 
@@ -1054,11 +1054,10 @@ describe('launching and conversing', () => {
           { id: 'implement', mode: 'AFK', model: 'sonnet', needs: ['issues'] },
         ],
         appStages: ['implement', 'review', 'pr-body', 'open-pr'],
-        containedStages: [],
       },
       { name: 'nightly', source: 'user', error: 'Preset nightly (user, nightly.preset.yaml): stage implement: exit all-green is not an exit condition.' },
-      { name: 'quick', source: 'built-in', description: null, startStages: [{ id: 'grill', mode: 'HITL', model: 'opus', needs: ['prompt'] }], appStages: ['implement', 'review', 'pr-body', 'open-pr'], containedStages: [] },
-      { name: 'setup', source: 'built-in', description: null, startStages: [{ id: 'setup', mode: 'HITL', model: 'sonnet', needs: [] }], appStages: [], containedStages: [] },
+      { name: 'quick', source: 'built-in', description: null, startStages: [{ id: 'grill', mode: 'HITL', model: 'opus', needs: ['prompt'] }], appStages: ['implement', 'review', 'pr-body', 'open-pr'] },
+      { name: 'setup', source: 'built-in', description: null, startStages: [{ id: 'setup', mode: 'HITL', model: 'sonnet', needs: [] }], appStages: [] },
     ],
   };
 
@@ -1102,7 +1101,8 @@ describe('launching and conversing', () => {
 
   test('where Docker isn’t available, a preset with contained stages shows why, asks again, and ctrl+r launches it to run on the host this time', async () => {
     const connection = inWidgets();
-    const planning = { ...presetsView.presets[0]!, containedStages: ['grill', 'spec', 'tickets'] } as PresetsView['presets'][number];
+    const mainFlow = presetsView.presets[0]! as Extract<PresetsView['presets'][number], { startStages: unknown }>;
+    const planning = { ...mainFlow, startStages: mainFlow.startStages.map((stage) => (stage.id === 'grill' ? { ...stage, contained: ['grill', 'spec', 'tickets'] } : stage)) };
     connection.replyTo('listPresets', { ok: true, value: { ...presetsView, presets: [planning, ...presetsView.presets.slice(1)] } });
     connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
     const down = 'Cannot connect to the Docker daemon. Is the docker daemon running?';
@@ -1113,7 +1113,8 @@ describe('launching and conversing', () => {
     await eventually(() => {
       const frame = unwrapped(app.lastFrame()!);
       expect(frame).toContain(`main-flow runs its grill, spec and tickets stages contained, in the task’s container, but Docker isn’t available: ${down}`);
-      expect(frame).toContain('ctrl+r runs it on this machine this time, where its calls ask you again');
+      expect(frame).toContain('ctrl+r: run on host this time, where its calls ask you again');
+      expect(frame).not.toContain('enter retries');
     });
     await eventually(() => expect(connection.sent).toContainEqual({ type: 'checkSandbox' }));
     await type(app, 'Grill me about the login flow.');
@@ -1136,7 +1137,7 @@ describe('launching and conversing', () => {
     await type(app, 'Spike the cache');
     app.stdin.write('\r');
     await eventually(() => expect(unwrapped(app.lastFrame()!)).toContain(reason));
-    expect(unwrapped(app.lastFrame()!)).toContain('ctrl+r runs it on this machine this time');
+    expect(unwrapped(app.lastFrame()!)).toContain('enter retries · ctrl+r: run on host this time');
     connection.replyTo('launchTask', { ok: true, value: { taskId: 'T1' } });
     app.stdin.write('\x12');
 
@@ -1838,7 +1839,7 @@ describe('launching and conversing', () => {
     await turns(app, 'Preparing the task’s container…');
     expect(app.lastFrame()).not.toContain('Starting the agent…');
 
-    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...preparing, preparing: false, cli: { pid: 4242, createdAt: 1 } } }]);
+    connection.servePatch([{ op: 'set', path: ['runs', 'R1'], value: { ...preparing, preparing: false, onHost: false, cli: { pid: 4242, createdAt: 1 } } }]);
     await turns(app, 'Starting the agent…');
     expect(app.lastFrame()).not.toContain('Preparing the task’s container…');
   });
@@ -3236,7 +3237,7 @@ describe('answering in the conversation', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false,
+    deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false, onHost: false,
   };
   const permission = {
     kind: 'attention' as const,
@@ -3519,7 +3520,7 @@ describe('taking over with c', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false,
+    deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false, onHost: false,
   };
   const permission = {
     kind: 'attention' as const,
@@ -3638,7 +3639,7 @@ describe('the conversation of an AFK task that is no longer live', () => {
     const ended = {
       id: 'R1', taskId: 'T1', mode: 'AFK' as const, autonomy: 'L1' as const, status: 'ended' as const, outcome: 'completed' as const, interruption: null,
       turn: 'agent' as const, queued: [] as string[], question: null, permission: null, stage: 'implement', ticket: null, proposal: null,
-      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {}, deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false,
+      tier: 'sonnet' as const, model: 'claude-sonnet-5-5', maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: {}, deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false, onHost: false,
     };
     const { app } = await started({ ...factoryState([reviewed]), runs: { R1: ended } }, { connection });
     await press(app, '\r', '\r');
@@ -3657,7 +3658,7 @@ describe('usage', () => {
   function metered(id: string, taskId: string, stage: string | null, ticket: string | null, used: RunView['usage']): RunView {
     return {
       id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage, ticket,
-      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used, deniedHosts: [], waitingForWindow: null, contained: false, preparing: false,
+      proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: 1, endedAt: 2, usage: used, deniedHosts: [], waitingForWindow: null, contained: false, preparing: false, onHost: false,
     };
   }
   const implementing = { ...task('T1', 'Implement the login flow', 'running', 'Running'), groups: ['login'] };
@@ -3799,7 +3800,7 @@ const SONNET = 'claude-sonnet-5-5';
 function ran(id: string, taskId: string, at: number, fields: Partial<RunView> = {}): RunView {
   return {
     id, taskId, mode: 'AFK', autonomy: 'L1', status: 'ended', outcome: 'completed', interruption: null, turn: 'agent', queued: [], question: null, permission: null, stage: 'implement',
-    ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, deniedHosts: [], waitingForWindow: null, contained: false, preparing: false, ...fields,
+    ticket: null, proposal: null, tier: 'sonnet', model: SONNET, maxTurns: 300, cli: null, skillSet: null, startedAt: at, endedAt: at + 1, usage: {}, deniedHosts: [], waitingForWindow: null, contained: false, preparing: false, onHost: false, ...fields,
   };
 }
 
@@ -4346,7 +4347,7 @@ describe('the wayfinder work loop', () => {
     const working = { ...picking, state: 'running' as const, label: 'In conversation', liveRunId: 'R1', loop: { ticket: 'acme/widgets#31', frontier: null, cleared: false } };
     const run = {
       id: 'R1', taskId: 'T1', mode: 'HITL' as const, autonomy: null, status: 'active' as const, outcome: null, interruption: null, turn: 'operator' as const, queued: [] as string[],
-      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {}, deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false,
+      question: null, permission: null, stage: 'work', ticket: null, proposal: null, tier: 'opus' as const, model: 'claude-opus-5-5', maxTurns: null, cli: null, skillSet: null, startedAt: 1, endedAt: null, usage: {}, deniedHosts: [] as string[], waitingForWindow: null, contained: false, preparing: false, onHost: false,
     };
     const { app } = await started({ ...factoryState([working]), runs: { R1: run } }, { connection });
     await press(app, '\r', '\r');
@@ -4446,7 +4447,7 @@ describe('quick launch', () => {
     startedAt: 1,
     endedAt: null,
     usage: {},
-    deniedHosts: [], waitingForWindow: null, contained: false, preparing: false,
+    deniedHosts: [], waitingForWindow: null, contained: false, preparing: false, onHost: false,
   };
   const question = {
     id: 'toolu_1',

@@ -623,8 +623,11 @@ export type Run = {
   // `bypassPermissions` (ADR 0015): decided from its stage when it starts.
   // A takeover's run is at the AFK stage it took over, so never is. An AFK
   // run's level decides where it runs instead (`runsContained`). Runs stored
-  // before it have none, and ran on the host.
+  // before it have none, and ran on the host. `onHost` when it is at a
+  // contained stage but runs on the host, as the operator chose (run on host
+  // this time).
   contained?: boolean;
+  onHost?: boolean;
   // The ticket it works on, as a ticket task's run (ADR 0013). Runs stored
   // before ticket tasks have none.
   ticket?: string | null;
@@ -3612,6 +3615,7 @@ function startRun(
     question: null,
     stage: task.stage ?? null,
     contained: task.mode === 'HITL' && isContained(stageOf(task, task.stage)) && !task.onHost,
+    ...(task.mode === 'HITL' && isContained(stageOf(task, task.stage)) && task.onHost && { onHost: true }),
     ticket: task.kind === 'ticket' ? (task.ticket ?? null) : null,
     opening,
     reports: reported.map((child) => child.id),

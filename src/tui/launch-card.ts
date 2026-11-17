@@ -71,6 +71,8 @@ const PROMPT_ROWS = 8;
 // The columns left of the prompt's value column and right of it: the
 // sheet's border and padding, the cursor, the label and the gaps.
 const PROMPT_INSET = LABEL + 3 + 4;
+// What a launch refused for want of Docker offers (ADR 0015).
+export const RUN_ON_HOST_HINT = 'ctrl+r: run on host this time, where its calls ask you again';
 // What a launch says while no repository is registered.
 export const NO_REPOSITORY = 'Register a repository first: run `agents-factory repo add` in a clone.';
 
@@ -162,7 +164,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
   const fixUrl = blocked && app && !app.installed ? app.fixUrl : (refusedByApp?.fixUrl ?? null);
   // As last checked: the launch checks Docker afresh. A daemon from before
   // contained stages lists none.
-  const contained = card.choice && 'startStages' in card.choice ? (card.choice.containedStages ?? []) : [];
+  const contained = card.start?.contained ?? [];
   const unsandboxed = card.choice && state.sandbox ? sandboxBlock(card.choice.name, contained, state.sandbox) : null;
   // Docker may have started since: the card asks again.
   useEffect(() => {
@@ -190,7 +192,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
         if (launched.left) return;
         if (launched.ok) return onLaunched(launched.taskId);
         setRefusal(launched.reason);
-        setHostable(launched.onHost);
+        setHostable(launched.offersHost);
       });
       return;
     }
@@ -274,7 +276,7 @@ export function LaunchCard({ connection, state, here, onLaunched, onCancel, open
     unsandboxed && !refusal ? h(Text, tone('bad'), unsandboxed) : null,
     launching.indicator,
     refusal ? h(Text, tone('bad'), refusal) : null,
-    offersHost ? h(Text, tone('dim'), 'enter retries · ctrl+r runs it on this machine this time, where its calls ask you again') : null,
+    offersHost ? h(Text, tone('dim'), `${refusal ? 'enter retries · ' : ''}${RUN_ON_HOST_HINT}`) : null,
   );
 }
 

@@ -150,9 +150,8 @@ import { addOperatorRules, readAllowRules, trackScripts, uncovered, type ToolCal
 import {
   appBlock,
   appStages,
-  containedStages,
-  sandboxBlock,
   builtInPresets,
+  containedStages,
   issueRefs,
   launchDefault,
   planStart,
@@ -163,6 +162,7 @@ import {
   resolvePreset,
   userPresets,
   launchesTickets,
+  sandboxBlock,
   type PresetFile,
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
@@ -852,7 +852,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // No silent fallback to the host (ADR 0015): a preset with contained
       // stages launches only where Docker is available, its image built or
       // building, unless the operator chose to run on the host this time.
-      const contained = containedStages(resolved.preset);
+      // Those the task reaches from its start stage on.
+      const contained = containedStages(resolved.preset, start.stage.id);
       if (contained.length && !action.onHost) {
         const blocked = sandboxBlock(resolved.preset.name, contained, await checkSandbox());
         if (blocked) {
@@ -1685,9 +1686,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (down) setReadiness({ state: 'unavailable', reason: down });
     else if (sandboxView.state !== 'building' && sandboxView.state !== 'ready') {
       setReadiness({ state: 'building', reason: null });
+      // A build that settles once Docker has gone meanwhile says nothing of it.
+      const built = (next: SandboxView) => sandboxView.state === 'building' && setReadiness(next);
       sandbox.buildImage().then(
-        () => setReadiness({ state: 'ready', reason: null }),
-        (error: Error) => setReadiness({ state: 'failed', reason: `The factory couldn’t build its container image: ${error.message}` }),
+        () => built({ state: 'ready', reason: null }),
+        (error: Error) => built({ state: 'failed', reason: `The factory couldn’t build its container image: ${error.message}` }),
       );
     }
     return sandboxView;

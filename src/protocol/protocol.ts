@@ -42,13 +42,13 @@ export type TokenCommand = { type: 'setupToken'; token: string };
 // branch and looks for it there again, and replies with the repository's
 // `SkillsSetup`. "Set up now" is a launch of the `setup` preset.
 export type SkillsCommand = { type: 'checkSkills'; repo: string };
+// Asks again whether Docker is available, and has the image built if it
+// isn't yet (ADR 0015). Replies with the `SandboxView`.
 export type SandboxCommand = { type: 'checkSandbox' };
 export type SetupView = { slug: string; installationSettings: string };
 // Launches a task from the launch card: the preset (by default the
 // repository's) is resolved and frozen, and the task starts at `stage` (by
 // default the first) in a new worktree. Replies with `{ taskId }`.
-// `checkSandbox` asks again whether Docker is available, and has the image
-// built if it isn't yet, and replies with the `SandboxView`.
 export type LaunchCommand = {
   type: 'launchTask';
   repo: string;

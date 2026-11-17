@@ -65,7 +65,7 @@ export class FakeSandbox implements Sandbox {
   }
 
   // Docker doesn't answer from now on, saying `reason`, as with its daemon
-  // stopped, or answers again (null). Everything the sandbox does fails meanwhile.
+  // stopped, or answers again (null). Prepares and image builds fail meanwhile.
   dockerDown(reason: string | null): void {
     this.down = reason;
   }
