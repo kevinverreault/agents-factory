@@ -168,7 +168,7 @@ import {
 } from '../presets/presets.ts';
 import { DEFAULT_PRESET, readClone, whyMissing } from '../repositories/registry.ts';
 import type { AwakeBlock, Processes } from '../os/processes.ts';
-import { SandboxError, egressFor, inRunDir, type Container, type Sandbox, type SandboxView } from '../sandbox/sandbox.ts';
+import { SandboxError, egressFor, inRunDir, type Container, type OperatorProfile, type Sandbox, type SandboxView } from '../sandbox/sandbox.ts';
 import { SecretsError, type Secrets } from '../secrets/secrets.ts';
 import { checkSkillsSetup, SETUP_FILES, unchecked } from '../skills/repo-setup.ts';
 import type { SkillSets } from '../skills/skill-set.ts';
@@ -2799,6 +2799,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       botTokens.set(run.id, { repo: task.repo, dir: ghConfigDir, refreshAt: bot.expiresAt - TOKEN_REFRESH_MS });
       guards = { start: snapshot!.head, env: contained ? inRunDir(env, dir) : env };
     }
+    // The operator's auto memory, read-only in a contained HITL run's container.
+    const memory = container?.profile?.memory ?? null;
     const start: RunStart = {
       runId: run.id,
       taskId: task.id,
@@ -2810,6 +2812,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       firstMessage: withFactoryNotes(run.opening, [
         uninstalled === null ? null : installNote(uninstalled),
         container === null ? null : scratchNote(container.scratch, isContainedHitl(run)),
+        memory === null ? null : memoryNote(memory),
       ]),
       model: run.model,
       maxTurns: run.maxTurns ?? null,
@@ -3117,17 +3120,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return onContainer(task.id, async () => {
       // No run starts beside a turn that may still run there.
       if (staleTurns.has(task.id)) await endStaleTurn(task.id);
+      const { path: clonePath, baseBranch } = lifecycle.repositories[task.repo]!;
       let sessionsDir: string;
+      let profile: OperatorProfile | null;
       try {
         sessionsDir = executor.sessionsDir(path);
+        // A contained HITL run alone gets the operator's profile (ADR 0015),
+        // the project's memory being the repository's, as every worktree of it shares.
+        profile = isContainedHitl(run) ? executor.profileOf(clonePath) : null;
       } catch (error) {
         throw new SandboxError((error as Error).message);
       }
       const plugin = run.skillSet ? skillSets.pathOf(run.skillSet) : null;
       const egress = egressFor(task.egressHosts ?? []);
-      const { path: clonePath, baseBranch } = lifecycle.repositories[task.repo]!;
       // The base branch as the host last fetched it, which an update run merges in.
-      const container = await sandbox.prepare({ taskId: task.id, clonePath, branch, branches, fetched: [baseBranch], plugin, runDir, sessionsDir, egress });
+      const container = await sandbox.prepare({ taskId: task.id, clonePath, branch, branches, fetched: [baseBranch], plugin, runDir, sessionsDir, egress, profile });
       containers.set(task.id, true);
       return container;
     });
@@ -3400,6 +3407,12 @@ function scratchNote(scratch: string, hitl: boolean): string {
     ? 'Leave the worktree clean, and commit your work as you go: your commits stay in this container, and only they ever come out to the operator’s task branch, never uncommitted changes or untracked files.'
     : 'Leave the worktree clean: the factory fails a run that leaves uncommitted changes or untracked files in it, and holds its commits in this container.';
   return `${clean} Keep files that aren’t part of the work, such as notes, downloads and files you ask the operator for, in ${scratch}, outside the clone, where they stay for this task’s later runs. When you ask the operator for files, ask them to copy them there, never into the worktree.`;
+}
+
+// A contained HITL run reads the operator's auto memory, but its writes
+// there would fail, and never reach the host (ADR 0015).
+function memoryNote(memory: string): string {
+  return `Your auto memory is the operator’s, carried in read-only at ${memory}: read it as usual, but don’t try to save memories there. Tell the operator instead what you would have remembered.`;
 }
 
 function verdictOf(answer: PermissionAnswer): Verdict {

@@ -32,7 +32,7 @@ async function debris(factory: TestFactory): Promise<{ path: string; container: 
   const path = join(factory.paths.worktreeRoot, 'acme-widgets', 'T7');
   const branch = 'factory/T7-lost-work';
   await factory.git.addWorktree(clone, { path, branch, startPoint: 'origin/main' });
-  factory.sandbox.leave({ taskId: 'T9', clonePath: clone, branch, branches: [], plugin: null, runDir: '/run', sessionsDir: '/sessions', egress: [] }, 'running');
+  factory.sandbox.leave({ taskId: 'T9', clonePath: clone, branch, branches: [], plugin: null, runDir: '/run', sessionsDir: '/sessions', egress: [], profile: null }, 'running');
   return { path, container: 'T9' };
 }
 

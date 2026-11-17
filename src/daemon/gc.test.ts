@@ -164,7 +164,7 @@ describe('deleting leftovers', () => {
     factory.git.push(clone, t8.branch);
     await factory.git.removeWorktree(clone, t8.path);
     await factory.git.deleteBranch(clone, t8.branch);
-    factory.sandbox.leave({ taskId: 'T9', clonePath: clone, branch: t7.branch, branches: [], plugin: null, runDir: '/run', sessionsDir: '/sessions', egress: [] }, 'stopped');
+    factory.sandbox.leave({ taskId: 'T9', clonePath: clone, branch: t7.branch, branches: [], plugin: null, runDir: '/run', sessionsDir: '/sessions', egress: [], profile: null }, 'stopped');
     factory.sandbox.leaveImage('agents-factory-sandbox:old');
     const ticked: Leftover[] = [
       { kind: 'worktree', repo: 'acme/widgets', path: t7.path, branch: t7.branch },
@@ -238,7 +238,7 @@ describe('repo remove runs gc scoped to its repository', () => {
     const { factory, operator } = await attached();
     const mine = await crashDebris(factory, 'T7');
     await withGadgets(factory, operator);
-    factory.sandbox.leave({ taskId: 'T9', clonePath: clone, branch: mine.branch, branches: [], plugin: null, runDir: '/run', sessionsDir: '/sessions', egress: [] }, 'stopped');
+    factory.sandbox.leave({ taskId: 'T9', clonePath: clone, branch: mine.branch, branches: [], plugin: null, runDir: '/run', sessionsDir: '/sessions', egress: [], profile: null }, 'stopped');
     factory.sandbox.leaveImage('agents-factory-sandbox:old');
 
     const reply = await operator.send({ type: 'listLeftovers', repo: 'acme/widgets' });

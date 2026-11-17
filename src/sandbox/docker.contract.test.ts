@@ -57,7 +57,7 @@ async function fixture(): Promise<DockerFixture> {
       git(clonePath, 'add', 'README.md');
       git(clonePath, 'commit', '--quiet', '-m', 'Start');
       git(clonePath, 'worktree', 'add', '--quiet', '-b', branch, worktree, 'main');
-      const spec = { taskId, clonePath, branch, branches: [], plugin: null, runDir: join(root, `${taskId}-run`), sessionsDir: join(root, `${taskId}-sessions`), egress: [ALLOWED] };
+      const spec = { taskId, clonePath, branch, branches: [], plugin: null, runDir: join(root, `${taskId}-run`), sessionsDir: join(root, `${taskId}-sessions`), egress: [ALLOWED], profile: null };
       return { spec, worktree };
     },
     async commitOnHost(worktree) {
@@ -229,6 +229,62 @@ describe('the Docker sandbox: containment', () => {
 
       expect((await sh(container, 'echo {} > T29.jsonl')).code).toBe(0);
       expect(await container.checks.violations(container.workdir, before, [], FACTORY_IDENTITY.email)).toEqual(['The run left uncommitted changes: T29.jsonl.']);
+    }));
+
+  test('the operator’s profile is copied in read-only, what the host has of it alone, and each prepare clears what a run left in the CLI’s user config directory', () =>
+    withTask(async (f, sandbox) => {
+      const { spec } = await f.task('T2');
+      const memory = join(f.root, 'memory');
+      mkdirSync(join(memory, 'topics'), { recursive: true });
+      writeFileSync(join(memory, 'MEMORY.md'), '- [Login](topics/login.md)\n');
+      writeFileSync(join(memory, 'topics', 'login.md'), 'The login flow uses Okta.\n');
+      const claudeMd = join(f.root, 'CLAUDE.md');
+      writeFileSync(claudeMd, 'Write British English.\n');
+
+      const run = await sandbox.prepare({ ...spec, profile: { claudeMd, memory } });
+
+      const carried = run.profile!.memory!;
+      expect((await sh(run, 'cat ~/.claude/CLAUDE.md')).stdout).toBe('Write British English.\n');
+      expect((await sh(run, `cat ${carried}/MEMORY.md ${carried}/topics/login.md`)).stdout).toBe('- [Login](topics/login.md)\nThe login flow uses Okta.\n');
+      // Read-only: the run's user changes none of it.
+      expect((await sh(run, 'echo x >> ~/.claude/CLAUDE.md')).code).not.toBe(0);
+      expect((await sh(run, `echo x >> ${carried}/MEMORY.md`)).code).not.toBe(0);
+      expect((await sh(run, `touch ${carried}/new.md`)).code).not.toBe(0);
+      expect((await sh(run, `touch ${carried}/topics/new.md`)).code).not.toBe(0);
+      // Nothing else of the operator's profile goes in.
+      expect((await sh(run, 'ls -A ~/.claude')).stdout.trim().split('\n').sort()).toEqual(['CLAUDE.md', 'projects']);
+
+      // A run replaces the CLAUDE.md, whose directory is its own, and plants
+      // user settings and a skill: the next prepare puts the operator's back
+      // and takes the rest away, the sessions kept.
+      const planted = await sh(
+        run,
+        'rm -f ~/.claude/CLAUDE.md && echo planted > ~/.claude/CLAUDE.md && echo \'{"hooks":{}}\' > ~/.claude/settings.json' +
+          ' && mkdir -p ~/.claude/skills/planted && echo planted > ~/.claude/skills/planted/SKILL.md && echo {} > ~/.claude/projects/-work/S1.jsonl',
+      );
+      expect(planted.code).toBe(0);
+      const again = await sandbox.prepare({ ...spec, profile: { claudeMd, memory } });
+      expect((await sh(again, 'cat ~/.claude/CLAUDE.md')).stdout).toBe('Write British English.\n');
+      expect((await sh(again, 'ls -A ~/.claude')).stdout.trim().split('\n').sort()).toEqual(['CLAUDE.md', 'projects']);
+      expect((await sh(again, 'cat ~/.claude/projects/-work/S1.jsonl')).stdout.trim()).toBe('{}');
+
+      // The next prepare copies afresh what the host has now: no CLAUDE.md, and other memory.
+      rmSync(claudeMd);
+      writeFileSync(join(memory, 'MEMORY.md'), '- [Billing](topics/billing.md)\n');
+      const later = await sandbox.prepare({ ...spec, profile: { claudeMd, memory } });
+      expect((await sh(later, 'test -e ~/.claude/CLAUDE.md')).code).not.toBe(0);
+      expect((await sh(later, `cat ${carried}/MEMORY.md`)).stdout).toBe('- [Billing](topics/billing.md)\n');
+
+      // With the operator's auto memory off, none goes in.
+      const off = await sandbox.prepare({ ...spec, profile: { claudeMd, memory: null } });
+      expect(off.profile).toEqual({ memory: null });
+      expect((await sh(off, `test -e ${carried}`)).code).not.toBe(0);
+
+      // An AFK run's prepare carries none, and takes away what was there.
+      await sandbox.prepare({ ...spec, profile: { claudeMd, memory } });
+      const afk = await sandbox.prepare(spec);
+      expect(afk.profile).toBeNull();
+      expect((await sh(afk, `test -e ~/.claude/CLAUDE.md || test -e ${carried}`)).code).not.toBe(0);
     }));
 
   test('the container’s CLI is the Linux build of the one the pinned SDK bundles', () =>

@@ -71,6 +71,14 @@ _Avoid_: Step, phase
 Whether a run executes on the operator's host or in its task's container. Every AFK run at L2 or above is contained; a HITL stage is contained when its workflow preset says so, as the built-in planning stages are, setup aside.
 _Avoid_: Sandbox mode, isolation (for the domain term)
 
+**Operator profile**:
+What a contained HITL run gets of the operator's own Claude Code setup: their user `CLAUDE.md` and the project's auto memory, both read-only. Nothing executable of theirs comes with it: no user settings, MCP servers, plugins or hooks.
+_Avoid_: Credential profile
+
+**Credential profile**:
+How a run authenticates, chosen per run by the scheduler and only applied by the executor (ADR 0001): the operator's own subscription login on the host, or, in a container, the subscription token the factory stores.
+_Avoid_: Operator profile, auth mode
+
 **Run on host this time**:
 The operator's explicit choice, when Docker is unavailable or a contained run's container couldn't be prepared, to run a task's contained HITL runs on the host instead, permission cards and all, until its conversation is reopened after it ran. The factory never makes this choice itself.
 _Avoid_: Fallback, host mode

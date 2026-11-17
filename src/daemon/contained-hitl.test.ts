@@ -95,6 +95,32 @@ describe('a contained HITL stage', () => {
     expect(state.runs.R1).toMatchObject({ mode: 'HITL', contained: true, stage: 'grill' });
   });
 
+  test('is given the operator’s user CLAUDE.md and the project’s auto memory, read-only, and nothing else of their profile', async () => {
+    const { factory, operator } = await attached();
+    await operator.send(launch);
+
+    const run = await started(factory, 1);
+
+    // The project's memory is the repository's, which every worktree of it shares, as on the host.
+    const [spec] = factory.sandbox.prepared;
+    expect(spec!.profile).toEqual(factory.executor.profileOf(clone));
+    expect(run.container!.profile).toEqual({ memory: expect.any(String) });
+    // The run is told it can read its memory but not write it.
+    expect(run.firstMessage).toContain(`Your auto memory is the operator’s, carried in read-only at ${run.container!.profile!.memory}`);
+  });
+
+  test('is given the operator’s user CLAUDE.md alone when they have auto memory off, and isn’t told of any', async () => {
+    const { factory, operator } = await attached();
+    factory.executor.autoMemoryOff = true;
+    await operator.send(launch);
+
+    const run = await started(factory, 1);
+
+    expect(factory.sandbox.prepared[0]!.profile).toEqual({ claudeMd: factory.executor.profileOf(clone).claudeMd, memory: null });
+    expect(run.container!.profile).toEqual({ memory: null });
+    expect(run.firstMessage).not.toContain('auto memory');
+  });
+
   test('opens on its skill, then the scratch-folder factory note, which says only its commits come out of the container', async () => {
     const { factory, operator } = await attached();
     await operator.send(launch);

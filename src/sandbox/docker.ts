@@ -14,7 +14,7 @@
 // hosts the spec allows.
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { lspPluginManifest, pinnedLanguageServerVersions, type LanguageServer, type LanguageServerVersions } from '../code-intelligence/code-intelligence.ts';
 import { GitError, guardChecks } from '../git/git.ts';
 import { SECURITY_PLUGIN, securityPluginDigest } from '../security-guidance/security-guidance.ts';
-import { RUN_DIR, SandboxError, type Container, type ContainerListing, type ContainerSpec, type GitResult, type ImageListing, type Sandbox } from './sandbox.ts';
+import { RUN_DIR, SandboxError, type Container, type OperatorProfile, type ContainerListing, type ContainerSpec, type GitResult, type ImageListing, type Sandbox } from './sandbox.ts';
 
 const WORKDIR = '/work';
 // The run's scratch folder, outside the clone, which the guards never read.
@@ -42,7 +42,19 @@ const CONTAINER_SERVER: LanguageServer = {
 };
 // The CLI's project directory for runs in `WORKDIR`, as Claude Code names it.
 const SESSIONS_DIR = '/home/agent/.claude/projects/-work';
+// Where a contained HITL run has the operator's profile (ADR 0015), owned
+// by root, so the run's user reads it and can't change it: their user
+// `CLAUDE.md` where the CLI reads user instructions from, and the
+// project's auto memory.
+const CLAUDE_HOME = '/home/agent/.claude';
+const USER_CLAUDE_MD = `${CLAUDE_HOME}/CLAUDE.md`;
+const PROFILE_DIR = '/factory/profile';
+const MEMORY_DIR = `${PROFILE_DIR}/memory`;
 const USER = 'agent';
+// Makes the scratch folder, as root: at each prepare rather than in the
+// image, so containers made before it get one too.
+const MAKE_SCRATCH = `install -d -o ${USER} -g ${USER} ${SCRATCH_DIR}`;
+
 const TASK_LABEL = 'agents-factory.task';
 const NAMESPACE_LABEL = 'agents-factory.namespace';
 const IMAGE_LABEL = 'agents-factory.sandbox';
@@ -273,6 +285,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       plugin: spec.plugin === null ? null : PLUGIN_DIR,
       lspPlugin: LSP_PLUGIN_DIR,
       securityPlugin: SECURITY_PLUGIN_DIR,
+      profile: spec.profile && { memory: spec.profile.memory === null ? null : MEMORY_DIR },
       checks: guardChecks({
         async output(cwd, args) {
           const result = await gitIn(spec.taskId, args, cwd);
@@ -318,6 +331,30 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     };
   }
 
+  // Runs `script` with `sh` in the task's container, as root.
+  function asRoot(taskId: string, script: string): Promise<string> {
+    return docker(['exec', '--user', 'root', nameOf(taskId), 'sh', '-c', script]);
+  }
+
+  // Copies the spec's operator profile in afresh, as root, after
+  // `clearProfile` made room for it: what of it the host has, the rest
+  // left out.
+  async function carryProfile({ taskId, profile }: ContainerSpec): Promise<void> {
+    if (!profile) return;
+    const name = nameOf(taskId);
+    // Followed if it is a link, as dotfiles often are.
+    if (isFile(profile.claudeMd)) await docker(['cp', '--follow-link', profile.claudeMd, `${name}:${USER_CLAUDE_MD}`]);
+    if (profile.memory !== null && isDirectory(profile.memory)) await docker(['cp', '--follow-link', `${profile.memory}/.`, `${name}:${MEMORY_DIR}`]);
+    await asRoot(
+      taskId,
+      [
+        `chown -R root:root ${PROFILE_DIR}`,
+        `chmod -R u+rwX,go+rX,go-w ${PROFILE_DIR}`,
+        `if [ -e ${USER_CLAUDE_MD} ]; then chown root:root ${USER_CLAUDE_MD} && chmod 444 ${USER_CLAUDE_MD}; fi`,
+      ].join(' && '),
+    );
+  }
+
   // Fetches the host branches into the container's clone: the task branch
   // fast-forwards, the others are moved to the host's tips.
   async function bringIn(spec: ContainerSpec): Promise<void> {
@@ -358,8 +395,9 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       const running = await stateOf(spec.taskId);
       if (running === null) await create(spec);
       else if (!running) await docker(['start', nameOf(spec.taskId)]);
-      // Made here rather than in the image, so containers made before it get one too.
-      await docker(['exec', '--user', 'root', nameOf(spec.taskId), 'install', '-d', '-o', USER, '-g', USER, SCRATCH_DIR]);
+      // Both in one exec, so a warm prepare stays quick.
+      await asRoot(spec.taskId, `${MAKE_SCRATCH} && ${clearProfile(spec.profile)}`);
+      await carryProfile(spec);
       await bringIn(spec);
       return handle(spec);
     },
@@ -454,6 +492,20 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
   };
 }
 
+// Removes, as root, the operator profile an earlier prepare copied in, and
+// everything else a run left in the CLI's user config directory but the
+// sessions mount: the user settings, skills or agents a run wrote there
+// would load in the task's next contained HITL run, which reads the user
+// settings source (ADR 0015). Then makes room for `profile`, if any.
+function clearProfile(profile: OperatorProfile | null): string {
+  return [
+    `rm -rf ${PROFILE_DIR}`,
+    `find ${CLAUDE_HOME} -mindepth 1 -maxdepth 1 ! -name projects -exec rm -rf {} +`,
+    ...(profile ? [`install -d -m 755 ${PROFILE_DIR}`] : []),
+    ...(profile?.memory != null ? [`install -d -m 755 ${MEMORY_DIR}`] : []),
+  ].join(' && ');
+}
+
 function diverged(branch: string): string {
   return `${branch} has commits in the container and on the host that the other lacks, so neither can take the other’s.`;
 }
@@ -462,6 +514,14 @@ function diverged(branch: string): string {
 function pinnedSdkVersion(): string {
   const entry = createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk');
   return (JSON.parse(readFileSync(join(dirname(entry), 'package.json'), 'utf8')) as { version: string }).version;
+}
+
+function isFile(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
+}
+
+function isDirectory(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
 }
 
 function networkExists(network: string): Promise<boolean> {

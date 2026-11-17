@@ -12,6 +12,7 @@ import {
 } from '../executor/executor.ts';
 import type { Answers, RunEvent } from '../lifecycle/lifecycle.ts';
 import type { ToolCall } from '../permissions/permissions.ts';
+import type { OperatorProfile } from '../sandbox/sandbox.ts';
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
@@ -110,6 +111,13 @@ export class FakeExecutor implements Executor {
 
   sessionsDir(cwd: string): string {
     return `${cwd}.sessions`;
+  }
+
+  // Whether the operator has auto memory off, as their profile then says.
+  autoMemoryOff = false;
+
+  profileOf(root: string): OperatorProfile {
+    return { claudeMd: '/operator/.claude/CLAUDE.md', memory: this.autoMemoryOff ? null : `${this.sessionsDir(root)}/memory` };
   }
 
   // Claude Code's retention sweep deletes the session's transcript.

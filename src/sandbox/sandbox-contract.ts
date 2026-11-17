@@ -214,6 +214,18 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
         expect(await again.deniedHosts()).toEqual([]);
       }));
 
+    test('a container has the operator profile only while its spec carries one, with auto memory unless the operator has it off', () =>
+      withFixture(async ({ sandbox, task }) => {
+        const { spec } = await task('T1');
+        const profile = { claudeMd: '/no/such/CLAUDE.md', memory: '/no/such/memory' };
+
+        expect((await sandbox.prepare(spec)).profile).toBeNull();
+        // What the host lacks of it is left out, and the rest still goes in.
+        expect((await sandbox.prepare({ ...spec, profile })).profile).toEqual({ memory: expect.any(String) });
+        expect((await sandbox.prepare({ ...spec, profile: { ...profile, memory: null } })).profile).toEqual({ memory: null });
+        expect((await sandbox.prepare({ ...spec, profile: null })).profile).toBeNull();
+      }));
+
     test('a task branch changed on both sides is refused, by prepare and by bringing it out', () =>
       withFixture(async ({ sandbox, task, commitInContainer, commitOnHost }) => {
         const { spec, worktree } = await task('T1');

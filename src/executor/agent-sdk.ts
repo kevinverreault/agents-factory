@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   getSessionInfo,
@@ -30,6 +30,7 @@ import { runsContained, type Answers, type Mode, type Question, type RunEvent } 
 import type { ModelUsage, Usage, UsageWindowStatus } from '../usage/usage.ts';
 import { processCreatedAt } from '../os/process-info.ts';
 import type { Processes } from '../os/processes.ts';
+import type { OperatorProfile } from '../sandbox/sandbox.ts';
 import { ArchiveError, type Completion, type ConversationEvent, type CredentialProfile, type Executor, type RunSink, type RunStart, type Verdict } from './executor.ts';
 import { afkFactoryTools, hitlFactoryTools, type FactoryTools } from './factory-tools.ts';
 import { streamedInput, type StreamedInput } from './streamed-input.ts';
@@ -218,6 +219,10 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
       return claudeProjectDir(cwd);
     },
 
+    profileOf(root) {
+      return operatorProfileOf(root);
+    },
+
     async archive({ sessionId, cwd }, dir) {
       try {
         if (!(await getSessionInfo(sessionId, { dir: cwd }))) return;
@@ -344,10 +349,48 @@ export function agentSdkExecutor({ adopt, lspPlugin, securityPlugin }: AgentSdkE
 // its config directory's `projects`, named for `cwd` with every character
 // but letters and digits turned into `-` (as `claude.exe` 2.1.312 names it).
 // A name it would shorten with a hash, past 200 characters, isn't matched.
-export function claudeProjectDir(cwd: string): string {
+export function claudeProjectDir(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
   const name = cwd.replace(/[^a-zA-Z0-9]/g, '-');
   if (name.length > 200) throw new Error(`The worktree path ${cwd} is too long for an L2 container to share its sessions.`);
-  return join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects', name);
+  return join(claudeConfigDir(env), 'projects', name);
+}
+
+// Claude Code's config directory on the host.
+function claudeConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+}
+
+// The operator profile of the project whose repository is at `root`, as a
+// HITL run on the host, in the daemon's environment `env`, would read it
+// (ADR 0015): the user `CLAUDE.md` in the CLI's config directory, and the
+// auto memory claude.exe 2.1.312 would use. That is none when the operator
+// turned auto memory off, in that environment or their user settings; the
+// `autoMemoryDirectory` of their user settings when it names an absolute
+// path, `~/` expanded; or else the one in the repository's project
+// directory, keyed by its main working tree, which every worktree of it
+// shares. What managed settings say of auto memory isn't followed.
+export function operatorProfileOf(root: string, env: NodeJS.ProcessEnv = process.env): OperatorProfile {
+  const config = claudeConfigDir(env);
+  return { claudeMd: join(config, 'CLAUDE.md'), memory: autoMemoryOf(root, config, env) };
+}
+
+function autoMemoryOf(root: string, config: string, env: NodeJS.ProcessEnv): string | null {
+  if (/^(1|true|yes|on)$/i.test(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY?.trim() ?? '')) return null;
+  const settings = userSettingsIn(config);
+  if (settings.autoMemoryEnabled === false) return null;
+  const named = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory.replace(/^~(?=[\\/])/, homedir()) : null;
+  return named !== null && isAbsolute(named) ? named : join(claudeProjectDir(root, env), 'memory');
+}
+
+// The operator's user settings in the CLI's config directory `config`, or
+// none when they have none the CLI could read either.
+function userSettingsIn(config: string): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } {
+  try {
+    const settings: unknown = JSON.parse(readFileSync(join(config, 'settings.json'), 'utf8'));
+    return typeof settings === 'object' && settings !== null ? settings : {};
+  } catch {
+    return {};
+  }
 }
 
 // The session transcripts archived in `dir` (ADR 0011), one JSONL file per
@@ -478,26 +521,33 @@ function l1Options({ credential, maxTurns, guards, cwd, allowRules }: RunStart, 
 // A contained HITL run is a conversation: it takes the streamed input as a
 // host HITL run does, its questions become cards, and the operator, not a
 // watchdog or max turns, decides about limits.
+//
+// A contained HITL run also has the operator's profile, but nothing
+// executable of it (ADR 0015): the user settings source loads, from a
+// container home that holds no settings of theirs, only their user
+// `CLAUDE.md`, read-only, and its auto memory is the project's, carried in
+// read-only, not the writable sessions mount's, or off as the operator has
+// it. Each prepare clears whatever a run left in that home. No user MCP
+// server loads either way: the MCP config is the factory's alone. An AFK
+// run has neither.
 function containedOptions({ mode, maxTurns, guards, token, container }: RunStart, canUseTool: CanUseTool, factory: FactoryTools): Options {
+  const profile = mode === 'HITL' ? container!.profile : null;
+  const memory = profile?.memory ?? null;
   return {
     env: {
       CLAUDE_CODE_OAUTH_TOKEN: token!,
       ...(mode === 'AFK' && RETRY_WATCHDOG_ENV),
-      // Off for now, against ADR 0015 for a contained HITL run, which is to
-      // get the project's auto memory: the sessions mount is the host project
-      // directory, auto memory's too, and writable, while the ADR carries
-      // memory in read-only. It stays off until memory comes in that way.
-      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+      ...(memory === null && { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       ...guards!.env,
     },
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
-    settingSources: ['project'],
+    settingSources: profile === null ? ['project'] : ['user', 'project'],
     mcpServers: { factory: factory.server },
     strictMcpConfig: true,
     managedSettings: { ...AFK_PLUGIN_POLICY, allowManagedPermissionRulesOnly: true, permissions: { deny: [...HARD_DENY_RULES] } },
-    settings: { ...RETENTION, attribution: { commit: '', pr: '' } },
+    settings: { ...RETENTION, attribution: { commit: '', pr: '' }, ...(memory !== null && { autoMemoryDirectory: memory }) },
     hooks: { PreToolUse: [{ hooks: [hardDenies(container!.workdir, guards!.start, (args) => container!.git(args).then(({ code }) => code))] }] },
     ...(mode === 'AFK' && maxTurns !== null && { maxTurns }),
     canUseTool,
