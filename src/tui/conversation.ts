@@ -70,7 +70,10 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
   const takesChat = (run?.mode ?? task?.mode) !== 'AFK';
   const live = takesChat && run?.status === 'active';
   const midTurn = live && run.turn === 'agent';
-  // A run under way that has shown nothing yet, as a task just launched.
+  // A contained run whose container is being prepared (ADR 0015), until its
+  // CLI is up; then a run under way that has shown nothing yet, as a task
+  // just launched.
+  const preparing = run?.status === 'active' && !!run.preparing;
   const starting = run?.status === 'active' && run.turn === 'agent' && events.length === 0;
   // The open card, until the operator has answered it.
   const question = live && run.question && run.question.id !== typing.current.answeredQuestion ? run.question : null;
@@ -226,9 +229,11 @@ export function Conversation({ connection, state, taskId, answerLog, onLeave }: 
             'event' in at ? h(Event, { key: at.event.id, event: at.event }) : h(Text, { key: at.answer.id, ...tone('ok') }, at.answer.line),
           ),
           ...(run?.queued ?? []).map((text, i) => h(SystemLine, { key: `queued-${i}`, text: `queued ${text}` })),
-          // Last, while the agent is under way: starting, before its first
-          // event, or else working through its turn.
-          starting ? h(Spinner, { key: 'starting', label: 'Starting the agent…' }) : midTurn ? h(Spinner, { key: 'working', label: 'agent working…' }) : null,
+          // Last, while the agent is under way: its container preparing,
+          // starting, before its first event, or else working through its turn.
+          preparing
+            ? h(Spinner, { key: 'preparing', label: 'Preparing the task’s container…' })
+            : starting ? h(Spinner, { key: 'starting', label: 'Starting the agent…' }) : midTurn ? h(Spinner, { key: 'working', label: 'agent working…' }) : null,
         ),
       ),
       // The rail: the task's usage and artifacts, each in its section.
