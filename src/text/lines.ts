@@ -29,6 +29,16 @@ export function orList(words: readonly string[]): string {
   return words.length > 1 ? `${words.slice(0, -1).join(', ')} or ${words.at(-1)}` : (words[0] ?? '');
 }
 
+// Words as a list ending in `and`: `a, b and c`, or the one word alone.
+export function andList(words: readonly string[]): string {
+  return words.length > 1 ? `${words.slice(0, -1).join(', ')} and ${words.at(-1)}` : (words[0] ?? '');
+}
+
+// The text with its first letter in lower case, to go on after a comma.
+export function lowerFirst(text: string): string {
+  return text.charAt(0).toLowerCase() + text.slice(1);
+}
+
 // The text on one line: its runs of whitespace one space, its ends trimmed.
 export function oneLineOf(text: string): string {
   return text.replace(/\s+/g, ' ').trim();

@@ -9,9 +9,10 @@ import { useInFlight } from './in-flight.ts';
 // What a launch shows until the daemon answers it: it names the task meanwhile.
 export const LAUNCHING = 'Naming the task…';
 
-// How a launch ended: the task it launched, or why it was refused. `left`
-// says the operator left the screen before it did.
-export type Launched = ({ ok: true; taskId: string } | { ok: false; reason: string }) & { left: boolean };
+// How a launch ended: the task it launched, or why it was refused, and
+// whether the refusal offers to run it on the host this time, Docker being
+// unavailable (ADR 0015). `left` says the operator left the screen before it did.
+export type Launched = ({ ok: true; taskId: string } | { ok: false; reason: string; offersHost: boolean }) & { left: boolean };
 
 export type Launch = {
   // Sends `command` unless a launch is under way, then calls `done` with how it ended.
@@ -30,7 +31,12 @@ export function useLaunch(connection: FactoryConnection): Launch {
   return {
     launch(command, done) {
       void inFlight.send(LAUNCHING, command)?.then((reply) =>
-        done({ ...(reply.ok ? { ok: true, taskId: (reply.value as { taskId: string }).taskId } : { ok: false, reason: reply.reason }), left: left.current }),
+        done({
+          ...(reply.ok
+            ? { ok: true, taskId: (reply.value as { taskId: string }).taskId }
+            : { ok: false, reason: reply.reason, offersHost: !!reply.choose?.some(({ command }) => command.type === 'launchTask' && command.onHost) }),
+          left: left.current,
+        }),
       );
     },
     busy: () => inFlight.under() !== null,

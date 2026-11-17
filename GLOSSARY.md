@@ -79,6 +79,10 @@ _Avoid_: Credential profile
 How a run authenticates, chosen per run by the scheduler and only applied by the executor (ADR 0001): the operator's own subscription login on the host, or, in a container, the subscription token the factory stores.
 _Avoid_: Operator profile, auth mode
 
+**Run on host this time**:
+The operator's explicit choice, when Docker is unavailable or a contained run's container couldn't be prepared, to run a task's contained HITL runs on the host instead, permission cards and all, until its conversation is reopened after it ran. The factory never makes this choice itself.
+_Avoid_: Fallback, host mode
+
 **Model tier**:
 The class of model a stage or run asks for, resolved to an exact model when the run starts. A delegating agent can only ask for its own tier or a lower one.
 _Avoid_: Model, size

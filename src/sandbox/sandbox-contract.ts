@@ -173,6 +173,15 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
         await sandbox.removeImage('agents-factory-sandbox:no-such-version');
       }));
 
+    test('Docker answers, and the image builds before any container needs it, as the current one', () =>
+      withFixture(async ({ sandbox }) => {
+        expect(await sandbox.unavailable()).toBeNull();
+
+        await Promise.all([sandbox.buildImage(), sandbox.buildImage()]);
+
+        expect((await sandbox.images()).filter((listing) => listing.current)).toEqual([{ image: expect.any(String), current: true, usedBy: [] }]);
+      }));
+
     test('each task has a container of its own', () =>
       withFixture(async ({ sandbox, task, commitInContainer, containerTip, hostTip }) => {
         const first = await task('T1');

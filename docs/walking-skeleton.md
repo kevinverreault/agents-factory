@@ -155,7 +155,7 @@ To re-check after a Windows Terminal or Ink upgrade, run `npm run probe:keys` an
 
 ## L2 sandbox on Docker (ADR 0007, ADR 0011)
 
-`dockerSandbox()` (`src/sandbox/docker.ts`) runs each L2 task in a container of its own, from an image it builds on first use: `node:24-bookworm-slim` with git, `gh`, curl, and the Linux CLI of the pinned SDK (`@anthropic-ai/claude-agent-sdk-linux-x64`). The shared contract (`src/sandbox/sandbox-contract.ts`) runs against the fake and against Docker Desktop 27.0.3 on Windows 10, recorded on 2026-11-07:
+`dockerSandbox()` (`src/sandbox/docker.ts`) runs each L2 task in a container of its own, from an image the daemon builds in the background when it starts (ADR 0015), a prepare meanwhile waiting for that build: `node:24-bookworm-slim` with git, `gh`, curl, and the Linux CLI of the pinned SDK (`@anthropic-ai/claude-agent-sdk-linux-x64`). The shared contract (`src/sandbox/sandbox-contract.ts`) runs against the fake and against Docker Desktop 27.0.3 on Windows 10, recorded on 2026-11-07:
 
 - Commits made in the container reach the host task branch through a `git bundle`, as a fast-forward, and the host branch's new commits reach the container at the next prepare. A branch changed on both sides is refused either way.
 - `docker restart` kills a turn still running in the container (a `sleep` that would have written a file never did), and the `docker exec` that started it ends. The clone keeps commits not yet brought out.

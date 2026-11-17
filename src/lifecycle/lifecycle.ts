@@ -589,6 +589,11 @@ export type Task = {
   // How many unclean daemon starts in a row found its run active, until one
   // of its runs ends other than interrupted (ADR 0003's crash-loop guard).
   uncleanStarts?: number;
+  // While its HITL runs at contained stages run on the host instead, as the
+  // operator chose at launch or when one couldn't be prepared (ADR 0015):
+  // until it is next opened, when they are contained again. Tasks stored
+  // before it have none.
+  onHost?: boolean;
 };
 
 export type Run = {
@@ -620,6 +625,9 @@ export type Run = {
   // run's level decides where it runs instead (`runsContained`). Runs stored
   // before it have none, and ran on the host.
   contained?: boolean;
+  // True when it is a HITL run at a contained stage that runs on the host
+  // instead, as the operator chose: Run on host this time (ADR 0015).
+  onHost?: boolean;
   // The ticket it works on, as a ticket task's run (ADR 0013). Runs stored
   // before ticket tasks have none.
   ticket?: string | null;
@@ -703,6 +711,11 @@ export type AttentionRequest = {
   // The skipped tickets a spec task's request offers to relaunch, once it
   // can launch no more tickets (ADR 0013). Other requests have none.
   skipped?: string[] | null;
+  // Whether a failure's run was a contained HITL run whose container the
+  // daemon couldn't prepare, so its CLI never started (ADR 0015): retried,
+  // or run on the host this time, it starts again on the message it would
+  // have opened on.
+  unprepared?: boolean;
   raisedAt: number;
 };
 
@@ -901,7 +914,9 @@ export type OperatorCommand =
   // tickets but its skipped ones (ADR 0013) takes `relaunch`, one of them to
   // launch a new ticket task on, or `end`: Done, leaving its spec open or
   // closing it anyway.
-  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; allowHosts?: string[]; relaunch?: string; end?: SpecEnd }
+  // A contained HITL run that failed preparing its container (ADR 0015)
+  // takes `onHost`: Run on host this time.
+  | { type: 'answer'; taskId: string; answers?: Answers; permission?: PermissionAnswer; allowHosts?: string[]; relaunch?: string; end?: SpecEnd; onHost?: boolean }
   // Resumes the root's session on the operator's review comments.
   | { type: 'requestChanges'; taskId: string; comments: string }
   // Publishes an L1 root in review as the factory's App, without raising its
@@ -944,7 +959,9 @@ export type RunEvent =
   | { type: 'runStarted'; runId: string; pid: number; createdAt: number; model: string }
   // `afterWake` when the daemon saw it fail shortly after the machine woke
   // (ADR 0003), so its failure request can say so.
-  | { type: 'runFailed'; runId: string; reason: string; deniedHosts?: string[]; afterWake?: boolean }
+  // `unprepared` when it was a contained HITL run whose container the
+  // daemon couldn't prepare, so its CLI never started (ADR 0015).
+  | { type: 'runFailed'; runId: string; reason: string; deniedHosts?: string[]; afterWake?: boolean; unprepared?: boolean }
   // The agent finished answering: the conversation is the operator's again.
   // `context` is how full the session is now, when the executor knows.
   | { type: 'turnEnded'; runId: string; context?: ContextUse }
@@ -1070,6 +1087,9 @@ export type TaskLaunched = {
   priority: Priority;
   // Whether it is a quick launch (`n`), whose HITL start stage is a short grill.
   quick: boolean;
+  // Whether the operator chose to run its contained HITL runs on the host
+  // this time (ADR 0015). Launches made before it have none.
+  onHost?: boolean;
   worktree: TaskWorktree;
   sessionId: string;
   skillSet: string;
@@ -2369,12 +2389,13 @@ export type AttentionQueueItem =
       recovery: Recovery | null;
       deniedHosts: string[] | null;
       skipped: string[] | null;
+      unprepared: boolean;
     }
   | { kind: 'ready'; taskId: string }
   // `reason` is why a semi-auto root's gate sent it to the operator (ADR 0014).
   | { kind: 'review'; taskId: string; reason?: string };
 
-const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null, recovery = null, deniedHosts = null, skipped = null }: AttentionRequest): AttentionQueueItem => ({
+const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = null, permission = null, recovery = null, deniedHosts = null, skipped = null, unprepared = false }: AttentionRequest): AttentionQueueItem => ({
   kind: 'attention',
   taskId,
   repo,
@@ -2387,6 +2408,7 @@ const attentionItem = ({ taskId, repo, id, kind, holdsRun, reason, question = nu
   recovery: structuredClone(recovery),
   deniedHosts: deniedHosts && [...deniedHosts],
   skipped: skipped && [...skipped],
+  unprepared,
 });
 
 // Whether the task's open request, if any, waits on the operator: a task
@@ -2562,6 +2584,9 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
         const other = action.allowHosts.find((host) => !hosts.includes(host));
         if (other !== undefined) return `${task.id}’s run wasn’t denied ${String(other)}: allow only ${hosts.join(', ')}.`;
       }
+      if (action.onHost && !request.unprepared) return `${task.id}’s run didn’t fail preparing its container: retry it as it was.`;
+      // Retried, it starts again at once.
+      if (request.unprepared) return cantStartRuns(state, task);
       const answered = request.question?.questions.every(({ question }) => action.answers?.[question]?.trim()) ?? true;
       return answered ? null : 'Answer every question on the card.';
     }
@@ -3576,6 +3601,7 @@ function startRun(
   const allowOnce = task.allowOnce ?? [];
   task.allowOnce = [];
   task.sessionId ??= `S${task.id.slice(1)}`;
+  const atContainedStage = task.mode === 'HITL' && isContained(stageOf(task, task.stage));
   const run: Run = {
     id: nextId(state, 'run'),
     taskId: task.id,
@@ -3590,7 +3616,8 @@ function startRun(
     queued: [],
     question: null,
     stage: task.stage ?? null,
-    contained: task.mode === 'HITL' && isContained(stageOf(task, task.stage)),
+    contained: atContainedStage && !task.onHost,
+    ...(atContainedStage && task.onHost && { onHost: true }),
     ticket: task.kind === 'ticket' ? (task.ticket ?? null) : null,
     opening,
     reports: reported.map((child) => child.id),
@@ -3900,7 +3927,7 @@ function addRequest(
   holdsRun: boolean,
   reason: string | null,
   at: number,
-  { question = null, permission = null, deniedHosts = null, skipped = null }: RequestExtra = {},
+  { question = null, permission = null, deniedHosts = null, skipped = null, unprepared = false }: RequestExtra = {},
 ): void {
   const request: AttentionRequest = {
     id: nextId(state, 'request'),
@@ -3915,13 +3942,14 @@ function addRequest(
     permission,
     ...(deniedHosts?.length ? { deniedHosts: [...deniedHosts] } : {}),
     ...(skipped?.length ? { skipped: [...skipped] } : {}),
+    ...(unprepared && { unprepared }),
     raisedAt: at,
   };
   state.requests[request.id] = request;
 }
 
 // What a request holds besides its kind and reason.
-type RequestExtra = { question?: Question | null; permission?: Permission | null; deniedHosts?: string[] | null; skipped?: string[] | null };
+type RequestExtra = { question?: Question | null; permission?: Permission | null; deniedHosts?: string[] | null; skipped?: string[] | null; unprepared?: boolean };
 
 function addArtifact(state: Lifecycle, artifact: DistributiveOmit<Artifact, 'id'>): void {
   const id = nextId(state, 'artifact');
@@ -4032,6 +4060,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
         state: specSet ? 'running' : 'queued',
         createdAt: at,
         quick: action.quick ? { questions: 0, done: false } : null,
+        ...(action.onHost && { onHost: true }),
       };
       state.tasks[launched.id] = launched;
       // A work loop starts from its map's frontier.
@@ -4042,6 +4071,10 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       task.state = 'queued';
       break;
     case 'open': {
+      // Run on host this time lasts until a conversation that ran before is
+      // reopened (ADR 0015): a work loop's ticket picks, its first included,
+      // keep it.
+      if (task.runIds.length > 0 && !picksFromFrontier(task)) task.onHost = false;
       if (!picksFromFrontier(task)) {
         startRun(state, task, at);
         break;
@@ -4234,6 +4267,15 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       }
       // The task's next L2 runs may reach them too.
       for (const host of action.allowHosts ?? []) if (!(task.egressHosts ??= []).includes(host)) task.egressHosts.push(host);
+      // A contained HITL run that never started its CLI starts again at
+      // once, on the host if the operator chose to run there this time, on
+      // what it would have opened on (ADR 0015).
+      if (request!.unprepared) {
+        const failed = state.runs[request!.runId!]!;
+        if (action.onHost) task.onHost = true;
+        startRun(state, task, at, { opening: failed.opening, resumesSession: failed.resumesSession });
+        break;
+      }
       if (request!.holdsRun) {
         // Resumes at once, even over the slot cap.
         run!.status = 'active';
@@ -4724,6 +4766,7 @@ function apply(state: Lifecycle, action: LifecycleAction, at: number): void {
       const reason = weekly === null ? action.reason : weeklyLimitReason(weekly, action.reason);
       raise(state, task, run!, 'failure', false, withWakeHint(withDenials(reason, action.deniedHosts), action.afterWake), at, {
         deniedHosts: action.deniedHosts,
+        unprepared: !!action.unprepared && run!.mode === 'HITL',
       });
       break;
     }
