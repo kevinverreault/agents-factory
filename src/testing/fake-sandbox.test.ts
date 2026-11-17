@@ -30,6 +30,11 @@ describeSandboxContract('the fake sandbox', async () => {
       return commit(path);
     },
     commitInContainer: (container) => commit(container.workdir),
+    async editInContainer(container) {
+      const path = `untracked-${++edits}.txt`;
+      git.editFile(container.workdir, path, `${edits}`);
+      return path;
+    },
     async fetchOnHost(spec, branch) {
       const path = resolve(`/host/${spec.taskId}-fetched-${branch}`);
       await git.addWorktree(spec.clonePath, { path, branch: `fetched/${branch}`, startPoint: `origin/${branch}` });

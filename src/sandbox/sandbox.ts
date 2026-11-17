@@ -40,7 +40,18 @@ export type ContainerSpec = {
   // The hosts the container may reach (ADR 0007): its egress is denied
   // anywhere else. Each prepare sets them afresh.
   egress: string[];
+  // Whether a task branch that diverged from the host's is left for the
+  // run to merge, rather than refused: a contained HITL run's (ADR 0015),
+  // whose agent the operator can ask to merge the host branch in. The
+  // host's tip is then the clone's `origin/<branch>`.
+  mergesHost?: boolean;
 };
+
+// The work a task's running container holds, as its bring-out weighs it
+// (ADR 0015): the paths its clone has uncommitted, untracked files
+// included, and whether its task branch and the host's diverged, so that
+// neither fast-forwards to the other.
+export type ContainerWork = { uncommitted: string[]; diverged: boolean };
 
 // The hosts every L2 run may reach (ADR 0007): the Claude API its CLI runs
 // on, GitHub's API and site for reading issues and PRs with the run's
@@ -133,6 +144,13 @@ export interface Sandbox {
   // running. Throws a `SandboxError` when it isn't a fast-forward, or the
   // worktree has another branch checked out.
   bringOut(taskId: string, worktreePath: string, branch: string): Promise<string>;
+  // The work the task's container holds against `branch` in the host
+  // worktree at `worktreePath`. The container must be running.
+  work(taskId: string, worktreePath: string, branch: string): Promise<ContainerWork>;
+  // The git checks of an AFK run (ADR 0007), made on the task's container's
+  // clone at `workdir`, as its prepared handle's are. The container must be
+  // running.
+  checks(taskId: string): Promise<Pick<Container, 'workdir' | 'checks'>>;
   // Removes the task's container, clone and all, if it has one.
   remove(taskId: string): Promise<void>;
   // Every container the factory made.

@@ -3,6 +3,9 @@
 // brief; the operator edits it line by line, picks the ticket set from the
 // spec candidates the factory found (ADR 0013), sets continue-as, autonomy
 // level, at L3 the merge policy (ADR 0014), tier and max turns, and confirms. Esc backs out and the conversation carries on.
+// While a contained stage's task branch, changed in its container and on
+// the host, blocks it, `ctrl+g` asks the agent to merge the host branch in
+// (ADR 0015).
 import { createElement as h, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { Box, Text, useInput, type Key } from 'ink';
 import { appRefusalText, AUTONOMY_LEVELS, CONTINUE_AS, heldBack, heldBackLabel, OFFERED_POLICIES, policyOf, readyNow, type AppCheck, type AutonomyLevel, type Brief, type ContinueAs, type HandoffTicketSets, type MergePolicy, type SpecCandidate } from '../lifecycle/lifecycle.ts';
@@ -10,6 +13,7 @@ import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
+import { MERGE_HINT } from './advance-sheet.ts';
 import { useInFlight } from './in-flight.ts';
 import { autonomyText, cycle, policyText } from './launch-card.ts';
 import { CursorWindow, fixed } from './screen.ts';
@@ -95,6 +99,10 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
     // A handoff under way isn't backed out of: its reply says how it ended.
     // Asking for the brief again is, as opening the sheet is never a commitment.
     if (key.escape) return inFlight.under() === HANDING_OFF ? undefined : send({ type: 'closeHandoff', taskId: task.id });
+    if (key.ctrl && input === 'g') {
+      if (handoff.readiness.mergesHost) void inFlight.send('Asking the agent…', { type: 'askToMergeHost', taskId: task.id })?.then(tell);
+      return;
+    }
     if (key.return) {
       if (!current.brief) {
         // The agent ended its turn without the brief: ask it again.
@@ -133,7 +141,11 @@ export function HandoffSheet({ connection, task, run, app = null }: Props) {
   const briefLines = lines.filter((line) => line.kind === 'goal' || line.kind === 'item');
   return h(
     Sheet,
-    { title: `Hand off ${task.id} ${to}`, hint: `${brief ? `enter hand off · ↑↓ line · ${at?.kind === 'spec' ? 'space select' : 'type to edit · ←→ change'}` : 'enter ask again'} · esc keep talking`, shrinks: true },
+    {
+      title: `Hand off ${task.id} ${to}`,
+      hint: `${brief ? `enter hand off · ↑↓ line · ${at?.kind === 'spec' ? 'space select' : 'type to edit · ←→ change'}` : 'enter ask again'}${handoff.readiness.mergesHost ? ` · ${MERGE_HINT}` : ''} · esc keep talking`,
+      shrinks: true,
+    },
     // On a short screen only the brief gives way, scrolled to keep the
     // selected line in view: the fields and what blocks the handoff stay.
     brief

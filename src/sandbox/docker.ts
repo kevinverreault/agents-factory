@@ -263,6 +263,38 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     }
   }
 
+  // The git checks of an AFK run (ADR 0007), made on the task's container's clone.
+  function checksOf(taskId: string): Container['checks'] {
+    const name = nameOf(taskId);
+    return guardChecks({
+      async output(cwd, args) {
+        const result = await gitIn(taskId, args, cwd);
+        if (result.code !== 0) throw new GitError(result.stderr.trim() || `git ${args[0]} failed.`);
+        return result.stdout;
+      },
+      async hooks(dir) {
+        const listing = await run('docker', [
+          'exec',
+          '--user',
+          USER,
+          name,
+          'sh',
+          '-c',
+          'cd "$1" 2>/dev/null || exit 0; for f in *; do [ -f "$f" ] && sha256sum "$f"; done; exit 0',
+          'sh',
+          dir,
+        ]);
+        return Object.fromEntries(
+          listing.stdout.split('\n').flatMap((line) => {
+            const [, hash, file] = /^([0-9a-f]{64}) {2}(.+)$/.exec(line) ?? [];
+            return hash ? [[file!, hash]] : [];
+          }),
+        );
+      },
+      join: posix.join,
+    });
+  }
+
   function handle(spec: ContainerSpec): Container {
     const name = nameOf(spec.taskId);
     return {
@@ -272,33 +304,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       plugin: spec.plugin === null ? null : PLUGIN_DIR,
       lspPlugin: LSP_PLUGIN_DIR,
       securityPlugin: SECURITY_PLUGIN_DIR,
-      checks: guardChecks({
-        async output(cwd, args) {
-          const result = await gitIn(spec.taskId, args, cwd);
-          if (result.code !== 0) throw new GitError(result.stderr.trim() || `git ${args[0]} failed.`);
-          return result.stdout;
-        },
-        async hooks(dir) {
-          const listing = await run('docker', [
-            'exec',
-            '--user',
-            USER,
-            name,
-            'sh',
-            '-c',
-            'cd "$1" 2>/dev/null || exit 0; for f in *; do [ -f "$f" ] && sha256sum "$f"; done; exit 0',
-            'sh',
-            dir,
-          ]);
-          return Object.fromEntries(
-            listing.stdout.split('\n').flatMap((line) => {
-              const [, hash, file] = /^([0-9a-f]{64}) {2}(.+)$/.exec(line) ?? [];
-              return hash ? [[file!, hash]] : [];
-            }),
-          );
-        },
-        join: posix.join,
-      }),
+      checks: checksOf(spec.taskId),
       git: (args) => gitIn(spec.taskId, args),
       async deniedHosts() {
         const log = await docker(['exec', '--user', USER, proxyOf(spec.taskId), 'sh', '-c', `cat ${DENIALS} 2>/dev/null; exit 0`]);
@@ -334,7 +340,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
     if (mine === host) return;
     if ((await gitIn(taskId, ['merge-base', '--is-ancestor', mine, host])).code === 0) {
       await gitOut(taskId, ['merge', '--ff-only', '--quiet', tracking]);
-    } else if ((await gitIn(taskId, ['merge-base', '--is-ancestor', host, mine])).code !== 0) {
+    } else if ((await gitIn(taskId, ['merge-base', '--is-ancestor', host, mine])).code !== 0 && !spec.mergesHost) {
       throw new SandboxError(diverged(branch));
     }
   }
@@ -395,6 +401,28 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
         rmSync(dir, { recursive: true, force: true });
       }
       return mine;
+    },
+
+    async work(taskId, _worktreePath, branch) {
+      if (!(await stateOf(taskId))) throw new SandboxError(`${taskId}’s container isn’t running.`);
+      const tracking = `refs/remotes/origin/${branch}`;
+      // The host's tip, as the container's origin has it now.
+      await gitOut(taskId, ['fetch', '--quiet', 'origin', `+refs/heads/${branch}:${tracking}`]);
+      const [status, mine, host] = await Promise.all([
+        gitIn(taskId, ['status', '--porcelain=v1', '--untracked-files=all']),
+        gitOut(taskId, ['rev-parse', `refs/heads/${branch}`]),
+        gitOut(taskId, ['rev-parse', tracking]),
+      ]);
+      if (status.code !== 0) throw new SandboxError(status.stderr.trim() || `git status failed in ${taskId}’s container.`);
+      const uncommitted = status.stdout.split('\n').filter(Boolean).map((line) => line.slice(3));
+      const ancestor = async (a: string, b: string) => (await gitIn(taskId, ['merge-base', '--is-ancestor', a, b])).code === 0;
+      const diverged = mine !== host && !(await ancestor(host, mine)) && !(await ancestor(mine, host));
+      return { uncommitted, diverged };
+    },
+
+    async checks(taskId) {
+      if (!(await stateOf(taskId))) throw new SandboxError(`${taskId}’s container isn’t running.`);
+      return { workdir: WORKDIR, checks: checksOf(taskId) };
     },
 
     async remove(taskId) {

@@ -71,6 +71,10 @@ _Avoid_: Step, phase
 Whether a run executes on the operator's host or in its task's container. Every AFK run at L2 or above is contained; a HITL stage is contained when its workflow preset says so, as the built-in planning stages are, setup aside.
 _Avoid_: Sandbox mode, isolation (for the domain term)
 
+**Bring-out**:
+Moving the commits a task's container holds out to its host task branch, as a fast-forward and never a force-move. A contained HITL stage's work comes out when the operator advances, hands off or spawns, once the git guards have checked it. Until then the host sees none of it. The advance and handoff sheets block on uncommitted changes in the container, and on a task branch both sides changed, which the agent can be asked to merge. A handoff that goes on in the container, as one AFK run at L2 or above, brings nothing out.
+_Avoid_: Sync, export, copy-out
+
 **Model tier**:
 The class of model a stage or run asks for, resolved to an exact model when the run starts. A delegating agent can only ask for its own tier or a lower one.
 _Avoid_: Model, size
@@ -171,7 +175,7 @@ Where the operator reviews and edits the handoff brief and confirms a handoff, w
 _Avoid_: Handoff dialog, handover form
 
 **Intent**:
-An operator or agent verb with steps outside the store, journaled before its first such step. After a crash, the next daemon finishes it or rolls it back before it reconciles runs. A handoff's commit, a spawn's worktree, a ticket task's launch (its worktree cut from its spec task's branch), a takeover's container restart and a factory merge (marking the PR ready, then merging it) each get an intent row. A cleanup waits on its task instead.
+An operator or agent verb with steps outside the store, journaled before its first such step. After a crash, the next daemon finishes it or rolls it back before it reconciles runs. A handoff's commit, an advance's or a handoff's bring-out from a contained stage, a spawn's worktree, a ticket task's launch (its worktree cut from its spec task's branch), a takeover's container restart and a factory merge (marking the PR ready, then merging it) each get an intent row. A cleanup waits on its task instead.
 _Avoid_: Transaction, pending operation
 
 **Advance sheet**:
