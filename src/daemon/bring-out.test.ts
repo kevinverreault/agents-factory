@@ -250,6 +250,18 @@ describe('handing off from a contained stage', () => {
     expect(factory.executor.started).toHaveLength(1);
   });
 
+  test('shows on its sheet, and is blocked by, work in the container that broke the git guards', async () => {
+    const grill = await grilled();
+    const { factory, operator, branch, head, workdir } = grill;
+    factory.git.breakInvariant(workdir, 'The run added remotes: elsewhere.');
+    const sheet = await briefed(grill);
+    const blocker = 'T1’s work in its container broke the factory’s git guards, so it stays there. The run added remotes: elsewhere.';
+    expect(sheet.tasks.T1?.handoff?.readiness).toEqual({ blockers: [blocker], toCommit: [] });
+
+    expect(await operator.send(confirmed(sheet, { autonomy: 'L1' }))).toEqual({ ok: false, reason: `The handoff is blocked. ${blocker}` });
+    expect(factory.git.branchTip(clone, branch)).toBe(head);
+  });
+
   test('on a branch both sides changed is blocked, its sheet offering to ask the agent to merge the host branch', async () => {
     const grill = await grilled();
     const { factory, operator, branch } = grill;

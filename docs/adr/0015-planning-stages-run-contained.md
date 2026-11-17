@@ -20,7 +20,7 @@ A HITL run executes on the host, and every call Claude Code doesn't let through 
 
 - **Guarded like L2.** This amends ADR 0007's "HITL runs are not guarded" for contained runs. They get the per-run gitconfig and the hard denies, and the git invariant check runs at each bring-out.
 
-- **The work comes out at advance, handoff and spawn.** Each one brings the container's commits out and fast-forwards the host task branch, so ticket tasks and children are cut from the latest work. The advance and handoff sheets require a clean, committed tree in the container. Host commits come in at each prepare and each turn after a park. True divergence blocks the sheet until the agent merges the host branch in. Nothing is force-moved.
+- **The work comes out at advance, handoff and spawn.** Each one brings the container's commits out and fast-forwards the host task branch, so ticket tasks and children are cut from the latest work. The advance and handoff sheets require a clean, committed tree in the container. Host commits come in at each prepare and each turn after a park. True divergence blocks the sheet until the agent merges the host branch in. Nothing is force-moved. A bring-out is journaled as an intent, the handoff's own or an advance's. This amends ADR 0003 for the advance: recovery brings its work out before reconciling runs, but the advance itself starts the next stage's run, so it is finished just after reconciling, once the dead daemon's run is parked.
 
 - **One container for the task's life.** The same container serves a task's contained HITL stages and its AFK stages (ADR 0011), so `quick` hands off without a bring-out. A contained HITL run holds no slot. A live conversation keeps its container running, and a parked run stops it.
 

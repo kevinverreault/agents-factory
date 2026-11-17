@@ -1273,7 +1273,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
       if (holdsWork(task)) {
-        const held = midTurn(task) ?? (await heldWork(task));
+        const held = midTurnBlock(task) ?? (await heldWork(task));
         if (held.blockers.length) {
           const reason = `The advance is blocked. ${held.blockers.join(' ')}`;
           return { ok: false, reason, ...(held.mergesHost && { confirm: { type: 'askToMergeHost', taskId } }) };
@@ -1333,7 +1333,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // What blocks bringing a contained stage's work out while its agent is
   // mid-turn, as it may commit more, or null when it isn't.
-  function midTurn(task: Task): HeldWork | null {
+  function midTurnBlock(task: Task): HeldWork | null {
     const run = liveRun(lifecycle, task);
     if (run?.status !== 'active' || run.turn !== 'agent') return null;
     return { blockers: [`${task.id}’s agent is mid-turn in its container, where it may commit more: wait for its turn to end, or interrupt it, first.`], mergesHost: false };
@@ -1355,7 +1355,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!(await hasContainer(task.id))) return { blockers: [], mergesHost: false };
         await sandbox.start(task.id);
         containers.set(task.id, true);
-        const work = await sandbox.work(task.id, path, branch);
+        const work = await sandbox.work(task.id, branch);
         const blockers: string[] = [];
         if (work.uncommitted.length) {
           blockers.push(`${task.id}’s container has changes not committed, which never come out of it: ${work.uncommitted.join(', ')}. Ask the agent to commit or discard them first.`);
@@ -1366,7 +1366,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         // The guards find uncommitted changes too: they are said once.
         if (!work.uncommitted.length) {
           const { workdir, checks } = await sandbox.checks(task.id);
-          const broken = await checks.violations(workdir, heldFrom(task.id) ?? (await checks.snapshot(workdir)), [], committer);
+          const broken = await checks.violations(workdir, guardBaseline(task.id) ?? (await checks.snapshot(workdir)), [], committer);
           if (broken.length) blockers.push(`${task.id}’s work in its container broke the factory’s git guards, so it stays there. ${broken.join(' ')}`);
         }
         return { blockers, mergesHost: work.diverged };
@@ -1392,7 +1392,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         containers.set(task.id, true);
         await sandbox.bringOut(task.id, path, branch);
         const { workdir, checks } = await sandbox.checks(task.id);
-        holdFrom(task.id, await checks.snapshot(workdir));
+        keepGuardBaseline(task.id, await checks.snapshot(workdir));
       });
       return null;
     } catch (error) {
@@ -1416,26 +1416,29 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return (await sandbox.list()).some((listed) => listed.taskId === taskId);
   }
 
-  // The container's clone as a contained stage's work was last brought out,
-  // or as its first run there found it (ADR 0015): what the git guards
-  // check its work against. Kept in the container's run directory, which
-  // lasts as long as the container does. Null when none was kept.
-  function heldFrom(taskId: string): RunSnapshot | null {
+  // The guard baseline of the task's container (ADR 0015): its clone as a
+  // contained stage's work was last brought out, or as its first run there
+  // found it, which the git guards check its work against. Kept in the
+  // container's run directory, which lasts as long as the container does.
+  // Null when none was kept.
+  function guardBaseline(taskId: string): RunSnapshot | null {
     try {
-      return JSON.parse(readFileSync(heldFromFile(taskId), 'utf8')) as RunSnapshot;
+      return JSON.parse(readFileSync(guardBaselineFile(taskId), 'utf8')) as RunSnapshot;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
   }
 
-  function holdFrom(taskId: string, snapshot: RunSnapshot): void {
+  // Keeps `snapshot` as the guard baseline of the task's container.
+  function keepGuardBaseline(taskId: string, snapshot: RunSnapshot): void {
     mkdirSync(containerRunDir(taskId), { recursive: true });
-    writeFileSync(heldFromFile(taskId), JSON.stringify(snapshot));
+    writeFileSync(guardBaselineFile(taskId), JSON.stringify(snapshot));
   }
 
-  function heldFromFile(taskId: string): string {
-    return join(containerRunDir(taskId), 'held-from.json');
+  // Where the guard baseline of the task's container is kept.
+  function guardBaselineFile(taskId: string): string {
+    return join(containerRunDir(taskId), 'guard-baseline.json');
   }
 
   // Opens the handoff sheet on how the task's worktree stands now.
@@ -1495,7 +1498,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if ('error' in gateConfig) return { ok: false, reason: gateConfig.error };
       action.mergeGate = gateConfig;
       const ready = await readiness(task);
-      const busy = holdsWork(task) ? midTurn(task) : null;
+      const busy = holdsWork(task) ? midTurnBlock(task) : null;
       if (busy) ready.blockers.push(...busy.blockers);
       if (ready.blockers.length) {
         // The sheet shows what blocks it.
@@ -1514,10 +1517,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (refused) return { ok: false, reason: refused };
         action.intent = intent.id;
         // Out first: the handoff commit moves the host task branch on.
-        const uncommitted = (bringsOut ? await bringOutHeld(task) : null) ?? (await commitHandoff(task, ready.toCommit));
-        if (uncommitted) {
+        const failed = (bringsOut ? await bringOutHeld(task) : null) ?? (await commitHandoff(task, ready.toCommit));
+        if (failed) {
           await settle({ type: 'intentDropped', taskId, intentId: intent.id }, new Set());
-          return { ok: false, reason: uncommitted };
+          return { ok: false, reason: failed };
         }
       }
       const refusal = await settle(action, new Set());
@@ -1598,9 +1601,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // would move the host task branch on past the container's.
   function bringsOutAtHandoff(task: Task, { autonomy, specs, committed }: Pick<HandedOff, 'autonomy' | 'specs' | 'committed'>): boolean {
     if (!holdsWork(task)) return false;
-    // A spec task's ticket tasks are cut from its host task branch (ADR 0013).
-    const specTask = !!task.handoff?.ticketSets?.candidates.some(({ spec }) => specs?.includes(spec));
-    return !runsContained(autonomy) || specTask || committed.length > 0;
+    // A spec task's ticket tasks are cut from its host task branch (ADR 0013):
+    // read from the confirmed choices alone, as a replay journaled them.
+    return !runsContained(autonomy) || !!specs?.length || committed.length > 0;
   }
 
   // Finishes a confirmed handoff a crash cut short (ADR 0003): its
@@ -2933,7 +2936,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           snapshot = await container.checks.snapshot(container.workdir);
           // A contained stage's work is checked as it comes out against the
           // container as its first run there found it (ADR 0015).
-          if (isContainedHitl(run) && !heldFrom(task.id)) holdFrom(task.id, snapshot);
+          if (isContainedHitl(run) && !guardBaseline(task.id)) keepGuardBaseline(task.id, snapshot);
         } catch (error) {
           if (!(error instanceof SandboxError || error instanceof GitError)) throw error;
           return fail(`The factory couldn’t prepare ${task.id}’s container: ${error.message}`);

@@ -141,7 +141,7 @@ export class FakeSandbox implements Sandbox {
     throw new SandboxError(`${branch} has commits in the container and on the host that the other lacks.`);
   }
 
-  async work(taskId: string, _worktreePath: string, branch: string): Promise<ContainerWork> {
+  async work(taskId: string, branch: string): Promise<ContainerWork> {
     this.record('work', taskId);
     const container = this.containers.get(taskId);
     if (!container?.running) throw new SandboxError(`${taskId}’s container isn’t running.`);

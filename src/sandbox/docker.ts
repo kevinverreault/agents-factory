@@ -403,7 +403,7 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       return mine;
     },
 
-    async work(taskId, _worktreePath, branch) {
+    async work(taskId, branch) {
       if (!(await stateOf(taskId))) throw new SandboxError(`${taskId}’s container isn’t running.`);
       const tracking = `refs/remotes/origin/${branch}`;
       // The host's tip, as the container's origin has it now.

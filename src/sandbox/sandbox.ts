@@ -144,9 +144,9 @@ export interface Sandbox {
   // running. Throws a `SandboxError` when it isn't a fast-forward, or the
   // worktree has another branch checked out.
   bringOut(taskId: string, worktreePath: string, branch: string): Promise<string>;
-  // The work the task's container holds against `branch` in the host
-  // worktree at `worktreePath`. The container must be running.
-  work(taskId: string, worktreePath: string, branch: string): Promise<ContainerWork>;
+  // The work the task's container holds against the host clone's `branch`.
+  // The container must be running.
+  work(taskId: string, branch: string): Promise<ContainerWork>;
   // The git checks of an AFK run (ADR 0007), made on the task's container's
   // clone at `workdir`, as its prepared handle's are. The container must be
   // running.

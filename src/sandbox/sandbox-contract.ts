@@ -222,20 +222,20 @@ export function describeSandboxContract(name: string, makeFixture: () => Promise
       withFixture(async ({ sandbox, task, commitInContainer, editInContainer, commitOnHost }) => {
         const { spec, worktree } = await task('T1');
         const container = await sandbox.prepare(spec);
-        expect(await sandbox.work('T1', worktree, spec.branch)).toEqual({ uncommitted: [], diverged: false });
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [], diverged: false });
 
         const path = await editInContainer(container);
-        expect(await sandbox.work('T1', worktree, spec.branch)).toEqual({ uncommitted: [path], diverged: false });
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [path], diverged: false });
 
         // Ahead of the host is no divergence, nor is behind it.
         await commitInContainer(container);
-        expect(await sandbox.work('T1', worktree, spec.branch)).toEqual({ uncommitted: [], diverged: false });
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [], diverged: false });
         await sandbox.bringOut('T1', worktree, spec.branch);
         await commitOnHost(worktree);
-        expect(await sandbox.work('T1', worktree, spec.branch)).toEqual({ uncommitted: [], diverged: false });
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [], diverged: false });
 
         await commitInContainer(container);
-        expect(await sandbox.work('T1', worktree, spec.branch)).toEqual({ uncommitted: [], diverged: true });
+        expect(await sandbox.work('T1', spec.branch)).toEqual({ uncommitted: [], diverged: true });
       }));
 
     test('a container’s checks are made on its clone, as its prepared handle’s are', () =>
