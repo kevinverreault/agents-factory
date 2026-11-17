@@ -1,6 +1,7 @@
 // The Docker adapter behind the Sandbox port (ADR 0007, ADR 0011). One
-// container per task, from one image per factory version that the adapter
-// builds itself the first time a container needs it. The container runs as a
+// container per task, from one image per factory version, which the daemon
+// has built in the background when it starts (ADR 0015), and a prepare
+// builds if it isn't there. The container runs as a
 // non-root user, clones the host clone from a read-only mount of its git
 // directory alone (the operator's working files, untracked ones included,
 // stay out), gets the
@@ -346,6 +347,16 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
   }
 
   return {
+    async unavailable() {
+      // The server's version: the client alone answers without its daemon.
+      const result = await run('docker', ['version', '--format', '{{.Server.Version}}']);
+      if (result.code === 0) return null;
+      if (result.code === 127) return `Docker isn’t installed, or isn’t on the factory’s PATH: ${result.stderr.trim()}`;
+      return result.stderr.trim() || 'Docker didn’t answer.';
+    },
+
+    buildImage: ensureImage,
+
     async prepare(spec) {
       await ensureImage();
       await ensureEgress(spec.taskId);

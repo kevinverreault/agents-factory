@@ -123,6 +123,15 @@ export type ContainerListing = { taskId: string; running: boolean };
 export type ImageListing = { image: string; current: boolean; usedBy: string[] };
 
 export interface Sandbox {
+  // Why Docker doesn't answer, as it said, or null when it does (ADR 0015):
+  // not installed, or its daemon not running.
+  unavailable(): Promise<string | null>;
+  // Builds this factory version's image unless it is there, then removes
+  // older factory images no container uses (ADR 0011). A build under way is
+  // shared: a prepare meanwhile waits for it rather than starting another,
+  // and one that failed is tried again by the next call. Throws a
+  // `SandboxError` when the build fails.
+  buildImage(): Promise<void>;
   // The task's container, running, with the host task branch's commits
   // fetched in as a fast-forward and `branches` brought up to date. Made
   // first, image and all, when the task has none. A container whose branch
@@ -162,5 +171,12 @@ export interface Sandbox {
   // container still uses it.
   removeImage(image: string): Promise<void>;
 }
+
+// Where contained runs stand (ADR 0015): Docker and this factory version's
+// image, as the daemon last found them. Checking until it first has;
+// building while the image is built, which a launch need not wait for; and
+// unavailable, or failed, with Docker's own reason, while a contained run
+// couldn't be prepared.
+export type SandboxView = { state: 'checking' | 'building' | 'ready' | 'unavailable' | 'failed'; reason: string | null };
 
 export class SandboxError extends Error {}

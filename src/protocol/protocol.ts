@@ -9,7 +9,11 @@ import type { Tier } from '../models/routing.ts';
 import type { PresetChoice } from '../presets/presets.ts';
 import type { FactoryState, PatchOp } from './factory-state.ts';
 
-export const PROTOCOL_VERSION = 24;
+export const PROTOCOL_VERSION = 25;
+
+// The operator's choice to run a task's contained HITL runs on the host
+// (ADR 0015), as every client and the daemon name it.
+export const RUN_ON_HOST = 'Run on host this time';
 
 // The daemon's own verbs, which a client of another protocol version may
 // still send (ADR 0002): their shapes never change. `daemon.stop` stops it
@@ -42,6 +46,9 @@ export type TokenCommand = { type: 'setupToken'; token: string };
 // branch and looks for it there again, and replies with the repository's
 // `SkillsSetup`. "Set up now" is a launch of the `setup` preset.
 export type SkillsCommand = { type: 'checkSkills'; repo: string };
+// Asks again whether Docker is available, and has the image built if it
+// isn't yet (ADR 0015). Replies with the `SandboxView`.
+export type SandboxCommand = { type: 'checkSandbox' };
 export type SetupView = { slug: string; installationSettings: string };
 // Launches a task from the launch card: the preset (by default the
 // repository's) is resolved and frozen, and the task starts at `stage` (by
@@ -67,6 +74,10 @@ export type LaunchCommand = {
   // A quick launch (`n`): its HITL start stage asks at most three questions
   // and ends on the handoff sheet.
   quick?: boolean;
+  // Run on host this time (ADR 0015): the task's contained HITL runs run on
+  // the host, asking as host runs do, until it is reopened. Without it, a
+  // preset with contained stages launches only where Docker is available.
+  onHost?: boolean;
 };
 // The advance sheet's confirm: the HITL task leaves its stage for the next
 // one, skipping the optional stages named in `skip`. At a work loop it
@@ -133,6 +144,7 @@ export type Command =
   | GitHubCommand
   | TokenCommand
   | SkillsCommand
+  | SandboxCommand
   | LaunchCommand
   | AdvanceCommand
   | HandoffCommand
