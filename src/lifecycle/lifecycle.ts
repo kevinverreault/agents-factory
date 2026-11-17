@@ -2552,8 +2552,7 @@ export function guard(state: Lifecycle, action: LifecycleAction): string | null 
     case 'expandQuickLaunch':
       return task.quick ? null : `${task.id} is no quick launch, or is one no longer.`;
     case 'askToMergeHost': {
-      const last = state.runs[task.runIds.at(-1) ?? ''];
-      if (task.mode !== 'HITL' || isTerminal(task) || !task.worktree || !last?.contained) return `${task.id} isn’t at a contained HITL stage.`;
+      if (isTerminal(task) || !holdsWorkInContainer(state, task)) return `${task.id} isn’t at a contained HITL stage.`;
       return task.factoryNotes?.includes(mergeHostNote(task)) ? `${task.id}’s agent is already asked to merge the host branch.` : null;
     }
     case 'takeOver':
@@ -3317,6 +3316,14 @@ function noteParent(state: Lifecycle, child: Task, note = childNote(child)): voi
 // A factory note saying what `paragraphs` say, in the conversation's Markdown.
 function factoryNote(...paragraphs: string[]): string {
   return ['## Factory note', ...paragraphs].join('\n\n');
+}
+
+// Whether the task's work is held in its container: a HITL task whose
+// last run was at a contained stage (ADR 0015), until the task advances,
+// hands off or spawns, which bring it out.
+export function holdsWorkInContainer(state: Lifecycle, task: Task): boolean {
+  const last = state.runs[task.runIds.at(-1) ?? ''];
+  return task.mode === 'HITL' && !!task.worktree && last?.mode === 'HITL' && !!last.contained;
 }
 
 // The factory note asking a contained HITL stage's agent to merge the host

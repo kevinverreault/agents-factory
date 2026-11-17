@@ -2,16 +2,16 @@
 // moving a HITL task on from its stage to the next HITL one, skipping
 // optional stages on the way. An AFK stage next is the handoff's to start.
 // On a ticket of a work loop over a map, it finishes the ticket. From a
-// contained stage whose work can't come out because the container and the
-// host both changed the task branch, `ctrl+g` asks the agent to merge the
-// host branch in (ADR 0015).
-import { createElement as h, useState } from 'react';
+// contained stage, it shows as it opens what blocks the work coming out of
+// the container, and when the container and the host both changed the task
+// branch, `ctrl+g` asks the agent to merge the host branch in (ADR 0015).
+import { createElement as h, useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { TaskView } from '../protocol/factory-state.ts';
-import type { Command } from '../protocol/protocol.ts';
+import type { AdvanceCheck } from '../protocol/protocol.ts';
 import { useInFlight } from './in-flight.ts';
-import { Cursor, GLYPH, Sheet, tone } from './theme.ts';
+import { Cursor, GLYPH, MERGE_HINT, Sheet, tone } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;
@@ -36,8 +36,19 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
   // Kept in one state: keys typed in one burst arrive before a re-render.
   const [sheet, setSheet] = useState({ cursor: 0, skipped: [] as string[] });
   const [refusal, setRefusal] = useState<string | null>(null);
-  // What the last refusal offers instead: asking the agent to merge the host branch.
-  const [offer, setOffer] = useState<Command | null>(null);
+  // What blocks the bring-out, as the factory found it when the sheet
+  // opened, or the last refusal, and whether it offers to ask the agent to
+  // merge the host branch.
+  const [check, setCheck] = useState<AdvanceCheck | null>(null);
+  const [offer, setOffer] = useState(false);
+  useEffect(() => {
+    void connection.send({ type: 'checkAdvance', taskId: task.id }).then((reply) => {
+      const found = reply.ok ? (reply.value as AdvanceCheck | undefined) : undefined;
+      if (!found) return;
+      setCheck(found);
+      setOffer(found.mergesHost);
+    });
+  }, [connection, task.id]);
   // The advance spins until the daemon answers it.
   const inFlight = useInFlight(connection);
   // Only stages before the one advanced to are skipped.
@@ -50,14 +61,14 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
     if (key.escape) return inFlight.under() ? undefined : onCancel();
     if (key.ctrl && input === 'g') {
       // Asked, the conversation carries on: the agent hears it on the operator's turn.
-      if (offer) void inFlight.send('Asking the agent…', offer)?.then((reply) => (reply.ok ? onCancel() : setRefusal(reply.reason)));
+      if (offer) void inFlight.send('Asking the agent…', { type: 'askToMergeHost', taskId: task.id })?.then((reply) => (reply.ok ? onCancel() : setRefusal(reply.reason)));
       return;
     }
     if (key.return) {
       void inFlight.send('Advancing…', { type: 'advanceStage', taskId: task.id, ...(skip.length > 0 && { skip }) })?.then((reply) => {
         if (reply.ok) return onAdvanced();
         setRefusal(reply.reason);
-        setOffer(reply.confirm?.type === 'askToMergeHost' ? reply.confirm : null);
+        setOffer(reply.confirm?.type === 'askToMergeHost');
       });
       return;
     }
@@ -81,7 +92,7 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
       { title: `Advance ${task.id} from ${task.stage}`, hint: `enter finish the ticket${offer ? ` · ${MERGE_HINT}` : ''} · esc back` },
       h(Text, null, `Finish ${ticket}: the factory reads the map again for its next frontier.`),
       inFlight.indicator,
-      refusal ? h(Text, tone('bad'), refusal) : null,
+      ...blocked(refusal, check),
     );
   }
   const then = handoff
@@ -106,9 +117,12 @@ export function AdvanceSheet({ connection, task, onAdvanced, onCancel }: Props) 
     ),
     then,
     inFlight.indicator,
-    refusal ? h(Text, tone('bad'), refusal) : null,
+    ...blocked(refusal, check),
   );
 }
 
-// The sheets' offer while a branch both sides changed blocks them (ADR 0015).
-export const MERGE_HINT = 'ctrl+g ask the agent to merge the host branch';
+// The last refusal, or else what blocks the bring-out as the sheet found it.
+function blocked(refusal: string | null, check: AdvanceCheck | null) {
+  if (refusal) return [h(Text, { key: 'refusal', ...tone('bad') }, refusal)];
+  return (check?.blockers ?? []).map((blocker, i) => h(Text, { key: `blocker-${i}`, ...tone('bad') }, `${GLYPH.failed} ${blocker}`));
+}

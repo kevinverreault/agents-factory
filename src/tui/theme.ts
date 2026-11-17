@@ -121,6 +121,10 @@ export function kindRole(item: Item): Role {
 }
 
 // The glyphs the screens share.
+// The advance and handoff sheets' offer while a task branch the container
+// and the host both changed blocks them (ADR 0015).
+export const MERGE_HINT = 'ctrl+g ask the agent to merge the host branch';
+
 export const GLYPH = {
   // The frames a spinner turns through.
   spinner: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],

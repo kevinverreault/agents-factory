@@ -5,7 +5,7 @@
 // intent. The sheets block rather than lose or force-move anything: on a
 // dirty tree in the container, a broken guard, or a branch changed on both
 // sides, where they offer to ask the agent to merge the host branch.
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { relayHook } from '../hooks/relay.ts';
@@ -184,6 +184,48 @@ describe('advancing from a contained stage', () => {
   });
 });
 
+describe('the advance sheet', () => {
+  test('reads, as it opens, what would block the bring-out, and nothing for a task that holds no work in a container', async () => {
+    const { factory, operator, workdir } = await grilled();
+    factory.git.editFile(workdir, 'notes/draft.md', 'half a thought');
+
+    expect(await operator.send({ type: 'checkAdvance', taskId: 'T1' })).toEqual({
+      ok: true,
+      value: { blockers: ['T1’s container has changes not committed, which never come out of it: notes/draft.md. Ask the agent to commit or discard them first.'], mergesHost: false },
+    });
+
+    const host = await attached();
+    await host.operator.send({ type: 'launchTask', repo: 'acme/widgets', prompt: 'Grill me about the login flow.' });
+    await started(host.factory, 1);
+    expect(await host.operator.send({ type: 'checkAdvance', taskId: 'T1' })).toEqual({ ok: true, value: { blockers: [], mergesHost: false } });
+    expect(host.factory.sandbox.calls).toEqual([]);
+  });
+});
+
+describe('a container with no guard baseline, as one used before the factory kept them', () => {
+  const forget = (factory: TestFactory) => rmSync(join(factory.paths.runsRoot, 'containers', 'T1', 'guard-baseline.json'));
+
+  test('is checked against its live run’s snapshot', async () => {
+    const { factory, operator, branch, tip } = await grilled();
+    forget(factory);
+
+    expect(await operator.send({ type: 'advanceStage', taskId: 'T1' })).toEqual({ ok: true });
+    expect(factory.git.branchTip(clone, branch)).toBe(tip);
+  });
+
+  test('with no live run blocks the bring-out, rather than check it against itself', async () => {
+    const { factory, operator, tui, branch, head } = await grilled();
+    factory.clock.advance(minutes(31));
+    await tui.until((state) => state.tasks.T1?.label === 'Ready for you');
+    forget(factory);
+
+    const reply = await operator.send({ type: 'advanceStage', taskId: 'T1' });
+
+    expect(reply).toMatchObject({ ok: false, reason: expect.stringContaining('The factory kept no record of T1’s container from before this stage’s work') });
+    expect(factory.git.branchTip(clone, branch)).toBe(head);
+  });
+});
+
 // A preset whose contained grill hands off to a spec's tickets.
 const TICKETED = [
   'stages:',
@@ -259,6 +301,22 @@ describe('handing off from a contained stage', () => {
     expect(sheet.tasks.T1?.handoff?.readiness).toEqual({ blockers: [blocker], toCommit: [] });
 
     expect(await operator.send(confirmed(sheet, { autonomy: 'L1' }))).toEqual({ ok: false, reason: `The handoff is blocked. ${blocker}` });
+    expect(factory.git.branchTip(clone, branch)).toBe(head);
+  });
+
+  test('is blocked while the agent is mid-turn, before the factory looks in the container', async () => {
+    const { factory, operator, tui, branch, head } = await grilled();
+    expect(await operator.send({ type: 'openHandoff', taskId: 'T1' })).toEqual({ ok: true });
+    await tui.until((state) => state.tasks.T1?.handoff != null);
+    // The agent writes the brief, and its turn goes on.
+    factory.executor.report('R1', { type: 'briefWritten', brief: { goal: 'Carry the work on.', decided: [], doneWhen: [], outOfScope: [], links: [] } });
+    const sheet = await tui.until((state) => !!state.tasks.T1?.handoff?.brief);
+    factory.sandbox.calls.length = 0;
+
+    const reply = await operator.send(confirmed(sheet, { autonomy: 'L1' }));
+
+    expect(reply).toMatchObject({ ok: false, reason: expect.stringContaining('T1’s agent is mid-turn in its container') });
+    expect(factory.sandbox.calls).toEqual([]);
     expect(factory.git.branchTip(clone, branch)).toBe(head);
   });
 
@@ -364,5 +422,49 @@ describe('a bring-out cut short by a crash', () => {
     expect(factory.git.branchTip(clone, branch)).toBe(tip);
     expect(state.tasks.T1).toMatchObject({ mode: 'AFK', autonomy: 'L1' });
     expect(recoveryReport(state)!.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'handoff', outcome: 'finished' }]);
+  });
+
+  test.each(['before', 'after'] as const)('at a handoff that brings out and commits host files, crashed %s its commit, is finished through the handoff’s intent', async (when) => {
+    const grill = await grilled();
+    const { factory, operator, branch, tip } = grill;
+    // The grill also wrote a file of the task's on the host.
+    const run = factory.executor.started[0]!;
+    factory.git.editFile(run.cwd!, 'GLOSSARY.md', 'Session: a signed-in visit.');
+    const event = { session_id: run.sessionId, cwd: run.cwd, hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: join(run.cwd!, 'GLOSSARY.md') } };
+    await relayHook(JSON.stringify({ ...event, tool_response: '' }), factory.paths);
+    await grill.tui.until((state) => Object.keys(state.artifacts).length > 0);
+    const sheet = await briefed(grill);
+    expect(sheet.tasks.T1?.handoff?.readiness).toEqual({ blockers: [], toCommit: ['GLOSSARY.md'] });
+    const crashed = factory.crashAt('git', 'commit', when);
+    void operator.send(confirmed(sheet, { autonomy: 'L2' }));
+
+    const tui = await crashAndRestart(factory, crashed);
+
+    const state = await tui.until((state) => !!recoveryReport(state));
+    const hostTip = factory.git.branchTip(clone, branch)!;
+    // Brought out first, then committed on top, once.
+    expect(factory.git.inHistory(tip, hostTip)).toBe(true);
+    expect(factory.git.commits.filter(({ paths }) => paths.includes('GLOSSARY.md'))).toEqual([{ worktreePath: run.cwd, paths: ['GLOSSARY.md'], message: `Handoff of T1: ${state.tasks.T1!.title}` }]);
+    expect(state.tasks.T1).toMatchObject({ mode: 'AFK', autonomy: 'L2' });
+    expect(recoveryReport(state)!.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'handoff', outcome: 'finished' }]);
+  });
+
+  test('at a handoff whose work can no longer come out is rolled back: the task stays HITL', async () => {
+    const grill = await grilled();
+    const { factory, operator, branch, head, workdir } = grill;
+    const sheet = await briefed(grill);
+    const crashed = factory.crashAt('sandbox', 'bringOut', 'before');
+    void operator.send(confirmed(sheet, { autonomy: 'L1' }));
+    await crashed;
+    await factory.crash();
+    // The dead daemon's turn leaves a change in the container uncommitted.
+    factory.git.editFile(workdir, 'notes/draft.md', 'half a thought');
+    await factory.startDaemon();
+    const tui = watch(await factory.attach());
+
+    const state = await tui.until((state) => !!recoveryReport(state));
+    expect(factory.git.branchTip(clone, branch)).toBe(head);
+    expect(state.tasks.T1).toMatchObject({ mode: 'HITL', stage: 'grill' });
+    expect(recoveryReport(state)!.recovery?.replayed).toEqual([{ taskId: 'T1', verb: 'handoff', outcome: 'rolled back' }]);
   });
 });

@@ -114,6 +114,7 @@ import {
   type Run,
   type ReplayedIntent,
   type StageAdvanced,
+  holdsWorkInContainer,
   type HandedOff,
   type RulesAnswer,
   type RunEvent,
@@ -134,6 +135,7 @@ import {
   type GitHubCommand,
   type HandoffCommand,
   type HookEvent,
+  type AdvanceCheck,
   type AdvanceCommand,
   type GcResult,
   type LaunchCommand,
@@ -479,6 +481,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return launch(command);
       case 'advanceStage':
         return advance(command);
+      case 'checkAdvance':
+        return checkAdvance(command.taskId);
       case 'markDone':
         return markDone(command);
       case 'cancel':
@@ -1264,7 +1268,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // operator's editor and the task's later runs start from them. What
   // blocks that blocks the advance, and nothing moves: a branch both sides
   // changed offers to ask the agent to merge the host's in.
-  function advance({ taskId, skip = [], end }: AdvanceCommand): Promise<Reply> {
+  function advance({ taskId, skip = [], end }: Extract<AdvanceCommand, { type: 'advanceStage' }>): Promise<Reply> {
     return serially(async (): Promise<Reply> => {
       if (stopping) return { ok: false, reason: 'The daemon is stopping.' };
       // Named now, for a next stage whose context is fresh.
@@ -1273,27 +1277,39 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (refused) return { ok: false, reason: refused };
       const task = lifecycle.tasks[taskId]!;
       if (holdsWork(task)) {
-        const held = midTurnBlock(task) ?? (await heldWork(task));
-        if (held.blockers.length) {
-          const reason = `The advance is blocked. ${held.blockers.join(' ')}`;
-          return { ok: false, reason, ...(held.mergesHost && { confirm: { type: 'askToMergeHost', taskId } }) };
+        const check = await checkBringOut(task);
+        if (check.blockers.length) {
+          const reason = `The advance is blocked. ${check.blockers.join(' ')}`;
+          return { ok: false, reason, ...(check.mergesHost && { confirm: { type: 'askToMergeHost', taskId } }) };
         }
         // The bring-out is outside the store: the advance is journaled first
         // (ADR 0003), and a crash from here on is finished by the next daemon.
-        const { type, ...advance } = action;
-        const intent: Intent = { id: `advance:${taskId}`, verb: 'advance', taskId, advance };
+        const { type, ...confirmed } = action;
+        const intent: Intent = { id: `advance:${taskId}`, verb: 'advance', taskId, advance: confirmed };
         const journaled = await settle({ type: 'intentJournaled', taskId, intent }, new Set());
         if (journaled) return { ok: false, reason: journaled };
         action.intent = intent.id;
         const unbrought = await bringOutHeld(task);
         if (unbrought) {
-          await settle({ type: 'intentDropped', taskId, intentId: intent.id }, new Set());
+          await dropIntent(taskId, intent.id);
           return { ok: false, reason: unbrought };
         }
       }
       const refusal = await settle(action, new Set());
-      if (refusal && action.intent) await settle({ type: 'intentDropped', taskId, intentId: action.intent }, new Set());
+      if (refusal && action.intent) await dropIntent(taskId, action.intent);
       return refusal ? { ok: false, reason: refusal } : { ok: true };
+    });
+  }
+
+  // What would block an advance's bring-out from the task's contained stage
+  // now, for the advance sheet to show as it opens (ADR 0015): nothing when
+  // the task holds no work in its container. The confirm checks afresh.
+  function checkAdvance(taskId: string): Promise<Reply> {
+    return serially(async (): Promise<Reply> => {
+      const task = lifecycle.tasks[taskId];
+      if (!task) return { ok: false, reason: `There is no task ${taskId}.` };
+      const value: BringOutCheck = holdsWork(task) ? await checkBringOut(task) : { blockers: [], mergesHost: false };
+      return { ok: true, value };
     });
   }
 
@@ -1302,59 +1318,71 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // which brings out nothing twice. The advance itself starts the next
   // stage's run, which none may while intents replay: it is finished once
   // the runs are reconciled, the dead daemon's run parked
-  // (`finishAdvances`). One the task no longer takes, or whose work can't
-  // come out, is rolled back: the task stays at its stage, whatever came
-  // out kept on the host task branch.
+  // (`finishAdvances`), and only if the task takes it then, as reconciling
+  // would leave it. One it wouldn't take, or whose work can't come out, is
+  // rolled back: the task stays at its stage, whatever came out kept on the
+  // host task branch.
   async function replayAdvance(intent: Extract<Intent, { verb: 'advance' }>): Promise<ReplayedIntent['outcome']> {
     const task = lifecycle.tasks[intent.taskId];
-    const refused = guard(lifecycle, { type: 'stageAdvanced', ...intent.advance }) ?? (await bringOutChecked(task!));
+    const refused = (advanceAfterReconciling(intent) ?? (await bringOutChecked(task!))) || null;
     if (!refused) return 'finished';
-    await settle({ type: 'intentDropped', taskId: intent.taskId, intentId: intent.id }, new Set());
+    await dropIntent(intent.taskId, intent.id);
     return 'rolled back';
   }
 
+  // Why the task wouldn't take the advance once the runs are reconciled,
+  // as an unclean start reconciles them, or null when it would.
+  function advanceAfterReconciling(intent: Extract<Intent, { verb: 'advance' }>): string | null {
+    const reconciled = reduce(lifecycle, { type: 'runsReconciled', interruption: 'unclean', replayed: [] }, clock.now(), routes());
+    if (reconciled.refusal) return reconciled.refusal;
+    return reduce(reconciled.state, { type: 'stageAdvanced', ...intent.advance, intent: intent.id }, clock.now(), routes()).refusal;
+  }
+
   // Advances each task whose advance's commits recovery brought out, once
-  // the runs are reconciled. One the task no longer takes is dropped.
+  // the runs are reconciled. One the task no longer takes, which recovery
+  // checked it would, is dropped.
   async function finishAdvances(): Promise<void> {
     for (const intent of Object.values(lifecycle.intents)) {
       if (intent.verb !== 'advance') continue;
       const refused = await settle({ type: 'stageAdvanced', ...intent.advance, intent: intent.id }, new Set());
-      if (refused) await settle({ type: 'intentDropped', taskId: intent.taskId, intentId: intent.id }, new Set());
+      if (refused) await dropIntent(intent.taskId, intent.id);
     }
   }
 
-  // Whether the task's work is held in its container: a HITL task whose
-  // last run was at a contained stage (ADR 0015), until the task advances,
-  // hands off or spawns.
+  // Drops the task's intent, as one rolled back.
+  async function dropIntent(taskId: string, intentId: string): Promise<void> {
+    await settle({ type: 'intentDropped', taskId, intentId }, new Set());
+  }
+
+  // Whether the task's work is held in its container (ADR 0015), until the
+  // task advances, hands off or spawns.
   function holdsWork(task: Task): boolean {
-    const last = lifecycle.runs[task.runIds.at(-1) ?? ''];
-    return task.mode === 'HITL' && !!task.worktree && !!last && isContainedHitl(last);
+    return holdsWorkInContainer(lifecycle, task);
   }
 
   // What blocks bringing a contained stage's work out while its agent is
   // mid-turn, as it may commit more, or null when it isn't.
-  function midTurnBlock(task: Task): HeldWork | null {
+  function midTurnBlock(task: Task): BringOutCheck | null {
     const run = liveRun(lifecycle, task);
     if (run?.status !== 'active' || run.turn !== 'agent') return null;
     return { blockers: [`${task.id}’s agent is mid-turn in its container, where it may commit more: wait for its turn to end, or interrupt it, first.`], mergesHost: false };
   }
 
   // What blocks bringing out the work the task's contained stage holds in
-  // its container (ADR 0015), checked afresh: changes not committed there,
-  // which never come out, a task branch it and the host both changed, and
-  // the git guards' invariants, checked as at an L2 run's end, against the
-  // container as its work was last brought out. A task whose container is
-  // gone holds nothing there. The container is started for the checks, and
-  // settled after.
-  async function heldWork(task: Task): Promise<HeldWork> {
+  // its container (ADR 0015), checked afresh: an agent mid-turn, which may
+  // commit more (unless `midTurn` is false), then changes not committed there, which never come out, a
+  // task branch it and the host both changed, and the git guards'
+  // invariants, checked as at an L2 run's end against the container's guard
+  // baseline. A task whose container is gone holds nothing there. The
+  // container is started for the checks, and settled after.
+  async function checkBringOut(task: Task, { midTurn = true } = {}): Promise<BringOutCheck> {
+    const busy = midTurn ? midTurnBlock(task) : null;
+    if (busy) return busy;
     const { path, branch } = task.worktree!;
     try {
       // The refs the operator's commits there make count as theirs.
       const committer = (await git.identity(path))?.email ?? '';
-      return await onContainer(task.id, async (): Promise<HeldWork> => {
-        if (!(await hasContainer(task.id))) return { blockers: [], mergesHost: false };
-        await sandbox.start(task.id);
-        containers.set(task.id, true);
+      const check = await onStartedContainer(task, async (): Promise<BringOutCheck> => {
         const work = await sandbox.work(task.id, branch);
         const blockers: string[] = [];
         if (work.uncommitted.length) {
@@ -1365,31 +1393,35 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         }
         // The guards find uncommitted changes too: they are said once.
         if (!work.uncommitted.length) {
-          const { workdir, checks } = await sandbox.checks(task.id);
-          const broken = await checks.violations(workdir, guardBaseline(task.id) ?? (await checks.snapshot(workdir)), [], committer);
-          if (broken.length) blockers.push(`${task.id}’s work in its container broke the factory’s git guards, so it stays there. ${broken.join(' ')}`);
+          const baseline = guardBaselineOf(task);
+          if (!baseline) {
+            blockers.push(
+              `The factory kept no record of ${task.id}’s container from before this stage’s work, as for a container its runs used before the factory checked their work, so its git guards can’t check it. Reopen the conversation, whose run records the container as it then stands, and try again.`,
+            );
+          } else {
+            const { workdir, checks } = await sandbox.checks(task.id);
+            // The branches of the children it awaits come in at each prepare.
+            const broken = await checks.violations(workdir, baseline, awaitedBranches(task), committer);
+            if (broken.length) blockers.push(`${task.id}’s work in its container broke the factory’s git guards, so it stays there. ${broken.join(' ')}`);
+          }
         }
         return { blockers, mergesHost: work.diverged };
       });
+      return check ?? { blockers: [], mergesHost: false };
     } catch (error) {
       if (!(error instanceof SandboxError || error instanceof GitError)) throw error;
       return { blockers: [`The factory couldn’t check ${task.id}’s work in its container: ${error.message}`], mergesHost: false };
-    } finally {
-      settleContainer(task.id);
     }
   }
 
   // Brings the commits the task's contained stage holds out to its host
   // task branch, as a fast-forward, and keeps the container as it then
-  // stands, for its later work there to be checked against: null once done,
-  // or when its container is gone, else why they couldn't come out.
+  // stands as its guard baseline: null once done, or when its container is
+  // gone, else why they couldn't come out.
   async function bringOutHeld(task: Task): Promise<string | null> {
     const { path, branch } = task.worktree!;
     try {
-      await onContainer(task.id, async () => {
-        if (!(await hasContainer(task.id))) return;
-        await sandbox.start(task.id);
-        containers.set(task.id, true);
+      await onStartedContainer(task, async () => {
         await sandbox.bringOut(task.id, path, branch);
         const { workdir, checks } = await sandbox.checks(task.id);
         keepGuardBaseline(task.id, await checks.snapshot(workdir));
@@ -1398,6 +1430,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     } catch (error) {
       if (!(error instanceof SandboxError || error instanceof GitError)) throw error;
       return `The factory couldn’t bring ${task.id}’s commits out of its container: ${error.message}`;
+    }
+  }
+
+  // Runs `job` on the task's container, started, once what the daemon
+  // already does to it is done, then settles it: null, running nothing,
+  // when Docker lists no container for the task.
+  async function onStartedContainer<T>(task: Task, job: () => Promise<T>): Promise<T | null> {
+    try {
+      return await onContainer(task.id, async () => {
+        if (!(await hasContainer(task.id))) return null;
+        await sandbox.start(task.id);
+        containers.set(task.id, true);
+        return job();
+      });
     } finally {
       settleContainer(task.id);
     }
@@ -1406,7 +1452,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Checks the work the task's contained stage holds, then brings it out:
   // null once done, else what blocked it.
   async function bringOutChecked(task: Task): Promise<string | null> {
-    const { blockers } = await heldWork(task);
+    const { blockers } = await checkBringOut(task);
     return blockers.length ? blockers.join(' ') : await bringOutHeld(task);
   }
 
@@ -1428,6 +1474,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
+  }
+
+  // The guard baseline of the task's container, or, for a container its
+  // runs used before the factory kept one, the snapshot its live run
+  // started from, if it has one.
+  function guardBaselineOf(task: Task): RunSnapshot | null {
+    const run = liveRun(lifecycle, task);
+    return guardBaseline(task.id) ?? (run && guarded.get(run.id)?.snapshot) ?? null;
   }
 
   // Keeps `snapshot` as the guard baseline of the task's container.
@@ -1497,8 +1551,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const gateConfig = frozenGateConfig(task.repo);
       if ('error' in gateConfig) return { ok: false, reason: gateConfig.error };
       action.mergeGate = gateConfig;
-      const ready = await readiness(task);
+      // An agent mid-turn blocks it before the factory looks in its container.
       const busy = holdsWork(task) ? midTurnBlock(task) : null;
+      const ready = await readiness(task, { container: !busy });
       if (busy) ready.blockers.push(...busy.blockers);
       if (ready.blockers.length) {
         // The sheet shows what blocks it.
@@ -1669,8 +1724,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // How the task's worktree stands for a handoff: the task branch checked
   // out, no change but to the task's own files, which the handoff commit
-  // takes, and no `pushurl` the AFK run's push guard can't cover.
-  async function readiness(task: Task): Promise<Readiness> {
+  // takes, and no `pushurl` the AFK run's push guard can't cover; and the
+  // work a contained stage holds in its container (ADR 0015), unless
+  // `container` is false. Its agent may be mid-turn as it writes the brief:
+  // the confirm alone is blocked by that.
+  async function readiness(task: Task, { container = true } = {}): Promise<Readiness> {
     if (!task.worktree) return { blockers: [], toCommit: [] };
     const { path, branch } = task.worktree;
     let state: WorktreeState;
@@ -1691,9 +1749,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (state.pushUrls.length) {
       blockers.push(`A remote has a pushurl, which the AFK run’s push guard can’t cover: ${state.pushUrls.join(', ')}. Remove it first.`);
     }
-    if (!holdsWork(task)) return { blockers, toCommit };
-    // The work a contained stage holds in its container (ADR 0015).
-    const held = await heldWork(task);
+    if (!container || !holdsWork(task)) return { blockers, toCommit };
+    const held = await checkBringOut(task, { midTurn: false });
     return { blockers: [...blockers, ...held.blockers], toCommit, ...(held.mergesHost && { mergesHost: true }) };
   }
 
@@ -3260,14 +3317,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return result;
   }
 
+  // The branches of the task's awaited children its container gets, which
+  // its run merges.
+  function awaitedBranches(task: Task): string[] {
+    return childrenOf(lifecycle, task)
+      .filter((child) => child.child?.awaited && !child.child.research && !child.child.branchDeleted && child.worktree)
+      .map((child) => child.worktree!.branch);
+  }
+
   // The run's task's container, running, with the host task branch's
   // commits in it, the branches of the children it awaits to merge, and the
   // base branch as fetched.
   function prepareContainer(task: Task, run: Run, runDir: string): Promise<Container> {
     const { path, branch } = task.worktree!;
-    const branches = childrenOf(lifecycle, task)
-      .filter((child) => child.child?.awaited && !child.child.research && !child.child.branchDeleted && child.worktree)
-      .map((child) => child.worktree!.branch);
+    const branches = awaitedBranches(task);
     return onContainer(task.id, async () => {
       // No run starts beside a turn that may still run there.
       if (staleTurns.has(task.id)) await endStaleTurn(task.id);
@@ -3506,7 +3569,7 @@ function isContainedHitl(run: Run): boolean {
 // What blocks bringing out the work a contained stage holds in its task's
 // container (ADR 0015), and whether its task branch and the host's both
 // changed, which the operator can ask its agent to merge.
-type HeldWork = { blockers: string[]; mergesHost: boolean };
+type BringOutCheck = AdvanceCheck;
 
 // A turn the daemon cut short in a task's container, and whether its
 // container's restart keeps its commits there rather than bringing them out

@@ -13,12 +13,11 @@ import { TIERS, type Tier } from '../models/routing.ts';
 import type { FactoryConnection } from '../protocol/client.ts';
 import type { HandoffView, RunView, TaskView } from '../protocol/factory-state.ts';
 import type { Reply } from '../protocol/protocol.ts';
-import { MERGE_HINT } from './advance-sheet.ts';
 import { useInFlight } from './in-flight.ts';
 import { autonomyText, cycle, policyText } from './launch-card.ts';
 import { CursorWindow, fixed } from './screen.ts';
 import { edit, withCaret, type Caret } from './text-input.ts';
-import { choosable, Cursor, GLYPH, Sheet, Tick, tone } from './theme.ts';
+import { choosable, Cursor, GLYPH, MERGE_HINT, Sheet, Tick, tone } from './theme.ts';
 
 type Props = {
   connection: FactoryConnection;

@@ -409,12 +409,20 @@ export function dockerSandbox({ namespace }: DockerSandboxOptions): Sandbox {
       // The host's tip, as the container's origin has it now.
       await gitOut(taskId, ['fetch', '--quiet', 'origin', `+refs/heads/${branch}:${tracking}`]);
       const [status, mine, host] = await Promise.all([
-        gitIn(taskId, ['status', '--porcelain=v1', '--untracked-files=all']),
+        gitIn(taskId, ['status', '--porcelain=v1', '-z', '--untracked-files=all']),
         gitOut(taskId, ['rev-parse', `refs/heads/${branch}`]),
         gitOut(taskId, ['rev-parse', tracking]),
       ]);
       if (status.code !== 0) throw new SandboxError(status.stderr.trim() || `git status failed in ${taskId}’s container.`);
-      const uncommitted = status.stdout.split('\n').filter(Boolean).map((line) => line.slice(3));
+      // Each entry NUL-ended, unquoted: `XY path`, a rename's or copy's then followed by the path it came from.
+      const uncommitted: string[] = [];
+      const entries = status.stdout.split('\0');
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i]!;
+        if (!entry) continue;
+        uncommitted.push(entry.slice(3));
+        if (/^[RC]|^.[RC]/.test(entry)) i++;
+      }
       const ancestor = async (a: string, b: string) => (await gitIn(taskId, ['merge-base', '--is-ancestor', a, b])).code === 0;
       const diverged = mine !== host && !(await ancestor(host, mine)) && !(await ancestor(mine, host));
       return { uncommitted, diverged };

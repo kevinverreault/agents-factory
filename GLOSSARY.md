@@ -72,7 +72,7 @@ Whether a run executes on the operator's host or in its task's container. Every 
 _Avoid_: Sandbox mode, isolation (for the domain term)
 
 **Bring-out**:
-Moving the commits a task's container holds out to its host task branch, as a fast-forward and never a force-move. A contained HITL stage's work comes out when the operator advances, hands off or spawns, once the git guards have checked it. Until then the host sees none of it. The advance and handoff sheets block on uncommitted changes in the container, and on a task branch both sides changed, which the agent can be asked to merge. A handoff that goes on in the container, as one AFK run at L2 or above, brings nothing out.
+Moving the commits a task's container holds out to its host task branch, as a fast-forward and never a force-move. A contained HITL stage's work comes out when the operator advances, hands off or spawns, once the git guards have checked it. Until then the host sees none of it. The advance and handoff sheets block on uncommitted changes in the container, and on a task branch both sides changed, which the agent can be asked to merge. A handoff that goes on in the container, as one AFK run at L2 or above, brings nothing out, unless it commits files on the host or makes a spec task.
 _Avoid_: Sync, export, copy-out
 
 **Model tier**:

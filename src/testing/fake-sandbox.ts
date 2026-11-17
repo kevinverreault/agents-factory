@@ -12,7 +12,7 @@ export const CURRENT_IMAGE = 'agents-factory-sandbox:current';
 // tree at `workdirOf(task)`, where a test edits and commits as the run's
 // agent would. It records what it was asked to do, in order.
 export class FakeSandbox implements Sandbox {
-  // `prepare T1`, `stop T1`, `restart T1`, `start T1`, `bringOut T1`, `work T1`, `remove T1`.
+  // `prepare T1`, `stop T1`, `restart T1`, `start T1`, `bringOut T1`, `work T1`, `checks T1`, `remove T1`.
   readonly calls: string[] = [];
   // Each spec a container was prepared with.
   readonly prepared: ContainerSpec[] = [];
@@ -41,7 +41,7 @@ export class FakeSandbox implements Sandbox {
 
   // Each call of `op` (such as `prepare` or `bringOut`) fails with a
   // `SandboxError` saying `reason` from now on, or works again (null).
-  fail(op: 'prepare' | 'bringOut' | 'work' | 'start' | 'stop' | 'restart' | 'remove', reason: string | null): void {
+  fail(op: 'prepare' | 'bringOut' | 'work' | 'checks' | 'start' | 'stop' | 'restart' | 'remove', reason: string | null): void {
     if (reason === null) this.failures.delete(op);
     else this.failures.set(op, reason);
   }
@@ -152,6 +152,7 @@ export class FakeSandbox implements Sandbox {
   }
 
   async checks(taskId: string): Promise<Pick<Container, 'workdir' | 'checks'>> {
+    this.record('checks', taskId);
     if (!this.containers.get(taskId)?.running) throw new SandboxError(`${taskId}’s container isn’t running.`);
     return { workdir: this.workdirOf(taskId), checks: this.git };
   }

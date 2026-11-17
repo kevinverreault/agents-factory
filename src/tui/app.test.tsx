@@ -2038,6 +2038,26 @@ describe('launching and conversing', () => {
     await eventually(() => expect(app.lastFrame()).not.toContain('ADVANCE T1'));
   });
 
+  test('the advance sheet shows, as it opens, what blocks its bring-out from a contained stage, and ctrl+g asks the agent to merge the host branch', async () => {
+    const connection = new FakeConnection();
+    const blocker = 'factory/T1 has commits in T1’s container and on the host that the other lacks, so neither can take the other’s. Ask the agent to merge the host branch in first.';
+    connection.replyTo('checkAdvance', { ok: true, value: { blockers: [blocker], mergesHost: true } });
+    const { app } = await started({ ...factoryState([onLean]), runs: { R1: run } }, { connection });
+    await press(app, '\r', '\r');
+    await settle();
+    app.stdin.write(CTRL_N);
+
+    await eventually(() => {
+      const frame = unwrapped(app.lastFrame()!);
+      expect(frame).toContain(`✗ ${blocker}`);
+      expect(frame).toContain('ctrl+g ask the agent to merge the host branch');
+    });
+    expect(connection.sent).toContainEqual({ type: 'checkAdvance', taskId: 'T1' });
+
+    app.stdin.write('\x07');
+    await eventually(() => expect(connection.sent.at(-1)).toEqual({ type: 'askToMergeHost', taskId: 'T1' }));
+  });
+
   test('the advance sheet says when the next stage is the handoff’s, or the last stage is ending; a task without a preset has none', async () => {
     const connection = new FakeConnection();
     const atTickets = { ...onLean, stage: 'tickets' };
